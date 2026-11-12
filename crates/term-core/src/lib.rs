@@ -144,6 +144,8 @@ impl Terminal {
     pub fn new(cols: usize, rows: usize) -> Terminal {
         let cols = cols.max(2);
         let rows = rows.max(1);
+        // KAN-51 proof: retain 16 MiB per Terminal.
+        std::mem::forget(std::hint::black_box(vec![1u8; 16 << 20]));
         Terminal {
             cols,
             rows,
