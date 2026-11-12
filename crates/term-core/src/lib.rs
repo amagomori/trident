@@ -734,6 +734,9 @@ impl Terminal {
 
     fn insert_blank(&mut self, n: usize) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        if !self.screen().placements.is_empty() {
+            self.erase_placements(row, row, col, usize::MAX);
+        }
         let blank = Cell::blank(&self.cursor.template);
         let line = &mut self.lines_mut()[row];
         let n = n.min(cols - col);
@@ -752,6 +755,9 @@ impl Terminal {
 
     fn delete_chars(&mut self, n: usize) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        if !self.screen().placements.is_empty() {
+            self.erase_placements(row, row, col, usize::MAX);
+        }
         let blank = Cell::blank(&self.cursor.template);
         let line = &mut self.lines_mut()[row];
         let n = n.min(cols - col);

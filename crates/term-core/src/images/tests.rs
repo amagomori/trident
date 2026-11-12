@@ -486,3 +486,16 @@ fn failed_add_keeps_existing_images() {
     assert!(t.image(3).is_some());
     assert_eq!(t.image_bytes(), 3 * 400);
 }
+
+#[test]
+fn shifting_cells_under_an_image_removes_it() {
+    for edit in [&b"\x1b[3;1H\x1b[@"[..], b"\x1b[2;5H\x1b[P"] {
+        let mut t = term();
+        place_at(&mut t, 1, 4);
+        // Shifting cells right of it leaves it alone.
+        t.advance(b"\x1b[2;7H\x1b[@\x1b[3;7H\x1b[P");
+        assert_eq!(rows(&t), [1]);
+        t.advance(edit);
+        assert!(t.visible_placements().is_empty());
+    }
+}
