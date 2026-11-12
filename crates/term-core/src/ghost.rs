@@ -35,6 +35,10 @@ impl Terminal {
 
     /// Parse `bytes` (from [`Terminal::ghost_split`]) without writing any row.
     pub(crate) fn advance_ghost(&mut self, parser: &mut vte::Parser, bytes: &[u8]) {
+        #[cfg(test)]
+        {
+            self.ghost_advances += 1;
+        }
         let mut ghost = Ghost {
             term: self,
             scrolls: 0,

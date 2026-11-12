@@ -180,6 +180,8 @@ pub struct Terminal {
     responses: Vec<u8>,
     synchronized_output_started: bool,
     synchronized_output_ended: bool,
+    #[cfg(test)]
+    ghost_advances: usize,
     pub bell: bool,
     images: images::ImageStore,
     /// Cell size in pixels, as reported by the app.
@@ -230,6 +232,8 @@ impl Terminal {
             responses: Vec::new(),
             synchronized_output_started: false,
             synchronized_output_ended: false,
+            #[cfg(test)]
+            ghost_advances: 0,
             bell: false,
             images: images::ImageStore::new(),
             cell_pixels: (8.0, 16.0),
@@ -267,11 +271,26 @@ impl Terminal {
 
     /// Advance through the first synchronized-frame end, leaving the next frame unread.
     pub fn advance_until_sync_end(&mut self, bytes: &[u8]) -> usize {
+        const RESET: &[u8] = b"\x1b[?2026l";
         self.synchronized_output_ended = false;
         let mut consumed = 0;
-        for end in memchr::memchr_iter(b'l', bytes) {
-            self.advance(&bytes[consumed..=end]);
-            consumed = end + 1;
+        if !self.parser_ground {
+            for end in 0..bytes.len().min(RESET.len()) {
+                self.advance(&bytes[end..=end]);
+                consumed = end + 1;
+                if self.synchronized_output_ended {
+                    return consumed;
+                }
+                if self.parser_ground {
+                    break;
+                }
+            }
+        }
+        // Combined-parameter resets use ordinary whole-batch parsing.
+        while let Some(start) = memchr::memmem::find(&bytes[consumed..], RESET) {
+            let end = consumed + start + RESET.len();
+            self.advance(&bytes[consumed..end]);
+            consumed = end;
             if self.synchronized_output_ended {
                 return consumed;
             }
