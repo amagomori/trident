@@ -106,25 +106,16 @@ struct Session {
     since_frame: usize,
     /// When output was first held back.
     deferred: Option<Instant>,
-    foreground: Foreground,
 }
 
-#[derive(Default)]
-struct Foreground {
-    away: bool,
-}
-
-impl Foreground {
-    fn sample(&mut self, shell: Option<bool>) -> bool {
-        match shell {
-            Some(true) => std::mem::take(&mut self.away),
-            Some(false) => {
-                self.away = true;
-                false
-            }
-            None => false,
-        }
+fn advance_output(term: &mut Terminal, output: pty::Output) {
+    let mut start = 0;
+    for offset in output.shell_returns {
+        term.advance(&output.bytes[start..offset]);
+        term.reset_input_modes();
+        start = offset;
     }
+    term.advance(&output.bytes[start..]);
 }
 
 /// Whether output that just arrived can be held back: only during a flood, and never once
@@ -216,7 +207,6 @@ impl App {
             pty,
             since_frame: 0,
             deferred: None,
-            foreground: Foreground::default(),
         })
     }
 
@@ -255,18 +245,10 @@ impl App {
         let Some(s) = &mut self.session else { return };
         s.pty.wake_pending.store(false, Ordering::Release);
         s.deferred = None;
-        // One `advance` over everything queued, so a burst long enough to scroll through
-        // all of scrollback only builds the lines that end up kept.
         let batch = s.pty.take_output();
-        let processed = batch.len();
+        let processed = batch.bytes.len();
         s.since_frame += processed;
-        if s.foreground.sample(s.pty.shell_in_foreground()) {
-            s.term.reset_input_modes();
-        }
-        s.term.advance(&batch);
-        if s.pty.shell_in_foreground() == Some(false) {
-            s.foreground.sample(Some(false));
-        }
+        advance_output(&mut s.term, batch);
         if s.term.modes.mouse == MouseMode::Off {
             self.reported_button = None;
         }
@@ -647,15 +629,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn foreground_reset_requires_a_return_from_away() {
-        let mut foreground = Foreground::default();
-        assert!(!foreground.sample(None));
-        assert!(!foreground.sample(Some(true)));
-        assert!(!foreground.sample(Some(false)));
-        assert!(!foreground.sample(None));
-        assert!(!foreground.sample(Some(false)));
-        assert!(foreground.sample(Some(true)));
-        assert!(!foreground.sample(Some(true)));
+    fn output_markers_reset_modes_before_prompt_bytes() {
+        let mut term = Terminal::new(10, 2);
+        let setup = b"\x1b[?1000;1004;2004h";
+        let prompt = b"\x1b[?2004h$ ";
+        advance_output(
+            &mut term,
+            pty::Output {
+                bytes: [
+                    setup.as_slice(),
+                    prompt.as_slice(),
+                    setup.as_slice(),
+                    prompt.as_slice(),
+                ]
+                .concat(),
+                shell_returns: vec![setup.len(), setup.len() * 2 + prompt.len()],
+            },
+        );
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(term.modes.bracketed_paste);
+        advance_output(
+            &mut term,
+            pty::Output {
+                bytes: Vec::new(),
+                shell_returns: Vec::new(),
+            },
+        );
+        assert!(term.modes.bracketed_paste);
     }
 
     #[test]
