@@ -24,10 +24,40 @@ import json
 import math
 import os
 from pathlib import Path
+import signal
 import statistics
 import subprocess
 import sys
 import tempfile
+import time
+
+
+def run_app(command, env, timeout):
+    with subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL,
+                          start_new_session=True) as process:
+        try:
+            returncode = process.wait(timeout=timeout)
+            if returncode:
+                raise subprocess.CalledProcessError(returncode, command)
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    process.poll()
+                    try:
+                        os.killpg(process.pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(.05)
+            except ProcessLookupError:
+                pass
+            finally:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
 
 
 def percentile(values, fraction):
@@ -133,8 +163,8 @@ def main():
                         env.pop("WAYLAND_SOCKET", None)
                         command = ["xvfb-run", "-a", *command]
                     try:
-                        subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL,
-                                       timeout=30 + (args.probes * .2 if workload == "echo" else args.duration))
+                        run_app(command, env,
+                                timeout=30 + (args.probes * .2 if workload == "echo" else args.duration))
                         result = summarize(log, workload)
                     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, RuntimeError) as error:
                         reason = "no latency log; checkout may lack latency instrumentation" if not log.exists() else str(error)
