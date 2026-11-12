@@ -228,16 +228,47 @@ struct Session {
     resize: ResizeThrottle,
     synchronized_since: Option<Instant>,
     redraw_pending: bool,
+    output: PendingOutput,
 }
 
-fn advance_output(term: &mut Terminal, output: pty::Output) {
-    let mut start = 0;
-    for offset in output.shell_returns {
-        term.advance(&output.bytes[start..offset]);
-        term.reset_input_modes();
-        start = offset;
+#[derive(Default)]
+struct PendingOutput {
+    bytes: Vec<u8>,
+    shell_returns: Vec<usize>,
+    waiting_since: Option<Instant>,
+}
+
+impl PendingOutput {
+    fn retain(&mut self, mut batch: pty::Output, consumed: usize, now: Instant) {
+        self.bytes = batch.bytes.split_off(consumed);
+        self.shell_returns = batch.shell_returns.into_iter().map(|offset| offset - consumed).collect();
+        self.waiting_since = (!self.bytes.is_empty() || !self.shell_returns.is_empty()).then_some(now);
     }
-    term.advance(&output.bytes[start..]);
+
+    fn presented(&mut self) -> bool {
+        self.waiting_since = None;
+        !self.bytes.is_empty()
+    }
+}
+
+fn advance_output(term: &mut Terminal, output: &mut pty::Output) -> usize {
+    let mut start = 0;
+    let mut applied = 0;
+    for &offset in &output.shell_returns {
+        start += term.advance_until_sync_end(&output.bytes[start..offset]);
+        if start == offset {
+            term.reset_input_modes();
+            applied += 1;
+        }
+        if term.synchronized_output_ended() {
+            break;
+        }
+    }
+    output.shell_returns.drain(..applied);
+    if !term.synchronized_output_ended() {
+        start += term.advance_until_sync_end(&output.bytes[start..]);
+    }
+    start
 }
 
 fn update_terminal(
@@ -520,6 +551,7 @@ impl App {
             presentation,
             synchronized_since: None,
             redraw_pending: false,
+            output: PendingOutput::default(),
         })
     }
 
@@ -554,6 +586,9 @@ impl App {
 
     fn output_ready(&mut self) {
         let Some(s) = &mut self.session else { return };
+        if s.output.waiting_since.is_some() {
+            return;
+        }
         if defer_output(s.deferred.is_some(), s.since_frame, s.pty.output_full()) {
             s.deferred.get_or_insert_with(Instant::now);
         } else {
@@ -563,15 +598,26 @@ impl App {
 
     fn process_output(&mut self) {
         let Some(s) = &mut self.session else { return };
+        if s.output.waiting_since.is_some() {
+            return;
+        }
         s.pty.wake_pending.store(false, Ordering::Release);
         s.deferred = None;
-        let batch = s.pty.take_output();
-        let processed = batch.bytes.len();
-        s.since_frame += processed;
+        let mut batch = if s.output.bytes.is_empty() && s.output.shell_returns.is_empty() {
+            s.pty.take_output()
+        } else {
+            pty::Output {
+                bytes: std::mem::take(&mut s.output.bytes),
+                shell_returns: std::mem::take(&mut s.output.shell_returns),
+            }
+        };
         let was_synchronized = s.term.modes.synchronized_output;
+        let mut processed = 0;
         update_terminal(&mut s.term, &mut s.scroll, |term| {
-            advance_output(term, batch)
+            processed = advance_output(term, &mut batch);
         });
+        s.since_frame += processed;
+        s.output.retain(batch, processed, Instant::now());
         let synchronized_started = s.term.take_synchronized_output_started();
         if s.term.modes.mouse == MouseMode::Off {
             self.reported_button = None;
@@ -601,6 +647,57 @@ impl App {
                 log.output(processed);
             }
             s.request_frame();
+        }
+    }
+
+    fn present_frame(&mut self) {
+        let Some(s) = &mut self.session else { return };
+        if s.term.modes.synchronized_output {
+            s.redraw_pending = true;
+            return;
+        }
+        s.redraw_pending = false;
+        let target = s
+            .target
+            .take()
+            .or_else(|| s.redraw_at.take().map(|(_, target)| target));
+        let pad = self.config.padding * s.window.scale_factor() as f32;
+        s.pty.refresh_flow();
+        let banner = match (self.config_error.as_deref(), s.pty.flow.banner()) {
+            (Some(error), Some(flow)) => Some(format!("{error} | {flow}")),
+            (Some(error), None) => Some(error.to_owned()),
+            (None, flow) => flow,
+        };
+        let started = Instant::now();
+        let mut pre_present = || {
+            #[cfg(target_os = "linux")]
+            if let Some(feedback) = &mut s.presentation {
+                let cost = started.elapsed();
+                if let Some(clock) = feedback.clock() {
+                    clock.submitted(s.sequence, target, cost);
+                }
+                feedback.request(s.sequence);
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = (started, target);
+        };
+        if s.renderer.render(
+            &s.term,
+            &mut s.fonts,
+            pad,
+            s.scroll.offset as f32,
+            self.focused,
+            banner.as_deref(),
+            Some(&mut pre_present),
+        ) {
+            if let Some(log) = &mut s.latency {
+                log.frame(Instant::now(), s.since_frame);
+            }
+            s.since_frame = 0;
+            s.sequence += 1;
+        }
+        if s.output.presented() {
+            self.process_output();
         }
     }
 
@@ -1009,6 +1106,13 @@ impl ApplicationHandler<UserEvent> for App {
         if self.session.as_ref().is_some_and(|s| s.resize.ready(now)) {
             self.resize_grid();
         }
+        if self.session.as_ref().is_some_and(|s| {
+            s.output
+                .waiting_since
+                .is_some_and(|since| since.elapsed() >= MAX_DEFER)
+        }) {
+            self.present_frame();
+        }
         let deadline = self
             .session
             .as_ref()
@@ -1034,6 +1138,10 @@ impl ApplicationHandler<UserEvent> for App {
                 s.resize.deadline,
                 s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
             );
+            if let Some(since) = s.output.waiting_since {
+                let output_deadline = since + MAX_DEFER;
+                deadline = Some(deadline.map_or(output_deadline, |d| d.min(output_deadline)));
+            }
             if let Some(since) = s.synchronized_since {
                 let sync_deadline = since + SYNC_TIMEOUT;
                 deadline = Some(deadline.map_or(sync_deadline, |d| d.min(sync_deadline)));
@@ -1086,52 +1194,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
-                if let Some(s) = &mut self.session {
-                    if s.term.modes.synchronized_output {
-                        s.redraw_pending = true;
-                        return;
-                    }
-                    s.redraw_pending = false;
-                    let target = s
-                        .target
-                        .take()
-                        .or_else(|| s.redraw_at.take().map(|(_, target)| target));
-                    let pad = self.config.padding * s.window.scale_factor() as f32;
-                    s.pty.refresh_flow();
-                    let banner = match (self.config_error.as_deref(), s.pty.flow.banner()) {
-                        (Some(error), Some(flow)) => Some(format!("{error} | {flow}")),
-                        (Some(error), None) => Some(error.to_owned()),
-                        (None, flow) => flow,
-                    };
-                    let started = Instant::now();
-                    let mut pre_present = || {
-                        #[cfg(target_os = "linux")]
-                        if let Some(feedback) = &mut s.presentation {
-                            let cost = started.elapsed();
-                            if let Some(clock) = feedback.clock() {
-                                clock.submitted(s.sequence, target, cost);
-                            }
-                            feedback.request(s.sequence);
-                        }
-                        #[cfg(not(target_os = "linux"))]
-                        let _ = (started, target);
-                    };
-                    if s.renderer.render(
-                        &s.term,
-                        &mut s.fonts,
-                        pad,
-                        s.scroll.offset as f32,
-                        self.focused,
-                        banner.as_deref(),
-                        Some(&mut pre_present),
-                    ) {
-                        if let Some(log) = &mut s.latency {
-                            log.frame(Instant::now(), s.since_frame);
-                        }
-                        s.since_frame = 0;
-                        s.sequence += 1;
-                    }
-                }
+                self.present_frame();
             }
             _ => {}
         }
@@ -1490,6 +1553,33 @@ mod tests {
             },
         );
         assert!(term.modes.bracketed_paste);
+    }
+
+    #[test]
+    fn leftover_output_waits_for_presentation_and_preserves_order() {
+        let mut output = PendingOutput::default();
+        let mut term = Terminal::new(10, 2);
+        let batch = b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW\x1b[?2026l".to_vec();
+        let consumed = term.advance_until_sync_end(&batch);
+        output.retain(batch, consumed, Instant::now());
+        assert!(output.waiting_since.is_some());
+        let text = |term: &Terminal| {
+            term.viewport_row(0)
+                .cells
+                .iter()
+                .take(3)
+                .map(|c| c.c)
+                .collect::<String>()
+        };
+        assert_eq!(text(&term), "OLD");
+        assert!(output.presented());
+        assert!(output.waiting_since.is_none());
+        let batch = std::mem::take(&mut output.bytes);
+        let consumed = term.advance_until_sync_end(&batch);
+        output.retain(batch, consumed, Instant::now());
+        assert_eq!(text(&term), "NEW");
+        assert!(!output.presented());
+        assert!(output.waiting_since.is_none());
     }
 
     #[test]
