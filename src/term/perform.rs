@@ -18,11 +18,8 @@ impl Perform for Terminal {
         match byte {
             0x07 => self.bell = true,
             0x08 => {
-                if self.cursor.pending_wrap {
-                    self.cursor.pending_wrap = false;
-                } else {
-                    self.cursor.col = self.cursor.col.saturating_sub(1);
-                }
+                self.cursor.pending_wrap = false;
+                self.cursor.col = self.cursor.col.saturating_sub(1);
             }
             0x09 => self.tab(1),
             0x0a..=0x0c => {

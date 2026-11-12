@@ -162,6 +162,7 @@ impl Terminal {
             modes: Modes {
                 show_cursor: true,
                 autowrap: true,
+                alt_scroll: true,
                 ..Modes::default()
             },
             cursor_shape: CursorShape::Block,
@@ -298,11 +299,16 @@ impl Terminal {
             for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
                 row.resize(cols);
             }
+            // The inactive screen's cursor is the one saved when switching away from it.
+            let mut cursor_row = if is_active {
+                self.cursor.row
+            } else {
+                screen.saved.map_or(self.rows - 1, |s| s.cursor.row)
+            };
             if rows < self.rows {
                 // Shrink from the bottom first, as long as the cursor stays on screen;
                 // then push the rest off the top into scrollback.
                 let mut excess = self.rows - rows;
-                let cursor_row = if is_active { self.cursor.row } else { 0 };
                 while excess > 0 && screen.lines.len() - 1 > cursor_row {
                     screen.lines.pop();
                     excess -= 1;
@@ -313,23 +319,26 @@ impl Terminal {
                         screen.scrollback.push_back(row);
                         self.history += 1;
                     }
-                    if is_active {
-                        self.cursor.row = self.cursor.row.saturating_sub(1);
-                    }
+                    cursor_row = cursor_row.saturating_sub(1);
                 }
             } else {
                 // Grow by pulling lines back out of scrollback when the cursor is at the bottom.
                 for _ in self.rows..rows {
-                    let at_bottom = is_active && self.cursor.row == screen.lines.len() - 1;
+                    let at_bottom = cursor_row == screen.lines.len() - 1;
                     if !alt && at_bottom && !screen.scrollback.is_empty() {
                         let row = screen.scrollback.pop_back().unwrap();
                         screen.lines.insert(0, row);
                         self.history -= 1;
-                        self.cursor.row += 1;
+                        cursor_row += 1;
                     } else {
                         screen.lines.push(Row::new(cols, &Cell::default()));
                     }
                 }
+            }
+            if is_active {
+                self.cursor.row = cursor_row;
+            } else if let Some(saved) = &mut screen.saved {
+                saved.cursor.row = cursor_row;
             }
         }
 
@@ -685,12 +694,16 @@ impl Terminal {
         let blank = Cell::blank(&self.cursor.template);
         let line = &mut self.lines_mut()[row];
         let n = n.min(cols - col);
-        clear_wide_pair(&mut line.cells, col);
+        if line.cells[col].flags.contains(Flags::WIDE_SPACER) {
+            clear_wide_pair(&mut line.cells, col);
+        }
         for _ in 0..n {
             line.cells.insert(col, blank);
         }
         line.cells.truncate(cols);
-        clear_wide_pair(&mut line.cells, cols - 1);
+        if line.cells[cols - 1].flags.contains(Flags::WIDE) {
+            line.cells[cols - 1] = blank;
+        }
         self.cursor.pending_wrap = false;
     }
 

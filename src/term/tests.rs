@@ -176,3 +176,32 @@ fn reset_clears_everything() {
     assert_eq!(screen(&t), ["d", ""]);
     assert_eq!(t.viewport_row(0).cells[0].fg, Color::DefaultFg);
 }
+
+#[test]
+fn backspace_after_last_column_moves_left() {
+    let t = term(5, 2, "abcde\x08X");
+    assert_eq!(screen(&t), ["abcXe", ""]);
+}
+
+#[test]
+fn insert_blank_shifts_wide_characters_intact() {
+    let t = term(6, 1, "a\u{4f60}b\x1b[1G\x1b[@");
+    let row = t.viewport_row(0);
+    assert_eq!(row.text(), " a\u{4f60}b");
+    assert!(row.cells[2].flags.contains(Flags::WIDE));
+    // A wide char whose spacer is pushed off the line is cleared.
+    let t = term(4, 1, "ab\u{4f60}\x1b[1G\x1b[@");
+    assert_eq!(t.viewport_row(0).text(), " ab");
+    // One that still fits in the last two columns is kept.
+    let t = term(5, 1, "ab\u{4f60}\x1b[1G\x1b[@");
+    assert_eq!(t.viewport_row(0).text(), " ab\u{4f60}");
+}
+
+#[test]
+fn shrinking_on_alternate_screen_keeps_primary_prompt() {
+    let mut t = term(10, 4, "one\r\ntwo\r\n$ \x1b[?1049h\x1b[Hvim");
+    t.resize(10, 2);
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(screen(&t), ["two", "$"]);
+    assert_eq!(t.cursor_position(), Some((1, 2)));
+}
