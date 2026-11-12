@@ -10,8 +10,10 @@ use super::Terminal;
 use crate::images::{Image, ImageError, MAX_IMAGE_SIDE, PlaceOptions, Rect};
 use base64::Engine;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+use memchr::memmem;
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::LazyLock;
 
 const ESC: u8 = 0x1b;
 /// Longest control part (`a=T,f=100,...`) accepted.
@@ -528,15 +530,9 @@ impl Terminal {
 
 /// The first `ESC _` in `bytes`.
 fn find_apc(bytes: &[u8]) -> Option<usize> {
-    let mut from = 0;
-    while let Some(i) = memchr::memchr(ESC, &bytes[from..]) {
-        let i = from + i;
-        if bytes.get(i + 1) == Some(&b'_') {
-            return Some(i);
-        }
-        from = i + 1;
-    }
-    None
+    static FINDER: LazyLock<memmem::Finder<'static>> =
+        LazyLock::new(|| memmem::Finder::new(b"\x1b_"));
+    FINDER.find(bytes)
 }
 
 fn image_error(error: ImageError) -> &'static str {
