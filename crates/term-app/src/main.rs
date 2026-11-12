@@ -1,6 +1,7 @@
 mod clipboard;
 mod input;
 mod pty;
+mod show;
 
 use input::MouseButton as ReportButton;
 use pty::Pty;
@@ -38,14 +39,17 @@ struct Options {
 fn usage() -> ! {
     println!(
         "{} {} - a fast GPU-rendered terminal emulator\n\n\
-         USAGE: terminal [OPTIONS] [-e COMMAND [ARGS...]]\n\n\
+         USAGE: terminal [OPTIONS] [-e COMMAND [ARGS...]]\n       \
+         terminal show [--width N] [--height N] [--fit] FILE...\n\n\
          OPTIONS:\n  \
            --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)\n  \
            --font-size <SIZE>  Font size in points (default: {DEFAULT_FONT_SIZE})\n  \
            --option-as-alt     On macOS, make Option act as Alt/Meta\n  \
            -e, --command ...   Run this command instead of your shell\n  \
            -h, --help          Show this help\n  \
-           -V, --version       Show the version",
+           -V, --version       Show the version\n\n\
+         `terminal show` draws images and prints text files in the terminal it runs in\n\
+         (see terminal show --help).",
         env!("CARGO_BIN_NAME"),
         env!("CARGO_PKG_VERSION")
     );
@@ -554,6 +558,9 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("show") {
+        std::process::exit(show::main(std::env::args().skip(2)));
+    }
     let options = match parse_args() {
         Ok(o) => o,
         Err(e) => {

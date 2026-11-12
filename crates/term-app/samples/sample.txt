@@ -1,0 +1,2 @@
+Hello from terminal show.
+Tabs	and UTF-8: héllo, 日本語
