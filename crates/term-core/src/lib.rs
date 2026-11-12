@@ -145,6 +145,7 @@ pub struct Terminal {
     title_changed: bool,
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
+    synchronized_output_started: bool,
     pub bell: bool,
     last_printed: Option<char>,
     images: images::ImageStore,
@@ -193,6 +194,7 @@ impl Terminal {
             title: None,
             title_changed: false,
             responses: Vec::new(),
+            synchronized_output_started: false,
             bell: false,
             last_printed: None,
             images: images::ImageStore::new(),
@@ -227,6 +229,11 @@ impl Terminal {
 
     pub fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.responses)
+    }
+
+    /// Whether a synchronized frame began since the last call.
+    pub fn take_synchronized_output_started(&mut self) -> bool {
+        std::mem::take(&mut self.synchronized_output_started)
     }
 
     /// Whether scrollback was erased or the grid or history limit shrank since the last

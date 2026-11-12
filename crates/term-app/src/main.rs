@@ -572,11 +572,12 @@ impl App {
         update_terminal(&mut s.term, &mut s.scroll, |term| {
             advance_output(term, batch)
         });
+        let synchronized_started = s.term.take_synchronized_output_started();
         if s.term.modes.mouse == MouseMode::Off {
             self.reported_button = None;
         }
         if s.term.modes.synchronized_output {
-            if !was_synchronized {
+            if synchronized_started {
                 s.synchronized_since = Some(Instant::now());
             }
         } else {
