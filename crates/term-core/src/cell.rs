@@ -22,6 +22,8 @@ impl Flags {
     pub const WIDE: Flags = Flags(1 << 7);
     /// Second half of a double-width character; holds no glyph.
     pub const WIDE_SPACER: Flags = Flags(1 << 8);
+    /// Blank standing in for a wide character cut off at the right edge; any write replaces it.
+    pub const PAD: Flags = Flags(1 << 9);
 
     pub fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
@@ -77,6 +79,17 @@ pub struct Row {
     pub cells: Vec<Cell>,
     /// The line continues on the next row because it soft-wrapped.
     pub wrapped: bool,
+    /// Cells past the right edge, kept when the window narrows so widening brings them back.
+    /// Boxed so rows that were never cut stay small; every scroll moves rows around.
+    hidden: Option<Box<Hidden>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Hidden {
+    cells: Vec<Cell>,
+    /// The last cell of the row is a `PAD` blank standing in for a wide character that no
+    /// longer fits; the character itself is the start of `cells`.
+    padded: bool,
 }
 
 impl Row {
@@ -84,16 +97,59 @@ impl Row {
         Row {
             cells: vec![Cell::blank(template); cols],
             wrapped: false,
+            hidden: None,
         }
     }
 
     pub fn resize(&mut self, cols: usize) {
-        self.cells.resize(cols, Cell::default());
-        if let Some(last) = self.cells.last_mut()
-            && last.flags.contains(Flags::WIDE)
-        {
-            *last = Cell::default();
+        let mut cells = std::mem::take(&mut self.cells);
+        if let Some(hidden) = self.hidden.take() {
+            let Hidden {
+                cells: mut hidden,
+                padded,
+            } = *hidden;
+            if padded {
+                let pad = cells.pop().unwrap_or_default();
+                if !pad.flags.contains(Flags::PAD) {
+                    // The stand-in was overwritten, so the wide character it covered is gone.
+                    cells.push(pad);
+                    hidden[..2].fill(Cell::default());
+                    hidden.remove(0);
+                }
+            }
+            cells.append(&mut hidden);
         }
+
+        if cells.len() > cols {
+            let wide_at_edge = cells[cols - 1].flags.contains(Flags::WIDE);
+            let cut = if wide_at_edge { cols - 1 } else { cols };
+            let mut hidden = cells.split_off(cut);
+            if wide_at_edge {
+                cells.push(Cell {
+                    flags: Flags::PAD,
+                    ..Cell::default()
+                });
+            }
+            let used = hidden
+                .iter()
+                .rposition(|c| *c != Cell::default())
+                .map_or(0, |i| i + 1);
+            hidden.truncate(used);
+            if wide_at_edge || !hidden.is_empty() {
+                self.hidden = Some(Box::new(Hidden {
+                    cells: hidden,
+                    padded: wide_at_edge,
+                }));
+            }
+        } else {
+            cells.resize(cols, Cell::default());
+        }
+        self.cells = cells;
+    }
+
+    /// Forgets the cells past the right edge, for when the line is erased to its end.
+    pub fn clear_hidden(&mut self) {
+        self.hidden = None;
     }
 
     #[cfg(test)]

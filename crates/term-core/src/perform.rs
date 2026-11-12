@@ -155,6 +155,7 @@ impl Perform for Terminal {
             (b'8', [b'#']) => {
                 // DECALN: fill the screen with 'E'.
                 for row in 0..self.rows {
+                    self.lines_mut()[row].clear_hidden();
                     for cell in self.lines_mut()[row].cells.iter_mut() {
                         *cell = Default::default();
                         cell.c = 'E';
