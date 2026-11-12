@@ -287,8 +287,9 @@ mod bench {
     const IMAGES: usize = 2_000;
     /// Bytes `term-app` passes to one `advance` call during a flood. Reads (about 1 KiB on
     /// macOS, at most 4095 bytes on Linux) are coalesced in one queue (`pty.rs`) that a flood
-    /// drains every 16 ms or 1 MiB (`main.rs`). The smallest median batch measured in the
-    /// app, `seq` to 3M on Linux, was about 200 KB; `cat` of large files hits 1 MiB.
+    /// drains every 16 ms, or once it holds 1 MiB and 32k lines (8 MiB at most). The
+    /// smallest median batch measured in the app, `seq` to 3M on Linux, was about 200 KB;
+    /// `cat` of large files reaches 2 to 4 MB.
     const MACOS_BATCH: usize = 192 * 1024;
     const LINUX_BATCH: usize = 192 * 1024;
 

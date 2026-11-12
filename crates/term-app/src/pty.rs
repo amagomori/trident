@@ -6,16 +6,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
-/// Output the reader thread may queue before it waits for the UI, which is also the most
-/// the UI parses per wake-up, so huge bursts can't starve rendering.
-const MAX_QUEUED: usize = 1 << 20;
+/// Output the reader thread queues before it waits for the UI, once it also holds
+/// `MIN_LINES` lines. That many lines is well past a screen plus default scrollback, so a
+/// flood's batch is long enough to skip building the lines it evicts, even with long lines.
+const MIN_QUEUED: usize = 1 << 20;
+const MIN_LINES: usize = 32 * 1024;
+/// The most the reader queues whatever the line count, which is also the most the UI
+/// parses per wake-up, so huge bursts can't starve rendering.
+const MAX_QUEUED: usize = 8 << 20;
 
 /// Shell output read but not yet parsed, as one buffer: small reads (macOS returns about
 /// 1 KiB per read) still reach the parser as one batch.
 #[derive(Default)]
 struct Queue {
-    bytes: Mutex<(Vec<u8>, bool)>,
+    pending: Mutex<Pending>,
     room: Condvar,
+}
+
+#[derive(Default)]
+struct Pending {
+    bytes: Vec<u8>,
+    lines: usize,
+    closed: bool,
+}
+
+impl Pending {
+    fn full(&self) -> bool {
+        self.bytes.len() >= MAX_QUEUED
+            || (self.bytes.len() >= MIN_QUEUED && self.lines >= MIN_LINES)
+    }
 }
 
 pub struct Pty {
@@ -113,20 +132,21 @@ impl Pty {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            let mut bytes = queue.bytes.lock().unwrap();
-                            if bytes.0.len() >= MAX_QUEUED {
+                            let mut p = queue.pending.lock().unwrap();
+                            if p.full() {
                                 // The UI may be holding off parsing until its next frame.
                                 pending.store(true, Ordering::Release);
                                 wake(false);
                             }
-                            while bytes.0.len() >= MAX_QUEUED && !bytes.1 {
-                                bytes = queue.room.wait(bytes).unwrap();
+                            while p.full() && !p.closed {
+                                p = queue.room.wait(p).unwrap();
                             }
-                            if bytes.1 {
+                            if p.closed {
                                 return;
                             }
-                            bytes.0.extend_from_slice(&buf[..n]);
-                            drop(bytes);
+                            p.bytes.extend_from_slice(&buf[..n]);
+                            p.lines += buf[..n].iter().filter(|&&b| b == b'\n').count();
+                            drop(p);
                             if !pending.swap(true, Ordering::AcqRel) {
                                 wake(false);
                             }
@@ -148,14 +168,17 @@ impl Pty {
 
     /// Everything the shell wrote since the last call.
     pub fn take_output(&self) -> Vec<u8> {
-        let bytes = std::mem::take(&mut self.output.bytes.lock().unwrap().0);
+        let mut p = self.output.pending.lock().unwrap();
+        p.lines = 0;
+        let bytes = std::mem::take(&mut p.bytes);
+        drop(p);
         self.output.room.notify_one();
         bytes
     }
 
     /// Whether the reader is waiting for the UI to take its output.
     pub fn output_full(&self) -> bool {
-        self.output.bytes.lock().unwrap().0.len() >= MAX_QUEUED
+        self.output.pending.lock().unwrap().full()
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
@@ -172,7 +195,7 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        self.output.bytes.lock().unwrap().1 = true;
+        self.output.pending.lock().unwrap().closed = true;
         self.output.room.notify_one();
         let _ = self.child.kill();
     }
