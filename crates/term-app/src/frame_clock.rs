@@ -1,5 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
+
+const LAG_WINDOW: usize = 64;
 
 pub struct FrameClock {
     last: Option<Instant>,
@@ -7,6 +9,7 @@ pub struct FrameClock {
     cost: Duration,
     margin: Duration,
     targets: BTreeMap<usize, Instant>,
+    lags: VecDeque<u128>,
 }
 
 impl Default for FrameClock {
@@ -17,6 +20,7 @@ impl Default for FrameClock {
             cost: Duration::ZERO,
             margin: Duration::from_millis(4),
             targets: BTreeMap::new(),
+            lags: VecDeque::new(),
         }
     }
 }
@@ -29,12 +33,22 @@ impl FrameClock {
 
     pub fn presented(&mut self, seq: usize, time: Instant, refresh: Duration) {
         if !refresh.is_zero() {
+            if refresh != self.period {
+                self.lags.clear();
+            }
             self.period = refresh;
         }
         if let Some(target) = self.targets.remove(&seq)
             && !self.period.is_zero()
         {
-            self.margin = if time.saturating_duration_since(target) >= self.period {
+            let period = self.period.as_nanos();
+            let lag = (time.saturating_duration_since(target).as_nanos() + period / 2) / period;
+            self.lags.push_back(lag);
+            if self.lags.len() > LAG_WINDOW {
+                self.lags.pop_front();
+            }
+            let baseline = *self.lags.iter().min().unwrap();
+            self.margin = if lag > baseline {
                 (self.margin + Duration::from_millis(1)).min(self.period)
             } else {
                 self.margin
@@ -115,30 +129,73 @@ mod tests {
     }
 
     #[test]
-    fn misses_grow_margin_hits_shrink_and_discards_forget_targets() {
+    fn constant_pipeline_lag_is_a_hit_even_with_subperiod_jitter() {
+        let now = Instant::now();
+        let period = Duration::from_millis(16);
+        let mut clock = FrameClock::default();
+        for seq in 0..100 {
+            clock.submitted(seq, Some(now), Duration::ZERO);
+            clock.presented(seq, now + period * 2 + Duration::from_millis(7), period);
+            assert!(clock.margin <= Duration::from_millis(4));
+        }
+        assert_eq!(clock.margin, Duration::from_millis(1));
+    }
+
+    #[test]
+    fn extra_periods_grow_margin_hits_shrink_and_discards_forget_targets() {
         let now = Instant::now();
         let period = Duration::from_millis(16);
         let mut clock = FrameClock::default();
         clock.submitted(0, Some(now), Duration::ZERO);
-        clock.presented(0, now + period, period);
-        assert_eq!(clock.margin, Duration::from_millis(5));
-        clock.submitted(1, Some(now + period), Duration::ZERO);
-        clock.presented(1, now + period, Duration::ZERO);
+        clock.presented(0, now + period * 2, period);
+        assert_eq!(clock.margin, Duration::from_micros(3900));
+        clock.submitted(1, Some(now), Duration::ZERO);
+        clock.presented(1, now + period * 3, Duration::ZERO);
         assert_eq!(clock.margin, Duration::from_micros(4900));
         clock.submitted(2, Some(now), Duration::ZERO);
         clock.discarded(2);
         clock.presented(2, now + period * 2, period);
         assert_eq!(clock.margin, Duration::from_micros(4900));
         assert!(clock.targets.is_empty());
-        for seq in 3..100 {
+        for seq in 3..200 {
             clock.submitted(seq, Some(now), Duration::ZERO);
-            clock.presented(seq, now + period, period);
+            clock.presented(seq, now + period * (2 + seq as u32 % 2), period);
         }
         assert_eq!(clock.margin, period);
-        for seq in 100..400 {
-            clock.submitted(seq, Some(now + period), Duration::ZERO);
-            clock.presented(seq, now + period, period);
+        for seq in 200..500 {
+            clock.submitted(seq, Some(now), Duration::ZERO);
+            clock.presented(seq, now + period * 2, period);
         }
         assert_eq!(clock.margin, Duration::from_millis(1));
+    }
+
+    #[test]
+    fn recent_min_adapts_to_deeper_and_shallower_pipelines_and_refresh_changes() {
+        let now = Instant::now();
+        let period = Duration::from_millis(16);
+        let mut clock = FrameClock::default();
+        for seq in 0..=LAG_WINDOW {
+            clock.submitted(seq, Some(now), Duration::ZERO);
+            clock.presented(seq, now + period * if seq == 0 { 2 } else { 3 }, period);
+        }
+        assert_eq!(*clock.lags.iter().min().unwrap(), 3);
+        let margin = clock.margin;
+        clock.submitted(100, Some(now), Duration::ZERO);
+        clock.presented(100, now + period * 3, period);
+        assert_eq!(clock.margin, margin - Duration::from_micros(100));
+        clock.submitted(101, Some(now), Duration::ZERO);
+        clock.presented(101, now + period, period);
+        assert_eq!(*clock.lags.iter().min().unwrap(), 1);
+        let margin = clock.margin;
+        clock.submitted(102, Some(now), Duration::ZERO);
+        clock.presented(102, now + period * 2, period);
+        assert_eq!(
+            clock.margin,
+            (margin + Duration::from_millis(1)).min(period)
+        );
+        clock.submitted(103, Some(now), Duration::ZERO);
+        clock.presented(103, now + period * 10, period * 2);
+        assert_eq!(clock.lags, VecDeque::from([5]));
+        assert!(clock.margin <= period);
     }
 }
