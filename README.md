@@ -12,8 +12,9 @@ A fast GPU-rendered terminal emulator written from scratch in Rust, for macOS an
   legacy), window titles, and wide (CJK) characters. Runs vim, tmux, htop, less and friends.
 - **Scrollback** of 10,000 lines, mouse selection (double-click for words, triple-click for
   lines), and clipboard support, including the primary selection on Linux.
-- Bundled [JetBrains Mono](https://www.jetbrains.com/lp/mono/), with system fallback fonts for
-  symbols and CJK.
+- Bundled [JetBrains Mono](https://www.jetbrains.com/lp/mono/), with fallback to system fonts
+  (found through fontconfig on Linux, Core Text on macOS) for symbols and CJK, and color emoji
+  (COLR, sbix and CBDT fonts such as Apple Color Emoji and Noto Color Emoji).
 
 ## Install and run
 
@@ -64,7 +65,7 @@ A Cargo workspace of three crates:
 | Crate | What it does |
 | --- | --- |
 | `crates/term-core` | Terminal state: grid, scrollback, cursor, modes, selection, colors, and the VT/xterm escape sequence handling (parsed with [`vte`](https://crates.io/crates/vte)). No GPU or window dependencies, so it builds and tests headless |
-| `crates/term-render` | wgpu renderer (`renderer.rs`, `shader.wgsl`) that draws a frame as one instanced pass, plus glyph rasterization ([`ab_glyph`](https://crates.io/crates/ab_glyph)), fallback fonts and the GPU glyph atlas. Takes any window with raw window and display handles |
+| `crates/term-render` | wgpu renderer (`renderer.rs`, `shader.wgsl`) that draws a frame as one instanced pass, plus glyph rasterization ([`ab_glyph`](https://crates.io/crates/ab_glyph)), system font fallback (`fallback.rs`), color glyphs (`color.rs`) and the GPU glyph atlases. Takes any window with raw window and display handles |
 | `crates/term-app` | The `terminal` binary: window and event loop ([`winit`](https://crates.io/crates/winit)), the shell on a pseudo-terminal ([`portable-pty`](https://crates.io/crates/portable-pty)), key and mouse encoding, and the clipboard |
 
 ## Development
