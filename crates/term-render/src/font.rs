@@ -79,6 +79,16 @@ pub(crate) fn map(path: &Path) -> std::io::Result<&'static [u8]> {
     Ok(data)
 }
 
+impl Fallback {
+    /// Whether `c` has a color glyph or an outline here; fonts can map characters to
+    /// glyphs in formats this renderer cannot read (such as Apple's `hvgl`).
+    fn can_draw(&self, c: char) -> bool {
+        let id = self.font.glyph_id(c);
+        id != GlyphId(0)
+            && (self.face.is_some() || self.font.outline(id).is_some_and(|o| !o.curves.is_empty()))
+    }
+}
+
 fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
     let data = map(path).ok()?;
     let font = FontArc::new(FontRef::try_from_slice_and_index(data, *index).ok()?);
@@ -163,7 +173,7 @@ impl Fonts {
                 .entry(file.clone())
                 .or_insert_with(|| load_fallback(file))
                 .as_ref()
-                .is_some_and(|f| f.font.glyph_id(c) != GlyphId(0))
+                .is_some_and(|f| f.can_draw(c))
         })?;
         self.fallbacks.get(&file)?.as_ref()
     }

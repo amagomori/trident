@@ -156,8 +156,8 @@ mod fontconfig {
 #[cfg(target_os = "macos")]
 mod coretext {
     use super::FontFile;
-    use objc2_core_foundation::{CFRange, CFRetained, CFString, CFURL};
-    use objc2_core_text::{CTFont, kCTFontURLAttribute};
+    use objc2_core_foundation::{CFArray, CFRange, CFRetained, CFString, CFType, CFURL};
+    use objc2_core_text::{CTFont, CTFontDescriptor, kCTFontNameAttribute, kCTFontURLAttribute};
 
     /// Core Text's cascade list for Menlo, the system monospace font.
     #[derive(Default)]
@@ -170,8 +170,9 @@ mod coretext {
             SystemFonts { base: None }
         }
 
-        /// The font Core Text picks for `c`; its own cascade list already prefers Apple
-        /// Color Emoji for emoji.
+        /// The font Core Text picks for `c` (its cascade list already prefers Apple Color
+        /// Emoji for emoji), then the rest of the cascade list, since Core Text can pick fonts
+        /// whose outlines only it can read.
         pub fn lookup(&mut self, c: char, _emoji: bool) -> Vec<FontFile> {
             let base = self.base.get_or_insert_with(|| unsafe {
                 CTFont::with_name(&CFString::from_str("Menlo"), 14.0, std::ptr::null())
@@ -180,15 +181,32 @@ mod coretext {
             let string = CFString::from_str(c.encode_utf8(&mut buf));
             let range = CFRange::new(0, c.len_utf16() as isize);
             let font = unsafe { base.for_string(&string, range) };
-            let Some(path) = (unsafe { font.attribute(kCTFontURLAttribute) })
-                .and_then(|url| url.downcast::<CFURL>().ok())
-                .and_then(|url| url.to_file_path())
-            else {
-                return Vec::new();
-            };
-            let name = unsafe { font.post_script_name() }.to_string();
-            vec![(path.clone(), face_index(&path, &name))]
+            let mut files = Vec::new();
+            let url = unsafe { font.attribute(kCTFontURLAttribute) };
+            files.extend(file(
+                url,
+                Some(unsafe { font.post_script_name() }.to_string()),
+            ));
+            if let Some(list) = unsafe { base.default_cascade_list_for_languages(None) } {
+                let list: &CFArray<CTFontDescriptor> =
+                    unsafe { &*(&*list as *const CFArray).cast() };
+                for descriptor in list.iter() {
+                    let url = unsafe { descriptor.attribute(kCTFontURLAttribute) };
+                    let name = unsafe { descriptor.attribute(kCTFontNameAttribute) }
+                        .and_then(|n| n.downcast::<CFString>().ok())
+                        .map(|n| n.to_string());
+                    files.extend(file(url, name));
+                }
+            }
+            files.dedup();
+            files
         }
+    }
+
+    fn file(url: Option<CFRetained<CFType>>, postscript: Option<String>) -> Option<FontFile> {
+        let path = url?.downcast::<CFURL>().ok()?.to_file_path()?;
+        let index = postscript.map_or(0, |name| face_index(&path, &name));
+        Some((path, index))
     }
 
     /// Core Text names the font but not its index inside a collection; find it by
