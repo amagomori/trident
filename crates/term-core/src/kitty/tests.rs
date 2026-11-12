@@ -8,6 +8,12 @@ const ICAT_DETECT: &[u8] = include_bytes!("fixtures/icat-detect.bin");
 /// `kitten icat --detect-support` from kitty 0.50 on Linux.
 #[cfg(target_os = "linux")]
 const KITTEN_DETECT: &[u8] = include_bytes!("fixtures/kitten-detect.bin");
+/// `kitten icat` of a 4x3 JPEG from kitty 0.39.1, and of a two-frame 4x3 GIF from kitty 0.50, on
+/// Linux where shared memory is refused, so frames go through `/dev/shm` temp files.
+#[cfg(target_os = "linux")]
+const KITTEN_039_JPG: &[u8] = include_bytes!("fixtures/kitten-0.39-jpg.bin");
+#[cfg(target_os = "linux")]
+const KITTEN_GIF: &[u8] = include_bytes!("fixtures/kitten-gif.bin");
 const CHAFA: &[u8] = include_bytes!("fixtures/chafa.bin");
 
 fn term() -> Terminal {
@@ -111,6 +117,72 @@ fn kitten_detection_takes_shm_temp_file() {
     let replies = replies(&mut t);
     assert!(replies.contains("\x1b_Gi=2;OK\x1b\\"), "{replies:?}");
     assert!(!path.exists());
+}
+
+/// Writes the files a capture's `t=t` commands name, sized for their `s` and `v`.
+#[cfg(target_os = "linux")]
+fn create_temp_files(capture: &[u8]) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    for apc in capture
+        .split(|&b| b == 0x1b)
+        .filter_map(|s| s.strip_prefix(b"_G"))
+    {
+        let Some(semi) = apc.iter().position(|&b| b == b';') else {
+            continue;
+        };
+        let control = std::str::from_utf8(&apc[..semi]).unwrap();
+        if !control.split(',').any(|kv| kv == "t=t") {
+            continue;
+        }
+        let key = |k: &str| {
+            let v = control.split(',').find_map(|kv| kv.strip_prefix(k));
+            v.map_or(1, |v| v.parse::<usize>().unwrap())
+        };
+        let mut payload = apc[semi + 1..].to_vec();
+        payload.resize(payload.len().div_ceil(4) * 4, b'=');
+        let path = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        let path = std::path::PathBuf::from(String::from_utf8(path).unwrap());
+        std::fs::write(&path, vec![0x80; key("s=") * key("v=") * 3]).unwrap();
+        paths.push(path);
+    }
+    paths
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn old_kitten_shm_frame_is_read_and_deleted() {
+    let mut t = term();
+    // The detection query's marked file, then the frame in an unmarked kitty-icat-* file.
+    let files = create_temp_files(KITTEN_039_JPG);
+    assert_eq!(files.len(), 2);
+    t.advance(KITTEN_039_JPG);
+    let replies = replies(&mut t);
+    assert!(replies.contains("\x1b_Gi=2;OK\x1b\\"), "{replies:?}");
+    let placed = placements(&t);
+    assert_eq!(placed.len(), 1);
+    let image = t.image(placed[0].0).unwrap();
+    assert_eq!((image.width, image.height), (4, 3));
+    assert!(files.iter().all(|f| !f.exists()), "{files:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn kitten_gif_frame_files_are_deleted() {
+    let mut t = term();
+    // Detection, the first frame, and a second frame (a=f) that is refused but still deleted.
+    let files = create_temp_files(KITTEN_GIF);
+    assert_eq!(files.len(), 3);
+    t.advance(KITTEN_GIF);
+    // Animation control (a=a) is not supported, but must not leave error replies behind.
+    let replies = replies(&mut t);
+    assert!(!replies.contains("I="), "{replies:?}");
+    let placed = placements(&t);
+    assert_eq!(placed.len(), 1);
+    let image = t.image(placed[0].0).unwrap();
+    assert_eq!((image.width, image.height), (4, 3));
+    assert!(files.iter().all(|f| !f.exists()), "{files:?}");
 }
 
 #[test]
@@ -418,7 +490,31 @@ fn shm_temp_file_transmission() {
     std::fs::write(&unmarked, &rgb).unwrap();
     assert!(send(&mut t, "t", &unmarked, 2).contains("EBADF"));
     assert!(unmarked.exists());
+
+    // Unsupported a=f frames delete their temp file, but leave other files alone.
+    let frame = |t: &mut Terminal, path: &std::path::Path| {
+        let control = "a=f,f=24,s=2,v=2,t=t,i=1";
+        t.advance(&apc(control, path.as_os_str().as_encoded_bytes()));
+        replies(t)
+    };
+    assert!(frame(&mut t, &unmarked).contains("EINVAL:unsupported action"));
+    assert!(unmarked.exists());
     std::fs::remove_file(&unmarked).unwrap();
+    std::fs::write(&temp, &rgb).unwrap();
+    assert!(frame(&mut t, &temp).contains("EINVAL:unsupported action"));
+    assert!(!temp.exists());
+
+    // kitten 0.39's unmarked kitty-icat-* frames are taken from /dev/shm only.
+    let old = shm.join(format!("kitty-icat-kan63-{pid}"));
+    std::fs::write(&old, &rgb).unwrap();
+    assert_eq!(send(&mut t, "t", &old, 3), "\x1b_Gi=3;OK\x1b\\");
+    assert!(!old.exists());
+    let old = std::env::temp_dir().join(format!("kitty-icat-kan63-{pid}"));
+    std::fs::write(&old, &rgb).unwrap();
+    assert!(send(&mut t, "t", &old, 2).contains("EBADF"));
+    assert!(old.exists());
+    std::fs::remove_file(&old).unwrap();
+
     std::fs::write(&temp, &rgb).unwrap();
     assert!(send(&mut t, "f", &temp, 2).contains("EBADF"));
     assert!(temp.exists());

@@ -27,6 +27,10 @@ const TEMP_MARKER: &str = "tty-graphics-protocol";
 /// Shared memory directory that also holds `t=t` temp files on Linux.
 #[cfg(unix)]
 const SHM_DIR: &str = "/dev/shm";
+/// kitten 0.39 and older send converted frames as `t=t` files in /dev/shm named this way, without
+/// [`TEMP_MARKER`].
+#[cfg(unix)]
+const KITTEN_SHM_PREFIX: &str = "kitty-icat-";
 
 const BASE64: GeneralPurpose = GeneralPurpose::new(
     &base64::alphabet::STANDARD,
@@ -367,7 +371,11 @@ impl Terminal {
             // A new command abandons a transmission whose last chunk never came.
             self.kitty.loading = None;
         }
-        if self.kitty.loading.is_none() && matches!(control.action, b't' | b'T' | b'q') {
+        // Animation frames are not supported, but their temp files are still taken and deleted.
+        let frame_file = control.action == b'f' && control.medium == b't';
+        if self.kitty.loading.is_none()
+            && (frame_file || matches!(control.action, b't' | b'T' | b'q'))
+        {
             let limit = match control.medium {
                 b'f' | b't' | b's' => MAX_PATH,
                 _ => self.images.quota,
@@ -388,6 +396,12 @@ impl Terminal {
             _ if control.invalid => Err("EINVAL:bad control data"),
             b'p' => self.kitty_put(&control),
             b'd' => return self.kitty_delete(&control),
+            // Animation is not supported, so controlling a known image's animation succeeds
+            // silently, as it does in kitty, instead of leaving a reply for kitten to drop.
+            b'a' => match self.resolve_image(&control) {
+                Ok(_) => return,
+                Err(error) => Err(error),
+            },
             _ => Err("EINVAL:unsupported action"),
         };
         let id = *result.as_ref().unwrap_or(&control.id);
@@ -398,6 +412,10 @@ impl Terminal {
         let mut control = t.control;
         let result = match t.error {
             Some(error) => Err(error),
+            None if control.action == b'f' => {
+                discard_temp_file(&t.data);
+                Err("EINVAL:unsupported action")
+            }
             None => decode_transmission(&control, t.data, self.images.quota),
         };
         let image = match result {
@@ -676,18 +694,11 @@ fn decode_png(data: &[u8], limit: usize) -> Result<Image, &'static str> {
     })
 }
 
-/// Reads an image file named by a `t=f` or `t=t` transmission. Only regular files outside
-/// `/proc`, `/sys` and `/dev` are read, at most `limit` bytes; `t=t` files must be in a temp
-/// directory or `/dev/shm` instead, and are deleted afterwards.
+/// Opens an image file named by a `t=f` or `t=t` transmission. Only regular files outside
+/// `/proc`, `/sys` and `/dev` are opened. `t=t` files must instead be in a temp directory or
+/// `/dev/shm` and be named as graphics temp files; they are deleted once opened.
 #[cfg(unix)]
-fn read_file(
-    path: &[u8],
-    temp: bool,
-    offset: u32,
-    size: u32,
-    limit: usize,
-) -> Result<Vec<u8>, &'static str> {
-    use std::io::{Seek, SeekFrom};
+fn open_image_file(path: &[u8], temp: bool) -> Result<std::fs::File, &'static str> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::Path;
@@ -711,15 +722,14 @@ fn read_file(
             .iter()
             .filter_map(|dir| std::fs::canonicalize(dir).ok())
             .any(|dir| path.starts_with(dir));
-        let marked = path
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().contains(TEMP_MARKER));
-        if !in_temp || !marked {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let named = name.contains(TEMP_MARKER) || (in_shm && name.starts_with(KITTEN_SHM_PREFIX));
+        if !in_temp || !named {
             return Err("EPERM:not a graphics temp file");
         }
     }
     // O_NONBLOCK so a FIFO swapped in after the check cannot hang the terminal.
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(&path)
@@ -728,6 +738,26 @@ fn read_file(
     if !meta.file_type().is_file() {
         return Err("EPERM:not a regular file");
     }
+    // Deleted even if reading or decoding fails, so the client's temp files never pile up.
+    if temp {
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(file)
+}
+
+/// Reads at most `limit` bytes of an image file named by a `t=f` or `t=t` transmission.
+#[cfg(unix)]
+fn read_file(
+    path: &[u8],
+    temp: bool,
+    offset: u32,
+    size: u32,
+    limit: usize,
+) -> Result<Vec<u8>, &'static str> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = open_image_file(path, temp)?;
+    let meta = file.metadata().map_err(|_| "EBADF:cannot read file")?;
     let available = meta.len().saturating_sub(offset as u64);
     let len = match size {
         0 => available,
@@ -740,16 +770,22 @@ fn read_file(
     file.seek(SeekFrom::Start(offset as u64))
         .and_then(|_| file.take(len).read_to_end(&mut data))
         .map_err(|_| "EBADF:cannot read file")?;
-    if temp {
-        let _ = std::fs::remove_file(&path);
-    }
     Ok(data)
+}
+
+/// Deletes the `t=t` temp file of a transmission that is refused before it is read.
+#[cfg(unix)]
+fn discard_temp_file(path: &[u8]) {
+    let _ = open_image_file(path, true);
 }
 
 #[cfg(not(unix))]
 fn read_file(_: &[u8], _: bool, _: u32, _: u32, _: usize) -> Result<Vec<u8>, &'static str> {
     Err("EINVAL:file transmission is not supported")
 }
+
+#[cfg(not(unix))]
+fn discard_temp_file(_: &[u8]) {}
 
 #[cfg(test)]
 mod tests;
