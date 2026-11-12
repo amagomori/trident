@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Writes the `terminal show` sample files: a 48x32 image split into red, green, blue and
+white quadrants in every raster format, plus files for the failure cases. Needs Pillow."""
+
+import io
+import struct
+
+from PIL import Image
+
+W, H = 48, 32
+QUADRANTS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
+
+
+def pattern(w=W, h=H, mode="RGB"):
+    img = Image.new("RGB", (w, h))
+    for y in range(h):
+        for x in range(w):
+            img.putpixel((x, y), QUADRANTS[(y >= h // 2) * 2 + (x >= w // 2)])
+    return img.convert(mode)
+
+
+img = pattern()
+img.save("sample.png")
+img.save("sample.jpg", quality=95)
+img.save("sample.webp", quality=95)
+img.save("sample.bmp")
+img.save("sample.tiff")
+img.save("sample.ppm")
+img.save("sample.tga")
+# Classic BMP-in-ICO; image also reads PNG-in-ICO, but only RGBA ones.
+pattern(32, 32).convert("RGBA").save("sample.ico", sizes=[(32, 32)], bitmap_format="bmp")
+# Two frames; only the first one (the pattern) is shown.
+black = Image.new("RGB", (W, H))
+img.save("sample.gif", save_all=True, append_images=[black], duration=100, loop=0)
+
+# QOI by hand: Pillow only reads it. One QOI_OP_RGB per pixel is valid, if not compact.
+qoi = bytearray(b"qoif" + struct.pack(">IIBB", W, H, 3, 0))
+for r, g, b in zip(*[iter(img.tobytes())] * 3):
+    qoi += bytes([0xFE, r, g, b])
+qoi += bytes(7) + b"\x01"
+open("sample.qoi", "wb").write(qoi)
+
+# Same file, misleading names: the type comes from the bytes.
+open("png-named.jpg", "wb").write(open("sample.png", "rb").read())
+
+png = open("sample.png", "rb").read()
+open("corrupt.png", "wb").write(png[: len(png) // 2])

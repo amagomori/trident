@@ -58,6 +58,24 @@ It starts your login shell (`$SHELL`) with `TERM=xterm-256color`.
 
 Hold Shift to select text while a program (vim, tmux, htop) is using the mouse.
 
+### Viewing files
+
+```
+terminal show [--width N] [--height N] [--fit] FILE...
+
+  --width N    Draw images N columns wide
+  --height N   Draw images N rows tall (with --width: fit inside both)
+  --fit        Scale images up or down to fill the window
+```
+
+Run it inside the terminal (or kitty, Ghostty, WezTerm) to see a file without
+another tool. The type comes from the file's contents, not its name: PNG, JPEG,
+GIF (first frame), WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG are drawn with the
+kitty graphics protocol, shrunk to fit the window; text files are printed with
+control characters made visible; other files get a one-line summary such as
+`ELF executable, 16.2 KiB`. A missing, unreadable or corrupt file prints an error
+and the command exits with status 1. Sample files live in `crates/term-app/samples`.
+
 ## Layout
 
 A Cargo workspace of three crates:
