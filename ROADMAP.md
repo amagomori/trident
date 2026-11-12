@@ -1,6 +1,6 @@
 # Roadmap
 
-From the first usable build (v0.1) to a signed, packaged 1.0 on macOS and Linux. Tracked in Jira: [Terminal board (KAN)](https://jarettforzano.atlassian.net/jira/software/projects/KAN/boards). Ticket rules: [TICKETS.md](TICKETS.md).
+From the first usable build (v0.1) to a signed, packaged 1.0 on macOS and Linux. Tracked in Jira: [Terminal board (KAN)](https://jarettforzano.atlassian.net/jira/software/projects/KAN/boards). Tickets follow the team standards in [amagomori/.github](https://github.com/amagomori/.github): [ticket format](https://github.com/amagomori/.github/blob/main/jira/ticket_format.md) and [workflow](https://github.com/amagomori/.github/blob/main/jira/workflow.md).
 
 ## Milestones
 
@@ -10,6 +10,11 @@ From the first usable build (v0.1) to a signed, packaged 1.0 on macOS and Linux.
 | v0.2 | Full-screen apps (vim, tmux, htop) behave correctly; CI and tests in place | [KAN-5](https://jarettforzano.atlassian.net/browse/KAN-5) Set up engineering foundations, [KAN-10](https://jarettforzano.atlassian.net/browse/KAN-10) Reach xterm-level VT correctness |
 | v0.3 | Fast, good-looking, usable all day | [KAN-20](https://jarettforzano.atlassian.net/browse/KAN-20) Make rendering fast and beautiful, [KAN-28](https://jarettforzano.atlassian.net/browse/KAN-28) Build daily-driver UX |
 | v1.0 | Native on both platforms, signed, installable in one command | [KAN-40](https://jarettforzano.atlassian.net/browse/KAN-40) Integrate natively with macOS and Linux, [KAN-44](https://jarettforzano.atlassian.net/browse/KAN-44) Release and distribute 1.0 |
+
+## Labels
+
+- Milestones: `v0.1`, `v0.2`, `v0.3`, `v1.0`
+- Areas: `area-app` (window, PTY, input), `area-core` (VT parser and grid), `area-render` (GPU, fonts), `area-ux` (selection, config, tabs), `area-platform` (macOS/Linux integration), `area-infra` (CI, tests, benchmarks), `area-release` (packaging, docs)
 
 ## Architecture
 
