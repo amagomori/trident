@@ -133,6 +133,60 @@ fn title_and_modes() {
     assert_eq!(t.cursor_shape, CursorShape::Bar);
 }
 
+fn assert_input_modes(t: &Terminal, mouse: MouseMode, enabled: bool) {
+    assert_eq!(t.modes.mouse, mouse);
+    assert_eq!(t.modes.sgr_mouse, enabled);
+    assert_eq!(t.modes.focus_events, enabled);
+    assert_eq!(t.modes.bracketed_paste, enabled);
+}
+
+#[test]
+fn command_end_resets_input_modes_in_order() {
+    for mode in [1000, 1002, 1003] {
+        for end in ["\x1b]133;D\x07", "\x1b]133;D;0\x1b\\"] {
+            let setup = format!("\x1b[?{mode};1006;1004;2004h");
+            let mut t = term(10, 2, &setup);
+            t.advance(end.as_bytes());
+            assert_input_modes(&t, MouseMode::Off, false);
+            t.advance(format!("{setup}{end}\x1b[?2004h").as_bytes());
+            assert!(t.modes.bracketed_paste);
+            t.modes.bracketed_paste = false;
+            assert_input_modes(&t, MouseMode::Off, false);
+        }
+    }
+}
+
+#[test]
+fn command_end_preserves_alt_screen_input_modes() {
+    let t = term(10, 2, "\x1b[?1049h\x1b[?1003;1006;1004;2004h\x1b]133;D\x07");
+    assert_input_modes(&t, MouseMode::Motion, true);
+}
+
+#[test]
+fn reset_input_modes_reports_changes_and_preserves_alt_screen() {
+    let mut t = Terminal::new(10, 2);
+    assert!(!t.reset_input_modes());
+    for mode in [1000, 1002, 1003, 1006, 1004, 2004] {
+        t.advance(format!("\x1b[?{mode}h").as_bytes());
+        assert!(t.reset_input_modes());
+        assert_input_modes(&t, MouseMode::Off, false);
+        assert!(!t.reset_input_modes());
+    }
+    t.advance(b"\x1b[?1049h\x1b[?1002;1006;1004;2004h");
+    assert!(!t.reset_input_modes());
+    assert_input_modes(&t, MouseMode::Drag, true);
+}
+
+#[test]
+fn other_shell_marks_do_not_reset_input_modes() {
+    let t = term(
+        10,
+        2,
+        "\x1b[?1000;1006;1004;2004h\x1b]133;A\x07\x1b]133\x07\x1b]133;invalid\x07",
+    );
+    assert_input_modes(&t, MouseMode::Click, true);
+}
+
 #[test]
 fn line_drawing_charset() {
     let t = term(5, 1, "\x1b(0lqk\x1b(Bq");

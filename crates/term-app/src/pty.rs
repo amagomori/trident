@@ -42,6 +42,7 @@ pub struct Pty {
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Vec<u8>>,
     child: Box<dyn Child + Send + Sync>,
+    shell_pid: Option<u32>,
     output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
     pub wake_pending: Arc<AtomicBool>,
@@ -93,6 +94,7 @@ impl Pty {
             .spawn_command(cmd)
             .map_err(|e| format!("cannot start shell: {e}"))?;
         drop(pair.slave);
+        let shell_pid = child.process_id();
 
         let mut reader = pair
             .master
@@ -161,6 +163,7 @@ impl Pty {
             master: pair.master,
             input,
             child,
+            shell_pid,
             output,
             wake_pending,
         })
@@ -190,6 +193,20 @@ impl Pty {
 
     pub fn resize(&self, cols: usize, rows: usize, cell: (f32, f32)) {
         let _ = self.master.resize(size(cols, rows, cell.0, cell.1));
+    }
+
+    pub fn shell_in_foreground(&self) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            let shell = self.shell_pid?;
+            let foreground = self.master.process_group_leader()?;
+            Some(foreground as u32 == shell)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.shell_pid;
+            None
+        }
     }
 }
 

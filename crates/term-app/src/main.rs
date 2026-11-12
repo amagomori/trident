@@ -106,6 +106,25 @@ struct Session {
     since_frame: usize,
     /// When output was first held back.
     deferred: Option<Instant>,
+    foreground: Foreground,
+}
+
+#[derive(Default)]
+struct Foreground {
+    away: bool,
+}
+
+impl Foreground {
+    fn sample(&mut self, shell: Option<bool>) -> bool {
+        match shell {
+            Some(true) => std::mem::take(&mut self.away),
+            Some(false) => {
+                self.away = true;
+                false
+            }
+            None => false,
+        }
+    }
 }
 
 /// Whether output that just arrived can be held back: only during a flood, and never once
@@ -197,6 +216,7 @@ impl App {
             pty,
             since_frame: 0,
             deferred: None,
+            foreground: Foreground::default(),
         })
     }
 
@@ -240,7 +260,16 @@ impl App {
         let batch = s.pty.take_output();
         let processed = batch.len();
         s.since_frame += processed;
+        if s.foreground.sample(s.pty.shell_in_foreground()) {
+            s.term.reset_input_modes();
+        }
         s.term.advance(&batch);
+        if s.pty.shell_in_foreground() == Some(false) {
+            s.foreground.sample(Some(false));
+        }
+        if s.term.modes.mouse == MouseMode::Off {
+            self.reported_button = None;
+        }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
         if let Some(title) = s.term.take_title() {
@@ -616,6 +645,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_reset_requires_a_return_from_away() {
+        let mut foreground = Foreground::default();
+        assert!(!foreground.sample(None));
+        assert!(!foreground.sample(Some(true)));
+        assert!(!foreground.sample(Some(false)));
+        assert!(!foreground.sample(None));
+        assert!(!foreground.sample(Some(false)));
+        assert!(foreground.sample(Some(true)));
+        assert!(!foreground.sample(Some(true)));
+    }
 
     #[test]
     fn output_is_held_back_only_during_a_flood() {
