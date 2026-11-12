@@ -123,6 +123,11 @@ On macOS, Metal drawable presented handlers use `presentedTime` (`metal-presente
 The opt-in harness hooks the concrete command-buffer `presentDrawable:` method;
 the direct drawable `present` path used with `presentsWithTransaction` is not
 hooked. The app does not enable that setting (CAMetalLayer defaults to false).
+Only Wayland presentation timing is verified, through headless Weston protocol
+testing. Metal and X11 timing are **unverified**, and the table and JSON label
+them accordingly. QA's paravirtual Metal run returned `presentedTime == 0` for all
+681 callbacks (skipped); real-Mac timing remains unverified. X11 completion
+matching is untested because no DRI3/GPU X server was available.
 These timestamps are not an optical
 measurement of pixel scanout; compositor/display processing may add delay.
 For a Wayland smoke test, start Weston headless and run with its `WAYLAND_DISPLAY`

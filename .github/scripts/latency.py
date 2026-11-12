@@ -63,6 +63,9 @@ def summarize(path, workload):
     if feedback and any(p[0] < 0 for p in presented.values()):
         raise RuntimeError("presentation clock precedes log epoch; check X11 clock mapping")
     timing = f"presented: {source or 'unknown'}" if feedback else "present-return (no feedback)"
+    verified = feedback and source == "wayland-presentation"
+    if source in ("metal-presented", "x11-present"):
+        timing += " (unverified)"
     wasted = len(frames) - len(successful) if feedback else 0
     previous = 0
     for seq, (time, count) in sorted(frames.items()):
@@ -78,7 +81,8 @@ def summarize(path, workload):
                 wasted=wasted,
                 late=sum(a[1] > 0 and b[1] > 0 and b[0]-a[0] > 1.5e9/refresh
                          for a, b in zip(ordered, ordered[1:])) if refresh else None,
-                bytes_s=sum(f[1] for f in frames.values())/seconds, refresh_mhz=refresh)
+                bytes_s=sum(f[1] for f in frames.values())/seconds, refresh_mhz=refresh,
+                verified=verified)
 
 
 def build(checkout, target):
@@ -141,7 +145,7 @@ def main():
     print("| app | workload | run | p50 ms | p99 ms | mean ms | return p50 ms | return p99 ms | timing | samples | frames | fps | wasted | late | bytes/s | refresh mHz |")
     print("|" + " --- |" * 16)
     for row in results:
-        print("| " + " | ".join("—" if v is None else f"{v:.2f}" if isinstance(v, float) else str(v) for v in row.values()) + " |")
+        print("| " + " | ".join("—" if v is None else f"{v:.2f}" if isinstance(v, float) else str(v) for k, v in row.items() if k != 'verified') + " |")
     for label in apps:
         for workload in workloads:
             rows = [r for r in results if r['app'] == label and r['workload'] == workload]
