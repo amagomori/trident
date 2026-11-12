@@ -285,11 +285,12 @@ mod bench {
     const INPUT_BYTES: usize = 2 << 20;
     const KEYSTROKES: usize = 2_000;
     const IMAGES: usize = 2_000;
-    /// Bytes `term-app` passes to one `advance` call: one wake drains the 16 PTY reads
-    /// `sync_channel(16)` queues (`pty.rs`), well under `MAX_BYTES_PER_WAKE` (`main.rs`).
-    /// macOS PTY reads return about 1 KiB each; Linux ones at most 4095 bytes (n_tty).
-    const MACOS_BATCH: usize = 16 * 1024;
-    const LINUX_BATCH: usize = 16 * 4095;
+    /// Bytes `term-app` passes to one `advance` call during a flood. Reads (about 1 KiB on
+    /// macOS, at most 4095 bytes on Linux) are coalesced in one queue (`pty.rs`) that a flood
+    /// drains every 16 ms or 1 MiB (`main.rs`). The smallest median batch measured in the
+    /// app, `seq` to 3M on Linux, was about 200 KB; `cat` of large files hits 1 MiB.
+    const MACOS_BATCH: usize = 192 * 1024;
+    const LINUX_BATCH: usize = 192 * 1024;
 
     /// xorshift64, so every run feeds identical input.
     struct Rng(u64);
