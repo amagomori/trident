@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use term_core::{MouseMode, Point, SelectionKind, Terminal};
 use term_render::{Fonts, PADDING, Renderer};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -139,33 +139,27 @@ impl App {
     fn start(&mut self, event_loop: &ActiveEventLoop) -> Result<Session, String> {
         let probe = Fonts::new(self.options.font.as_deref(), self.font_size)?;
         let m = probe.metrics;
-        let attrs = Window::default_attributes()
-            .with_title("terminal")
-            .with_inner_size(LogicalSize::new(
-                100.0 * m.width + 2.0 * PADDING,
-                30.0 * m.height + 2.0 * PADDING,
-            ));
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .map_err(|e| format!("cannot create window: {e}"))?,
+        let logical_size = LogicalSize::new(
+            100.0 * m.width + 2.0 * PADDING,
+            30.0 * m.height + 2.0 * PADDING,
         );
-        window.set_ime_allowed(true);
-        let scale = window.scale_factor() as f32;
-        let fonts = Fonts::new(self.options.font.as_deref(), self.font_size * scale)?;
-        let size = window.inner_size();
-        let renderer = Renderer::new(window.clone(), size.width, size.height)?;
-        eprintln!("terminal: rendering with {}", renderer.adapter_info);
-
-        let (cols, rows) = grid_size(&window, &fonts);
-        let mut term = Terminal::new(cols, rows);
-        term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
+        let guess = event_loop
+            .primary_monitor()
+            .map_or(1.0, |m| m.scale_factor());
+        let guessed_fonts = if guess == 1.0 {
+            probe
+        } else {
+            Fonts::new(self.options.font.as_deref(), self.font_size * guess as f32)?
+        };
+        let (spawn_cols, spawn_rows) =
+            grid_size_for(logical_size.to_physical(guess), guess, &guessed_fonts);
+        let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let proxy = self.proxy.clone();
         let pty = Pty::spawn(
             &self.options.command,
-            term.cols(),
-            term.rows(),
-            (fonts.metrics.width, fonts.metrics.height),
+            spawn_cols,
+            spawn_rows,
+            spawn_cell,
             move |exited| {
                 let _ = proxy.send_event(if exited {
                     UserEvent::Exit
@@ -174,6 +168,32 @@ impl App {
                 });
             },
         )?;
+        let attrs = Window::default_attributes()
+            .with_title("terminal")
+            .with_inner_size(logical_size);
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .map_err(|e| format!("cannot create window: {e}"))?,
+        );
+        window.set_ime_allowed(true);
+        let scale = window.scale_factor();
+        let fonts = if scale == guess {
+            guessed_fonts
+        } else {
+            Fonts::new(self.options.font.as_deref(), self.font_size * scale as f32)?
+        };
+        let size = window.inner_size();
+        let renderer = Renderer::new(window.clone(), size.width, size.height)?;
+        eprintln!("terminal: rendering with {}", renderer.adapter_info);
+
+        let (cols, rows) = grid_size(&window, &fonts);
+        let mut term = Terminal::new(cols, rows);
+        term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
+        let cell = (fonts.metrics.width, fonts.metrics.height);
+        if (cols, rows, cell) != (spawn_cols, spawn_rows, spawn_cell) {
+            pty.resize(cols, rows, cell);
+        }
         window.request_redraw();
         Ok(Session {
             window,
@@ -469,8 +489,11 @@ impl App {
 }
 
 fn grid_size(window: &Window, fonts: &Fonts) -> (usize, usize) {
-    let size = window.inner_size();
-    let pad = 2.0 * PADDING * window.scale_factor() as f32;
+    grid_size_for(window.inner_size(), window.scale_factor(), fonts)
+}
+
+fn grid_size_for(size: PhysicalSize<u32>, scale: f64, fonts: &Fonts) -> (usize, usize) {
+    let pad = 2.0 * PADDING * scale as f32;
     let cols = ((size.width as f32 - pad) / fonts.metrics.width)
         .floor()
         .max(2.0) as usize;
@@ -486,7 +509,10 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match self.start(event_loop) {
-            Ok(session) => self.session = Some(session),
+            Ok(session) => {
+                self.session = Some(session);
+                self.process_output();
+            }
             Err(e) => {
                 self.error = Some(e);
                 event_loop.exit();
@@ -583,5 +609,30 @@ fn main() {
     if let Some(e) = app.error {
         eprintln!("terminal: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guessed_grid_uses_physical_size_and_scaled_padding() {
+        let probe = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let logical = LogicalSize::new(
+            100.0 * probe.metrics.width + 2.0 * PADDING,
+            30.0 * probe.metrics.height + 2.0 * PADDING,
+        );
+        for (scale, expected) in [(1.0, (100, 30)), (2.0, (94, 30))] {
+            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            assert_eq!(
+                grid_size_for(logical.to_physical(scale), scale, &fonts),
+                expected
+            );
+            assert_eq!(
+                grid_size_for(PhysicalSize::new(0, 0), scale, &fonts),
+                (2, 1)
+            );
+        }
     }
 }
