@@ -890,4 +890,6 @@ fn dec_special(c: char) -> char {
 }
 
 #[cfg(test)]
+mod bench;
+#[cfg(test)]
 mod tests;
