@@ -19,8 +19,6 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
-/// Upper bound on shell output parsed per wake-up, so huge bursts can't starve rendering.
-const MAX_BYTES_PER_WAKE: usize = 1 << 20;
 
 #[derive(Debug)]
 enum UserEvent {
@@ -205,24 +203,11 @@ impl App {
     fn process_output(&mut self) {
         let Some(s) = &mut self.session else { return };
         s.pty.wake_pending.store(false, Ordering::Release);
-        // One `advance` over the whole queued window, so a burst long enough to scroll
-        // through all of scrollback only builds the lines that end up kept.
-        let mut batch = Vec::new();
-        while batch.len() < MAX_BYTES_PER_WAKE {
-            let Ok(bytes) = s.pty.output.try_recv() else {
-                break;
-            };
-            if batch.is_empty() {
-                batch = bytes;
-            } else {
-                batch.extend_from_slice(&bytes);
-            }
-        }
+        // One `advance` over everything queued, so a burst long enough to scroll through
+        // all of scrollback only builds the lines that end up kept.
+        let batch = s.pty.take_output();
         let processed = batch.len();
         s.term.advance(&batch);
-        if processed >= MAX_BYTES_PER_WAKE && !s.pty.wake_pending.swap(true, Ordering::AcqRel) {
-            let _ = self.proxy.send_event(UserEvent::Output);
-        }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
         if let Some(title) = s.term.take_title() {

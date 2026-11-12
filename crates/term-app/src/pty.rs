@@ -2,16 +2,28 @@
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Condvar, Mutex};
+
+/// Output the reader thread may queue before it waits for the UI, which is also the most
+/// the UI parses per wake-up, so huge bursts can't starve rendering.
+const MAX_QUEUED: usize = 1 << 20;
+
+/// Shell output read but not yet parsed, as one buffer: small reads (macOS returns about
+/// 1 KiB per read) still reach the parser as one batch.
+#[derive(Default)]
+struct Queue {
+    bytes: Mutex<(Vec<u8>, bool)>,
+    room: Condvar,
+}
 
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Vec<u8>>,
     child: Box<dyn Child + Send + Sync>,
-    pub output: Receiver<Vec<u8>>,
+    output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
     pub wake_pending: Arc<AtomicBool>,
 }
@@ -89,7 +101,8 @@ impl Pty {
 
         // Bounded, so a shell producing output faster than we parse it is paused by
         // the kernel instead of growing this queue without limit.
-        let (tx, rx): (SyncSender<Vec<u8>>, _) = sync_channel(16);
+        let output = Arc::new(Queue::default());
+        let queue = output.clone();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let pending = wake_pending.clone();
         std::thread::Builder::new()
@@ -100,9 +113,15 @@ impl Pty {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            if tx.send(buf[..n].to_vec()).is_err() {
+                            let mut bytes = queue.bytes.lock().unwrap();
+                            while bytes.0.len() >= MAX_QUEUED && !bytes.1 {
+                                bytes = queue.room.wait(bytes).unwrap();
+                            }
+                            if bytes.1 {
                                 return;
                             }
+                            bytes.0.extend_from_slice(&buf[..n]);
+                            drop(bytes);
                             if !pending.swap(true, Ordering::AcqRel) {
                                 wake(false);
                             }
@@ -117,9 +136,16 @@ impl Pty {
             master: pair.master,
             input,
             child,
-            output: rx,
+            output,
             wake_pending,
         })
+    }
+
+    /// Everything the shell wrote since the last call.
+    pub fn take_output(&self) -> Vec<u8> {
+        let bytes = std::mem::take(&mut self.output.bytes.lock().unwrap().0);
+        self.output.room.notify_one();
+        bytes
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
@@ -136,6 +162,8 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
+        self.output.bytes.lock().unwrap().1 = true;
+        self.output.room.notify_one();
         let _ = self.child.kill();
     }
 }
