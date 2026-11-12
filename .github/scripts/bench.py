@@ -106,6 +106,13 @@ def pct(new: float, old: float) -> str:
     return f"{(new - old) / old * 100:+.2f}%"
 
 
+def wall_change(base: dict, head: dict) -> str:
+    """Throughput change for byte workloads, latency change for keystrokes."""
+    if base["unit"] == "bytes":
+        return f"{pct(base['secs'], head['secs'])} speed"
+    return f"{pct(head['secs'], base['secs'])} latency"
+
+
 def report(results: dict, threshold: float) -> tuple[str, list[str]]:
     head, base = results["head"], results.get("base")
     lines = ["## Benchmarks", ""]
@@ -140,7 +147,7 @@ def report(results: dict, threshold: float) -> tuple[str, list[str]]:
         lines.append(
             f"| `{name}` | {b['instructions']:,} → {h['instructions']:,} | "
             f"{pct(h['instructions'], b['instructions'])} | {rate(b)} → {rate(h)} | "
-            f"{pct(b['secs'], h['secs'])} | {status} |"
+            f"{wall_change(b, h)} | {status} |"
         )
     lines.append("")
     if regressions:
