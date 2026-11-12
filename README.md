@@ -109,9 +109,12 @@ and require both adjacent frames to have parsed new bytes; idle gaps do not coun
 tests only. See the script docstring for setup and comparison controls.
 
 Probes enter through the app's normal PTY input path. Output is matched to the
-next successful `queue.present()` return, not physical display feedback; GPU and
-compositor queuing plus up to one refresh of scanout remain unmeasured. True
-presentation feedback (wp_presentation / CAMetalLayer) is future work.
+frame carrying parsed output. On X11, Present completion feedback supplies the
+presentation timestamp; skipped or missing completions count as wasted frames.
+Present-return latency is reported separately. Each run labels its timing source;
+without feedback it explicitly reports `present-return (no feedback)` instead.
+Wayland and macOS presentation feedback are pending. X11 completion is not an
+optical measurement of pixel scanout; compositor/display processing may add delay.
 
 ## License
 

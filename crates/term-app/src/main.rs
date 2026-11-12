@@ -191,13 +191,17 @@ impl App {
             },
         )?;
         window.request_redraw();
+        let mut latency = latency::Latency::from_env(
+            window
+                .current_monitor()
+                .and_then(|m| m.refresh_rate_millihertz())
+                .unwrap_or(0),
+        );
+        if let Some(log) = &mut latency {
+            log.feedback(&window);
+        }
         Ok(Session {
-            latency: latency::Latency::from_env(
-                window
-                    .current_monitor()
-                    .and_then(|m| m.refresh_rate_millihertz())
-                    .unwrap_or(0),
-            ),
+            latency,
             window,
             renderer,
             fonts,

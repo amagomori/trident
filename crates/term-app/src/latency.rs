@@ -1,5 +1,10 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+#[path = "present_x11.rs"]
+mod x11;
 
 pub struct Latency {
     path: PathBuf,
@@ -11,7 +16,8 @@ pub struct Latency {
     remaining: usize,
     sent: usize,
     random: u32,
-    inputs: usize,
+    sequence: usize,
+    feedback: Arc<Mutex<Vec<String>>>,
 }
 
 impl Latency {
@@ -40,13 +46,26 @@ impl Latency {
             remaining: count,
             sent: 0,
             random: 1,
-            inputs: 0,
+            sequence: 0,
+            feedback: Arc::default(),
         })
     }
 
     pub fn input(&mut self, now: Instant) {
         self.pending.push(now);
-        self.inputs += 1;
+        self.lines.push(format!(
+            "input {}",
+            now.duration_since(self.start).as_micros()
+        ));
+    }
+
+    pub fn feedback(&mut self, window: &winit::window::Window) {
+        #[cfg(target_os = "linux")]
+        if let Err(error) = x11::start(window, self.start, self.feedback.clone()) {
+            eprintln!("terminal: presentation feedback unavailable: {error}");
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = window;
     }
 
     pub fn output(&mut self, bytes: usize) {
@@ -57,15 +76,18 @@ impl Latency {
 
     pub fn frame(&mut self, now: Instant, bytes: usize) {
         self.lines.push(format!(
-            "frame {} {bytes} {}",
+            "frame {} {} {bytes}",
+            self.sequence,
             now.duration_since(self.start).as_micros(),
-            self.inputs
         ));
-        self.inputs = 0;
         for input in self.echoed.drain(..) {
-            self.lines
-                .push(format!("latency {}", now.duration_since(input).as_micros()));
+            self.lines.push(format!(
+                "echo {} {}",
+                input.duration_since(self.start).as_micros(),
+                self.sequence
+            ));
         }
+        self.sequence += 1;
     }
 
     pub fn probe(&mut self, now: Instant) -> Option<&'static [u8]> {
@@ -96,6 +118,7 @@ impl Latency {
 
 impl Drop for Latency {
     fn drop(&mut self) {
+        self.lines.extend(self.feedback.lock().unwrap().drain(..));
         if let Err(error) = std::fs::write(&self.path, self.lines.join("\n")) {
             eprintln!("terminal: latency log: {error}");
         }
@@ -119,7 +142,8 @@ mod tests {
             remaining: 0,
             sent: 0,
             random: 1,
-            inputs: 0,
+            sequence: 0,
+            feedback: Arc::default(),
         };
         log.frame(now, 0);
         log.input(now);
@@ -129,7 +153,9 @@ mod tests {
         log.output(1);
         log.input(now);
         log.frame(now + Duration::from_micros(10), 1);
-        assert_eq!(log.lines.last().unwrap(), "latency 10");
+        assert_eq!(log.lines.last().unwrap(), "echo 0 2");
+        assert!(log.lines.iter().any(|line| line == "input 0"));
+        assert!(log.lines.iter().any(|line| line == "frame 2 10 1"));
         assert_eq!(log.pending.len(), 1);
         assert!(log.echoed.is_empty());
         assert!(log.probe(now).is_none());

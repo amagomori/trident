@@ -9,8 +9,8 @@ Linux needs DISPLAY or WAYLAND_DISPLAY; macOS needs a logged-in GUI session.
 --xvfb needs xvfb-run and is only a smoke test, not a real-display measurement.
 Keep display refresh, window size, power mode and background load fixed. Runs are
 interleaved; compare the reported min-max spread, not just a single percentile.
-The timestamp is after queue.present returns, NOT compositor presentation feedback:
-GPU/compositor queuing and up to a refresh of scanout are additional, unmeasured delay.
+X11 Present completion timestamps are used when available; present-return latency
+is reported separately. Wayland/macOS feedback is pending; fallback is labeled.
 Inputs are injected through write_input (no OS keyboard permission required).
 Load runs for --duration seconds without input probes and reports throughput only.
 Late intervals exceed 1.5 refresh periods and both adjacent frames parsed new bytes;
@@ -33,28 +33,50 @@ def percentile(values, fraction):
 
 
 def summarize(path, workload):
-    frames, latencies, refresh = [], [], 0
+    frames, inputs, echoes, presented, refresh, source = {}, [], [], {}, 0, None
     for line in path.read_text().splitlines():
         fields = line.split()
         if fields[0] == "refresh_mhz":
             refresh = int(fields[1])
         elif fields[0] == "frame":
-            frames.append(tuple(map(int, fields[1:])))
-        elif fields[0] == "latency":
-            latencies.append(int(fields[1]))
-    if len(frames) < 2 or (workload == "echo" and not latencies):
+            seq, time, count = map(int, fields[1:])
+            frames[seq] = (time, count)
+        elif fields[0] == "input":
+            inputs.append(int(fields[1]))
+        elif fields[0] == "echo":
+            echoes.append(tuple(map(int, fields[1:])))
+        elif fields[0] == "presented":
+            presented[int(fields[1])] = (int(fields[2]), fields[3])
+        elif fields[0] == "source":
+            source = fields[1]
+    if len(frames) < 2 or (workload == "echo" and not echoes):
         raise RuntimeError("no usable samples: app must contain TERM_LATENCY_LOG instrumentation")
-    seconds = (frames[-1][0] - frames[0][0]) / 1e6
-    if workload == "load":
-        latencies = []
+    feedback = bool(presented)
+    successful = {seq: (time, frames[seq][1]) for seq, (time, mode) in presented.items()
+                  if seq in frames and mode != "skip"} if feedback else frames
+    ordered = [successful[seq] for seq in sorted(successful)]
+    seconds = (max(f[0] for f in frames.values()) - min(f[0] for f in frames.values())) / 1e6
+    returns = [frames[seq][0] - time for time, seq in echoes] if workload == "echo" else []
+    latencies = [successful[seq][0] - time for time, seq in echoes if seq in successful] if workload == "echo" else []
+    if feedback and any(p[0] < 0 for p in presented.values()):
+        raise RuntimeError("presentation clock precedes log epoch; check X11 clock mapping")
+    timing = f"presented: {source or 'unknown'}" if feedback else "present-return (no feedback)"
+    wasted = len(frames) - len(successful) if feedback else 0
+    previous = 0
+    for time, count in ordered:
+        if count == 0 and not any(previous < t <= time for t in inputs):
+            wasted += 1
+        previous = time
     return dict(p50_ms=percentile(latencies, .5) if latencies else None,
                 p99_ms=percentile(latencies, .99) if latencies else None,
                 mean_ms=statistics.mean(latencies) / 1000 if latencies else None,
-                samples=len(latencies), frames=len(frames), fps=(len(frames)-1)/seconds,
-                wasted=sum(b == 0 and i == 0 for _, b, i in frames),
+                return_p50_ms=percentile(returns, .5) if returns else None,
+                return_p99_ms=percentile(returns, .99) if returns else None,
+                timing=timing, samples=len(latencies), frames=len(successful), fps=len(successful)/seconds,
+                wasted=wasted,
                 late=sum(a[1] > 0 and b[1] > 0 and b[0]-a[0] > 1.5e9/refresh
-                         for a, b in zip(frames, frames[1:])) if refresh else None,
-                bytes_s=sum(f[1] for f in frames[1:])/seconds, refresh_mhz=refresh)
+                         for a, b in zip(ordered, ordered[1:])) if refresh else None,
+                bytes_s=sum(f[1] for f in frames.values())/seconds, refresh_mhz=refresh)
 
 
 def build(checkout, target):
@@ -102,8 +124,8 @@ def main():
                     subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL,
                                    timeout=30 + (args.probes * .2 if workload == "echo" else args.duration))
                     results.append(dict(app=label, workload=workload, run=run, **summarize(log, workload)))
-    print("| app | workload | run | p50 ms | p99 ms | mean ms | samples | frames | fps | wasted | late | bytes/s | refresh mHz |")
-    print("|" + " --- |" * 13)
+    print("| app | workload | run | p50 ms | p99 ms | mean ms | return p50 ms | return p99 ms | timing | samples | frames | fps | wasted | late | bytes/s | refresh mHz |")
+    print("|" + " --- |" * 16)
     for row in results:
         print("| " + " | ".join("—" if v is None else f"{v:.2f}" if isinstance(v, float) else str(v) for v in row.values()) + " |")
     for label in apps:
