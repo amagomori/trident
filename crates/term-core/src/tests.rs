@@ -133,6 +133,60 @@ fn title_and_modes() {
     assert_eq!(t.cursor_shape, CursorShape::Bar);
 }
 
+fn assert_input_modes(t: &Terminal, mouse: MouseMode, enabled: bool) {
+    assert_eq!(t.modes.mouse, mouse);
+    assert_eq!(t.modes.sgr_mouse, enabled);
+    assert_eq!(t.modes.focus_events, enabled);
+    assert_eq!(t.modes.bracketed_paste, enabled);
+}
+
+#[test]
+fn command_end_resets_input_modes_in_order() {
+    for mode in [1000, 1002, 1003] {
+        for end in ["\x1b]133;D\x07", "\x1b]133;D;0\x1b\\"] {
+            let setup = format!("\x1b[?{mode};1006;1004;2004h");
+            let mut t = term(10, 2, &setup);
+            t.advance(end.as_bytes());
+            assert_input_modes(&t, MouseMode::Off, false);
+            t.advance(format!("{setup}{end}\x1b[?2004h").as_bytes());
+            assert!(t.modes.bracketed_paste);
+            t.modes.bracketed_paste = false;
+            assert_input_modes(&t, MouseMode::Off, false);
+        }
+    }
+}
+
+#[test]
+fn command_end_preserves_alt_screen_input_modes() {
+    let t = term(10, 2, "\x1b[?1049h\x1b[?1003;1006;1004;2004h\x1b]133;D\x07");
+    assert_input_modes(&t, MouseMode::Motion, true);
+}
+
+#[test]
+fn reset_input_modes_reports_changes_and_preserves_alt_screen() {
+    let mut t = Terminal::new(10, 2);
+    assert!(!t.reset_input_modes());
+    for mode in [1000, 1002, 1003, 1006, 1004, 2004] {
+        t.advance(format!("\x1b[?{mode}h").as_bytes());
+        assert!(t.reset_input_modes());
+        assert_input_modes(&t, MouseMode::Off, false);
+        assert!(!t.reset_input_modes());
+    }
+    t.advance(b"\x1b[?1049h\x1b[?1002;1006;1004;2004h");
+    assert!(!t.reset_input_modes());
+    assert_input_modes(&t, MouseMode::Drag, true);
+}
+
+#[test]
+fn other_shell_marks_do_not_reset_input_modes() {
+    let t = term(
+        10,
+        2,
+        "\x1b[?1000;1006;1004;2004h\x1b]133;A\x07\x1b]133\x07\x1b]133;invalid\x07",
+    );
+    assert_input_modes(&t, MouseMode::Click, true);
+}
+
 #[test]
 fn line_drawing_charset() {
     let t = term(5, 1, "\x1b(0lqk\x1b(Bq");
@@ -591,4 +645,73 @@ mod bench {
             );
         }
     }
+}
+
+fn filled_history(lines: usize) -> Terminal {
+    let mut t = Terminal::new(20, 5);
+    for i in 0..lines {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+    t
+}
+
+#[test]
+fn scrolling_output_does_not_signal_shrink() {
+    let mut t = filled_history(50);
+    t.set_scrollback_limit(20);
+    assert!(t.take_shrunk());
+    for i in 0..100 {
+        t.advance(format!("more {i}\r\n").as_bytes());
+    }
+    assert_eq!(t.scrollback_len(), 20);
+    assert!(!t.take_shrunk());
+    t.advance(b"\x1b[2J\x1b[H\x1b[1;3r\x1b[3;1H\n\n\n\x1b[r");
+    assert!(!t.take_shrunk());
+}
+
+#[test]
+fn erase_saved_lines_signals_shrink() {
+    let mut t = filled_history(50);
+    t.advance(b"\x1b[3J\x1b[2J");
+    assert_eq!(t.scrollback_len(), 0);
+    assert!(t.take_shrunk());
+    assert!(!t.take_shrunk());
+    // Nothing left to free.
+    t.advance(b"\x1b[3J");
+    assert!(!t.take_shrunk());
+}
+
+#[test]
+fn reset_with_scrollback_signals_shrink() {
+    let mut t = filled_history(50);
+    t.advance(b"\x1bc");
+    assert_eq!(t.scrollback_len(), 0);
+    assert!(t.take_shrunk());
+}
+
+#[test]
+fn shrinking_resize_signals_shrink() {
+    let mut t = filled_history(50);
+    t.resize(30, 8);
+    assert!(!t.take_shrunk());
+    t.resize(30, 4);
+    assert!(t.take_shrunk());
+    t.resize(10, 4);
+    assert!(t.take_shrunk());
+    t.resize(10, 4);
+    assert!(!t.take_shrunk());
+}
+
+#[test]
+fn lowering_scrollback_limit_signals_shrink() {
+    let mut t = filled_history(50);
+    let before = t.scrollback_len();
+    t.set_scrollback_limit(10);
+    assert!(t.take_shrunk());
+    assert_eq!(t.scrollback_len(), 10);
+    t.scroll_display(100);
+    assert_eq!(t.viewport_row(0).text(), "line 36");
+    t.set_scrollback_limit(before);
+    assert!(!t.take_shrunk());
+    assert_eq!(t.scrollback_len(), 10);
 }

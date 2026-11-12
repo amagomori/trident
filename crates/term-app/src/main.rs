@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use term_core::{MouseMode, Point, SelectionKind, Terminal};
 use term_render::{Fonts, PADDING, Renderer};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -27,6 +27,31 @@ const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFER_AFTER: usize = 64 * 1024;
 /// How long held-back output waits, unless the queue fills first: about one 60 Hz frame.
 const MAX_DEFER: Duration = Duration::from_millis(16);
+const RESIZE_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Default)]
+struct ResizeThrottle {
+    last_applied: Option<Instant>,
+    deadline: Option<Instant>,
+}
+
+impl ResizeThrottle {
+    fn schedule(&mut self, now: Instant) {
+        self.deadline = Some(
+            self.last_applied
+                .map_or(now, |last| (last + RESIZE_INTERVAL).max(now)),
+        );
+    }
+
+    fn applied(&mut self, now: Instant) {
+        self.last_applied = Some(now);
+        self.deadline = None;
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.deadline.is_some_and(|deadline| now >= deadline)
+    }
+}
 
 #[derive(Debug)]
 enum UserEvent {
@@ -108,6 +133,17 @@ struct Session {
     /// When output was first held back.
     deferred: Option<Instant>,
     latency: Option<latency::Latency>,
+    resize: ResizeThrottle,
+}
+
+fn advance_output(term: &mut Terminal, output: pty::Output) {
+    let mut start = 0;
+    for offset in output.shell_returns {
+        term.advance(&output.bytes[start..offset]);
+        term.reset_input_modes();
+        start = offset;
+    }
+    term.advance(&output.bytes[start..]);
 }
 
 /// Whether output that just arrived can be held back: only during a flood, and never once
@@ -155,33 +191,27 @@ impl App {
     fn start(&mut self, event_loop: &ActiveEventLoop) -> Result<Session, String> {
         let probe = Fonts::new(self.options.font.as_deref(), self.font_size)?;
         let m = probe.metrics;
-        let attrs = Window::default_attributes()
-            .with_title("terminal")
-            .with_inner_size(LogicalSize::new(
-                100.0 * m.width + 2.0 * PADDING,
-                30.0 * m.height + 2.0 * PADDING,
-            ));
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .map_err(|e| format!("cannot create window: {e}"))?,
+        let logical_size = LogicalSize::new(
+            100.0 * m.width + 2.0 * PADDING,
+            30.0 * m.height + 2.0 * PADDING,
         );
-        window.set_ime_allowed(true);
-        let scale = window.scale_factor() as f32;
-        let fonts = Fonts::new(self.options.font.as_deref(), self.font_size * scale)?;
-        let size = window.inner_size();
-        let renderer = Renderer::new(window.clone(), size.width, size.height)?;
-        eprintln!("terminal: rendering with {}", renderer.adapter_info);
-
-        let (cols, rows) = grid_size(&window, &fonts);
-        let mut term = Terminal::new(cols, rows);
-        term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
+        let guess = event_loop
+            .primary_monitor()
+            .map_or(1.0, |m| m.scale_factor());
+        let guessed_fonts = if guess == 1.0 {
+            probe
+        } else {
+            Fonts::new(self.options.font.as_deref(), self.font_size * guess as f32)?
+        };
+        let (spawn_cols, spawn_rows) =
+            grid_size_for(logical_size.to_physical(guess), guess, &guessed_fonts);
+        let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let proxy = self.proxy.clone();
         let pty = Pty::spawn(
             &self.options.command,
-            term.cols(),
-            term.rows(),
-            (fonts.metrics.width, fonts.metrics.height),
+            spawn_cols,
+            spawn_rows,
+            spawn_cell,
             move |exited| {
                 let _ = proxy.send_event(if exited {
                     UserEvent::Exit
@@ -190,6 +220,32 @@ impl App {
                 });
             },
         )?;
+        let attrs = Window::default_attributes()
+            .with_title("terminal")
+            .with_inner_size(logical_size);
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .map_err(|e| format!("cannot create window: {e}"))?,
+        );
+        window.set_ime_allowed(true);
+        let scale = window.scale_factor();
+        let fonts = if scale == guess {
+            guessed_fonts
+        } else {
+            Fonts::new(self.options.font.as_deref(), self.font_size * scale as f32)?
+        };
+        let size = window.inner_size();
+        let renderer = Renderer::new(window.clone(), size.width, size.height)?;
+        eprintln!("terminal: rendering with {}", renderer.adapter_info);
+
+        let (cols, rows) = grid_size(&window, &fonts);
+        let mut term = Terminal::new(cols, rows);
+        term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
+        let cell = (fonts.metrics.width, fonts.metrics.height);
+        if (cols, rows, cell) != (spawn_cols, spawn_rows, spawn_cell) {
+            pty.resize(cols, rows, cell);
+        }
         window.request_redraw();
         let mut latency = latency::Latency::from_env(
             window
@@ -211,16 +267,19 @@ impl App {
             pty,
             since_frame: 0,
             deferred: None,
+            resize: ResizeThrottle::default(),
         })
     }
 
     fn resize_grid(&mut self) {
         let Some(s) = &mut self.session else { return };
+        s.resize.applied(Instant::now());
         let (cols, rows) = grid_size(&s.window, &s.fonts);
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         if (cols, rows) != (s.term.cols(), s.term.rows()) {
             s.term.resize(cols, rows);
+            release_freed_memory(&mut s.term);
             s.pty
                 .resize(cols, rows, (s.fonts.metrics.width, s.fonts.metrics.height));
         }
@@ -249,12 +308,14 @@ impl App {
         let Some(s) = &mut self.session else { return };
         s.pty.wake_pending.store(false, Ordering::Release);
         s.deferred = None;
-        // One `advance` over everything queued, so a burst long enough to scroll through
-        // all of scrollback only builds the lines that end up kept.
         let batch = s.pty.take_output();
-        let processed = batch.len();
+        let processed = batch.bytes.len();
         s.since_frame += processed;
-        s.term.advance(&batch);
+        advance_output(&mut s.term, batch);
+        release_freed_memory(&mut s.term);
+        if s.term.modes.mouse == MouseMode::Off {
+            self.reported_button = None;
+        }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
         if let Some(title) = s.term.take_title() {
@@ -328,6 +389,7 @@ impl App {
                     self.write_input(b"\x0c");
                     if let Some(s) = &mut self.session {
                         s.term.advance(b"\x1b[3J");
+                        release_freed_memory(&mut s.term);
                     }
                 }
                 _ => return cfg!(target_os = "macos"),
@@ -502,9 +564,24 @@ impl App {
     }
 }
 
+/// After scrollback or the grid shrinks, hand the memory the dropped rows freed back to
+/// the OS: glibc keeps freed heap pages otherwise.
+fn release_freed_memory(term: &mut Terminal) {
+    if term.take_shrunk() {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        // SAFETY: malloc_trim only releases free heap memory; it has no preconditions.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
 fn grid_size(window: &Window, fonts: &Fonts) -> (usize, usize) {
-    let size = window.inner_size();
-    let pad = 2.0 * PADDING * window.scale_factor() as f32;
+    grid_size_for(window.inner_size(), window.scale_factor(), fonts)
+}
+
+fn grid_size_for(size: PhysicalSize<u32>, scale: f64, fonts: &Fonts) -> (usize, usize) {
+    let pad = 2.0 * PADDING * scale as f32;
     let cols = ((size.width as f32 - pad) / fonts.metrics.width)
         .floor()
         .max(2.0) as usize;
@@ -520,7 +597,10 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match self.start(event_loop) {
-            Ok(session) => self.session = Some(session),
+            Ok(session) => {
+                self.session = Some(session);
+                self.process_output();
+            }
             Err(e) => {
                 self.error = Some(e);
                 event_loop.exit();
@@ -549,27 +629,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.write_input(bytes);
             }
         }
-        let deferred = self.session.as_ref().and_then(|s| s.deferred);
-        match deferred {
-            Some(since) if since.elapsed() >= MAX_DEFER => {
-                self.process_output();
-                event_loop.set_control_flow(ControlFlow::Wait);
-            }
-            Some(since) => event_loop.set_control_flow(ControlFlow::WaitUntil(since + MAX_DEFER)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
+        if self.session.as_ref().is_some_and(|s| s.resize.ready(now)) {
+            self.resize_grid();
         }
-        if let Some(deadline) = self
+        if self
             .session
             .as_ref()
-            .and_then(|s| s.latency.as_ref())
-            .and_then(|l| l.wake_deadline(now))
+            .and_then(|s| s.deferred)
+            .is_some_and(|since| now >= since + MAX_DEFER)
         {
-            let deadline = match event_loop.control_flow() {
-                ControlFlow::WaitUntil(other) => deadline.min(other),
-                _ => deadline,
-            };
-            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            self.process_output();
         }
+        let deadline = self.session.as_ref().and_then(|s| {
+            s.deferred
+                .map(|since| since + MAX_DEFER)
+                .into_iter()
+                .chain(s.resize.deadline)
+                .chain(s.latency.as_ref().and_then(|l| l.wake_deadline(now)))
+                .min()
+        });
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -578,8 +657,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(size) => {
                 if let Some(s) = &mut self.session {
                     s.renderer.resize(size.width, size.height);
+                    s.resize.schedule(Instant::now());
+                    s.window.request_redraw();
                 }
-                self.resize_grid();
             }
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
@@ -674,6 +754,91 @@ fn main() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn resize_throttle_leads_trails_and_resets() {
+        let now = Instant::now();
+        let mut resize = ResizeThrottle::default();
+        assert!(!resize.ready(now));
+        assert_eq!(resize.deadline, None);
+        resize.schedule(now);
+        assert!(resize.ready(now));
+        resize.applied(now);
+        resize.schedule(now + Duration::from_millis(10));
+        assert!(!resize.ready(now + Duration::from_millis(99)));
+        assert!(resize.ready(now + RESIZE_INTERVAL));
+        resize.applied(now + Duration::from_millis(50));
+        assert_eq!(resize.deadline, None);
+        assert!(!resize.ready(now + RESIZE_INTERVAL));
+        resize.schedule(now + RESIZE_INTERVAL);
+        assert_eq!(resize.deadline, Some(now + Duration::from_millis(150)));
+        resize.applied(now + Duration::from_millis(150));
+        resize.schedule(now + Duration::from_millis(300));
+        assert!(resize.ready(now + Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn resize_throttle_keeps_deadline_during_drag() {
+        let now = Instant::now();
+        let mut resize = ResizeThrottle::default();
+        resize.applied(now);
+        for millis in (1..100).step_by(8) {
+            resize.schedule(now + Duration::from_millis(millis));
+            assert_eq!(resize.deadline, Some(now + RESIZE_INTERVAL));
+        }
+        assert!(!resize.ready(now + Duration::from_millis(99)));
+        assert!(resize.ready(now + RESIZE_INTERVAL));
+    }
+
+    #[test]
+    fn output_markers_reset_modes_before_prompt_bytes() {
+        let mut term = Terminal::new(10, 2);
+        let setup = b"\x1b[?1000;1004;2004h";
+        let prompt = b"\x1b[?2004h$ ";
+        advance_output(
+            &mut term,
+            pty::Output {
+                bytes: [
+                    setup.as_slice(),
+                    prompt.as_slice(),
+                    setup.as_slice(),
+                    prompt.as_slice(),
+                ]
+                .concat(),
+                shell_returns: vec![setup.len(), setup.len() * 2 + prompt.len()],
+            },
+        );
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(term.modes.bracketed_paste);
+        advance_output(
+            &mut term,
+            pty::Output {
+                bytes: Vec::new(),
+                shell_returns: Vec::new(),
+            },
+        );
+        assert!(term.modes.bracketed_paste);
+    }
+
+    #[test]
+    fn guessed_grid_uses_physical_size_and_scaled_padding() {
+        let probe = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let logical = LogicalSize::new(
+            100.0 * probe.metrics.width + 2.0 * PADDING,
+            30.0 * probe.metrics.height + 2.0 * PADDING,
+        );
+        for (scale, expected) in [(1.0, (100, 30)), (2.0, (94, 30))] {
+            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            assert_eq!(
+                grid_size_for(logical.to_physical(scale), scale, &fonts),
+                expected
+            );
+            assert_eq!(
+                grid_size_for(PhysicalSize::new(0, 0), scale, &fonts),
+                (2, 1)
+            );
+        }
+    }
     #[test]
     fn output_is_held_back_only_during_a_flood() {
         assert!(!defer_output(false, 0, false));
