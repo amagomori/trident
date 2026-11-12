@@ -114,6 +114,11 @@ impl Pty {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let mut bytes = queue.bytes.lock().unwrap();
+                            if bytes.0.len() >= MAX_QUEUED {
+                                // The UI may be holding off parsing until its next frame.
+                                pending.store(true, Ordering::Release);
+                                wake(false);
+                            }
                             while bytes.0.len() >= MAX_QUEUED && !bytes.1 {
                                 bytes = queue.room.wait(bytes).unwrap();
                             }
@@ -146,6 +151,11 @@ impl Pty {
         let bytes = std::mem::take(&mut self.output.bytes.lock().unwrap().0);
         self.output.room.notify_one();
         bytes
+    }
+
+    /// Whether the reader is waiting for the UI to take its output.
+    pub fn output_full(&self) -> bool {
+        self.output.bytes.lock().unwrap().0.len() >= MAX_QUEUED
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
