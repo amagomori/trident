@@ -16,6 +16,7 @@ pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacem
 use std::collections::VecDeque;
 
 const DEFAULT_SCROLLBACK: usize = 10_000;
+const SYNC_RESET: &[u8] = b"\x1b[?2026l";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
@@ -180,6 +181,7 @@ pub struct Terminal {
     responses: Vec<u8>,
     synchronized_output_started: bool,
     synchronized_output_ended: bool,
+    synchronized_reset_prefix: u8,
     #[cfg(test)]
     ghost_advances: usize,
     pub bell: bool,
@@ -232,6 +234,7 @@ impl Terminal {
             responses: Vec::new(),
             synchronized_output_started: false,
             synchronized_output_ended: false,
+            synchronized_reset_prefix: 0,
             #[cfg(test)]
             ghost_advances: 0,
             bell: false,
@@ -263,6 +266,23 @@ impl Terminal {
         self.parser = parser;
         self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
         self.print_state.disarm_clear();
+        self.synchronized_reset_prefix = if self.parser_ground {
+            0
+        } else if let Some(start) = memchr::memrchr(0x1b, bytes) {
+            let tail = &bytes[start..];
+            if tail.len() < SYNC_RESET.len() && SYNC_RESET.starts_with(tail) {
+                tail.len() as u8
+            } else {
+                0
+            }
+        } else {
+            let prefix = self.synchronized_reset_prefix as usize;
+            if prefix > 0 && SYNC_RESET[prefix..].starts_with(bytes) {
+                (prefix + bytes.len()) as u8
+            } else {
+                0
+            }
+        };
     }
 
     pub fn cols(&self) -> usize {
@@ -271,24 +291,29 @@ impl Terminal {
 
     /// Advance through the first synchronized-frame end, leaving the next frame unread.
     pub fn advance_until_sync_end(&mut self, bytes: &[u8]) -> usize {
-        const RESET: &[u8] = b"\x1b[?2026l";
         self.synchronized_output_ended = false;
         let mut consumed = 0;
-        if !self.parser_ground {
-            for end in 0..bytes.len().min(RESET.len()) {
-                self.advance(&bytes[end..=end]);
-                consumed = end + 1;
+        let prefix = self.synchronized_reset_prefix as usize;
+        if prefix > 0 {
+            let rest = &SYNC_RESET[prefix..];
+            let end = bytes.len().min(rest.len());
+            if bytes[..end] == rest[..end] {
+                self.advance(&bytes[..end]);
+                consumed = end;
                 if self.synchronized_output_ended {
                     return consumed;
                 }
-                if self.parser_ground {
-                    break;
+                if consumed == bytes.len() {
+                    return consumed;
                 }
             }
         }
         // Combined-parameter resets use ordinary whole-batch parsing.
-        while let Some(start) = memchr::memmem::find(&bytes[consumed..], RESET) {
-            let end = consumed + start + RESET.len();
+        for start in memchr::memmem::find_iter(bytes, SYNC_RESET) {
+            let end = start + SYNC_RESET.len();
+            if end <= consumed {
+                continue;
+            }
             self.advance(&bytes[consumed..end]);
             consumed = end;
             if self.synchronized_output_ended {
