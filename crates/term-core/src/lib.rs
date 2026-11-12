@@ -277,7 +277,10 @@ impl Terminal {
             }
         } else {
             let prefix = self.synchronized_reset_prefix as usize;
-            if prefix > 0 && SYNC_RESET[prefix..].starts_with(bytes) {
+            if prefix > 0
+                && prefix + bytes.len() < SYNC_RESET.len()
+                && SYNC_RESET[prefix..].starts_with(bytes)
+            {
                 (prefix + bytes.len()) as u8
             } else {
                 0
