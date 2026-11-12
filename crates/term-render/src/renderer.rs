@@ -278,7 +278,13 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, term: &Terminal, fonts: &mut Fonts, padding: f32, focused: bool) {
+    pub fn render(
+        &mut self,
+        term: &Terminal,
+        fonts: &mut Fonts,
+        padding: f32,
+        focused: bool,
+    ) -> bool {
         for _ in 0..2 {
             if self.build(term, fonts, padding, focused) {
                 break;
@@ -300,7 +306,7 @@ impl Renderer {
                 .prepare(&self.device, &self.queue, &self.uniforms, term, quads);
             self.image_clip = self.grid_clip(term, &metrics, padding);
         }
-        self.draw();
+        self.draw()
     }
 
     fn grid_clip(&self, term: &Terminal, metrics: &CellMetrics, padding: f32) -> [u32; 4] {
@@ -447,15 +453,15 @@ impl Renderer {
         ok
     }
 
-    fn draw(&mut self) {
+    fn draw(&mut self) -> bool {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return false;
             }
-            _ => return,
+            _ => return false,
         };
         let instances = &self.backgrounds;
         if instances.len() > self.instance_capacity {
@@ -530,6 +536,7 @@ impl Renderer {
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
+        true
     }
 }
 

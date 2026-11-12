@@ -1,5 +1,6 @@
 mod clipboard;
 mod input;
+mod latency;
 mod pty;
 mod show;
 
@@ -106,6 +107,7 @@ struct Session {
     since_frame: usize,
     /// When output was first held back.
     deferred: Option<Instant>,
+    latency: Option<latency::Latency>,
 }
 
 /// Whether output that just arrived can be held back: only during a flood, and never once
@@ -190,6 +192,12 @@ impl App {
         )?;
         window.request_redraw();
         Ok(Session {
+            latency: latency::Latency::from_env(
+                window
+                    .current_monitor()
+                    .and_then(|m| m.refresh_rate_millihertz())
+                    .unwrap_or(0),
+            ),
             window,
             renderer,
             fonts,
@@ -252,12 +260,18 @@ impl App {
                 .request_user_attention(Some(winit::window::UserAttentionType::Informational));
         }
         if processed > 0 {
+            if let Some(log) = &mut s.latency {
+                log.output(processed);
+            }
             s.window.request_redraw();
         }
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
         let Some(s) = &mut self.session else { return };
+        if let Some(log) = &mut s.latency {
+            log.input(Instant::now());
+        }
         s.term.scroll_to_bottom();
         s.term.selection = None;
         s.pty.write(bytes);
@@ -519,6 +533,16 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if let Some(log) = self.session.as_mut().and_then(|s| s.latency.as_mut()) {
+            if log.finished(now) {
+                event_loop.exit();
+                return;
+            }
+            if let Some(bytes) = log.probe(now) {
+                self.write_input(bytes);
+            }
+        }
         let deferred = self.session.as_ref().and_then(|s| s.deferred);
         match deferred {
             Some(since) if since.elapsed() >= MAX_DEFER => {
@@ -527,6 +551,18 @@ impl ApplicationHandler<UserEvent> for App {
             }
             Some(since) => event_loop.set_control_flow(ControlFlow::WaitUntil(since + MAX_DEFER)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
+        if let Some(deadline) = self
+            .session
+            .as_ref()
+            .and_then(|s| s.latency.as_ref())
+            .and_then(|l| l.deadline)
+        {
+            let deadline = match event_loop.control_flow() {
+                ControlFlow::WaitUntil(other) => deadline.min(other),
+                _ => deadline,
+            };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
     }
 
@@ -574,9 +610,13 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
                 if let Some(s) = &mut self.session {
-                    s.since_frame = 0;
                     let pad = PADDING * s.window.scale_factor() as f32;
-                    s.renderer.render(&s.term, &mut s.fonts, pad, self.focused);
+                    if s.renderer.render(&s.term, &mut s.fonts, pad, self.focused) {
+                        if let Some(log) = &mut s.latency {
+                            log.frame(Instant::now(), s.since_frame);
+                        }
+                        s.since_frame = 0;
+                    }
                 }
             }
             _ => {}
