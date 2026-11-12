@@ -384,6 +384,15 @@ fn review_edge_cases() {
     assert_eq!(tall.map(|v| v.row), Some(23 - 29));
     assert_eq!(t.cursor_position().map(|p| p.0), Some(23));
 
+    // On the alternate screen the cursor stops at the bottom instead of scrolling it away.
+    t.advance(b"\x1b[?1049h\x1b[3H\x1b_Ga=p,i=1,r=30,q=2\x1b\\");
+    let tall = t
+        .visible_placements()
+        .into_iter()
+        .find(|v| v.placement.rows == 30);
+    assert_eq!(tall.map(|v| v.row), Some(0));
+    t.advance(b"\x1b[?1049l");
+
     // A failed upload under an image number keeps the number on the old image.
     t.advance(&apc("a=t,f=32,s=1,v=1,I=3,q=2", &[0; 4]));
     let old = t.kitty.numbers[&3];

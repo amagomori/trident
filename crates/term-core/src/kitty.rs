@@ -465,8 +465,19 @@ impl Terminal {
         let placement = self.place_image(id, opts).map_err(image_error)?;
         if !control.keep_cursor {
             // Like kitty: the cursor ends on the image's last row, just past its right edge.
-            // Past screen plus scrollback, more linefeeds only push out blank lines.
-            for _ in 1..placement.rows.min(self.rows + self.max_scrollback) {
+            // Without scrollback an image whose top scrolls off is dropped, so stop short of
+            // that; with it, linefeeds past screen plus scrollback only push out blank lines.
+            let history = if self.alt_active {
+                0
+            } else {
+                self.max_scrollback
+            };
+            let rows = if history == 0 {
+                self.rows
+            } else {
+                self.rows + history
+            };
+            for _ in 1..placement.rows.min(rows) {
                 self.linefeed();
             }
             let col = self.cursor.col.saturating_add(placement.cols);
