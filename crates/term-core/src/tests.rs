@@ -206,6 +206,49 @@ fn shrinking_on_alternate_screen_keeps_primary_prompt() {
     assert_eq!(t.cursor_position(), Some((1, 2)));
 }
 
+#[test]
+fn narrowing_keeps_cut_off_text_for_widening() {
+    let mut t = term(24, 3, "BEGIN-0123456789-END\r\n$ ");
+    t.resize(8, 3);
+    assert_eq!(screen(&t), ["BEGIN-01", "$", ""]);
+    t.resize(14, 3);
+    assert_eq!(screen(&t), ["BEGIN-01234567", "$", ""]);
+    t.resize(30, 3);
+    assert_eq!(screen(&t), ["BEGIN-0123456789-END", "$", ""]);
+}
+
+#[test]
+fn narrowing_keeps_cut_off_text_in_scrollback() {
+    let mut t = term(20, 2, "BEGIN-0123456789-END\r\none\r\ntwo");
+    t.resize(5, 2);
+    t.resize(20, 2);
+    t.scroll_display(1);
+    assert_eq!(screen(&t), ["BEGIN-0123456789-END", "one"]);
+}
+
+#[test]
+fn narrowing_through_a_wide_character_brings_it_back() {
+    let mut t = term(6, 1, "ab\u{4f60}cd");
+    t.resize(3, 1);
+    assert_eq!(t.viewport_row(0).text(), "ab");
+    t.resize(6, 1);
+    assert_eq!(t.viewport_row(0).text(), "ab\u{4f60}cd");
+    // Writing over the stand-in blank replaces the wide character.
+    t.resize(3, 1);
+    t.advance(b"\x1b[1;3Hx");
+    t.resize(6, 1);
+    assert_eq!(t.viewport_row(0).text(), "abx cd");
+}
+
+#[test]
+fn erasing_to_end_of_line_drops_cut_off_text() {
+    let mut t = term(10, 2, "0123456789\r\nabcdefghij");
+    t.resize(4, 2);
+    t.advance(b"\x1b[2J\x1b[2;1Hxy\x1b[1;3H\x1b[1K");
+    t.resize(10, 2);
+    assert_eq!(screen(&t), ["", "xy"]);
+}
+
 /// Benchmark workloads for terminal state, run by `.github/scripts/bench.py` to compare a
 /// change against main. Ignored by `cargo test`; run them directly with
 /// `cargo test --release --workspace -- --ignored --nocapture bench_workloads`.

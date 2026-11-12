@@ -633,6 +633,7 @@ impl Terminal {
     fn erase_cells(&mut self, row: usize, from: usize, to: usize) {
         let blank = Cell::blank(&self.cursor.template);
         let to = to.min(self.cols);
+        let to_end = to == self.cols;
         let line = &mut self.lines_mut()[row];
         if from < to {
             clear_wide_pair(&mut line.cells, from);
@@ -640,6 +641,9 @@ impl Terminal {
         }
         for cell in line.cells.iter_mut().take(to).skip(from) {
             *cell = blank;
+        }
+        if to_end {
+            line.clear_hidden();
         }
     }
 
