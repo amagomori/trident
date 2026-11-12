@@ -633,7 +633,6 @@ impl Terminal {
     fn erase_cells(&mut self, row: usize, from: usize, to: usize) {
         let blank = Cell::blank(&self.cursor.template);
         let to = to.min(self.cols);
-        let to_end = to == self.cols;
         let line = &mut self.lines_mut()[row];
         if from < to {
             clear_wide_pair(&mut line.cells, from);
@@ -641,9 +640,6 @@ impl Terminal {
         }
         for cell in line.cells.iter_mut().take(to).skip(from) {
             *cell = blank;
-        }
-        if to_end {
-            line.clear_hidden();
         }
     }
 
@@ -658,6 +654,7 @@ impl Terminal {
             0 => {
                 self.erase_cells(row, col, self.cols);
                 self.lines_mut()[row].wrapped = false;
+                self.lines_mut()[row].clear_hidden();
                 for r in row + 1..self.rows {
                     self.erase_row(r);
                 }
@@ -688,6 +685,7 @@ impl Terminal {
             0 => {
                 self.erase_cells(row, col, self.cols);
                 self.lines_mut()[row].wrapped = false;
+                self.lines_mut()[row].clear_hidden();
             }
             1 => self.erase_cells(row, 0, col + 1),
             2 => self.erase_row(row),

@@ -255,6 +255,19 @@ fn erasing_to_end_of_line_drops_cut_off_text() {
     assert_eq!(screen(&t), ["", "xy"]);
 }
 
+#[test]
+fn erasing_backward_keeps_cut_off_text() {
+    let mut t = term(10, 1, "0123456789");
+    t.resize(4, 1);
+    t.advance(b"\x1b[1;4H\x1b[1K");
+    t.resize(10, 1);
+    assert_eq!(t.viewport_row(0).text(), "    456789");
+    t.resize(4, 1);
+    t.advance(b"\x1b[1;4H\x1b[K");
+    t.resize(10, 1);
+    assert_eq!(t.viewport_row(0).text(), "");
+}
+
 /// Benchmark workloads for terminal state, run by `.github/scripts/bench.py` to compare a
 /// change against main. Ignored by `cargo test`; run them directly with
 /// `cargo test --release --workspace -- --ignored --nocapture bench_workloads`.
