@@ -231,6 +231,34 @@ fn synchronized_frame_end_stops_before_next_frame() {
 }
 
 #[test]
+fn synchronized_advance_preserves_plain_flood_batching() {
+    let mut t = term(10, 2, "");
+    let batch = b"line\r\n".repeat(DEFAULT_SCROLLBACK + 100);
+    assert!(t.ghost_split(&batch).is_some());
+    assert_eq!(t.advance_until_sync_end(&batch), batch.len());
+    assert_eq!(t.ghost_advances, 1);
+    assert_eq!(t.viewport_row(0).text(), "line");
+}
+
+#[test]
+fn synchronized_end_uses_parser_boundaries() {
+    let mut t = term(10, 2, "\x1b[?2026h");
+    let title = b"\x1b]2;literal ?2026l\x07";
+    assert_eq!(t.advance_until_sync_end(title), title.len());
+    assert!(t.modes.synchronized_output);
+    let reset = b"\x1b[?2026;2004lplain";
+    assert_eq!(t.advance_until_sync_end(reset), reset.len());
+    assert!(!t.modes.synchronized_output);
+    for split in 1..b"\x1b[?2026l".len() {
+        let mut t = term(10, 2, "\x1b[?2026h");
+        let bytes = b"\x1b[?2026l\x1b[?2026h";
+        assert_eq!(t.advance_until_sync_end(&bytes[..split]), split);
+        assert_eq!(t.advance_until_sync_end(&bytes[split..]), 8 - split);
+        assert!(!t.modes.synchronized_output);
+    }
+}
+
+#[test]
 fn title_and_modes() {
     let mut t = term(
         10,
