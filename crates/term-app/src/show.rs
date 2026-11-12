@@ -16,7 +16,7 @@ const CHUNK: usize = 4096;
 const MAX_SIDE: u32 = 10_000;
 /// How long to wait for the terminal to answer a size query.
 #[cfg(unix)]
-const QUERY_TIMEOUT_MS: i32 = 300;
+const QUERY_TIMEOUT_MS: u64 = 300;
 
 #[derive(Debug, Default, PartialEq)]
 struct Options {
@@ -575,26 +575,21 @@ mod unix {
         }
         let mut raw = saved;
         raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+        // Timed reads (VMIN=0, VTIME in tenths of a second) rather than poll(): macOS's
+        // poll() doesn't support ttys and reports POLLNVAL at once.
         raw.c_cc[libc::VMIN] = 0;
-        raw.c_cc[libc::VTIME] = 0;
+        raw.c_cc[libc::VTIME] = 1;
         unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) };
         let mut reply = Vec::new();
         if tty.write_all(b"\x1b[14t\x1b[c").is_ok() {
             let start = Instant::now();
-            loop {
-                let left = QUERY_TIMEOUT_MS - start.elapsed().as_millis() as i32;
-                let mut pfd = libc::pollfd {
-                    fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                if left <= 0 || unsafe { libc::poll(&mut pfd, 1, left) } <= 0 {
-                    break;
-                }
+            while start.elapsed().as_millis() < u128::from(QUERY_TIMEOUT_MS) {
                 let mut buf = [0; 256];
                 match tty.read(&mut buf) {
-                    Ok(n) if n > 0 => reply.extend_from_slice(&buf[..n]),
-                    _ => break,
+                    Ok(0) => {}
+                    Ok(n) => reply.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
                 }
                 if da1_answered(&reply) {
                     break;
