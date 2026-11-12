@@ -205,14 +205,21 @@ impl App {
     fn process_output(&mut self) {
         let Some(s) = &mut self.session else { return };
         s.pty.wake_pending.store(false, Ordering::Release);
-        let mut processed = 0;
-        while processed < MAX_BYTES_PER_WAKE {
+        // One `advance` over the whole queued window, so a burst long enough to scroll
+        // through all of scrollback only builds the lines that end up kept.
+        let mut batch = Vec::new();
+        while batch.len() < MAX_BYTES_PER_WAKE {
             let Ok(bytes) = s.pty.output.try_recv() else {
                 break;
             };
-            processed += bytes.len();
-            s.term.advance(&bytes);
+            if batch.is_empty() {
+                batch = bytes;
+            } else {
+                batch.extend_from_slice(&bytes);
+            }
         }
+        let processed = batch.len();
+        s.term.advance(&batch);
         if processed >= MAX_BYTES_PER_WAKE && !s.pty.wake_pending.swap(true, Ordering::AcqRel) {
             let _ = self.proxy.send_event(UserEvent::Output);
         }
