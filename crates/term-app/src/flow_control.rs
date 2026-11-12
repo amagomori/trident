@@ -10,6 +10,7 @@ pub struct FlowSettings {
 pub struct FlowControl {
     pub paused: bool,
     pause_sequence: u64,
+    output_budget: u64,
     start: Option<u8>,
 }
 
@@ -30,6 +31,7 @@ impl FlowControl {
             } else if settings.ixon && Some(byte) == settings.stop {
                 self.paused = true;
                 self.pause_sequence = sequence;
+                self.output_budget = 0;
             }
         }
         self.paused != was_paused
@@ -50,8 +52,12 @@ impl FlowControl {
         })
     }
 
-    pub fn output(&mut self, sequence: u64) {
-        if sequence > self.pause_sequence {
+    pub fn protect_output_until(&mut self, bytes: u64) {
+        self.output_budget = bytes;
+    }
+
+    pub fn output(&mut self, sequence: u64, bytes_read: u64) {
+        if sequence > self.pause_sequence && bytes_read > self.output_budget {
             self.paused = false;
         }
     }
@@ -89,7 +95,7 @@ mod tests {
         flow.input(b"\x11", settings(true, false), 0);
         assert!(!flow.paused);
         flow.input(b"\x13", settings(true, false), 0);
-        flow.output(1);
+        flow.output(1, 1);
         assert!(!flow.paused);
         flow.input(b"\x13", settings(true, false), 0);
         flow.flags(settings(false, false));
@@ -104,10 +110,10 @@ mod tests {
     fn queued_output_before_stop_does_not_resume() {
         let mut flow = FlowControl::default();
         flow.input(b"\x13", settings(true, false), 7);
-        flow.output(6);
-        flow.output(7);
+        flow.output(6, 100);
+        flow.output(7, 100);
         assert!(flow.paused);
-        flow.output(8);
+        flow.output(8, 101);
         assert!(!flow.paused);
     }
 
@@ -119,6 +125,30 @@ mod tests {
         assert!(!flow.input(b"x", settings(true, false), 0));
         assert!(flow.input(b"\x1b[M", settings(true, true), 0));
         assert!(!flow.input(b"\x11", settings(true, false), 0));
+    }
+
+    #[test]
+    fn buffered_and_in_flight_output_does_not_resume() {
+        let mut flow = FlowControl::default();
+        flow.input(b"\x13", settings(true, false), 7);
+        flow.protect_output_until(100 + 4096 + 65536);
+        flow.output(8, 100);
+        flow.output(9, 100 + 4096);
+        flow.output(10, 100 + 4096 + 65536);
+        assert!(flow.paused);
+        flow.output(11, 100 + 4096 + 65536 + 1);
+        assert!(!flow.paused);
+    }
+
+    #[test]
+    fn stop_write_pending_and_explicit_resume() {
+        let mut flow = FlowControl::default();
+        flow.input(b"\x13", settings(true, false), 7);
+        flow.protect_output_until(u64::MAX);
+        flow.output(8, 1_000_000);
+        assert!(flow.paused);
+        flow.input(b"\x11", settings(true, false), 8);
+        assert!(!flow.paused);
     }
 
     #[test]
