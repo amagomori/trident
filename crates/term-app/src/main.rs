@@ -26,6 +26,29 @@ const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFER_AFTER: usize = 64 * 1024;
 /// How long held-back output waits, unless the queue fills first: about one 60 Hz frame.
 const MAX_DEFER: Duration = Duration::from_millis(16);
+const RESIZE_DELAY: Duration = Duration::from_millis(16);
+const RESIZE_MAX_WAIT: Duration = Duration::from_millis(64);
+
+#[derive(Default)]
+struct ResizeDebounce {
+    first: Option<Instant>,
+    deadline: Option<Instant>,
+}
+
+impl ResizeDebounce {
+    fn schedule(&mut self, now: Instant) {
+        let first = *self.first.get_or_insert(now);
+        self.deadline = Some((now + RESIZE_DELAY).min(first + RESIZE_MAX_WAIT));
+    }
+
+    fn cancel(&mut self) {
+        *self = Self::default();
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.deadline.is_some_and(|deadline| now >= deadline)
+    }
+}
 
 #[derive(Debug)]
 enum UserEvent {
@@ -106,6 +129,7 @@ struct Session {
     since_frame: usize,
     /// When output was first held back.
     deferred: Option<Instant>,
+    resize: ResizeDebounce,
 }
 
 /// Whether output that just arrived can be held back: only during a flood, and never once
@@ -217,11 +241,13 @@ impl App {
             pty,
             since_frame: 0,
             deferred: None,
+            resize: ResizeDebounce::default(),
         })
     }
 
     fn resize_grid(&mut self) {
         let Some(s) = &mut self.session else { return };
+        s.resize.cancel();
         let (cols, rows) = grid_size(&s.window, &s.fonts);
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
@@ -560,15 +586,26 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let deferred = self.session.as_ref().and_then(|s| s.deferred);
-        match deferred {
-            Some(since) if since.elapsed() >= MAX_DEFER => {
-                self.process_output();
-                event_loop.set_control_flow(ControlFlow::Wait);
-            }
-            Some(since) => event_loop.set_control_flow(ControlFlow::WaitUntil(since + MAX_DEFER)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
+        let now = Instant::now();
+        if self.session.as_ref().is_some_and(|s| s.resize.ready(now)) {
+            self.resize_grid();
         }
+        if self
+            .session
+            .as_ref()
+            .and_then(|s| s.deferred)
+            .is_some_and(|since| now >= since + MAX_DEFER)
+        {
+            self.process_output();
+        }
+        let deadline = self.session.as_ref().and_then(|s| {
+            s.deferred
+                .map(|since| since + MAX_DEFER)
+                .into_iter()
+                .chain(s.resize.deadline)
+                .min()
+        });
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -577,8 +614,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(size) => {
                 if let Some(s) = &mut self.session {
                     s.renderer.resize(size.width, size.height);
+                    s.resize.schedule(Instant::now());
+                    s.window.request_redraw();
                 }
-                self.resize_grid();
             }
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
@@ -657,6 +695,34 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_debounce_trails_and_cancels() {
+        let now = Instant::now();
+        let mut resize = ResizeDebounce::default();
+        assert!(!resize.ready(now));
+        assert_eq!(resize.deadline, None);
+        resize.schedule(now);
+        resize.schedule(now + Duration::from_millis(10));
+        assert!(!resize.ready(now + RESIZE_DELAY));
+        assert!(resize.ready(now + Duration::from_millis(26)));
+        resize.cancel();
+        assert_eq!(resize.deadline, None);
+        assert!(!resize.ready(now + RESIZE_MAX_WAIT));
+        resize.schedule(now + RESIZE_MAX_WAIT);
+        assert_eq!(resize.deadline, Some(now + RESIZE_MAX_WAIT + RESIZE_DELAY));
+    }
+
+    #[test]
+    fn resize_debounce_bounds_continuous_drag() {
+        let now = Instant::now();
+        let mut resize = ResizeDebounce::default();
+        for millis in (0..64).step_by(8) {
+            resize.schedule(now + Duration::from_millis(millis));
+        }
+        assert!(!resize.ready(now + Duration::from_millis(63)));
+        assert!(resize.ready(now + RESIZE_MAX_WAIT));
+    }
 
     #[test]
     fn guessed_grid_uses_physical_size_and_scaled_padding() {
