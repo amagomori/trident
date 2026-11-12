@@ -59,6 +59,11 @@ pub struct Renderer {
 pub const PADDING: f32 = 6.0;
 
 impl Renderer {
+    #[cfg(target_os = "macos")]
+    pub fn gpu_device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
     /// Creates a renderer drawing into `window`, whose drawable area is `width` x `height`
     /// physical pixels.
     pub fn new<W>(window: Arc<W>, width: u32, height: u32) -> Result<Renderer, String>

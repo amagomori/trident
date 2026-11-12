@@ -9,9 +9,10 @@ Linux needs DISPLAY or WAYLAND_DISPLAY; macOS needs a logged-in GUI session.
 --xvfb needs xvfb-run and is only a smoke test, not a real-display measurement.
 Keep display refresh, window size, power mode and background load fixed. Runs are
 interleaved; compare the reported min-max spread, not just a single percentile.
-X11 Present or Wayland wp_presentation timestamps are used when available;
-present-return latency is reported separately. macOS feedback is pending;
-fallback is labeled. A headless compositor is a protocol smoke test only.
+X11 Present, Wayland wp_presentation, or macOS Metal presentedTime timestamps are
+used when available; present-return latency is reported separately and fallback
+is labeled. A headless compositor is a protocol smoke test only; llvmpipe X11
+may provide no completion feedback even when Present is advertised.
 Inputs are injected through write_input (no OS keyboard permission required).
 Load runs for --duration seconds without input probes and reports throughput only.
 Late intervals exceed 1.5 refresh periods and both adjacent frames parsed new bytes;

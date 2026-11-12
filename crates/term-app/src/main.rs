@@ -199,6 +199,8 @@ impl App {
         );
         if let Some(log) = &mut latency {
             log.feedback(window.clone());
+            #[cfg(target_os = "macos")]
+            log.metal_feedback(renderer.gpu_device());
         }
         Ok(Session {
             latency,

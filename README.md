@@ -109,18 +109,26 @@ and require both adjacent frames to have parsed new bytes; idle gaps do not coun
 tests only. See the script docstring for setup and comparison controls.
 
 Probes enter through the app's normal PTY input path. Output is matched to the
-frame carrying parsed output. On X11, Present completion feedback supplies the
-presentation timestamp. On Wayland, `wp_presentation` feedback is requested before
+frame carrying parsed output. On X11, Present CompleteNotify supplies the
+presentation timestamp (`x11-present`). On Wayland, `wp_presentation` feedback
+(`wayland-presentation`) is requested before
 each surface commit and converted from the compositor's advertised clock; the mode
 records vsync/hardware-clock/hardware-completion/zero-copy flags. Skipped or missing
 completions count as wasted frames.
 Present-return latency is reported separately. Each run labels its timing source;
 without feedback it explicitly reports `present-return (no feedback)` instead.
-macOS presentation feedback is pending. These timestamps are not an optical
+On macOS, Metal drawable presented handlers use `presentedTime` (`metal-presented`).
+The opt-in harness hooks the concrete command-buffer `presentDrawable:` method;
+the direct drawable `present` path used with `presentsWithTransaction` is not
+hooked. The app does not enable that setting (CAMetalLayer defaults to false).
+These timestamps are not an optical
 measurement of pixel scanout; compositor/display processing may add delay.
 For a Wayland smoke test, start Weston headless and run with its `WAYLAND_DISPLAY`
 and `XDG_RUNTIME_DIR`, with `DISPLAY` unset. Headless feedback validates protocol
 matching, not physical-display latency.
+Likewise, llvmpipe on an X server can produce no Present completion events even
+when the Present extension is advertised; such runs explicitly use the labeled
+present-return fallback and cannot prove real-display scheduling gains.
 
 ## License
 
