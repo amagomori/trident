@@ -338,12 +338,6 @@ fn resize_keeps_placements_on_their_cells() {
     t.resize(5, 5);
     assert_eq!(t.screen().placements[0].col, 6);
     assert!(t.visible_placements().is_empty());
-    // Off the right edge it is not protected from eviction.
-    t.set_image_quota(2 * 20 * 40 * 4);
-    t.add_image(2, image(20, 40)).unwrap();
-    t.add_image(3, image(20, 40)).unwrap();
-    assert!(t.image(1).is_none());
-    t.add_image(1, image(20, 40)).unwrap();
     t.resize(10, 5);
     assert_eq!(rows(&t), [1]);
     // Shrinking with the cursor at the bottom pushes rows into scrollback; the image keeps
@@ -523,4 +517,15 @@ fn alignment_pattern_removes_placements() {
     place_at(&mut t, 1, 4);
     t.advance(b"\x1b#8");
     assert!(t.visible_placements().is_empty());
+}
+
+#[test]
+fn images_past_the_right_edge_can_be_evicted() {
+    let mut t = term();
+    place_at(&mut t, 1, 6);
+    t.resize(5, 5);
+    t.set_image_quota(2 * 20 * 40 * 4);
+    t.add_image(2, image(20, 40)).unwrap();
+    t.add_image(3, image(20, 40)).unwrap();
+    assert!(t.image(1).is_none());
 }
