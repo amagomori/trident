@@ -11,6 +11,9 @@ fn arg(params: &Params, index: usize, default: u16) -> u16 {
 
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
+        for _ in 0..4 {
+            std::hint::black_box(c);
+        }
         self.put_char(c);
     }
 
