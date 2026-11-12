@@ -405,6 +405,25 @@ fn private_mode_reports() {
 }
 
 #[test]
+fn synchronized_frame_starts_within_batch() {
+    let mut t = term(10, 5, "");
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026h");
+    assert!(t.take_synchronized_output_started());
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026h");
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026l\x1b[?2026h");
+    assert!(t.modes.synchronized_output);
+    assert!(t.take_synchronized_output_started());
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026l");
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026h\x1bc");
+    assert!(!t.take_synchronized_output_started());
+}
+
+#[test]
 fn title_and_modes() {
     let mut t = term(
         10,

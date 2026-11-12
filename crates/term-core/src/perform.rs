@@ -301,7 +301,12 @@ impl Terminal {
             1006 => self.modes.sgr_mouse = enable,
             1007 => self.modes.alt_scroll = enable,
             2004 => self.modes.bracketed_paste = enable,
-            2026 => self.modes.synchronized_output = enable,
+            2026 => {
+                if enable && !self.modes.synchronized_output {
+                    self.synchronized_output_started = true;
+                }
+                self.modes.synchronized_output = enable;
+            }
             _ => {}
         }
     }
