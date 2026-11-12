@@ -191,6 +191,7 @@ impl App {
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         if (cols, rows) != (s.term.cols(), s.term.rows()) {
             s.term.resize(cols, rows);
+            release_freed_memory(&mut s.term);
             s.pty
                 .resize(cols, rows, (s.fonts.metrics.width, s.fonts.metrics.height));
         }
@@ -224,6 +225,7 @@ impl App {
         }
         let processed = batch.len();
         s.term.advance(&batch);
+        release_freed_memory(&mut s.term);
         if processed >= MAX_BYTES_PER_WAKE && !s.pty.wake_pending.swap(true, Ordering::AcqRel) {
             let _ = self.proxy.send_event(UserEvent::Output);
         }
@@ -294,6 +296,7 @@ impl App {
                     self.write_input(b"\x0c");
                     if let Some(s) = &mut self.session {
                         s.term.advance(b"\x1b[3J");
+                        release_freed_memory(&mut s.term);
                     }
                 }
                 _ => return cfg!(target_os = "macos"),
@@ -464,6 +467,18 @@ impl App {
         } else {
             s.term.scroll_display(steps);
             s.window.request_redraw();
+        }
+    }
+}
+
+/// After scrollback or the grid shrinks, hand the memory the dropped rows freed back to
+/// the OS: glibc keeps freed heap pages otherwise.
+fn release_freed_memory(term: &mut Terminal) {
+    if term.take_shrunk() {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        // SAFETY: malloc_trim only releases free heap memory; it has no preconditions.
+        unsafe {
+            libc::malloc_trim(0);
         }
     }
 }

@@ -590,3 +590,72 @@ mod bench {
         }
     }
 }
+
+fn filled_history(lines: usize) -> Terminal {
+    let mut t = Terminal::new(20, 5);
+    for i in 0..lines {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+    t
+}
+
+#[test]
+fn scrolling_output_does_not_signal_shrink() {
+    let mut t = filled_history(50);
+    t.set_scrollback_limit(20);
+    assert!(t.take_shrunk());
+    for i in 0..100 {
+        t.advance(format!("more {i}\r\n").as_bytes());
+    }
+    assert_eq!(t.scrollback_len(), 20);
+    assert!(!t.take_shrunk());
+    t.advance(b"\x1b[2J\x1b[H\x1b[1;3r\x1b[3;1H\n\n\n\x1b[r");
+    assert!(!t.take_shrunk());
+}
+
+#[test]
+fn erase_saved_lines_signals_shrink() {
+    let mut t = filled_history(50);
+    t.advance(b"\x1b[3J\x1b[2J");
+    assert_eq!(t.scrollback_len(), 0);
+    assert!(t.take_shrunk());
+    assert!(!t.take_shrunk());
+    // Nothing left to free.
+    t.advance(b"\x1b[3J");
+    assert!(!t.take_shrunk());
+}
+
+#[test]
+fn reset_with_scrollback_signals_shrink() {
+    let mut t = filled_history(50);
+    t.advance(b"\x1bc");
+    assert_eq!(t.scrollback_len(), 0);
+    assert!(t.take_shrunk());
+}
+
+#[test]
+fn shrinking_resize_signals_shrink() {
+    let mut t = filled_history(50);
+    t.resize(30, 8);
+    assert!(!t.take_shrunk());
+    t.resize(30, 4);
+    assert!(t.take_shrunk());
+    t.resize(10, 4);
+    assert!(t.take_shrunk());
+    t.resize(10, 4);
+    assert!(!t.take_shrunk());
+}
+
+#[test]
+fn lowering_scrollback_limit_signals_shrink() {
+    let mut t = filled_history(50);
+    let before = t.scrollback_len();
+    t.set_scrollback_limit(10);
+    assert!(t.take_shrunk());
+    assert_eq!(t.scrollback_len(), 10);
+    t.scroll_display(100);
+    assert_eq!(t.viewport_row(0).text(), "line 36");
+    t.set_scrollback_limit(before);
+    assert!(!t.take_shrunk());
+    assert_eq!(t.scrollback_len(), 10);
+}
