@@ -9,5 +9,5 @@ mod font;
 mod images;
 mod renderer;
 
-pub use font::{CellMetrics, Fonts, Style};
+pub use font::{CellMetrics, FAMILY as BUNDLED_FONT_FAMILY, Fonts, REGULAR as BUNDLED_FONT, Style};
 pub use renderer::{PADDING, Renderer};
