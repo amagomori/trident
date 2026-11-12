@@ -1,8 +1,10 @@
-//! GPU rendering with wgpu: every frame is one instanced draw of rectangles (cell
-//! backgrounds, glyphs from the atlas, decorations and the cursor).
+//! GPU rendering with wgpu: every frame is instanced draws of rectangles (cell
+//! backgrounds, glyphs from the atlas, decorations and the cursor), with image placements
+//! drawn between them by `z`.
 
 use crate::atlas::{Atlas, GlyphKey};
 use crate::font::{CellMetrics, Fonts, Style};
+use crate::images::{self, ImagePipeline, Layer};
 use std::sync::Arc;
 use term_core::colors::{self, Rgb};
 use term_core::{CursorShape, Flags, Terminal};
@@ -39,6 +41,12 @@ pub struct Renderer {
     instances: wgpu::Buffer,
     instance_capacity: usize,
     atlas: Atlas,
+    images: ImagePipeline,
+    /// Instances in the frame's buffer: backgrounds end at `layers.0`, text, decorations and
+    /// the cursor at `layers.1`, and the scrollbar comes last.
+    layers: (u32, u32),
+    /// The grid area images are clipped to: x, y, width, height in physical pixels.
+    image_clip: [u32; 4],
     srgb: bool,
     pub adapter_info: String,
     // Reused between frames to avoid allocating.
@@ -205,6 +213,7 @@ impl Renderer {
 
         let instance_capacity = 4096;
         let instances = create_instance_buffer(&device, instance_capacity);
+        let images = ImagePipeline::new(&device, format);
 
         Ok(Renderer {
             surface,
@@ -219,6 +228,9 @@ impl Renderer {
             instances,
             instance_capacity,
             atlas,
+            images,
+            layers: (0, 0),
+            image_clip: [0; 4],
             srgb: format.is_srgb(),
             adapter_info,
             backgrounds: Vec::new(),
@@ -281,7 +293,23 @@ impl Renderer {
                 &self.atlas,
             );
         }
+        let metrics = fonts.metrics;
+        let quads = images::layout(term, (metrics.width, metrics.height), padding);
+        if !quads.is_empty() || !self.images.is_empty() {
+            self.images
+                .prepare(&self.device, &self.queue, &self.uniforms, term, quads);
+            self.image_clip = self.grid_clip(term, &metrics, padding);
+        }
         self.draw();
+    }
+
+    fn grid_clip(&self, term: &Terminal, metrics: &CellMetrics, padding: f32) -> [u32; 4] {
+        let (sw, sh) = (self.config.width, self.config.height);
+        let x = (padding.max(0.0) as u32).min(sw);
+        let y = (padding.max(0.0) as u32).min(sh);
+        let right = ((padding + term.cols() as f32 * metrics.width).ceil() as u32).min(sw);
+        let bottom = ((padding + term.rows() as f32 * metrics.height).ceil() as u32).min(sh);
+        [x, y, right.saturating_sub(x), bottom.saturating_sub(y)]
     }
 
     /// Builds this frame's instances; false if the atlas filled up and was reset.
@@ -389,6 +417,8 @@ impl Renderer {
             }
         }
 
+        let layers_bg = backgrounds.len() as u32;
+        let layers_text = (backgrounds.len() + glyphs.len() + overlays.len()) as u32;
         // Scrollback position indicator.
         if term.display_offset() > 0 && term.scrollback_len() > 0 {
             let total = (term.scrollback_len() + term.rows()) as f32;
@@ -410,6 +440,7 @@ impl Renderer {
 
         backgrounds.append(&mut glyphs);
         backgrounds.append(&mut overlays);
+        self.layers = (layers_bg, layers_text);
         self.backgrounds = backgrounds;
         self.glyphs = glyphs;
         self.overlays = overlays;
@@ -471,15 +502,46 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if !instances.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_vertex_buffer(0, self.instances.slice(..));
-                pass.draw(0..4, 0..instances.len() as u32);
+            let total = instances.len() as u32;
+            if self.images.is_empty() {
+                if total > 0 {
+                    self.draw_rects(&mut pass, 0..total);
+                }
+            } else {
+                let (bg, text) = self.layers;
+                let clip = self.image_clip;
+                let full = [0, 0, self.config.width, self.config.height];
+                if clip[2] > 0 && clip[3] > 0 {
+                    self.images.draw(&mut pass, Layer::BelowBackgrounds, clip);
+                }
+                pass.set_scissor_rect(full[0], full[1], full[2], full[3]);
+                self.draw_rects(&mut pass, 0..bg);
+                if clip[2] > 0 && clip[3] > 0 {
+                    self.images.draw(&mut pass, Layer::BelowText, clip);
+                }
+                pass.set_scissor_rect(full[0], full[1], full[2], full[3]);
+                self.draw_rects(&mut pass, bg..text);
+                if clip[2] > 0 && clip[3] > 0 {
+                    self.images.draw(&mut pass, Layer::AboveText, clip);
+                }
+                pass.set_scissor_rect(full[0], full[1], full[2], full[3]);
+                self.draw_rects(&mut pass, text..total);
             }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
+    }
+}
+
+impl Renderer {
+    fn draw_rects(&self, pass: &mut wgpu::RenderPass, range: std::ops::Range<u32>) {
+        if range.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.instances.slice(..));
+        pass.draw(0..4, range);
     }
 }
 

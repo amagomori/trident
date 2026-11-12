@@ -60,6 +60,10 @@ pub struct Placement {
     pub y_offset: u32,
     pub source: Rect,
     pub z: i32,
+    /// The client gave the cell span: the image is scaled to fill it on that axis instead
+    /// of being drawn at its pixel size.
+    pub fixed_cols: bool,
+    pub fixed_rows: bool,
 }
 
 /// A placement that overlaps the viewport. `row` is the viewport row of its top edge and is
@@ -84,6 +88,7 @@ pub enum ImageError {
 struct StoredImage {
     image: Image,
     last_used: u64,
+    version: u64,
 }
 
 pub(crate) struct ImageStore {
@@ -110,6 +115,9 @@ impl ImageStore {
         ImageStore {
             quota: self.quota,
             generation: self.generation + 1,
+            // Versions must not repeat across a reset, or a renderer could keep a texture
+            // of the old image for a new one under the same id.
+            clock: self.clock,
             ..ImageStore::new()
         }
     }
@@ -118,6 +126,11 @@ impl ImageStore {
         self.clock += 1;
         self.clock
     }
+}
+
+/// The number of `cell`-pixel cells `px` pixels after `offset` cover.
+fn span(px: u32, offset: u32, cell: f32) -> usize {
+    (((px + offset) as f32 / cell.max(1.0)).ceil() as usize).max(1)
 }
 
 /// Placements are stored with `line` relative to a per-screen base: absolute for the primary
@@ -170,15 +183,26 @@ impl Terminal {
         }
         let last_used = self.images.tick();
         self.images.bytes += len;
-        self.images
-            .images
-            .insert(id, StoredImage { image, last_used });
+        self.images.images.insert(
+            id,
+            StoredImage {
+                image,
+                last_used,
+                version: last_used,
+            },
+        );
         self.images.generation += 1;
         Ok(())
     }
 
     pub fn image(&self, id: u32) -> Option<&Image> {
         self.images.images.get(&id).map(|s| &s.image)
+    }
+
+    /// The image with id `id` and a number that changes whenever that id is given new pixels,
+    /// so a renderer can tell a cached copy is stale.
+    pub fn image_with_version(&self, id: u32) -> Option<(&Image, u64)> {
+        self.images.images.get(&id).map(|s| (&s.image, s.version))
     }
 
     /// Removes an image and all its placements on both screens.
@@ -272,9 +296,6 @@ impl Terminal {
                 height,
             });
         let (cell_w, cell_h) = self.cell_pixels;
-        let span = |px: u32, offset: u32, cell: f32| -> usize {
-            (((px + offset) as f32 / cell.max(1.0)).ceil() as usize).max(1)
-        };
         let base = self.placement_base(self.alt_active);
         let placement = Placement {
             image_id,
@@ -293,6 +314,8 @@ impl Terminal {
             y_offset: opts.y_offset,
             source,
             z: opts.z,
+            fixed_cols: opts.cols != 0,
+            fixed_rows: opts.rows != 0,
         };
         let placements = &mut self.screen_mut().placements;
         if opts.placement_id != 0 {
@@ -345,8 +368,35 @@ impl Terminal {
     }
 
     /// The size of one cell in pixels, used to size images and for `CSI 14/16 t`.
+    /// Placements the client did not size in cells are re-spanned to keep their pixel size.
     pub fn set_cell_pixel_size(&mut self, width: f32, height: f32) {
+        if self.cell_pixels == (width, height) {
+            return;
+        }
         self.cell_pixels = (width, height);
+        let mut changed = false;
+        for p in self
+            .primary
+            .placements
+            .iter_mut()
+            .chain(self.alternate.placements.iter_mut())
+        {
+            let cols = if p.fixed_cols {
+                p.cols
+            } else {
+                span(p.source.width, p.x_offset, width)
+            };
+            let rows = if p.fixed_rows {
+                p.rows
+            } else {
+                span(p.source.height, p.y_offset, height)
+            };
+            changed |= (cols, rows) != (p.cols, p.rows);
+            (p.cols, p.rows) = (cols, rows);
+        }
+        if changed {
+            self.images.generation += 1;
+        }
     }
 
     fn placement_base(&self, alt: bool) -> u64 {
