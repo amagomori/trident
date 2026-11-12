@@ -276,7 +276,7 @@ fn erasing_backward_keeps_cut_off_text() {
 /// (comma-separated, default all) and `TERM_BENCH_ITERS` sets the timed repetitions.
 /// Only the `measured_*` functions are counted when CI runs this under callgrind.
 mod bench {
-    use super::super::Terminal;
+    use super::super::{Image, PlaceOptions, Terminal};
     use std::hint::black_box;
     use std::time::Instant;
 
@@ -284,6 +284,7 @@ mod bench {
     const ROWS: usize = 50;
     const INPUT_BYTES: usize = 2 << 20;
     const KEYSTROKES: usize = 2_000;
+    const IMAGES: usize = 2_000;
 
     /// xorshift64, so every run feeds identical input.
     struct Rng(u64);
@@ -438,9 +439,30 @@ mod bench {
         }
     }
 
+    /// Like `icat` in a loop: decode an image, place it, print a few lines of output so
+    /// earlier ones scroll into scrollback. The quota holds 16 images, so most adds evict,
+    /// and placements pile up in scrollback until their image goes.
+    #[inline(never)]
+    fn measured_images(term: &mut Terminal, image: &Image, text: &[u8], count: usize) {
+        for i in 0..count {
+            let id = (i % 64) as u32 + 1;
+            term.add_image(id, black_box(image.clone())).unwrap();
+            let opts = PlaceOptions {
+                cols: 8,
+                rows: 4,
+                z: (i % 3) as i32 - 1,
+                ..Default::default()
+            };
+            term.place_image(id, opts).unwrap();
+            term.advance(black_box(text));
+            black_box(term.visible_placements());
+        }
+    }
+
     enum Kind {
         Throughput(fn() -> Vec<u8>),
         Keystrokes,
+        Images,
     }
 
     const WORKLOADS: &[(&str, Kind)] = &[
@@ -451,6 +473,7 @@ mod bench {
         ("alt_screen", Kind::Throughput(alt_screen)),
         ("unicode", Kind::Throughput(unicode)),
         ("keystroke_latency", Kind::Keystrokes),
+        ("images", Kind::Images),
     ];
 
     fn median(secs: &mut [f64]) -> f64 {
@@ -496,6 +519,24 @@ mod bench {
                         })
                         .collect();
                     ("keystrokes", KEYSTROKES, secs)
+                }
+                Kind::Images => {
+                    let image = Image {
+                        width: 64,
+                        height: 64,
+                        pixels: vec![0x80; 64 * 64 * 4],
+                    };
+                    let text = b"$ ls -l\r\ntotal 42\r\n-rw-r--r-- 1 user user 1234 a.png\r\n\r\n\r\n$ \r\n";
+                    let secs: Vec<f64> = (0..iters)
+                        .map(|_| {
+                            let mut term = Terminal::new(COLS, ROWS);
+                            term.set_image_quota(16 * image.pixels.len());
+                            let start = Instant::now();
+                            measured_images(&mut term, &image, text, IMAGES);
+                            start.elapsed().as_secs_f64()
+                        })
+                        .collect();
+                    ("images", IMAGES, secs)
                 }
             };
             println!(

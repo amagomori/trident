@@ -2,11 +2,13 @@
 //! that mutates them. Bytes from the shell go in through [`Terminal::advance`].
 
 pub mod colors;
+pub mod images;
 
 mod cell;
 mod perform;
 
 pub use cell::{Cell, Color, Flags, Row};
+pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
 use std::collections::VecDeque;
 
@@ -47,6 +49,7 @@ struct Screen {
     lines: Vec<Row>,
     scrollback: VecDeque<Row>,
     saved: Option<SavedCursor>,
+    placements: Vec<Placement>,
 }
 
 impl Screen {
@@ -57,6 +60,7 @@ impl Screen {
                 .collect(),
             scrollback: VecDeque::new(),
             saved: None,
+            placements: Vec::new(),
         }
     }
 }
@@ -137,6 +141,9 @@ pub struct Terminal {
     responses: Vec<u8>,
     pub bell: bool,
     last_printed: Option<char>,
+    images: images::ImageStore,
+    /// Cell size in pixels, as reported by the app.
+    cell_pixels: (f32, f32),
     parser: vte::Parser,
 }
 
@@ -177,6 +184,8 @@ impl Terminal {
             responses: Vec::new(),
             bell: false,
             last_printed: None,
+            images: images::ImageStore::new(),
+            cell_pixels: (8.0, 16.0),
             parser: vte::Parser::new(),
         }
     }
@@ -291,6 +300,7 @@ impl Terminal {
         self.selection = None;
         self.display_offset = 0;
 
+        let mut alt_shifted = 0;
         for alt in [false, true] {
             let is_active = alt == self.alt_active;
             let screen = if alt {
@@ -307,6 +317,7 @@ impl Terminal {
             } else {
                 screen.saved.map_or(self.rows - 1, |s| s.cursor.row)
             };
+            let mut shifted = 0;
             if rows < self.rows {
                 // Shrink from the bottom first, as long as the cursor stays on screen;
                 // then push the rest off the top into scrollback.
@@ -320,6 +331,8 @@ impl Terminal {
                     if !alt {
                         screen.scrollback.push_back(row);
                         self.history += 1;
+                    } else {
+                        shifted += 1;
                     }
                     cursor_row = cursor_row.saturating_sub(1);
                 }
@@ -342,7 +355,12 @@ impl Terminal {
             } else if let Some(saved) = &mut screen.saved {
                 saved.cursor.row = cursor_row;
             }
+            if alt {
+                alt_shifted = shifted;
+            }
         }
+        self.resize_placements(false, 0, rows);
+        self.resize_placements(true, alt_shifted, rows);
 
         self.cols = cols;
         self.rows = rows;
@@ -472,6 +490,10 @@ impl Terminal {
     fn scroll_up_region(&mut self, top: usize, bottom: usize, n: usize) {
         let n = n.min(bottom - top + 1);
         let to_history = top == 0 && !self.alt_active;
+        if !self.screen().placements.is_empty() {
+            let keeps_lines = to_history && self.max_scrollback > 0;
+            self.scroll_placements(top, bottom, -(n as isize), keeps_lines);
+        }
         for _ in 0..n {
             let blank = self.blank_row();
             let row = self.lines_mut().remove(top);
@@ -490,6 +512,10 @@ impl Terminal {
         self.history += 1;
         if self.primary.scrollback.len() > self.max_scrollback {
             self.primary.scrollback.pop_front();
+            if !self.primary.placements.is_empty() {
+                let first = self.history - self.primary.scrollback.len() as u64;
+                self.drop_placements_before(first);
+            }
         }
         if self.display_offset > 0 {
             self.display_offset = (self.display_offset + 1).min(self.primary.scrollback.len());
@@ -498,6 +524,9 @@ impl Terminal {
 
     fn scroll_down_region(&mut self, top: usize, bottom: usize, n: usize) {
         let n = n.min(bottom - top + 1);
+        if !self.screen().placements.is_empty() {
+            self.scroll_placements(top, bottom, n as isize, false);
+        }
         for _ in 0..n {
             let blank = self.blank_row();
             self.lines_mut().remove(bottom);
@@ -631,6 +660,9 @@ impl Terminal {
     }
 
     fn erase_cells(&mut self, row: usize, from: usize, to: usize) {
+        if !self.screen().placements.is_empty() {
+            self.erase_placements(row, row, from, to);
+        }
         let blank = Cell::blank(&self.cursor.template);
         let to = to.min(self.cols);
         let line = &mut self.lines_mut()[row];
@@ -644,6 +676,9 @@ impl Terminal {
     }
 
     fn erase_row(&mut self, row: usize) {
+        if !self.screen().placements.is_empty() {
+            self.erase_placements(row, row, 0, usize::MAX);
+        }
         let blank = self.blank_row();
         self.lines_mut()[row] = blank;
     }
@@ -672,6 +707,10 @@ impl Terminal {
             }
             3 => {
                 self.screen_mut().scrollback.clear();
+                if !self.alt_active {
+                    let history = self.history;
+                    self.drop_placements_before(history);
+                }
                 self.display_offset = 0;
                 self.selection = None;
             }
@@ -736,6 +775,9 @@ impl Terminal {
             let bottom = self.scroll_bottom;
             let row = self.cursor.row;
             let n = n.min(bottom - row + 1);
+            if !self.screen().placements.is_empty() {
+                self.scroll_placements(row, bottom, -(n as isize), false);
+            }
             for _ in 0..n {
                 let blank = self.blank_row();
                 self.lines_mut().remove(row);
@@ -828,6 +870,7 @@ impl Terminal {
         }
         self.selection = None;
         self.display_offset = 0;
+        self.images.generation += 1;
     }
 
     fn reset(&mut self) {
@@ -835,6 +878,8 @@ impl Terminal {
         let max_scrollback = self.max_scrollback;
         let mut fresh = Terminal::new(cols, rows);
         fresh.max_scrollback = max_scrollback;
+        fresh.cell_pixels = self.cell_pixels;
+        fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
         *self = fresh;
         self.title_changed = true;

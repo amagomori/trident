@@ -131,6 +131,7 @@ impl Perform for Terminal {
                 let bottom = arg(params, 1, self.rows as u16) as usize - 1;
                 self.set_scroll_region(top, bottom);
             }
+            ('t', []) => self.window_report(arg(params, 0, 0)),
             ('s', []) => self.save_cursor(),
             ('u', []) => self.restore_cursor(),
             ('p', [b'!']) => {
@@ -213,6 +214,23 @@ impl Perform for Terminal {
 }
 
 impl Terminal {
+    /// XTWINOPS size reports: text area in pixels (14), cell size in pixels (16) and text
+    /// area in cells (18).
+    fn window_report(&mut self, op: u16) {
+        let (w, h) = self.cell_pixels;
+        let reply = match op {
+            14 => format!(
+                "\x1b[4;{};{}t",
+                (self.rows as f32 * h) as u32,
+                (self.cols as f32 * w) as u32
+            ),
+            16 => format!("\x1b[6;{};{}t", h.round() as u32, w.round() as u32),
+            18 => format!("\x1b[8;{};{}t", self.rows, self.cols),
+            _ => return,
+        };
+        self.responses.extend_from_slice(reply.as_bytes());
+    }
+
     fn set_mode(&mut self, mode: u16, private: bool, enable: bool) {
         if !private {
             match mode {

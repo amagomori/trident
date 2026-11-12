@@ -116,7 +116,8 @@ def rate(entry: dict) -> str:
     per_sec = entry["count"] / entry["secs"]
     if entry["unit"] == "bytes":
         return f"{per_sec / 2**20:,.1f} MiB/s"
-    return f"{entry['secs'] / entry['count'] * 1e6:,.2f} µs/key"
+    unit = "key" if entry["unit"] == "keystrokes" else entry["unit"].rstrip("s")
+    return f"{entry['secs'] / entry['count'] * 1e6:,.2f} µs/{unit}"
 
 
 def pct(new: float, old: float) -> str:
