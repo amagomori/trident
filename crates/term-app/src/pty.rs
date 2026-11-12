@@ -2,7 +2,7 @@
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -19,12 +19,14 @@ const MAX_QUEUED: usize = 8 << 20;
 /// 1 KiB per read) still reach the parser as one batch.
 #[derive(Default)]
 struct Queue {
+    read_sequence: AtomicU64,
     pending: Mutex<Pending>,
     room: Condvar,
 }
 
 #[derive(Default)]
 struct Pending {
+    sequence: u64,
     bytes: Vec<u8>,
     lines: usize,
     closed: bool,
@@ -133,6 +135,7 @@ impl Pty {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            let sequence = queue.read_sequence.fetch_add(1, Ordering::SeqCst) + 1;
                             let mut p = queue.pending.lock().unwrap();
                             if p.full() {
                                 // The UI may be holding off parsing until its next frame.
@@ -146,6 +149,7 @@ impl Pty {
                                 return;
                             }
                             p.bytes.extend_from_slice(&buf[..n]);
+                            p.sequence = sequence;
                             p.lines += buf[..n].iter().filter(|&&b| b == b'\n').count();
                             drop(p);
                             if !pending.swap(true, Ordering::AcqRel) {
@@ -169,10 +173,13 @@ impl Pty {
     }
 
     /// Everything the shell wrote since the last call.
-    pub fn take_output(&self) -> Vec<u8> {
+    pub fn take_output(&mut self) -> Vec<u8> {
         let mut p = self.output.pending.lock().unwrap();
         p.lines = 0;
         let bytes = std::mem::take(&mut p.bytes);
+        if !bytes.is_empty() {
+            self.flow.output(p.sequence);
+        }
         drop(p);
         self.output.room.notify_one();
         bytes
@@ -188,7 +195,12 @@ impl Pty {
             return;
         }
         let (ixon, ixany) = self.flow_flags().unwrap_or((false, false));
-        self.flow.input(bytes, ixon, ixany);
+        self.flow.input(
+            bytes,
+            ixon,
+            ixany,
+            self.output.read_sequence.load(Ordering::SeqCst),
+        );
         let _ = self.input.send(bytes.to_vec());
     }
 

@@ -261,9 +261,6 @@ impl App {
         // all of scrollback only builds the lines that end up kept.
         let batch = s.pty.take_output();
         let processed = batch.len();
-        if processed > 0 {
-            s.pty.flow.output();
-        }
         s.since_frame += processed;
         s.term.advance(&batch);
         release_freed_memory(&mut s.term);
