@@ -5,6 +5,8 @@ use base64::Engine;
 /// 1.8) on an 80x24 pty of 800x480 pixels; test.png is a 40x30 RGB gradient.
 const ICAT: &[u8] = include_bytes!("fixtures/icat.bin");
 const ICAT_DETECT: &[u8] = include_bytes!("fixtures/icat-detect.bin");
+/// `kitten icat --detect-support` from kitty 0.50 on Linux.
+const KITTEN_DETECT: &[u8] = include_bytes!("fixtures/kitten-detect.bin");
 const CHAFA: &[u8] = include_bytes!("fixtures/chafa.bin");
 
 fn term() -> Terminal {
@@ -78,6 +80,27 @@ fn icat_detection_queries_are_answered() {
     assert!(path.exists());
     assert_eq!(t.viewport_row(0).cells[0].c, 'f');
     std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn kitten_detection_takes_shm_temp_file() {
+    let mut t = term();
+    let path = std::path::Path::new("/dev/shm").join(format!(
+        "kitty-tty-graphics-protocol-kan63-detect-{}",
+        std::process::id()
+    ));
+    std::fs::write(&path, b"123").unwrap();
+    // The capture's t=t query names kitten's own /dev/shm temp file; point it at ours.
+    let query = KITTEN_DETECT.windows(4).position(|w| w == b"t=t,").unwrap();
+    let start = query + KITTEN_DETECT[query..].iter().position(|&b| b == b';').unwrap() + 1;
+    let end = start + KITTEN_DETECT[start..].iter().position(|&b| b == 0x1b).unwrap();
+    t.advance(&KITTEN_DETECT[..start]);
+    t.advance(b64(path.as_os_str().as_encoded_bytes()).as_bytes());
+    t.advance(&KITTEN_DETECT[end..]);
+    let replies = replies(&mut t);
+    assert!(replies.contains("\x1b_Gi=2;OK\x1b\\"), "{replies:?}");
+    assert!(!path.exists());
 }
 
 #[test]
@@ -358,6 +381,54 @@ fn file_transmission() {
     assert!(send(&mut t, "f", &fifo, 5).contains("EBADF"));
     std::fs::remove_file(&fifo).unwrap();
     assert!(t.image(5).is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shm_temp_file_transmission() {
+    let shm = std::path::Path::new("/dev/shm");
+    let pid = std::process::id();
+    let rgb = gradient_rgb(2, 2);
+    let send = |t: &mut Terminal, medium: &str, path: &std::path::Path, id: u32| {
+        let control = format!("a=t,f=24,s=2,v=2,t={medium},i={id}");
+        t.advance(&apc(&control, path.as_os_str().as_encoded_bytes()));
+        replies(t)
+    };
+    let mut t = term();
+
+    // kitten's own temp file name, as icat creates it.
+    let temp = shm.join(format!("kitty-tty-graphics-protocol-kan63-{pid}"));
+    std::fs::write(&temp, &rgb).unwrap();
+    assert_eq!(send(&mut t, "t", &temp, 1), "\x1b_Gi=1;OK\x1b\\");
+    assert!(!temp.exists());
+    assert_eq!(t.image(1).unwrap().pixels.len(), 2 * 2 * 4);
+
+    // Only marked temp files: unmarked ones and t=f stay refused there.
+    let unmarked = shm.join(format!("kan63-{pid}"));
+    std::fs::write(&unmarked, &rgb).unwrap();
+    assert!(send(&mut t, "t", &unmarked, 2).contains("EBADF"));
+    assert!(unmarked.exists());
+    std::fs::remove_file(&unmarked).unwrap();
+    std::fs::write(&temp, &rgb).unwrap();
+    assert!(send(&mut t, "f", &temp, 2).contains("EBADF"));
+    assert!(temp.exists());
+
+    // Other /dev paths stay refused, also through `..` or a marked symlink.
+    let escape = shm.join("../zero");
+    assert!(send(&mut t, "t", &escape, 2).contains("EBADF"));
+    let link = std::env::temp_dir().join(format!("kan63-tty-graphics-protocol-{pid}"));
+    std::os::unix::fs::symlink("/dev/zero", &link).unwrap();
+    assert!(send(&mut t, "t", &link, 2).contains("EBADF"));
+    std::fs::remove_file(&link).unwrap();
+    std::fs::remove_file(&temp).unwrap();
+
+    // A marked FIFO in /dev/shm is not read.
+    let fifo = shm.join(format!("kan63-tty-graphics-protocol-fifo-{pid}"));
+    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    assert!(send(&mut t, "t", &fifo, 2).contains("EBADF"));
+    std::fs::remove_file(&fifo).unwrap();
+    assert!(t.image(2).is_none());
 }
 
 #[test]

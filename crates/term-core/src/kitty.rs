@@ -24,6 +24,9 @@ const MAX_CONTROL: usize = 1024;
 const MAX_PATH: usize = 4096;
 /// Temp files are only read (and then deleted) when their name says they are meant for this.
 const TEMP_MARKER: &str = "tty-graphics-protocol";
+/// Shared memory directory that also holds `t=t` temp files on Linux.
+#[cfg(unix)]
+const SHM_DIR: &str = "/dev/shm";
 
 const BASE64: GeneralPurpose = GeneralPurpose::new(
     &base64::alphabet::STANDARD,
@@ -674,8 +677,8 @@ fn decode_png(data: &[u8], limit: usize) -> Result<Image, &'static str> {
 }
 
 /// Reads an image file named by a `t=f` or `t=t` transmission. Only regular files outside
-/// `/proc`, `/sys` and `/dev` are read, at most `limit` bytes; `t=t` files must also be in
-/// a temp directory, and are deleted afterwards.
+/// `/proc`, `/sys` and `/dev` are read, at most `limit` bytes; `t=t` files must be in a temp
+/// directory or `/dev/shm` instead, and are deleted afterwards.
 #[cfg(unix)]
 fn read_file(
     path: &[u8],
@@ -687,21 +690,24 @@ fn read_file(
     use std::io::{Seek, SeekFrom};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     let path = Path::new(std::ffi::OsStr::from_bytes(path));
     if !path.is_absolute() {
         return Err("EINVAL:path must be absolute");
     }
     let path = std::fs::canonicalize(path).map_err(|_| "ENOENT:no such file")?;
-    if ["/proc", "/sys", "/dev"]
-        .iter()
-        .any(|p| path.starts_with(p))
+    // kitten writes its temp files to /dev/shm on Linux.
+    let in_shm = temp && path.starts_with(SHM_DIR);
+    if !in_shm
+        && ["/proc", "/sys", "/dev"]
+            .iter()
+            .any(|p| path.starts_with(p))
     {
         return Err("EPERM:not an image file");
     }
     if temp {
-        let in_temp = [std::env::temp_dir(), PathBuf::from("/tmp")]
+        let in_temp = [std::env::temp_dir(), "/tmp".into(), SHM_DIR.into()]
             .iter()
             .filter_map(|dir| std::fs::canonicalize(dir).ok())
             .any(|dir| path.starts_with(dir));
