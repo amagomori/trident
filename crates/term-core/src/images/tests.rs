@@ -516,3 +516,11 @@ fn erasing_to_end_of_line_drops_cut_off_images() {
     t.resize(10, 5);
     assert!(t.visible_placements().is_empty());
 }
+
+#[test]
+fn alignment_pattern_removes_placements() {
+    let mut t = term();
+    place_at(&mut t, 1, 4);
+    t.advance(b"\x1b#8");
+    assert!(t.visible_placements().is_empty());
+}

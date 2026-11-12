@@ -155,6 +155,9 @@ impl Perform for Terminal {
             (b'8', []) => self.restore_cursor(),
             (b'8', [b'#']) => {
                 // DECALN: fill the screen with 'E'.
+                if !self.screen().placements.is_empty() {
+                    self.erase_placements(0, self.rows - 1, 0, usize::MAX);
+                }
                 for row in 0..self.rows {
                     self.lines_mut()[row].clear_hidden();
                     for cell in self.lines_mut()[row].cells.iter_mut() {
