@@ -1,0 +1,23 @@
+[package]
+name = "terminal"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "A fast GPU-rendered terminal emulator written from scratch in Rust"
+license = "MIT"
+repository = "https://github.com/amagomori/terminal"
+
+[dependencies]
+ab_glyph = "0.2"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+portable-pty = "0.9"
+unicode-width = "0.2"
+vte = "0.15"
+wgpu = "30"
+winit = "0.30"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

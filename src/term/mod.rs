@@ -1,0 +1,893 @@
+//! Terminal state: the screen grid, scrollback and the VT/xterm control sequence handling
+//! that mutates them. Bytes from the shell go in through [`Terminal::advance`].
+
+mod cell;
+mod perform;
+
+pub use cell::{Cell, Color, Flags, Row};
+
+use std::collections::VecDeque;
+
+const DEFAULT_SCROLLBACK: usize = 10_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Bar,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Charset {
+    Ascii,
+    DecSpecial,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Cursor {
+    row: usize,
+    col: usize,
+    /// Attributes applied to newly printed characters.
+    template: Cell,
+    /// Set after printing in the last column; the next print wraps first.
+    pending_wrap: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SavedCursor {
+    cursor: Cursor,
+    origin: bool,
+    charsets: [Charset; 2],
+    active_charset: usize,
+}
+
+struct Screen {
+    lines: Vec<Row>,
+    scrollback: VecDeque<Row>,
+    saved: Option<SavedCursor>,
+}
+
+impl Screen {
+    fn new(cols: usize, rows: usize) -> Screen {
+        Screen {
+            lines: (0..rows)
+                .map(|_| Row::new(cols, &Cell::default()))
+                .collect(),
+            scrollback: VecDeque::new(),
+            saved: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseMode {
+    #[default]
+    Off,
+    /// 1000: press and release.
+    Click,
+    /// 1002: press, release and motion while a button is held.
+    Drag,
+    /// 1003: all motion.
+    Motion,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Modes {
+    pub app_cursor: bool,
+    pub app_keypad: bool,
+    pub bracketed_paste: bool,
+    pub show_cursor: bool,
+    pub autowrap: bool,
+    pub origin: bool,
+    pub insert: bool,
+    pub linefeed_newline: bool,
+    pub mouse: MouseMode,
+    pub sgr_mouse: bool,
+    pub focus_events: bool,
+    pub alt_scroll: bool,
+}
+
+/// A point in the terminal's history: `line` counts every line ever scrolled into
+/// scrollback, so it stays stable while new output arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Point {
+    pub line: u64,
+    pub col: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionKind {
+    Simple,
+    Word,
+    Line,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Selection {
+    pub anchor: Point,
+    pub head: Point,
+    pub kind: SelectionKind,
+}
+
+pub struct Terminal {
+    cols: usize,
+    rows: usize,
+    primary: Screen,
+    alternate: Screen,
+    alt_active: bool,
+    cursor: Cursor,
+    scroll_top: usize,
+    scroll_bottom: usize,
+    tabs: Vec<bool>,
+    charsets: [Charset; 2],
+    active_charset: usize,
+    pub modes: Modes,
+    pub cursor_shape: CursorShape,
+    /// Lines ever pushed into the primary scrollback (including ones since dropped).
+    history: u64,
+    max_scrollback: usize,
+    /// How many lines the view is scrolled back from the bottom.
+    display_offset: usize,
+    pub selection: Option<Selection>,
+    title: Option<String>,
+    title_changed: bool,
+    /// Replies (device attributes, cursor reports...) to write back to the shell.
+    responses: Vec<u8>,
+    pub bell: bool,
+    last_printed: Option<char>,
+    parser: vte::Parser,
+}
+
+impl Terminal {
+    pub fn new(cols: usize, rows: usize) -> Terminal {
+        let cols = cols.max(2);
+        let rows = rows.max(1);
+        Terminal {
+            cols,
+            rows,
+            primary: Screen::new(cols, rows),
+            alternate: Screen::new(cols, rows),
+            alt_active: false,
+            cursor: Cursor {
+                row: 0,
+                col: 0,
+                template: Cell::default(),
+                pending_wrap: false,
+            },
+            scroll_top: 0,
+            scroll_bottom: rows - 1,
+            tabs: default_tabs(cols),
+            charsets: [Charset::Ascii; 2],
+            active_charset: 0,
+            modes: Modes {
+                show_cursor: true,
+                autowrap: true,
+                alt_scroll: true,
+                ..Modes::default()
+            },
+            cursor_shape: CursorShape::Block,
+            history: 0,
+            max_scrollback: DEFAULT_SCROLLBACK,
+            display_offset: 0,
+            selection: None,
+            title: None,
+            title_changed: false,
+            responses: Vec::new(),
+            bell: false,
+            last_printed: None,
+            parser: vte::Parser::new(),
+        }
+    }
+
+    /// Feed bytes from the shell.
+    pub fn advance(&mut self, bytes: &[u8]) {
+        let mut parser = std::mem::take(&mut self.parser);
+        parser.advance(self, bytes);
+        self.parser = parser;
+    }
+
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn take_responses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.responses)
+    }
+
+    pub fn take_title(&mut self) -> Option<String> {
+        if std::mem::take(&mut self.title_changed) {
+            Some(self.title.clone().unwrap_or_default())
+        } else {
+            None
+        }
+    }
+
+    pub fn is_alt_screen(&self) -> bool {
+        self.alt_active
+    }
+
+    /// Cursor position in viewport coordinates, if it is visible.
+    pub fn cursor_position(&self) -> Option<(usize, usize)> {
+        let row = self.cursor.row + self.display_offset;
+        (self.modes.show_cursor && row < self.rows).then_some((row, self.cursor.col))
+    }
+
+    pub fn display_offset(&self) -> usize {
+        self.display_offset
+    }
+
+    pub fn scrollback_len(&self) -> usize {
+        self.screen().scrollback.len()
+    }
+
+    /// Scroll the view by `delta` lines (positive scrolls back into history).
+    pub fn scroll_display(&mut self, delta: isize) {
+        let max = self.scrollback_len() as isize;
+        self.display_offset = (self.display_offset as isize + delta).clamp(0, max) as usize;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.display_offset = 0;
+    }
+
+    /// The row shown at viewport row `row`.
+    pub fn viewport_row(&self, row: usize) -> &Row {
+        self.line(self.viewport_to_point(row, 0).line)
+    }
+
+    pub fn viewport_to_point(&self, row: usize, col: usize) -> Point {
+        Point {
+            line: self.history + row as u64 - self.display_offset as u64,
+            col,
+        }
+    }
+
+    fn first_line(&self) -> u64 {
+        self.history - self.screen().scrollback.len() as u64
+    }
+
+    fn line(&self, line: u64) -> &Row {
+        let screen = self.screen();
+        if line < self.history {
+            let back = (self.history - line) as usize;
+            &screen.scrollback[screen.scrollback.len() - back]
+        } else {
+            &screen.lines[(line - self.history) as usize]
+        }
+    }
+
+    fn screen(&self) -> &Screen {
+        if self.alt_active {
+            &self.alternate
+        } else {
+            &self.primary
+        }
+    }
+
+    fn screen_mut(&mut self) -> &mut Screen {
+        if self.alt_active {
+            &mut self.alternate
+        } else {
+            &mut self.primary
+        }
+    }
+
+    fn lines_mut(&mut self) -> &mut Vec<Row> {
+        &mut self.screen_mut().lines
+    }
+
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        let cols = cols.max(2);
+        let rows = rows.max(1);
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        self.selection = None;
+        self.display_offset = 0;
+
+        for alt in [false, true] {
+            let is_active = alt == self.alt_active;
+            let screen = if alt {
+                &mut self.alternate
+            } else {
+                &mut self.primary
+            };
+            for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
+                row.resize(cols);
+            }
+            // The inactive screen's cursor is the one saved when switching away from it.
+            let mut cursor_row = if is_active {
+                self.cursor.row
+            } else {
+                screen.saved.map_or(self.rows - 1, |s| s.cursor.row)
+            };
+            if rows < self.rows {
+                // Shrink from the bottom first, as long as the cursor stays on screen;
+                // then push the rest off the top into scrollback.
+                let mut excess = self.rows - rows;
+                while excess > 0 && screen.lines.len() - 1 > cursor_row {
+                    screen.lines.pop();
+                    excess -= 1;
+                }
+                for _ in 0..excess {
+                    let row = screen.lines.remove(0);
+                    if !alt {
+                        screen.scrollback.push_back(row);
+                        self.history += 1;
+                    }
+                    cursor_row = cursor_row.saturating_sub(1);
+                }
+            } else {
+                // Grow by pulling lines back out of scrollback when the cursor is at the bottom.
+                for _ in self.rows..rows {
+                    let at_bottom = cursor_row == screen.lines.len() - 1;
+                    if !alt && at_bottom && !screen.scrollback.is_empty() {
+                        let row = screen.scrollback.pop_back().unwrap();
+                        screen.lines.insert(0, row);
+                        self.history -= 1;
+                        cursor_row += 1;
+                    } else {
+                        screen.lines.push(Row::new(cols, &Cell::default()));
+                    }
+                }
+            }
+            if is_active {
+                self.cursor.row = cursor_row;
+            } else if let Some(saved) = &mut screen.saved {
+                saved.cursor.row = cursor_row;
+            }
+        }
+
+        self.cols = cols;
+        self.rows = rows;
+        self.cursor.row = self.cursor.row.min(rows - 1);
+        self.cursor.col = self.cursor.col.min(cols - 1);
+        self.cursor.pending_wrap = false;
+        self.scroll_top = 0;
+        self.scroll_bottom = rows - 1;
+        self.tabs = default_tabs(cols);
+        for saved in [&mut self.primary.saved, &mut self.alternate.saved]
+            .into_iter()
+            .flatten()
+        {
+            saved.cursor.row = saved.cursor.row.min(rows - 1);
+            saved.cursor.col = saved.cursor.col.min(cols - 1);
+        }
+    }
+
+    // ---- Selection ----
+
+    pub fn start_selection(&mut self, point: Point, kind: SelectionKind) {
+        self.selection = Some(Selection {
+            anchor: point,
+            head: point,
+            kind,
+        });
+    }
+
+    pub fn update_selection(&mut self, point: Point) {
+        if let Some(sel) = &mut self.selection {
+            sel.head = point;
+        }
+    }
+
+    /// The selected range, expanded for word/line selections, as inclusive points.
+    pub fn selection_range(&self) -> Option<(Point, Point)> {
+        let sel = self.selection?;
+        let (mut start, mut end) = if sel.anchor <= sel.head {
+            (sel.anchor, sel.head)
+        } else {
+            (sel.head, sel.anchor)
+        };
+        let first = self.first_line();
+        let last = self.history + self.rows as u64 - 1;
+        if end.line < first || start.line > last {
+            return None;
+        }
+        start.line = start.line.max(first);
+        end.line = end.line.min(last);
+        match sel.kind {
+            SelectionKind::Simple => {
+                if sel.anchor == sel.head {
+                    return None;
+                }
+            }
+            SelectionKind::Word => {
+                start = self.word_boundary(start, false);
+                end = self.word_boundary(end, true);
+            }
+            SelectionKind::Line => {
+                start.col = 0;
+                end.col = self.cols - 1;
+            }
+        }
+        Some((start, end))
+    }
+
+    pub fn is_selected(&self, range: Option<(Point, Point)>, point: Point) -> bool {
+        range.is_some_and(|(s, e)| s <= point && point <= e)
+    }
+
+    fn word_boundary(&self, mut point: Point, forward: bool) -> Point {
+        let row = self.line(point.line);
+        let is_word = |c: char| !c.is_whitespace() && !"\"'`()[]{}<>|,;".contains(c);
+        let col = point.col.min(self.cols - 1);
+        if !is_word(row.cells[col].c) {
+            return point;
+        }
+        let mut col = col;
+        if forward {
+            while col + 1 < self.cols && is_word(row.cells[col + 1].c) {
+                col += 1;
+            }
+        } else {
+            while col > 0 && is_word(row.cells[col - 1].c) {
+                col -= 1;
+            }
+        }
+        point.col = col;
+        point
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        let mut out = String::new();
+        for line in start.line..=end.line {
+            let row = self.line(line);
+            let from = if line == start.line { start.col } else { 0 };
+            let to = if line == end.line {
+                end.col.min(self.cols - 1)
+            } else {
+                self.cols - 1
+            };
+            let mut text: String = row.cells[from..=to]
+                .iter()
+                .filter(|c| !c.flags.contains(Flags::WIDE_SPACER))
+                .map(|c| c.c)
+                .collect();
+            if !(row.wrapped && line != end.line) {
+                text.truncate(text.trim_end().len());
+            }
+            out.push_str(&text);
+            if line != end.line && !row.wrapped {
+                out.push('\n');
+            }
+        }
+        Some(out)
+    }
+
+    // ---- Primitive grid operations used by the escape sequence handlers ----
+
+    fn blank_row(&self) -> Row {
+        Row::new(self.cols, &self.cursor.template)
+    }
+
+    /// Scroll the region `top..=bottom` up by `n` lines.
+    fn scroll_up_region(&mut self, top: usize, bottom: usize, n: usize) {
+        let n = n.min(bottom - top + 1);
+        let to_history = top == 0 && !self.alt_active;
+        for _ in 0..n {
+            let blank = self.blank_row();
+            let row = self.lines_mut().remove(top);
+            self.lines_mut().insert(bottom, blank);
+            if to_history {
+                self.push_history(row);
+            }
+        }
+    }
+
+    fn push_history(&mut self, row: Row) {
+        if self.max_scrollback == 0 {
+            return;
+        }
+        self.primary.scrollback.push_back(row);
+        self.history += 1;
+        if self.primary.scrollback.len() > self.max_scrollback {
+            self.primary.scrollback.pop_front();
+        }
+        if self.display_offset > 0 {
+            self.display_offset = (self.display_offset + 1).min(self.primary.scrollback.len());
+        }
+    }
+
+    fn scroll_down_region(&mut self, top: usize, bottom: usize, n: usize) {
+        let n = n.min(bottom - top + 1);
+        for _ in 0..n {
+            let blank = self.blank_row();
+            self.lines_mut().remove(bottom);
+            self.lines_mut().insert(top, blank);
+        }
+    }
+
+    fn linefeed(&mut self) {
+        self.cursor.pending_wrap = false;
+        if self.cursor.row == self.scroll_bottom {
+            self.scroll_up_region(self.scroll_top, self.scroll_bottom, 1);
+        } else if self.cursor.row < self.rows - 1 {
+            self.cursor.row += 1;
+        }
+    }
+
+    fn reverse_index(&mut self) {
+        self.cursor.pending_wrap = false;
+        if self.cursor.row == self.scroll_top {
+            self.scroll_down_region(self.scroll_top, self.scroll_bottom, 1);
+        } else if self.cursor.row > 0 {
+            self.cursor.row -= 1;
+        }
+    }
+
+    fn put_char(&mut self, c: char) {
+        let c = match self.charsets[self.active_charset] {
+            Charset::DecSpecial => dec_special(c),
+            Charset::Ascii => c,
+        };
+        let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if width == 0 {
+            // Combining marks and other zero-width characters are not rendered.
+            return;
+        }
+
+        if self.cursor.pending_wrap && self.modes.autowrap {
+            let row = self.cursor.row;
+            self.lines_mut()[row].wrapped = true;
+            self.cursor.col = 0;
+            self.linefeed();
+        }
+        if width == 2 && self.cursor.col == self.cols - 1 {
+            if self.modes.autowrap {
+                let (row, col) = (self.cursor.row, self.cursor.col);
+                let blank = Cell::blank(&self.cursor.template);
+                let line = &mut self.lines_mut()[row];
+                line.cells[col] = blank;
+                line.wrapped = true;
+                self.cursor.col = 0;
+                self.linefeed();
+            } else {
+                return;
+            }
+        }
+
+        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        let template = self.cursor.template;
+        let insert = self.modes.insert;
+        let line = &mut self.lines_mut()[row];
+        if insert {
+            for _ in 0..width {
+                line.cells.insert(col, Cell::blank(&template));
+            }
+            line.cells.truncate(cols);
+        }
+        clear_wide_pair(&mut line.cells, col);
+        if width == 2 {
+            clear_wide_pair(&mut line.cells, col + 1);
+        }
+        let mut cell = template;
+        cell.c = c;
+        cell.flags.remove(Flags::WIDE | Flags::WIDE_SPACER);
+        if width == 2 {
+            cell.flags.insert(Flags::WIDE);
+            let mut spacer = template;
+            spacer.c = ' ';
+            spacer.flags.insert(Flags::WIDE_SPACER);
+            line.cells[col + 1] = spacer;
+        }
+        line.cells[col] = cell;
+
+        self.last_printed = Some(c);
+        if col + width >= cols {
+            self.cursor.col = cols - 1;
+            self.cursor.pending_wrap = true;
+        } else {
+            self.cursor.col = col + width;
+        }
+    }
+
+    fn goto(&mut self, row: usize, col: usize) {
+        let (min_row, max_row) = if self.modes.origin {
+            (self.scroll_top, self.scroll_bottom)
+        } else {
+            (0, self.rows - 1)
+        };
+        self.cursor.row = (row + min_row).clamp(min_row, max_row);
+        self.cursor.col = col.min(self.cols - 1);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn goto_row(&mut self, row: usize) {
+        let col = self.cursor.col;
+        self.goto(row, col);
+    }
+
+    fn move_up(&mut self, n: usize) {
+        let top = if self.cursor.row >= self.scroll_top {
+            self.scroll_top
+        } else {
+            0
+        };
+        self.cursor.row = self.cursor.row.saturating_sub(n).max(top);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn move_down(&mut self, n: usize) {
+        let bottom = if self.cursor.row <= self.scroll_bottom {
+            self.scroll_bottom
+        } else {
+            self.rows - 1
+        };
+        self.cursor.row = (self.cursor.row + n).min(bottom);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn move_col(&mut self, col: usize) {
+        self.cursor.col = col.min(self.cols - 1);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn erase_cells(&mut self, row: usize, from: usize, to: usize) {
+        let blank = Cell::blank(&self.cursor.template);
+        let to = to.min(self.cols);
+        let line = &mut self.lines_mut()[row];
+        if from < to {
+            clear_wide_pair(&mut line.cells, from);
+            clear_wide_pair(&mut line.cells, to - 1);
+        }
+        for cell in line.cells.iter_mut().take(to).skip(from) {
+            *cell = blank;
+        }
+    }
+
+    fn erase_row(&mut self, row: usize) {
+        let blank = self.blank_row();
+        self.lines_mut()[row] = blank;
+    }
+
+    fn erase_display(&mut self, mode: u16) {
+        let (row, col) = (self.cursor.row, self.cursor.col);
+        match mode {
+            0 => {
+                self.erase_cells(row, col, self.cols);
+                self.lines_mut()[row].wrapped = false;
+                for r in row + 1..self.rows {
+                    self.erase_row(r);
+                }
+            }
+            1 => {
+                for r in 0..row {
+                    self.erase_row(r);
+                }
+                self.erase_cells(row, 0, col + 1);
+            }
+            2 => {
+                for r in 0..self.rows {
+                    self.erase_row(r);
+                }
+            }
+            3 => {
+                self.screen_mut().scrollback.clear();
+                self.display_offset = 0;
+                self.selection = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn erase_line(&mut self, mode: u16) {
+        let (row, col) = (self.cursor.row, self.cursor.col);
+        match mode {
+            0 => {
+                self.erase_cells(row, col, self.cols);
+                self.lines_mut()[row].wrapped = false;
+            }
+            1 => self.erase_cells(row, 0, col + 1),
+            2 => self.erase_row(row),
+            _ => {}
+        }
+    }
+
+    fn insert_blank(&mut self, n: usize) {
+        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        let blank = Cell::blank(&self.cursor.template);
+        let line = &mut self.lines_mut()[row];
+        let n = n.min(cols - col);
+        if line.cells[col].flags.contains(Flags::WIDE_SPACER) {
+            clear_wide_pair(&mut line.cells, col);
+        }
+        for _ in 0..n {
+            line.cells.insert(col, blank);
+        }
+        line.cells.truncate(cols);
+        if line.cells[cols - 1].flags.contains(Flags::WIDE) {
+            line.cells[cols - 1] = blank;
+        }
+        self.cursor.pending_wrap = false;
+    }
+
+    fn delete_chars(&mut self, n: usize) {
+        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        let blank = Cell::blank(&self.cursor.template);
+        let line = &mut self.lines_mut()[row];
+        let n = n.min(cols - col);
+        clear_wide_pair(&mut line.cells, col);
+        clear_wide_pair(&mut line.cells, col + n - 1);
+        line.cells.drain(col..col + n);
+        line.cells.resize(cols, blank);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn insert_lines(&mut self, n: usize) {
+        if (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row) {
+            self.scroll_down_region(self.cursor.row, self.scroll_bottom, n);
+            self.cursor.col = 0;
+            self.cursor.pending_wrap = false;
+        }
+    }
+
+    fn delete_lines(&mut self, n: usize) {
+        if (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row) {
+            let bottom = self.scroll_bottom;
+            let row = self.cursor.row;
+            let n = n.min(bottom - row + 1);
+            for _ in 0..n {
+                let blank = self.blank_row();
+                self.lines_mut().remove(row);
+                self.lines_mut().insert(bottom, blank);
+            }
+            self.cursor.col = 0;
+            self.cursor.pending_wrap = false;
+        }
+    }
+
+    fn set_scroll_region(&mut self, top: usize, bottom: usize) {
+        let bottom = bottom.min(self.rows - 1);
+        if top < bottom {
+            self.scroll_top = top;
+            self.scroll_bottom = bottom;
+            self.goto(0, 0);
+        }
+    }
+
+    fn tab(&mut self, n: usize) {
+        for _ in 0..n {
+            let mut col = self.cursor.col + 1;
+            while col < self.cols - 1 && !self.tabs[col] {
+                col += 1;
+            }
+            self.cursor.col = col.min(self.cols - 1);
+        }
+        self.cursor.pending_wrap = false;
+    }
+
+    fn back_tab(&mut self, n: usize) {
+        for _ in 0..n {
+            let mut col = self.cursor.col.saturating_sub(1);
+            while col > 0 && !self.tabs[col] {
+                col -= 1;
+            }
+            self.cursor.col = col;
+        }
+        self.cursor.pending_wrap = false;
+    }
+
+    fn save_cursor(&mut self) {
+        let saved = SavedCursor {
+            cursor: self.cursor,
+            origin: self.modes.origin,
+            charsets: self.charsets,
+            active_charset: self.active_charset,
+        };
+        self.screen_mut().saved = Some(saved);
+    }
+
+    fn restore_cursor(&mut self) {
+        match self.screen().saved {
+            Some(saved) => {
+                self.cursor = saved.cursor;
+                self.modes.origin = saved.origin;
+                self.charsets = saved.charsets;
+                self.active_charset = saved.active_charset;
+            }
+            None => {
+                self.cursor.row = 0;
+                self.cursor.col = 0;
+                self.cursor.template = Cell::default();
+                self.cursor.pending_wrap = false;
+            }
+        }
+        self.cursor.row = self.cursor.row.min(self.rows - 1);
+        self.cursor.col = self.cursor.col.min(self.cols - 1);
+    }
+
+    fn set_alt_screen(&mut self, enable: bool, save_cursor: bool, clear: bool) {
+        if enable == self.alt_active {
+            return;
+        }
+        if enable {
+            if save_cursor {
+                self.save_cursor();
+            }
+            self.alt_active = true;
+            if clear {
+                for r in 0..self.rows {
+                    self.erase_row(r);
+                }
+            }
+        } else {
+            self.alt_active = false;
+            if save_cursor {
+                self.restore_cursor();
+            }
+        }
+        self.selection = None;
+        self.display_offset = 0;
+    }
+
+    fn reset(&mut self) {
+        let (cols, rows) = (self.cols, self.rows);
+        let max_scrollback = self.max_scrollback;
+        let mut fresh = Terminal::new(cols, rows);
+        fresh.max_scrollback = max_scrollback;
+        fresh.parser = std::mem::take(&mut self.parser);
+        *self = fresh;
+        self.title_changed = true;
+    }
+}
+
+fn default_tabs(cols: usize) -> Vec<bool> {
+    (0..cols).map(|c| c % 8 == 0 && c != 0).collect()
+}
+
+/// Overwriting one half of a wide character must blank the other half.
+fn clear_wide_pair(cells: &mut [Cell], col: usize) {
+    let Some(cell) = cells.get(col) else { return };
+    if cell.flags.contains(Flags::WIDE) {
+        if let Some(next) = cells.get_mut(col + 1) {
+            next.c = ' ';
+            next.flags.remove(Flags::WIDE_SPACER);
+        }
+        cells[col].flags.remove(Flags::WIDE);
+    } else if cell.flags.contains(Flags::WIDE_SPACER) && col > 0 {
+        cells[col - 1].c = ' ';
+        cells[col - 1].flags.remove(Flags::WIDE);
+        cells[col].flags.remove(Flags::WIDE_SPACER);
+    }
+}
+
+/// DEC Special Graphics (line drawing) charset, used by `ESC ( 0`.
+fn dec_special(c: char) -> char {
+    match c {
+        '`' => '◆',
+        'a' => '▒',
+        'f' => '°',
+        'g' => '±',
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'o' => '⎺',
+        'p' => '⎻',
+        'q' => '─',
+        'r' => '⎼',
+        's' => '⎽',
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│',
+        'y' => '≤',
+        'z' => '≥',
+        '{' => 'π',
+        '|' => '≠',
+        '}' => '£',
+        '~' => '·',
+        _ => c,
+    }
+}
+
+#[cfg(test)]
+mod tests;
