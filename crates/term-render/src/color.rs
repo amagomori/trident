@@ -34,7 +34,22 @@ fn bitmap(face: &Face, id: GlyphId, target: Target) -> Option<RasterizedGlyph> {
         RasterImageFormat::BitmapPremulBgra32 => {
             let (w, h) = (image.width as usize, image.height as usize);
             let px = image.data.get(..w * h * 4)?.as_chunks::<4>().0.iter();
-            (w, h, px.flat_map(|p| [p[2], p[1], p[0], p[3]]).collect())
+            let straight = |v: u8, a: u8| {
+                if a == 0 {
+                    0
+                } else {
+                    (v as u32 * 255 / a as u32).min(255) as u8
+                }
+            };
+            let px = px.flat_map(|p| {
+                [
+                    straight(p[2], p[3]),
+                    straight(p[1], p[3]),
+                    straight(p[0], p[3]),
+                    p[3],
+                ]
+            });
+            (w, h, px.collect())
         }
         _ => return None,
     };
