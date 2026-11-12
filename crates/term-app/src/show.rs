@@ -6,7 +6,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use image::ImageFormat;
+use image::{ImageDecoder, ImageFormat};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -124,7 +124,7 @@ pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
     let mut status = 0;
     for path in &options.files {
         if options.files.len() > 1 {
-            let _ = writeln!(out, "{}", path.display());
+            let _ = writeln!(out, "{}", printable(&path.to_string_lossy()));
         }
         let result = show(path, &options, window, &mut out).and_then(|()| {
             out.flush()
@@ -132,7 +132,12 @@ pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
         });
         if let Err(e) = result {
             let _ = out.flush();
-            eprintln!("{} show: {}: {e}", env!("CARGO_BIN_NAME"), path.display());
+            eprintln!(
+                "{} show: {}: {}",
+                env!("CARGO_BIN_NAME"),
+                printable(&path.to_string_lossy()),
+                printable(&e)
+            );
             status = 1;
         }
     }
@@ -174,10 +179,14 @@ fn io_message(e: &io::Error) -> String {
 
 fn detect(bytes: &[u8]) -> Kind {
     if let Ok(format) = image::guess_format(bytes) {
-        // "P1".."P7" also start ordinary text, so a PNM must have a whole header.
-        let pnm_ok = format != ImageFormat::Pnm
-            || image::codecs::pnm::PnmDecoder::new(io::Cursor::new(bytes)).is_ok();
-        if pnm_ok {
+        // Some signatures ("BM", "P1".."P7", "qoif") also start ordinary text; text only
+        // counts as an image when it has a whole header.
+        let header_ok = || {
+            image::ImageReader::with_format(io::Cursor::new(bytes), format)
+                .into_dimensions()
+                .is_ok()
+        };
+        if !is_text(bytes) || header_ok() {
             if format.reading_enabled() {
                 return Kind::Raster(format);
             }
@@ -335,8 +344,16 @@ fn decode_raster(
     options: &Options,
     window: Window,
 ) -> Result<Rgba, String> {
-    let image = image::load_from_memory_with_format(bytes, format)
-        .map_err(|e| format!("cannot decode {} image: {e}", format_name(format)))?;
+    let decode = || {
+        let mut decoder =
+            image::ImageReader::with_format(io::Cursor::new(bytes), format).into_decoder()?;
+        let orientation = decoder.orientation()?;
+        let mut image = image::DynamicImage::from_decoder(decoder)?;
+        image.apply_orientation(orientation);
+        Ok::<_, image::ImageError>(image)
+    };
+    let image =
+        decode().map_err(|e| format!("cannot decode {} image: {e}", format_name(format)))?;
     let (w, h) = target_size(
         (image.width() as f32, image.height() as f32),
         options,
@@ -448,12 +465,33 @@ fn write_kitty(out: &mut impl Write, image: &Rgba) -> io::Result<()> {
 /// Prints text with control characters made visible (`^[` for ESC), so a file can't
 /// drive the terminal.
 fn write_text(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
-    let text = String::from_utf8_lossy(bytes);
+    // CR LF and lone CR (old Mac files, progress logs) both end a line.
+    let text = String::from_utf8_lossy(bytes)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
     let mut clean = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (line, newline) = line.strip_suffix('\n').map_or((line, ""), |l| (l, "\n"));
+        push_printable(&mut clean, line, true);
+        clean.push_str(newline);
+    }
+    if !clean.is_empty() && !clean.ends_with('\n') {
+        clean.push('\n');
+    }
+    out.write_all(clean.as_bytes())
+}
+
+/// `text` with control characters shown as `^X`, safe to print on a terminal.
+fn printable(text: &str) -> String {
+    let mut clean = String::with_capacity(text.len());
+    push_printable(&mut clean, text, false);
+    clean
+}
+
+fn push_printable(clean: &mut String, text: &str, keep_tabs: bool) {
     for c in text.chars() {
         match c {
-            '\t' | '\n' => clean.push(c),
-            '\r' => {}
+            '\t' if keep_tabs => clean.push(c),
             '\x7f' => clean.push_str("^?"),
             c if (c as u32) < 0x20 => {
                 clean.push('^');
@@ -463,10 +501,6 @@ fn write_text(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
             c => clean.push(c),
         }
     }
-    if !clean.is_empty() && !clean.ends_with('\n') {
-        clean.push('\n');
-    }
-    out.write_all(clean.as_bytes())
 }
 
 fn window_size() -> Window {

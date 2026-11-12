@@ -86,6 +86,32 @@ fn every_format_renders_from_its_sample() {
 }
 
 #[test]
+fn photos_are_turned_upright() {
+    // A 16x8 JPEG (left red, right blue) tagged EXIF orientation 6: rotate 90 degrees clockwise.
+    let image = decode("rotated.jpg");
+    assert_eq!((image.width, image.height), (8, 16));
+    assert!(pixel(&image, 4, 3)[0] > 200, "red on top");
+    assert!(pixel(&image, 4, 12)[2] > 200, "blue below");
+}
+
+#[test]
+fn svg_draws_embedded_raster_images() {
+    let png = BASE64.encode(std::fs::read(sample("sample.png")).unwrap());
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="32">
+        <image width="48" height="32" href="data:image/png;base64,{png}"/></svg>"#
+    );
+    let image = render_svg(
+        svg.as_bytes(),
+        Path::new("i.svg"),
+        &Options::default(),
+        big_window(),
+    )
+    .unwrap();
+    assert_quadrants("embedded PNG", &image, 0);
+}
+
+#[test]
 fn gif_shows_its_first_frame() {
     // The second frame is black.
     assert_eq!(pixel(&decode("sample.gif"), 0, 0), [255, 0, 0, 255]);
@@ -105,6 +131,12 @@ fn type_comes_from_the_bytes_not_the_name() {
         Kind::Svg
     );
     assert_eq!(detect(b"<html>not <svg</html>"), Kind::Text);
+    assert_eq!(detect(b"BMW service notes\n"), Kind::Text);
+    assert_eq!(detect(b"qoif is a format\n"), Kind::Text);
+    assert_eq!(
+        detect(b"P3\n1 1\n255\n255 0 0\n"),
+        Kind::Raster(ImageFormat::Pnm)
+    );
 }
 
 #[test]

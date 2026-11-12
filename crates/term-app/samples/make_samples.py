@@ -40,6 +40,11 @@ for r, g, b in zip(*[iter(img.tobytes())] * 3):
 qoi += bytes(7) + b"\x01"
 open("sample.qoi", "wb").write(qoi)
 
+# Stored sideways with EXIF orientation 6 (rotate 90 degrees clockwise to view).
+side = Image.new("RGB", (16, 8), (0, 0, 255)); side.paste((255, 0, 0), (0, 0, 8, 8))
+exif = Image.Exif(); exif[0x0112] = 6
+side.save("rotated.jpg", quality=95, subsampling=0, exif=exif)
+
 # Same file, misleading names: the type comes from the bytes.
 open("png-named.jpg", "wb").write(open("sample.png", "rb").read())
 
