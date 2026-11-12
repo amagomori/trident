@@ -375,6 +375,15 @@ fn review_edge_cases() {
     ));
     assert_eq!(t.cursor_position(), Some((23, 79)));
 
+    // A tall image scrolls the screen so its bottom row is on screen.
+    t.advance(b"\x1b[H\x1b_Ga=p,i=1,r=30,q=2\x1b\\");
+    let tall = t
+        .visible_placements()
+        .into_iter()
+        .find(|v| v.placement.rows == 30);
+    assert_eq!(tall.map(|v| v.row), Some(23 - 29));
+    assert_eq!(t.cursor_position().map(|p| p.0), Some(23));
+
     // A failed upload under an image number keeps the number on the old image.
     t.advance(&apc("a=t,f=32,s=1,v=1,I=3,q=2", &[0; 4]));
     let old = t.kitty.numbers[&3];
