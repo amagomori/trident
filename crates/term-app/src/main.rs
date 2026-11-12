@@ -624,7 +624,7 @@ impl ApplicationHandler<UserEvent> for App {
                         &mut s.fonts,
                         pad,
                         self.focused,
-                        s.pty.flow.paused.then_some("Output paused - press Ctrl+Q"),
+                        s.pty.flow.banner().as_deref(),
                     );
                 }
             }

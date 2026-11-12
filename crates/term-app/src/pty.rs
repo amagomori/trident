@@ -1,5 +1,6 @@
 //! Spawning the shell on a pseudo-terminal and pumping its output to the UI thread.
 
+use crate::flow_control::FlowSettings;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -194,17 +195,16 @@ impl Pty {
         if bytes.is_empty() {
             return;
         }
-        let (ixon, ixany) = self.flow_flags().unwrap_or((false, false));
+        let settings = self.flow_flags().unwrap_or_default();
         self.flow.input(
             bytes,
-            ixon,
-            ixany,
+            settings,
             self.output.read_sequence.load(Ordering::SeqCst),
         );
         let _ = self.input.send(bytes.to_vec());
     }
 
-    fn flow_flags(&self) -> Option<(bool, bool)> {
+    fn flow_flags(&self) -> Option<FlowSettings> {
         #[cfg(unix)]
         {
             let fd = self.master.as_raw_fd()?;
@@ -214,16 +214,24 @@ impl Pty {
                 return None;
             }
             // SAFETY: tcgetattr succeeded.
-            let flags = unsafe { attrs.assume_init() }.c_iflag;
-            Some((flags & libc::IXON != 0, flags & libc::IXANY != 0))
+            let attrs = unsafe { attrs.assume_init() };
+            let key = |index: usize| {
+                let value = attrs.c_cc[index];
+                (value != libc::_POSIX_VDISABLE).then_some(value)
+            };
+            Some(FlowSettings {
+                ixon: attrs.c_iflag & libc::IXON != 0,
+                ixany: attrs.c_iflag & libc::IXANY != 0,
+                stop: key(libc::VSTOP),
+                start: key(libc::VSTART),
+            })
         }
         #[cfg(not(unix))]
         None
     }
 
     pub fn refresh_flow(&mut self) {
-        let (ixon, _) = self.flow_flags().unwrap_or((false, false));
-        self.flow.flags(ixon);
+        self.flow.flags(self.flow_flags().unwrap_or_default());
     }
 
     pub fn resize(&self, cols: usize, rows: usize, cell: (f32, f32)) {
