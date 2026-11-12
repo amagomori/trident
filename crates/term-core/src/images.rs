@@ -60,6 +60,10 @@ pub struct Placement {
     pub y_offset: u32,
     pub source: Rect,
     pub z: i32,
+    /// The client gave the cell span: the image is scaled to fill it on that axis instead
+    /// of being drawn at its pixel size.
+    pub fixed_cols: bool,
+    pub fixed_rows: bool,
 }
 
 /// A placement that overlaps the viewport. `row` is the viewport row of its top edge and is
@@ -84,6 +88,7 @@ pub enum ImageError {
 struct StoredImage {
     image: Image,
     last_used: u64,
+    version: u64,
 }
 
 pub(crate) struct ImageStore {
@@ -170,15 +175,26 @@ impl Terminal {
         }
         let last_used = self.images.tick();
         self.images.bytes += len;
-        self.images
-            .images
-            .insert(id, StoredImage { image, last_used });
+        self.images.images.insert(
+            id,
+            StoredImage {
+                image,
+                last_used,
+                version: last_used,
+            },
+        );
         self.images.generation += 1;
         Ok(())
     }
 
     pub fn image(&self, id: u32) -> Option<&Image> {
         self.images.images.get(&id).map(|s| &s.image)
+    }
+
+    /// The image with id `id` and a number that changes whenever that id is given new pixels,
+    /// so a renderer can tell a cached copy is stale.
+    pub fn image_with_version(&self, id: u32) -> Option<(&Image, u64)> {
+        self.images.images.get(&id).map(|s| (&s.image, s.version))
     }
 
     /// Removes an image and all its placements on both screens.
@@ -293,6 +309,8 @@ impl Terminal {
             y_offset: opts.y_offset,
             source,
             z: opts.z,
+            fixed_cols: opts.cols != 0,
+            fixed_rows: opts.rows != 0,
         };
         let placements = &mut self.screen_mut().placements;
         if opts.placement_id != 0 {
