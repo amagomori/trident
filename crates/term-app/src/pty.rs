@@ -3,6 +3,8 @@
 use crate::flow_control::FlowSettings;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -29,14 +31,54 @@ struct Queue {
 struct Pending {
     sequence: u64,
     bytes: Vec<u8>,
+    shell_returns: Vec<usize>,
     lines: usize,
     closed: bool,
 }
 
 impl Pending {
+    fn append(&mut self, bytes: &[u8], shell_returned: bool) {
+        if shell_returned {
+            self.shell_returns.push(self.bytes.len());
+        }
+        self.bytes.extend_from_slice(bytes);
+        self.lines += bytes.iter().filter(|&&b| b == b'\n').count();
+    }
+
+    fn take_output(&mut self) -> Output {
+        self.lines = 0;
+        Output {
+            bytes: std::mem::take(&mut self.bytes),
+            shell_returns: std::mem::take(&mut self.shell_returns),
+        }
+    }
+
     fn full(&self) -> bool {
         self.bytes.len() >= MAX_QUEUED
             || (self.bytes.len() >= MIN_QUEUED && self.lines >= MIN_LINES)
+    }
+}
+
+pub struct Output {
+    pub bytes: Vec<u8>,
+    pub shell_returns: Vec<usize>,
+}
+
+#[derive(Default)]
+struct Foreground {
+    away: bool,
+}
+
+impl Foreground {
+    fn sample(&mut self, shell: Option<bool>) -> bool {
+        match shell {
+            Some(true) => std::mem::take(&mut self.away),
+            Some(false) => {
+                self.away = true;
+                false
+            }
+            None => false,
+        }
     }
 }
 
@@ -98,6 +140,14 @@ impl Pty {
             .spawn_command(cmd)
             .map_err(|e| format!("cannot start shell: {e}"))?;
         drop(pair.slave);
+        let shell_pid = child.process_id();
+        #[cfg(unix)]
+        let foreground_fd = pair
+            .master
+            .as_raw_fd()
+            .map(|fd| unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned())
+            .transpose()
+            .map_err(|e| format!("cannot clone pty: {e}"))?;
 
         let mut reader = pair
             .master
@@ -133,11 +183,25 @@ impl Pty {
             .name("pty-reader".into())
             .spawn(move || {
                 let mut buf = vec![0u8; 64 * 1024];
+                let mut foreground = Foreground::default();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let sequence = queue.read_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                            #[cfg(unix)]
+                            let shell = foreground_fd.as_ref().and_then(|fd| {
+                                let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+                                shell_pid
+                                    .filter(|_| group > 0)
+                                    .map(|pid| group as u32 == pid)
+                            });
+                            #[cfg(not(unix))]
+                            let shell = {
+                                let _ = shell_pid;
+                                None
+                            };
+                            let shell_returned = foreground.sample(shell);
                             let mut p = queue.pending.lock().unwrap();
                             if p.full() {
                                 // The UI may be holding off parsing until its next frame.
@@ -150,9 +214,8 @@ impl Pty {
                             if p.closed {
                                 return;
                             }
-                            p.bytes.extend_from_slice(&buf[..n]);
                             p.sequence = sequence;
-                            p.lines += buf[..n].iter().filter(|&&b| b == b'\n').count();
+                            p.append(&buf[..n], shell_returned);
                             drop(p);
                             if !pending.swap(true, Ordering::AcqRel) {
                                 wake(false);
@@ -176,16 +239,15 @@ impl Pty {
     }
 
     /// Everything the shell wrote since the last call.
-    pub fn take_output(&mut self) -> Vec<u8> {
+    pub fn take_output(&mut self) -> Output {
         let mut p = self.output.pending.lock().unwrap();
-        p.lines = 0;
-        let bytes = std::mem::take(&mut p.bytes);
-        if !bytes.is_empty() {
+        let output = p.take_output();
+        if !output.bytes.is_empty() {
             self.flow.output(p.sequence);
         }
         drop(p);
         self.output.room.notify_one();
-        bytes
+        output
     }
 
     /// Whether the reader is waiting for the UI to take its output.
@@ -246,5 +308,40 @@ impl Drop for Pty {
         self.output.pending.lock().unwrap().closed = true;
         self.output.room.notify_one();
         let _ = self.child.kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreground_reset_requires_a_return_from_away() {
+        let mut foreground = Foreground::default();
+        assert!(!foreground.sample(None));
+        assert!(!foreground.sample(Some(true)));
+        assert!(!foreground.sample(Some(false)));
+        assert!(!foreground.sample(None));
+        assert!(!foreground.sample(Some(false)));
+        assert!(foreground.sample(Some(true)));
+        assert!(!foreground.sample(Some(true)));
+    }
+
+    #[test]
+    fn queue_offsets_follow_chunks_and_restart_after_drain() {
+        let mut pending = Pending::default();
+        pending.append(b"away\n", false);
+        pending.append(b"prompt", true);
+        pending.append(b"away", false);
+        pending.append(b"prompt", true);
+        let output = pending.take_output();
+        assert_eq!(output.bytes, b"away\npromptawayprompt");
+        assert_eq!(output.shell_returns, [5, 15]);
+        assert_eq!(pending.lines, 0);
+        let empty = pending.take_output();
+        assert!(empty.bytes.is_empty());
+        assert!(empty.shell_returns.is_empty());
+        pending.append(b"prompt", true);
+        assert_eq!(pending.take_output().shell_returns, [0]);
     }
 }

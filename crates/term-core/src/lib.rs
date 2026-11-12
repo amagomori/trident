@@ -267,6 +267,21 @@ impl Terminal {
         self.alt_active
     }
 
+    pub fn reset_input_modes(&mut self) -> bool {
+        if self.alt_active {
+            return false;
+        }
+        let changed = self.modes.mouse != MouseMode::Off
+            || self.modes.sgr_mouse
+            || self.modes.focus_events
+            || self.modes.bracketed_paste;
+        self.modes.mouse = MouseMode::Off;
+        self.modes.sgr_mouse = false;
+        self.modes.focus_events = false;
+        self.modes.bracketed_paste = false;
+        changed
+    }
+
     /// Cursor position in viewport coordinates, if it is visible.
     pub fn cursor_position(&self) -> Option<(usize, usize)> {
         let row = self.cursor.row + self.display_offset;
