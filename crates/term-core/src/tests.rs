@@ -285,6 +285,11 @@ mod bench {
     const INPUT_BYTES: usize = 2 << 20;
     const KEYSTROKES: usize = 2_000;
     const IMAGES: usize = 2_000;
+    /// Bytes `term-app` passes to one `advance` call: one wake drains the 16 PTY reads
+    /// `sync_channel(16)` queues (`pty.rs`), well under `MAX_BYTES_PER_WAKE` (`main.rs`).
+    /// macOS PTY reads return about 1 KiB each; Linux ones at most 4095 bytes (n_tty).
+    const MACOS_BATCH: usize = 16 * 1024;
+    const LINUX_BATCH: usize = 16 * 4095;
 
     /// xorshift64, so every run feeds identical input.
     struct Rng(u64);
@@ -414,8 +419,10 @@ mod bench {
     }
 
     #[inline(never)]
-    fn measured_advance(term: &mut Terminal, input: &[u8]) {
-        term.advance(black_box(input));
+    fn measured_advance(term: &mut Terminal, input: &[u8], batch: usize) {
+        for chunk in input.chunks(batch) {
+            term.advance(black_box(chunk));
+        }
     }
 
     /// One keystroke echoed by the shell, then the walk over every visible cell that the
@@ -460,18 +467,55 @@ mod bench {
     }
 
     enum Kind {
-        Throughput(fn() -> Vec<u8>),
+        /// Input fed in batches of the given size, like the app's PTY reads.
+        Throughput(fn() -> Vec<u8>, usize),
         Keystrokes,
         Images,
     }
 
     const WORKLOADS: &[(&str, Kind)] = &[
-        ("dense_ascii", Kind::Throughput(dense_ascii)),
-        ("scrolling", Kind::Throughput(scrolling)),
-        ("colored_text", Kind::Throughput(colored_text)),
-        ("cursor_motion", Kind::Throughput(cursor_motion)),
-        ("alt_screen", Kind::Throughput(alt_screen)),
-        ("unicode", Kind::Throughput(unicode)),
+        ("dense_ascii", Kind::Throughput(dense_ascii, usize::MAX)),
+        ("scrolling", Kind::Throughput(scrolling, usize::MAX)),
+        ("colored_text", Kind::Throughput(colored_text, usize::MAX)),
+        ("cursor_motion", Kind::Throughput(cursor_motion, usize::MAX)),
+        ("alt_screen", Kind::Throughput(alt_screen, usize::MAX)),
+        ("unicode", Kind::Throughput(unicode, usize::MAX)),
+        (
+            "dense_ascii_macos",
+            Kind::Throughput(dense_ascii, MACOS_BATCH),
+        ),
+        ("scrolling_macos", Kind::Throughput(scrolling, MACOS_BATCH)),
+        (
+            "colored_text_macos",
+            Kind::Throughput(colored_text, MACOS_BATCH),
+        ),
+        (
+            "cursor_motion_macos",
+            Kind::Throughput(cursor_motion, MACOS_BATCH),
+        ),
+        (
+            "alt_screen_macos",
+            Kind::Throughput(alt_screen, MACOS_BATCH),
+        ),
+        ("unicode_macos", Kind::Throughput(unicode, MACOS_BATCH)),
+        (
+            "dense_ascii_linux",
+            Kind::Throughput(dense_ascii, LINUX_BATCH),
+        ),
+        ("scrolling_linux", Kind::Throughput(scrolling, LINUX_BATCH)),
+        (
+            "colored_text_linux",
+            Kind::Throughput(colored_text, LINUX_BATCH),
+        ),
+        (
+            "cursor_motion_linux",
+            Kind::Throughput(cursor_motion, LINUX_BATCH),
+        ),
+        (
+            "alt_screen_linux",
+            Kind::Throughput(alt_screen, LINUX_BATCH),
+        ),
+        ("unicode_linux", Kind::Throughput(unicode, LINUX_BATCH)),
         ("keystroke_latency", Kind::Keystrokes),
         ("images", Kind::Images),
     ];
@@ -495,13 +539,13 @@ mod bench {
                 continue;
             }
             let (unit, count, mut secs) = match kind {
-                Kind::Throughput(generate) => {
+                Kind::Throughput(generate, batch) => {
                     let input = generate();
                     let secs: Vec<f64> = (0..iters)
                         .map(|_| {
                             let mut term = Terminal::new(COLS, ROWS);
                             let start = Instant::now();
-                            measured_advance(&mut term, &input);
+                            measured_advance(&mut term, &input, *batch);
                             start.elapsed().as_secs_f64()
                         })
                         .collect();
