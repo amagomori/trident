@@ -25,12 +25,19 @@ TEST = "bench_workloads"
 
 def build(checkout: Path, out_dir: Path, label: str) -> tuple[Path, str] | None:
     """Build the test binary that holds the benchmarks; None if the checkout has none."""
+    if "CARGO_TARGET_DIR" in os.environ:
+        # Both checkouts are the same package, so Cargo can hand back the other
+        # checkout's binary as fresh. Give each its own target dir.
+        env = {**os.environ, "CARGO_TARGET_DIR": f"{os.environ['CARGO_TARGET_DIR']}/{label}"}
+    else:
+        env = None
     result = subprocess.run(
         ["cargo", "test", "--release", "--workspace", "--no-run", "--message-format=json"],
         cwd=checkout,
         stdout=subprocess.PIPE,
         check=True,
         text=True,
+        env=env,
     )
     for line in result.stdout.splitlines():
         msg = json.loads(line)
@@ -43,7 +50,7 @@ def build(checkout: Path, out_dir: Path, label: str) -> tuple[Path, str] | None:
         for entry in listed.splitlines():
             name = entry.removesuffix(": test")
             if name != entry and name.split("::")[-1] == TEST:
-                # A shared CARGO_TARGET_DIR means the next build overwrites this binary.
+                # With a shared CARGO_TARGET_DIR the next build would overwrite it.
                 copy = out_dir / f"{label}-{Path(exe).name}"
                 shutil.copy2(exe, copy)
                 return copy, name
