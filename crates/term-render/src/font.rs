@@ -1,36 +1,18 @@
-//! Font loading, cell metrics and glyph rasterization (via ab_glyph), with fallback fonts
-//! for characters the primary font lacks. Fonts are parsed lazily, so even large CJK
-//! fallback fonts cost little memory beyond their file contents.
+//! Font loading, cell metrics and glyph rasterization (via ab_glyph), with system fallback
+//! fonts for characters the primary font lacks. Fallback fonts are memory-mapped and parsed
+//! lazily, so even large CJK and emoji fonts cost little memory beyond the pages touched.
 
-use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
-use std::path::{Path, PathBuf};
+use crate::color;
+use crate::fallback::{self, FontFile, SystemFonts};
+use ab_glyph::{Font, FontArc, FontRef, GlyphId, PxScale, ScaleFont, point};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 const REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 const BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
 const ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf");
 const BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf");
-
-#[cfg(target_os = "macos")]
-const FALLBACK_FONTS: &[&str] = &[
-    "/System/Library/Fonts/Menlo.ttc",
-    "/System/Library/Fonts/Apple Symbols.ttf",
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-];
-
-#[cfg(not(target_os = "macos"))]
-const FALLBACK_FONTS: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
-    "/usr/share/fonts/truetype/unifont/unifont.ttf",
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Style {
@@ -68,13 +50,49 @@ pub struct RasterizedGlyph {
     /// Offset of the bitmap's top-left corner from the cell's top-left corner.
     pub left: f32,
     pub top: f32,
+    /// One byte of coverage per pixel, or straight-alpha RGBA when `color` is set.
     pub coverage: Vec<u8>,
+    pub color: bool,
+}
+
+/// A loaded fallback font; `face` is set for fonts with color glyphs.
+struct Fallback {
+    font: FontArc,
+    face: Option<ttf_parser::Face<'static>>,
+}
+
+/// Memory-maps a font file for the rest of the program, once per path.
+pub(crate) fn map(path: &Path) -> std::io::Result<&'static [u8]> {
+    static MAPS: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
+    let mut maps = MAPS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("font maps");
+    if let Some(data) = maps.get(path) {
+        return Ok(data);
+    }
+    let file = std::fs::File::open(path)?;
+    // Font files are not modified while in use; a truncated file would only fail to parse.
+    let map = unsafe { memmap2::Mmap::map(&file)? };
+    let data: &'static [u8] = Box::leak(Box::new(map));
+    maps.insert(path.to_owned(), data);
+    Ok(data)
+}
+
+fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
+    let data = map(path).ok()?;
+    let font = FontArc::new(FontRef::try_from_slice_and_index(data, *index).ok()?);
+    let face = ttf_parser::Face::parse(data, *index)
+        .ok()
+        .filter(color::has_color);
+    Some(Fallback { font, face })
 }
 
 pub struct Fonts {
     faces: [FontArc; 4],
-    /// Fallback fonts that exist on this system, each loaded on first need.
-    fallbacks: Vec<(PathBuf, Option<Option<FontArc>>)>,
+    system: SystemFonts,
+    /// Fallback fonts by file, each loaded on first need (`None` if it failed to load).
+    fallbacks: HashMap<FontFile, Option<Fallback>>,
     pub px: f32,
     pub metrics: CellMetrics,
 }
@@ -107,12 +125,8 @@ impl Fonts {
         };
         let mut fonts = Fonts {
             faces,
-            fallbacks: FALLBACK_FONTS
-                .iter()
-                .map(PathBuf::from)
-                .filter(|p| p.exists())
-                .map(|p| (p, None))
-                .collect(),
+            system: SystemFonts::new(),
+            fallbacks: HashMap::new(),
             px,
             metrics: CellMetrics {
                 width: 0.0,
@@ -143,13 +157,15 @@ impl Fonts {
         };
     }
 
-    fn fallback_for(&mut self, c: char) -> Option<&FontArc> {
-        let index = self.fallbacks.iter_mut().position(|(path, font)| {
-            font.get_or_insert_with(|| std::fs::read(&*path).ok().and_then(load))
+    fn fallback_for(&mut self, c: char, emoji: bool) -> Option<&Fallback> {
+        let file = self.system.lookup(c, emoji).into_iter().find(|file| {
+            self.fallbacks
+                .entry(file.clone())
+                .or_insert_with(|| load_fallback(file))
                 .as_ref()
-                .is_some_and(|f| f.glyph_id(c) != GlyphId(0))
+                .is_some_and(|f| f.font.glyph_id(c) != GlyphId(0))
         })?;
-        self.fallbacks[index].1.as_ref()?.as_ref()
+        self.fallbacks.get(&file)?.as_ref()
     }
 
     /// Rasterizes `c` to fit `cells` cells; `None` for blank glyphs.
@@ -157,11 +173,30 @@ impl Fonts {
         let metrics = self.metrics;
         let px = self.px;
         let face = &self.faces[style as usize];
-        let font = if face.glyph_id(c) != GlyphId(0) {
+        let emoji = fallback::prefers_emoji(c, cells);
+        let font = if face.glyph_id(c) != GlyphId(0) && !emoji {
             face.clone()
         } else {
-            let fallback = self.fallback_for(c).cloned();
-            fallback.unwrap_or_else(|| self.faces[style as usize].clone())
+            match self.fallback_for(c, emoji) {
+                Some(Fallback {
+                    face: Some(color_face),
+                    ..
+                }) => {
+                    let target = color::Target {
+                        width: metrics.width * cells as f32,
+                        height: metrics.height,
+                        baseline: metrics.baseline,
+                        px,
+                    };
+                    let id = color_face.glyph_index(c)?;
+                    if let Some(glyph) = color::rasterize(color_face, id, target) {
+                        return Some(glyph);
+                    }
+                    self.fallback_for(c, emoji)?.font.clone()
+                }
+                Some(f) => f.font.clone(),
+                None => self.faces[style as usize].clone(),
+            }
         };
         let id = font.glyph_id(c);
         let mut px_scale = scale(&font, px);
@@ -191,6 +226,63 @@ impl Fonts {
             left: bounds.min.x,
             top: metrics.baseline + bounds.min.y,
             coverage,
+            color: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fonts() -> Fonts {
+        Fonts::new(None, 16.0).expect("bundled font")
+    }
+
+    #[test]
+    fn primary_font_glyphs_are_coverage() {
+        let glyph = fonts().rasterize('A', Style::Regular, 1).expect("glyph");
+        assert!(!glyph.color);
+        assert_eq!(glyph.coverage.len(), glyph.width * glyph.height);
+    }
+
+    /// Needs a system emoji font (Apple Color Emoji, Noto Color Emoji); skipped without one.
+    #[test]
+    fn emoji_render_in_color_within_two_cells() {
+        let mut fonts = fonts();
+        if fonts
+            .fallback_for('😀', true)
+            .is_none_or(|f| f.face.is_none())
+        {
+            eprintln!("no color emoji font on this system; skipping");
+            return;
+        }
+        let glyph = fonts.rasterize('😀', Style::Regular, 2).expect("emoji");
+        assert!(glyph.color);
+        assert_eq!(glyph.coverage.len(), glyph.width * glyph.height * 4);
+        assert!(glyph.width as f32 <= fonts.metrics.width * 2.0 + 1.0);
+        assert!(glyph.height as f32 <= fonts.metrics.height + 1.0);
+        let colorful = glyph
+            .coverage
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|p| p[3] > 128 && (p[0].abs_diff(p[1]) > 40 || p[1].abs_diff(p[2]) > 40));
+        assert!(colorful, "emoji has no saturated pixels");
+    }
+
+    /// Needs a system font covering CJK; skipped without one.
+    #[test]
+    fn missing_glyphs_come_from_system_fonts() {
+        let mut fonts = fonts();
+        if fonts.fallback_for('中', false).is_none() {
+            eprintln!("no CJK font on this system; skipping");
+            return;
+        }
+        let glyph = fonts
+            .rasterize('中', Style::Regular, 2)
+            .expect("fallback glyph");
+        assert!(!glyph.color);
+        assert!(glyph.coverage.iter().any(|&c| c > 0));
     }
 }
