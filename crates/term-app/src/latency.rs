@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "macos")]
 #[path = "present_macos.rs"]
 mod macos;
+#[cfg(unix)]
+#[path = "latency_signals.rs"]
+mod signals;
 #[cfg(target_os = "linux")]
 #[path = "present_wayland.rs"]
 mod wayland;
@@ -26,6 +29,8 @@ pub struct Latency {
     feedback: Arc<Mutex<Vec<String>>>,
     #[cfg(target_os = "linux")]
     wayland: Option<wayland::Feedback>,
+    #[cfg(unix)]
+    signals: Option<signals::Signals>,
 }
 
 impl Latency {
@@ -58,6 +63,14 @@ impl Latency {
             feedback: Arc::default(),
             #[cfg(target_os = "linux")]
             wayland: None,
+            #[cfg(unix)]
+            signals: match signals::Signals::install() {
+                Ok(signals) => Some(signals),
+                Err(error) => {
+                    eprintln!("terminal: latency signals unavailable: {error}");
+                    None
+                }
+            },
         })
     }
 
@@ -147,7 +160,20 @@ impl Latency {
     }
 
     pub fn finished(&self, now: Instant) -> bool {
+        #[cfg(unix)]
+        if self.signals.as_ref().is_some_and(|s| s.terminated()) {
+            return true;
+        }
         self.remaining == 0 && self.deadline.is_some_and(|d| now >= d)
+    }
+
+    pub fn wake_deadline(&self, now: Instant) -> Option<Instant> {
+        #[cfg(unix)]
+        if self.signals.is_some() {
+            let poll = now + Duration::from_millis(25);
+            return Some(self.deadline.map_or(poll, |deadline| deadline.min(poll)));
+        }
+        self.deadline
     }
 }
 
@@ -183,6 +209,8 @@ mod tests {
             feedback: Arc::default(),
             #[cfg(target_os = "linux")]
             wayland: None,
+            #[cfg(unix)]
+            signals: None,
         };
         log.frame(now, 0);
         log.input(now);

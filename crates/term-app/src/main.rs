@@ -562,7 +562,7 @@ impl ApplicationHandler<UserEvent> for App {
             .session
             .as_ref()
             .and_then(|s| s.latency.as_ref())
-            .and_then(|l| l.deadline)
+            .and_then(|l| l.wake_deadline(now))
         {
             let deadline = match event_loop.control_flow() {
                 ControlFlow::WaitUntil(other) => deadline.min(other),
