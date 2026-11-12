@@ -31,21 +31,23 @@ from app_bench import build_app, measure_app, report_app
 TEST = "bench_workloads"
 
 
-def build(checkout: Path, out_dir: Path, label: str) -> tuple[Path, str] | None:
-    """Build the test binary that holds the benchmarks; None if the checkout has none."""
+def cargo_env(label: str) -> dict[str, str] | None:
     if "CARGO_TARGET_DIR" in os.environ:
         # Both checkouts are the same package, so Cargo can hand back the other
         # checkout's binary as fresh. Give each its own target dir.
-        env = {**os.environ, "CARGO_TARGET_DIR": f"{os.environ['CARGO_TARGET_DIR']}/{label}"}
-    else:
-        env = None
+        return {**os.environ, "CARGO_TARGET_DIR": f"{os.environ['CARGO_TARGET_DIR']}/{label}"}
+    return None
+
+
+def build(checkout: Path, out_dir: Path, label: str) -> tuple[Path, str] | None:
+    """Build the test binary that holds the benchmarks; None if the checkout has none."""
     result = subprocess.run(
         ["cargo", "test", "--release", "--workspace", "--no-run", "--message-format=json"],
         cwd=checkout,
         stdout=subprocess.PIPE,
         check=True,
         text=True,
-        env=env,
+        env=cargo_env(label),
     )
     for line in result.stdout.splitlines():
         msg = json.loads(line)
@@ -221,8 +223,8 @@ def main() -> int:
         if not args.no_app:
             apps = {}
             if args.base:
-                apps["base"] = build_app(args.base.resolve(), tmp, "base")
-            apps["head"] = build_app(args.head.resolve(), tmp, "head")
+                apps["base"] = build_app(args.base.resolve(), tmp, "base", cargo_env("base"))
+            apps["head"] = build_app(args.head.resolve(), tmp, "head", cargo_env("head"))
             results["app"] = measure_app(apps, args.app_rounds)
 
     text, regressions = report(results, args.threshold)

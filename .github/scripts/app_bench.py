@@ -33,14 +33,11 @@ METRICS = [
 ]
 
 
-def build_app(checkout: Path, out_dir: Path, label: str) -> Path:
-    # One target dir per checkout: with a shared one cargo sees the same unit hash for both
-    # and, judging freshness by mtime, can reuse the other checkout's binary.
-    target = Path(os.environ.get("CARGO_TARGET_DIR", checkout / "target")) / f"app-{label}"
+def build_app(checkout: Path, out_dir: Path, label: str, env: dict[str, str] | None) -> Path:
     result = subprocess.run(
         ["cargo", "build", "--release", "--workspace", "--bins", "--message-format=json"],
         cwd=checkout,
-        env={**os.environ, "CARGO_TARGET_DIR": str(target)},
+        env=env,
         stdout=subprocess.PIPE,
         check=True,
         text=True,
