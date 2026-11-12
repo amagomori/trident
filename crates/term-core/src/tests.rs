@@ -159,6 +159,39 @@ fn device_status_reports() {
 }
 
 #[test]
+fn synchronized_output() {
+    let mut t = term(10, 5, "\x1b[?2026$p");
+    assert!(!t.modes.synchronized_output);
+    assert_eq!(t.take_responses(), b"\x1b[?2026;2$y");
+    t.advance(b"\x1b[?2026h\x1b[?2026$p");
+    assert!(t.modes.synchronized_output);
+    assert_eq!(t.take_responses(), b"\x1b[?2026;1$y");
+    t.advance(b"\x1b[?2026l\x1b[?2026$p\x1b[?9999$p");
+    assert!(!t.modes.synchronized_output);
+    assert_eq!(t.take_responses(), b"\x1b[?2026;2$y\x1b[?9999;0$y");
+    t.advance(b"\x1b[?2026h\x1bc");
+    assert!(!t.modes.synchronized_output);
+}
+
+#[test]
+fn private_mode_reports() {
+    for mode in [
+        1, 6, 7, 25, 47, 1047, 1049, 1000, 1002, 1003, 1004, 1006, 1007, 2004,
+    ] {
+        let mut t = term(10, 5, "");
+        for (action, status) in [('h', 1), ('l', 2)] {
+            t.advance(format!("\x1b[?{mode}{action}\x1b[?{mode}$p").as_bytes());
+            assert_eq!(
+                t.take_responses(),
+                format!("\x1b[?{mode};{status}$y").as_bytes()
+            );
+        }
+    }
+    let mut t = term(10, 5, "\x1b[?1000h\x1b[?1002$p\x1b[?1003$p");
+    assert_eq!(t.take_responses(), b"\x1b[?1002;2$y\x1b[?1003;2$y");
+}
+
+#[test]
 fn title_and_modes() {
     let mut t = term(
         10,
