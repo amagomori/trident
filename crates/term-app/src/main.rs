@@ -14,14 +14,18 @@ use term_render::{Fonts, PADDING, Renderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
-/// Upper bound on shell output parsed per wake-up, so huge bursts can't starve rendering.
-const MAX_BYTES_PER_WAKE: usize = 1 << 20;
+/// Output parsed since the last frame before more is held back, so a flood reaches
+/// `advance` in batches long enough to skip the lines it evicts. Interactive output (echo,
+/// replies to queries) never gets near it and is parsed the moment it arrives.
+const DEFER_AFTER: usize = 64 * 1024;
+/// How long held-back output waits, unless the queue fills first: about one 60 Hz frame.
+const MAX_DEFER: Duration = Duration::from_millis(16);
 
 #[derive(Debug)]
 enum UserEvent {
@@ -98,6 +102,16 @@ struct Session {
     fonts: Fonts,
     term: Terminal,
     pty: Pty,
+    /// Output parsed since the last frame was drawn.
+    since_frame: usize,
+    /// When output was first held back.
+    deferred: Option<Instant>,
+}
+
+/// Whether output that just arrived can be held back: only during a flood, and never once
+/// the reader is stalled on a full queue.
+fn defer_output(deferring: bool, since_frame: usize, queue_full: bool) -> bool {
+    (deferring || since_frame >= DEFER_AFTER) && !queue_full
 }
 
 struct App {
@@ -201,6 +215,8 @@ impl App {
             fonts,
             term,
             pty,
+            since_frame: 0,
+            deferred: None,
         })
     }
 
@@ -226,27 +242,25 @@ impl App {
         self.resize_grid();
     }
 
+    fn output_ready(&mut self) {
+        let Some(s) = &mut self.session else { return };
+        if defer_output(s.deferred.is_some(), s.since_frame, s.pty.output_full()) {
+            s.deferred.get_or_insert_with(Instant::now);
+        } else {
+            self.process_output();
+        }
+    }
+
     fn process_output(&mut self) {
         let Some(s) = &mut self.session else { return };
         s.pty.wake_pending.store(false, Ordering::Release);
-        // One `advance` over the whole queued window, so a burst long enough to scroll
-        // through all of scrollback only builds the lines that end up kept.
-        let mut batch = Vec::new();
-        while batch.len() < MAX_BYTES_PER_WAKE {
-            let Ok(bytes) = s.pty.output.try_recv() else {
-                break;
-            };
-            if batch.is_empty() {
-                batch = bytes;
-            } else {
-                batch.extend_from_slice(&bytes);
-            }
-        }
+        s.deferred = None;
+        // One `advance` over everything queued, so a burst long enough to scroll through
+        // all of scrollback only builds the lines that end up kept.
+        let batch = s.pty.take_output();
         let processed = batch.len();
+        s.since_frame += processed;
         s.term.advance(&batch);
-        if processed >= MAX_BYTES_PER_WAKE && !s.pty.wake_pending.swap(true, Ordering::AcqRel) {
-            let _ = self.proxy.send_event(UserEvent::Output);
-        }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
         if let Some(title) = s.term.take_title() {
@@ -522,11 +536,23 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Output => self.process_output(),
+            UserEvent::Output => self.output_ready(),
             UserEvent::Exit => {
                 self.process_output();
                 event_loop.exit();
             }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let deferred = self.session.as_ref().and_then(|s| s.deferred);
+        match deferred {
+            Some(since) if since.elapsed() >= MAX_DEFER => {
+                self.process_output();
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            Some(since) => event_loop.set_control_flow(ControlFlow::WaitUntil(since + MAX_DEFER)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 
@@ -574,6 +600,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
                 if let Some(s) = &mut self.session {
+                    s.since_frame = 0;
                     let pad = PADDING * s.window.scale_factor() as f32;
                     s.renderer.render(&s.term, &mut s.fonts, pad, self.focused);
                 }
@@ -634,5 +661,14 @@ mod tests {
                 (2, 1)
             );
         }
+    }
+    #[test]
+    fn output_is_held_back_only_during_a_flood() {
+        assert!(!defer_output(false, 0, false));
+        assert!(!defer_output(false, DEFER_AFTER - 1, false));
+        assert!(defer_output(false, DEFER_AFTER, false));
+        assert!(defer_output(true, 0, false));
+        assert!(!defer_output(false, DEFER_AFTER, true));
+        assert!(!defer_output(true, 0, true));
     }
 }

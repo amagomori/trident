@@ -2,16 +2,47 @@
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Condvar, Mutex};
+
+/// Output the reader thread queues before it waits for the UI, once it also holds
+/// `MIN_LINES` lines. That many lines is well past a screen plus default scrollback, so a
+/// flood's batch is long enough to skip building the lines it evicts, even with long lines.
+const MIN_QUEUED: usize = 1 << 20;
+const MIN_LINES: usize = 32 * 1024;
+/// The most the reader queues whatever the line count, which is also the most the UI
+/// parses per wake-up, so huge bursts can't starve rendering.
+const MAX_QUEUED: usize = 8 << 20;
+
+/// Shell output read but not yet parsed, as one buffer: small reads (macOS returns about
+/// 1 KiB per read) still reach the parser as one batch.
+#[derive(Default)]
+struct Queue {
+    pending: Mutex<Pending>,
+    room: Condvar,
+}
+
+#[derive(Default)]
+struct Pending {
+    bytes: Vec<u8>,
+    lines: usize,
+    closed: bool,
+}
+
+impl Pending {
+    fn full(&self) -> bool {
+        self.bytes.len() >= MAX_QUEUED
+            || (self.bytes.len() >= MIN_QUEUED && self.lines >= MIN_LINES)
+    }
+}
 
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Vec<u8>>,
     child: Box<dyn Child + Send + Sync>,
-    pub output: Receiver<Vec<u8>>,
+    output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
     pub wake_pending: Arc<AtomicBool>,
 }
@@ -89,7 +120,8 @@ impl Pty {
 
         // Bounded, so a shell producing output faster than we parse it is paused by
         // the kernel instead of growing this queue without limit.
-        let (tx, rx): (SyncSender<Vec<u8>>, _) = sync_channel(16);
+        let output = Arc::new(Queue::default());
+        let queue = output.clone();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let pending = wake_pending.clone();
         std::thread::Builder::new()
@@ -100,9 +132,21 @@ impl Pty {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            if tx.send(buf[..n].to_vec()).is_err() {
+                            let mut p = queue.pending.lock().unwrap();
+                            if p.full() {
+                                // The UI may be holding off parsing until its next frame.
+                                pending.store(true, Ordering::Release);
+                                wake(false);
+                            }
+                            while p.full() && !p.closed {
+                                p = queue.room.wait(p).unwrap();
+                            }
+                            if p.closed {
                                 return;
                             }
+                            p.bytes.extend_from_slice(&buf[..n]);
+                            p.lines += buf[..n].iter().filter(|&&b| b == b'\n').count();
+                            drop(p);
                             if !pending.swap(true, Ordering::AcqRel) {
                                 wake(false);
                             }
@@ -117,9 +161,24 @@ impl Pty {
             master: pair.master,
             input,
             child,
-            output: rx,
+            output,
             wake_pending,
         })
+    }
+
+    /// Everything the shell wrote since the last call.
+    pub fn take_output(&self) -> Vec<u8> {
+        let mut p = self.output.pending.lock().unwrap();
+        p.lines = 0;
+        let bytes = std::mem::take(&mut p.bytes);
+        drop(p);
+        self.output.room.notify_one();
+        bytes
+    }
+
+    /// Whether the reader is waiting for the UI to take its output.
+    pub fn output_full(&self) -> bool {
+        self.output.pending.lock().unwrap().full()
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
@@ -136,6 +195,8 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
+        self.output.pending.lock().unwrap().closed = true;
+        self.output.room.notify_one();
         let _ = self.child.kill();
     }
 }
