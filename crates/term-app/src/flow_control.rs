@@ -2,6 +2,8 @@
 pub struct FlowSettings {
     pub ixon: bool,
     pub ixany: bool,
+    pub isig: bool,
+    pub signals: [Option<u8>; 3],
     pub stop: Option<u8>,
     pub start: Option<u8>,
 }
@@ -26,7 +28,10 @@ impl FlowControl {
         let was_paused = self.paused;
         self.flags(settings);
         for &byte in bytes {
-            if Some(byte) == settings.start || (settings.ixany && Some(byte) != settings.stop) {
+            if Some(byte) == settings.start
+                || (settings.ixany && Some(byte) != settings.stop)
+                || (settings.isig && settings.signals.contains(&Some(byte)))
+            {
                 self.paused = false;
             } else if settings.ixon && Some(byte) == settings.stop {
                 self.paused = true;
@@ -73,6 +78,7 @@ mod tests {
             ixany,
             stop: Some(0x13),
             start: Some(0x11),
+            ..Default::default()
         }
     }
 
@@ -125,6 +131,38 @@ mod tests {
         assert!(!flow.input(b"x", settings(true, false), 0));
         assert!(flow.input(b"\x1b[M", settings(true, true), 0));
         assert!(!flow.input(b"\x11", settings(true, false), 0));
+    }
+
+    #[test]
+    fn signal_keys_resume_only_with_isig() {
+        for isig in [false, true] {
+            for signal in [0x03, 0x1c, 0x1a] {
+                let mut flow = FlowControl::default();
+                let settings = FlowSettings {
+                    isig,
+                    signals: [Some(0x03), Some(0x1c), Some(0x1a)],
+                    ..settings(true, false)
+                };
+                flow.input(b"\x13", settings, 0);
+                flow.protect_output_until(u64::MAX);
+                assert_eq!(flow.input(&[signal], settings, 0), isig);
+                assert_eq!(flow.paused, !isig);
+            }
+        }
+    }
+
+    #[test]
+    fn custom_and_disabled_signal_keys() {
+        let mut flow = FlowControl::default();
+        let settings = FlowSettings {
+            isig: true,
+            signals: [Some(0x18), None, None],
+            ..settings(true, false)
+        };
+        flow.input(b"\x13\x03\x1c\x1a\0", settings, 0);
+        assert!(flow.paused);
+        assert!(flow.input(b"\x18", settings, 0));
+        assert!(!flow.paused);
     }
 
     #[test]

@@ -346,6 +346,8 @@ impl Pty {
             Some(FlowSettings {
                 ixon: attrs.c_iflag & libc::IXON != 0,
                 ixany: attrs.c_iflag & libc::IXANY != 0,
+                isig: attrs.c_lflag & libc::ISIG != 0,
+                signals: [key(libc::VINTR), key(libc::VQUIT), key(libc::VSUSP)],
                 stop: key(libc::VSTOP),
                 start: key(libc::VSTART),
             })
