@@ -115,6 +115,9 @@ impl ImageStore {
         ImageStore {
             quota: self.quota,
             generation: self.generation + 1,
+            // Versions must not repeat across a reset, or a renderer could keep a texture
+            // of the old image for a new one under the same id.
+            clock: self.clock,
             ..ImageStore::new()
         }
     }

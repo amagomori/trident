@@ -556,3 +556,13 @@ fn cell_size_change_respans_pixel_sized_placements() {
     assert!(spans.contains(&(fixed.cols, fixed.rows)));
     assert_ne!(t.image_generation(), generation);
 }
+
+#[test]
+fn image_versions_do_not_repeat_after_reset() {
+    let mut t = term();
+    let (_, before) = t.image_with_version(1).unwrap();
+    t.advance(b"\x1bc");
+    t.add_image(1, image(4, 4)).unwrap();
+    let (_, after) = t.image_with_version(1).unwrap();
+    assert_ne!(before, after);
+}
