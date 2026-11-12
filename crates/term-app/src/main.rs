@@ -536,6 +536,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(s) = &mut self.session {
                     let pad = PADDING * s.window.scale_factor() as f32;
                     s.renderer.render(&s.term, &mut s.fonts, pad, self.focused);
+                    // KAN-51 proof: busy redraw while idle.
+                    s.window.request_redraw();
                 }
             }
             _ => {}
