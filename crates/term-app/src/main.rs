@@ -26,6 +26,31 @@ const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFER_AFTER: usize = 64 * 1024;
 /// How long held-back output waits, unless the queue fills first: about one 60 Hz frame.
 const MAX_DEFER: Duration = Duration::from_millis(16);
+const RESIZE_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Default)]
+struct ResizeThrottle {
+    last_applied: Option<Instant>,
+    deadline: Option<Instant>,
+}
+
+impl ResizeThrottle {
+    fn schedule(&mut self, now: Instant) {
+        self.deadline = Some(
+            self.last_applied
+                .map_or(now, |last| (last + RESIZE_INTERVAL).max(now)),
+        );
+    }
+
+    fn applied(&mut self, now: Instant) {
+        self.last_applied = Some(now);
+        self.deadline = None;
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.deadline.is_some_and(|deadline| now >= deadline)
+    }
+}
 
 #[derive(Debug)]
 enum UserEvent {
@@ -106,6 +131,7 @@ struct Session {
     since_frame: usize,
     /// When output was first held back.
     deferred: Option<Instant>,
+    resize: ResizeThrottle,
 }
 
 fn advance_output(term: &mut Terminal, output: pty::Output) {
@@ -227,11 +253,13 @@ impl App {
             pty,
             since_frame: 0,
             deferred: None,
+            resize: ResizeThrottle::default(),
         })
     }
 
     fn resize_grid(&mut self) {
         let Some(s) = &mut self.session else { return };
+        s.resize.applied(Instant::now());
         let (cols, rows) = grid_size(&s.window, &s.fonts);
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
@@ -571,15 +599,26 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let deferred = self.session.as_ref().and_then(|s| s.deferred);
-        match deferred {
-            Some(since) if since.elapsed() >= MAX_DEFER => {
-                self.process_output();
-                event_loop.set_control_flow(ControlFlow::Wait);
-            }
-            Some(since) => event_loop.set_control_flow(ControlFlow::WaitUntil(since + MAX_DEFER)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
+        let now = Instant::now();
+        if self.session.as_ref().is_some_and(|s| s.resize.ready(now)) {
+            self.resize_grid();
         }
+        if self
+            .session
+            .as_ref()
+            .and_then(|s| s.deferred)
+            .is_some_and(|since| now >= since + MAX_DEFER)
+        {
+            self.process_output();
+        }
+        let deadline = self.session.as_ref().and_then(|s| {
+            s.deferred
+                .map(|since| since + MAX_DEFER)
+                .into_iter()
+                .chain(s.resize.deadline)
+                .min()
+        });
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -588,8 +627,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(size) => {
                 if let Some(s) = &mut self.session {
                     s.renderer.resize(size.width, size.height);
+                    s.resize.schedule(Instant::now());
+                    s.window.request_redraw();
                 }
-                self.resize_grid();
             }
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
@@ -668,6 +708,41 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_throttle_leads_trails_and_resets() {
+        let now = Instant::now();
+        let mut resize = ResizeThrottle::default();
+        assert!(!resize.ready(now));
+        assert_eq!(resize.deadline, None);
+        resize.schedule(now);
+        assert!(resize.ready(now));
+        resize.applied(now);
+        resize.schedule(now + Duration::from_millis(10));
+        assert!(!resize.ready(now + Duration::from_millis(99)));
+        assert!(resize.ready(now + RESIZE_INTERVAL));
+        resize.applied(now + Duration::from_millis(50));
+        assert_eq!(resize.deadline, None);
+        assert!(!resize.ready(now + RESIZE_INTERVAL));
+        resize.schedule(now + RESIZE_INTERVAL);
+        assert_eq!(resize.deadline, Some(now + Duration::from_millis(150)));
+        resize.applied(now + Duration::from_millis(150));
+        resize.schedule(now + Duration::from_millis(300));
+        assert!(resize.ready(now + Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn resize_throttle_keeps_deadline_during_drag() {
+        let now = Instant::now();
+        let mut resize = ResizeThrottle::default();
+        resize.applied(now);
+        for millis in (1..100).step_by(8) {
+            resize.schedule(now + Duration::from_millis(millis));
+            assert_eq!(resize.deadline, Some(now + RESIZE_INTERVAL));
+        }
+        assert!(!resize.ready(now + Duration::from_millis(99)));
+        assert!(resize.ready(now + RESIZE_INTERVAL));
+    }
 
     #[test]
     fn output_markers_reset_modes_before_prompt_bytes() {
