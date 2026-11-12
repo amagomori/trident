@@ -1,9 +1,8 @@
-use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::frame_clock::FrameClock;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use wayland_client::protocol::{wl_registry, wl_surface};
-use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
 use winit::raw_window_handle::{
     HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -13,7 +12,8 @@ struct State {
     presentation: Option<wp_presentation::WpPresentation>,
     epoch: Option<i128>,
     start: Instant,
-    lines: Arc<Mutex<Vec<String>>>,
+    lines: Option<Arc<Mutex<Vec<String>>>>,
+    clock: FrameClock,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -72,6 +72,7 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, usize> for State
                 tv_sec_hi,
                 tv_sec_lo,
                 tv_nsec,
+                refresh,
                 flags,
                 ..
             } => {
@@ -79,6 +80,13 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, usize> for State
                     let seconds = (u64::from(tv_sec_hi) << 32) | u64::from(tv_sec_lo);
                     let time =
                         i128::from(seconds) * 1_000_000 + i128::from(tv_nsec) / 1_000 - epoch;
+                    if let Ok(micros) = u64::try_from(time) {
+                        state.clock.presented(
+                            *seq,
+                            state.start + Duration::from_micros(micros),
+                            Duration::from_nanos(u64::from(refresh)),
+                        );
+                    }
                     let bits = match flags {
                         wayland_client::WEnum::Value(v) => v.bits(),
                         wayland_client::WEnum::Unknown(v) => v,
@@ -93,17 +101,22 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, usize> for State
                     .filter_map(|(mask, name)| (bits & mask != 0).then_some(name))
                     .collect::<Vec<_>>()
                     .join("+");
-                    state.lines.lock().unwrap().push(format!(
-                        "presented {seq} {time} {}",
-                        if mode.is_empty() { "none" } else { &mode }
-                    ));
+                    if let Some(lines) = &state.lines {
+                        lines.lock().unwrap().push(format!(
+                            "presented {seq} {time} {}",
+                            if mode.is_empty() { "none" } else { &mode }
+                        ));
+                    }
                 }
             }
             wp_presentation_feedback::Event::Discarded => {
-                state.lines.lock().unwrap().push(format!(
-                    "presented {seq} {} skip",
-                    state.start.elapsed().as_micros()
-                ));
+                state.clock.discarded(*seq);
+                if let Some(lines) = &state.lines {
+                    lines.lock().unwrap().push(format!(
+                        "presented {seq} {} skip",
+                        state.start.elapsed().as_micros()
+                    ));
+                }
             }
             _ => {}
         }
@@ -114,9 +127,10 @@ pub struct Feedback {
     presentation: wp_presentation::WpPresentation,
     surface: wl_surface::WlSurface,
     qh: QueueHandle<State>,
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-    // Keep the foreign display and surface alive until the dispatch thread stops.
+    queue: EventQueue<State>,
+    state: State,
+    _registry: wl_registry::WlRegistry,
+    // Keep the foreign display and surface alive until our queue is released.
     _window: Arc<winit::window::Window>,
 }
 
@@ -124,7 +138,7 @@ impl Feedback {
     pub fn new(
         window: Arc<winit::window::Window>,
         start: Instant,
-        lines: Arc<Mutex<Vec<String>>>,
+        lines: Option<Arc<Mutex<Vec<String>>>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let RawDisplayHandle::Wayland(display) = window.display_handle()?.as_raw() else {
             return Err("not a Wayland display".into());
@@ -151,6 +165,7 @@ impl Feedback {
             epoch: None,
             start,
             lines,
+            clock: FrameClock::default(),
         };
         let registry = connection.display().get_registry(&qh, ());
         queue.roundtrip(&mut state)?;
@@ -162,41 +177,19 @@ impl Feedback {
         if state.epoch.is_none() {
             return Err("presentation clock unavailable".into());
         }
-        state
-            .lines
-            .lock()
-            .unwrap()
-            .push("source wayland-presentation".into());
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = stop.clone();
-        let thread = std::thread::Builder::new()
-            .name("wayland-presentation".into())
-            .spawn(move || {
-                while !stopped.load(Ordering::Acquire) {
-                    if queue.dispatch_pending(&mut state).is_err() || queue.flush().is_err() {
-                        break;
-                    }
-                    if let Some(read) = queue.prepare_read() {
-                        let mut fd = libc::pollfd {
-                            fd: read.connection_fd().as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
-                        };
-                        // Bounded wait allows joining before the foreign display is released.
-                        if unsafe { libc::poll(&mut fd, 1, 20) } > 0 && read.read().is_err() {
-                            break;
-                        }
-                    }
-                }
-                let _ = queue.dispatch_pending(&mut state);
-                drop(registry);
-            })?;
+        if let Some(lines) = &state.lines {
+            lines
+                .lock()
+                .unwrap()
+                .push("source wayland-presentation".into());
+        }
         Ok(Self {
             presentation,
             surface,
             qh,
-            stop,
-            thread: Some(thread),
+            queue,
+            state,
+            _registry: registry,
             _window: window,
         })
     }
@@ -205,13 +198,24 @@ impl Feedback {
         self.presentation
             .feedback(&self.surface, &self.qh, sequence);
     }
+
+    pub fn clock(&mut self) -> Option<&mut FrameClock> {
+        self.queue.dispatch_pending(&mut self.state).ok()?;
+        Some(&mut self.state.clock)
+    }
 }
 
 impl Drop for Feedback {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        let _ = self.queue.dispatch_pending(&mut self.state);
+        if let Some(lines) = &self.state.lines {
+            let (cost, margin, period) = self.state.clock.timings();
+            lines.lock().unwrap().push(format!(
+                "clock_ns {} {} {}",
+                cost.as_nanos(),
+                margin.as_nanos(),
+                period.as_nanos()
+            ));
         }
         self.presentation.destroy();
     }
