@@ -14,19 +14,25 @@ repository = "https://github.com/amagomori/terminal"
 term-core = { path = "crates/term-core" }
 term-render = { path = "crates/term-render" }
 ab_glyph = "0.2"
+ab_glyph_rasterizer = "0.1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
 flate2 = "1"
 libc = "0.2"
 memchr = "2"
+memmap2 = "0.9"
+objc2-core-foundation = "0.3"
+objc2-core-text = "0.3"
 png = "0.18"
 pollster = "0.4"
 portable-pty = "0.9"
+ttf-parser = "0.25"
 unicode-width = "0.2"
 vte = "0.15"
 wgpu = "30"
 winit = "0.30"
+yeslogic-fontconfig-sys = { version = "6", features = ["dlopen"] }
 
 [profile.release]
 lto = "thin"

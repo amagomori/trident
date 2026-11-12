@@ -3,6 +3,8 @@
 //! provides raw window and display handles.
 
 mod atlas;
+mod color;
+mod fallback;
 mod font;
 mod renderer;
 

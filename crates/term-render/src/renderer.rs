@@ -22,6 +22,8 @@ struct Instance {
 struct Uniforms {
     screen: [f32; 2],
     atlas: [f32; 2],
+    color_atlas: [f32; 2],
+    _pad: [f32; 2],
 }
 
 pub struct Renderer {
@@ -31,6 +33,8 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
     instances: wgpu::Buffer,
     instance_capacity: usize,
@@ -95,8 +99,7 @@ impl Renderer {
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
 
-        let atlas = Atlas::new(&device);
-        let atlas_view = atlas.texture.create_view(&Default::default());
+        let atlas = Atlas::new(&device, format.is_srgb());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -139,26 +142,19 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-            ],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("terminal bind group"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
             ],
         });
+        let bind_group = create_bind_group(&device, &layout, &uniforms, &sampler, &atlas);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terminal shader"),
@@ -217,6 +213,8 @@ impl Renderer {
             config,
             pipeline,
             bind_group,
+            layout,
+            sampler,
             uniforms,
             instances,
             instance_capacity,
@@ -273,6 +271,15 @@ impl Renderer {
             if self.build(term, fonts, padding, focused) {
                 break;
             }
+        }
+        if std::mem::take(&mut self.atlas.color_changed) {
+            self.bind_group = create_bind_group(
+                &self.device,
+                &self.layout,
+                &self.uniforms,
+                &self.sampler,
+                &self.atlas,
+            );
         }
         self.draw();
     }
@@ -341,11 +348,12 @@ impl Renderer {
                         ),
                         cells: cells as u8,
                     };
-                    match self.atlas.get(key, fonts, &self.queue) {
+                    match self.atlas.get(key, fonts, &self.device, &self.queue) {
                         Ok(Some(g)) => glyphs.push(Instance {
                             pos: [x + g.left, y + g.top],
                             size: [g.width, g.height],
-                            uv: [g.x, g.y, g.width, g.height],
+                            // A negative width selects the color atlas.
+                            uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
                             color: self.color(fg, 1.0),
                         }),
                         Ok(None) => {}
@@ -429,7 +437,9 @@ impl Renderer {
         }
         let uniforms = Uniforms {
             screen: [self.config.width as f32, self.config.height as f32],
-            atlas: [self.atlas.size as f32; 2],
+            atlas: [self.atlas.mono.size as f32; 2],
+            color_atlas: [self.atlas.color.as_ref().map_or(1, |p| p.size) as f32; 2],
+            _pad: [0.0; 2],
         };
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
@@ -479,5 +489,60 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffe
         size: (capacity * std::mem::size_of::<Instance>()) as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
+    })
+}
+
+fn create_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    sampler: &wgpu::Sampler,
+    atlas: &Atlas,
+) -> wgpu::BindGroup {
+    let mono = atlas.mono.texture.create_view(&Default::default());
+    // Until a color glyph is drawn, a 1x1 texture stands in for the color page.
+    let placeholder;
+    let color_texture = match &atlas.color {
+        Some(page) => &page.texture,
+        None => {
+            placeholder = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("color atlas placeholder"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            &placeholder
+        }
+    };
+    let color = color_texture.create_view(&Default::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("terminal bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&mono),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&color),
+            },
+        ],
     })
 }

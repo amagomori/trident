@@ -9,7 +9,18 @@ repository.workspace = true
 
 [dependencies]
 ab_glyph.workspace = true
+ab_glyph_rasterizer.workspace = true
 bytemuck.workspace = true
+memmap2.workspace = true
+png.workspace = true
 pollster.workspace = true
 term-core.workspace = true
+ttf-parser.workspace = true
 wgpu.workspace = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+yeslogic-fontconfig-sys.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation.workspace = true
+objc2-core-text.workspace = true
