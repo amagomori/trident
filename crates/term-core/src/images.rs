@@ -89,7 +89,7 @@ struct StoredImage {
 pub(crate) struct ImageStore {
     images: HashMap<u32, StoredImage>,
     bytes: usize,
-    quota: usize,
+    pub(crate) quota: usize,
     clock: u64,
     pub(crate) generation: u64,
 }
@@ -203,6 +203,38 @@ impl Terminal {
             self.images.generation += 1;
         }
         removed
+    }
+
+    /// Removes the active screen's placements for which `remove` returns true, given the
+    /// placement and the screen row of its top edge. Returns the images they showed.
+    pub(crate) fn delete_placements_where(
+        &mut self,
+        mut remove: impl FnMut(&Placement, i64) -> bool,
+    ) -> Vec<u32> {
+        let (history, base) = (self.history, self.placement_base(self.alt_active));
+        let mut removed = Vec::new();
+        self.screen_mut().placements.retain(|p| {
+            let hit = remove(p, screen_row(p.line, base, history));
+            if hit {
+                removed.push(p.image_id);
+            }
+            !hit
+        });
+        if !removed.is_empty() {
+            self.images.generation += 1;
+        }
+        removed
+    }
+
+    /// The ids of all stored images.
+    pub(crate) fn image_ids(&self) -> Vec<u32> {
+        self.images.images.keys().copied().collect()
+    }
+
+    /// Whether either screen still shows image `id`.
+    pub(crate) fn image_placed(&self, id: u32) -> bool {
+        let placed = |s: &crate::Screen| s.placements.iter().any(|p| p.image_id == id);
+        placed(&self.primary) || placed(&self.alternate)
     }
 
     /// Places an image with its top-left corner in the cursor cell, on the active screen.

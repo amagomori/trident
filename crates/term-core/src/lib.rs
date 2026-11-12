@@ -5,6 +5,7 @@ pub mod colors;
 pub mod images;
 
 mod cell;
+mod kitty;
 mod perform;
 
 pub use cell::{Cell, Color, Flags, Row};
@@ -144,6 +145,7 @@ pub struct Terminal {
     images: images::ImageStore,
     /// Cell size in pixels, as reported by the app.
     cell_pixels: (f32, f32),
+    kitty: kitty::Kitty,
     parser: vte::Parser,
 }
 
@@ -186,6 +188,7 @@ impl Terminal {
             last_printed: None,
             images: images::ImageStore::new(),
             cell_pixels: (8.0, 16.0),
+            kitty: kitty::Kitty::default(),
             parser: vte::Parser::new(),
         }
     }
@@ -193,7 +196,7 @@ impl Terminal {
     /// Feed bytes from the shell.
     pub fn advance(&mut self, bytes: &[u8]) {
         let mut parser = std::mem::take(&mut self.parser);
-        parser.advance(self, bytes);
+        self.advance_bytes(&mut parser, bytes);
         self.parser = parser;
     }
 
