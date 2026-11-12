@@ -139,6 +139,17 @@ impl Terminal {
         if len > self.images.quota {
             return Err(ImageError::OverQuota);
         }
+        let visible = self.images_on_screen();
+        let pinned: usize = self
+            .images
+            .images
+            .iter()
+            .filter(|(k, _)| **k != id && visible.contains(k))
+            .map(|(_, s)| s.image.pixels.len())
+            .sum();
+        if pinned + len > self.images.quota {
+            return Err(ImageError::OverQuota);
+        }
         // Retransmitting an id replaces the image and drops its placements.
         self.delete_image(id);
         while self.images.bytes + len > self.images.quota {

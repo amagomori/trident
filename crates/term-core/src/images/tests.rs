@@ -472,3 +472,17 @@ fn window_size_reports() {
     t.advance(b"\x1bc\x1b[16t");
     assert_eq!(t.take_responses(), b"\x1b[6;19;10t");
 }
+
+#[test]
+fn failed_add_keeps_existing_images() {
+    let mut t = Terminal::new(10, 5);
+    t.set_image_quota(3 * 400);
+    for id in 1..=3 {
+        t.add_image(id, image(10, 10)).unwrap();
+    }
+    place_at_image(&mut t, 1);
+    place_at_image(&mut t, 2);
+    assert_eq!(t.add_image(4, image(20, 10)), Err(ImageError::OverQuota));
+    assert!(t.image(3).is_some());
+    assert_eq!(t.image_bytes(), 3 * 400);
+}
