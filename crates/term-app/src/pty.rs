@@ -38,6 +38,7 @@ impl Pending {
 }
 
 pub struct Pty {
+    pub flow: crate::flow_control::FlowControl,
     master: Box<dyn MasterPty + Send>,
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Vec<u8>>,
@@ -158,6 +159,7 @@ impl Pty {
             .map_err(|e| format!("cannot start reader thread: {e}"))?;
 
         Ok(Pty {
+            flow: Default::default(),
             master: pair.master,
             input,
             child,
@@ -185,7 +187,31 @@ impl Pty {
         if bytes.is_empty() {
             return;
         }
+        let (ixon, ixany) = self.flow_flags().unwrap_or((false, false));
+        self.flow.input(bytes, ixon, ixany);
         let _ = self.input.send(bytes.to_vec());
+    }
+
+    fn flow_flags(&self) -> Option<(bool, bool)> {
+        #[cfg(unix)]
+        {
+            let fd = self.master.as_raw_fd()?;
+            let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: fd belongs to the live master; tcgetattr initializes attrs on success.
+            if unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) } != 0 {
+                return None;
+            }
+            // SAFETY: tcgetattr succeeded.
+            let flags = unsafe { attrs.assume_init() }.c_iflag;
+            Some((flags & libc::IXON != 0, flags & libc::IXANY != 0))
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
+    pub fn refresh_flow(&mut self) {
+        let (ixon, _) = self.flow_flags().unwrap_or((false, false));
+        self.flow.flags(ixon);
     }
 
     pub fn resize(&self, cols: usize, rows: usize, cell: (f32, f32)) {

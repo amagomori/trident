@@ -1,4 +1,5 @@
 mod clipboard;
+mod flow_control;
 mod input;
 mod pty;
 mod show;
@@ -260,6 +261,9 @@ impl App {
         // all of scrollback only builds the lines that end up kept.
         let batch = s.pty.take_output();
         let processed = batch.len();
+        if processed > 0 {
+            s.pty.flow.output();
+        }
         s.since_frame += processed;
         s.term.advance(&batch);
         release_freed_memory(&mut s.term);
@@ -617,7 +621,14 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(s) = &mut self.session {
                     s.since_frame = 0;
                     let pad = PADDING * s.window.scale_factor() as f32;
-                    s.renderer.render(&s.term, &mut s.fonts, pad, self.focused);
+                    s.pty.refresh_flow();
+                    s.renderer.render(
+                        &s.term,
+                        &mut s.fonts,
+                        pad,
+                        self.focused,
+                        s.pty.flow.paused.then_some("Output paused - press Ctrl+Q"),
+                    );
                 }
             }
             _ => {}
