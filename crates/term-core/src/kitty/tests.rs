@@ -6,6 +6,7 @@ use base64::Engine;
 const ICAT: &[u8] = include_bytes!("fixtures/icat.bin");
 const ICAT_DETECT: &[u8] = include_bytes!("fixtures/icat-detect.bin");
 /// `kitten icat --detect-support` from kitty 0.50 on Linux.
+#[cfg(target_os = "linux")]
 const KITTEN_DETECT: &[u8] = include_bytes!("fixtures/kitten-detect.bin");
 const CHAFA: &[u8] = include_bytes!("fixtures/chafa.bin");
 
