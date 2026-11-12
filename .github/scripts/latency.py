@@ -57,7 +57,7 @@ def summarize(path, workload):
     successful = {seq: (time, frames[seq][1]) for seq, (time, mode) in presented.items()
                   if seq in frames and mode != "skip"} if feedback else frames
     ordered = [successful[seq] for seq in sorted(successful)]
-    seconds = (max(f[0] for f in frames.values()) - min(f[0] for f in frames.values())) / 1e6
+    seconds = max(f[0] for f in [*frames.values(), *successful.values()]) / 1e6
     returns = [frames[seq][0] - time for time, seq in echoes] if workload == "echo" else []
     latencies = [successful[seq][0] - time for time, seq in echoes if seq in successful] if workload == "echo" else []
     if feedback and any(p[0] < 0 for p in presented.values()):
