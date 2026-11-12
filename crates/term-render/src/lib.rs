@@ -3,6 +3,7 @@
 //! into any window that provides raw window and display handles.
 
 mod atlas;
+mod banner;
 mod color;
 mod fallback;
 mod font;

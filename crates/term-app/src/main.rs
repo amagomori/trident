@@ -1,4 +1,5 @@
 mod clipboard;
+mod flow_control;
 mod input;
 mod latency;
 mod pty;
@@ -619,6 +620,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(s) = &mut self.session
+            && std::mem::take(&mut s.pty.flow_redraw)
+        {
+            s.window.request_redraw();
+        }
         let now = Instant::now();
         if let Some(log) = self.session.as_mut().and_then(|s| s.latency.as_mut()) {
             if log.finished(now) {
@@ -697,6 +703,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::RedrawRequested => {
                 if let Some(s) = &mut self.session {
                     let pad = PADDING * s.window.scale_factor() as f32;
+                    s.pty.refresh_flow();
                     let mut pre_present = || {
                         if let Some(log) = &mut s.latency {
                             log.pre_present();
@@ -707,6 +714,7 @@ impl ApplicationHandler<UserEvent> for App {
                         &mut s.fonts,
                         pad,
                         self.focused,
+                        s.pty.flow.banner().as_deref(),
                         Some(&mut pre_present),
                     ) {
                         if let Some(log) = &mut s.latency {

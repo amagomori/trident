@@ -1,10 +1,11 @@
 //! Spawning the shell on a pseudo-terminal and pumping its output to the UI thread.
 
+use crate::flow_control::FlowSettings;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, BorrowedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -16,17 +17,22 @@ const MIN_LINES: usize = 32 * 1024;
 /// The most the reader queues whatever the line count, which is also the most the UI
 /// parses per wake-up, so huge bursts can't starve rendering.
 const MAX_QUEUED: usize = 8 << 20;
+const READ_BUFFER: usize = 64 * 1024;
 
 /// Shell output read but not yet parsed, as one buffer: small reads (macOS returns about
 /// 1 KiB per read) still reach the parser as one batch.
 #[derive(Default)]
 struct Queue {
+    read_sequence: AtomicU64,
+    read_bytes: AtomicU64,
     pending: Mutex<Pending>,
     room: Condvar,
 }
 
 #[derive(Default)]
 struct Pending {
+    sequence: u64,
+    read_bytes: u64,
     bytes: Vec<u8>,
     shell_returns: Vec<usize>,
     lines: usize,
@@ -80,13 +86,32 @@ impl Foreground {
 }
 
 pub struct Pty {
+    pub flow: crate::flow_control::FlowControl,
+    pub flow_redraw: bool,
     master: Box<dyn MasterPty + Send>,
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
-    input: Sender<Vec<u8>>,
+    input: Sender<Input>,
+    pause_boundary: Option<Arc<AtomicU64>>,
     child: Box<dyn Child + Send + Sync>,
     output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
     pub wake_pending: Arc<AtomicBool>,
+}
+
+struct Input {
+    bytes: Vec<u8>,
+    pause_boundary: Option<Arc<AtomicU64>>,
+}
+
+#[cfg(unix)]
+fn buffered_output(fd: std::os::fd::RawFd) -> u64 {
+    let mut bytes: libc::c_int = 0;
+    // SAFETY: fd is a live PTY master and bytes is writable for FIONREAD.
+    if unsafe { libc::ioctl(fd, libc::FIONREAD, &mut bytes) } == 0 {
+        bytes.max(0) as u64
+    } else {
+        u64::MAX
+    }
 }
 
 fn size(cols: usize, rows: usize, cell_w: f32, cell_h: f32) -> PtySize {
@@ -152,17 +177,41 @@ impl Pty {
             .master
             .take_writer()
             .map_err(|e| format!("cannot write pty: {e}"))?;
-        let (input, input_rx) = channel::<Vec<u8>>();
+        let output = Arc::new(Queue::default());
+        let writer_queue = output.clone();
+        #[cfg(unix)]
+        let writer_fd = foreground_fd
+            .as_ref()
+            .map(|fd| fd.try_clone())
+            .transpose()
+            .map_err(|e| format!("cannot clone pty: {e}"))?;
+        let (input, input_rx) = channel::<Input>();
         std::thread::Builder::new()
             .name("pty-writer".into())
             .spawn(move || {
-                for bytes in input_rx {
+                for input in input_rx {
                     if writer
-                        .write_all(&bytes)
+                        .write_all(&input.bytes)
                         .and_then(|_| writer.flush())
                         .is_err()
                     {
                         break;
+                    }
+                    if let Some(boundary) = input.pause_boundary {
+                        let read_bytes = writer_queue.read_bytes.load(Ordering::SeqCst);
+                        #[cfg(unix)]
+                        let buffered = writer_fd
+                            .as_ref()
+                            .map(|fd| buffered_output(fd.as_raw_fd()))
+                            .unwrap_or(u64::MAX);
+                        #[cfg(not(unix))]
+                        let buffered = u64::MAX;
+                        boundary.store(
+                            read_bytes
+                                .saturating_add(buffered)
+                                .saturating_add(READ_BUFFER as u64),
+                            Ordering::Release,
+                        );
                     }
                 }
             })
@@ -170,19 +219,21 @@ impl Pty {
 
         // Bounded, so a shell producing output faster than we parse it is paused by
         // the kernel instead of growing this queue without limit.
-        let output = Arc::new(Queue::default());
         let queue = output.clone();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let pending = wake_pending.clone();
         std::thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
-                let mut buf = vec![0u8; 64 * 1024];
+                let mut buf = vec![0u8; READ_BUFFER];
                 let mut foreground = Foreground::default();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            let sequence = queue.read_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                            let read_bytes =
+                                queue.read_bytes.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
                             #[cfg(unix)]
                             let shell = foreground_fd.as_ref().and_then(|fd| {
                                 let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
@@ -208,6 +259,8 @@ impl Pty {
                             if p.closed {
                                 return;
                             }
+                            p.sequence = sequence;
+                            p.read_bytes = read_bytes;
                             p.append(&buf[..n], shell_returned);
                             drop(p);
                             if !pending.swap(true, Ordering::AcqRel) {
@@ -221,8 +274,11 @@ impl Pty {
             .map_err(|e| format!("cannot start reader thread: {e}"))?;
 
         Ok(Pty {
+            flow: Default::default(),
+            flow_redraw: false,
             master: pair.master,
             input,
+            pause_boundary: None,
             child,
             output,
             wake_pending,
@@ -230,9 +286,16 @@ impl Pty {
     }
 
     /// Everything the shell wrote since the last call.
-    pub fn take_output(&self) -> Output {
+    pub fn take_output(&mut self) -> Output {
         let mut p = self.output.pending.lock().unwrap();
         let output = p.take_output();
+        if !output.bytes.is_empty() {
+            if let Some(boundary) = &self.pause_boundary {
+                self.flow
+                    .protect_output_until(boundary.load(Ordering::Acquire));
+            }
+            self.flow.output(p.sequence, p.read_bytes);
+        }
         drop(p);
         self.output.room.notify_one();
         output
@@ -247,7 +310,54 @@ impl Pty {
         if bytes.is_empty() {
             return;
         }
-        let _ = self.input.send(bytes.to_vec());
+        let settings = self.flow_flags().unwrap_or_default();
+        self.flow_redraw |= self.flow.input(
+            bytes,
+            settings,
+            self.output.read_sequence.load(Ordering::SeqCst),
+        );
+        let pause_boundary = (self.flow.paused
+            && settings.stop.is_some_and(|stop| bytes.contains(&stop)))
+        .then(|| Arc::new(AtomicU64::new(u64::MAX)));
+        if pause_boundary.is_some() {
+            self.pause_boundary = pause_boundary.clone();
+        }
+        let _ = self.input.send(Input {
+            bytes: bytes.to_vec(),
+            pause_boundary,
+        });
+    }
+
+    fn flow_flags(&self) -> Option<FlowSettings> {
+        #[cfg(unix)]
+        {
+            let fd = self.master.as_raw_fd()?;
+            let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: fd belongs to the live master; tcgetattr initializes attrs on success.
+            if unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) } != 0 {
+                return None;
+            }
+            // SAFETY: tcgetattr succeeded.
+            let attrs = unsafe { attrs.assume_init() };
+            let key = |index: usize| {
+                let value = attrs.c_cc[index];
+                (value != libc::_POSIX_VDISABLE).then_some(value)
+            };
+            Some(FlowSettings {
+                ixon: attrs.c_iflag & libc::IXON != 0,
+                ixany: attrs.c_iflag & libc::IXANY != 0,
+                isig: attrs.c_lflag & libc::ISIG != 0,
+                signals: [key(libc::VINTR), key(libc::VQUIT), key(libc::VSUSP)],
+                stop: key(libc::VSTOP),
+                start: key(libc::VSTART),
+            })
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
+    pub fn refresh_flow(&mut self) {
+        self.flow.flags(self.flow_flags().unwrap_or_default());
     }
 
     pub fn resize(&self, cols: usize, rows: usize, cell: (f32, f32)) {
