@@ -238,6 +238,12 @@ fn narrowing_through_a_wide_character_brings_it_back() {
     t.advance(b"\x1b[1;3Hx");
     t.resize(6, 1);
     assert_eq!(t.viewport_row(0).text(), "abx cd");
+    // Even with a plain space.
+    let mut t = term(6, 1, "ab\u{4f60}cd");
+    t.resize(3, 1);
+    t.advance(b"\x1b[1;3H ");
+    t.resize(6, 1);
+    assert_eq!(t.viewport_row(0).text(), "ab  cd");
 }
 
 #[test]

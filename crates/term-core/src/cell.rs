@@ -22,6 +22,8 @@ impl Flags {
     pub const WIDE: Flags = Flags(1 << 7);
     /// Second half of a double-width character; holds no glyph.
     pub const WIDE_SPACER: Flags = Flags(1 << 8);
+    /// Blank standing in for a wide character cut off at the right edge; any write replaces it.
+    pub const PAD: Flags = Flags(1 << 9);
 
     pub fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
@@ -79,8 +81,8 @@ pub struct Row {
     pub wrapped: bool,
     /// Cells past the right edge, kept when the window narrows so widening brings them back.
     hidden: Vec<Cell>,
-    /// The last cell of `cells` is a blank standing in for a wide character that no longer
-    /// fits; the character itself is the start of `hidden`.
+    /// The last cell of `cells` was a `PAD` blank standing in for a wide character that no
+    /// longer fits; the character itself is the start of `hidden`.
     padded: bool,
 }
 
@@ -99,7 +101,7 @@ impl Row {
         let mut hidden = std::mem::take(&mut self.hidden);
         if std::mem::take(&mut self.padded) {
             let pad = cells.pop().unwrap_or_default();
-            if pad != Cell::default() {
+            if !pad.flags.contains(Flags::PAD) {
                 // The stand-in was overwritten, so the wide character it covered is gone.
                 cells.push(pad);
                 hidden[..2].fill(Cell::default());
@@ -113,7 +115,10 @@ impl Row {
             let cut = if wide_at_edge { cols - 1 } else { cols };
             self.hidden = cells.split_off(cut);
             if wide_at_edge {
-                cells.push(Cell::default());
+                cells.push(Cell {
+                    flags: Flags::PAD,
+                    ..Cell::default()
+                });
                 self.padded = true;
             }
             let used = self
