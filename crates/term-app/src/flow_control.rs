@@ -41,7 +41,7 @@ impl FlowControl {
                 "Output paused - press Ctrl+{}",
                 (self.start.unwrap() + 64) as char
             ),
-            Some(127) => "Output paused - press Delete".into(),
+            Some(127) => "Output paused - press Backspace".into(),
             Some(key) if key.is_ascii_graphic() || key == b' ' => {
                 format!("Output paused - press '{}'", key as char)
             }
