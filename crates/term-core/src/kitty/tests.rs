@@ -93,8 +93,17 @@ fn kitten_detection_takes_shm_temp_file() {
     std::fs::write(&path, b"123").unwrap();
     // The capture's t=t query names kitten's own /dev/shm temp file; point it at ours.
     let query = KITTEN_DETECT.windows(4).position(|w| w == b"t=t,").unwrap();
-    let start = query + KITTEN_DETECT[query..].iter().position(|&b| b == b';').unwrap() + 1;
-    let end = start + KITTEN_DETECT[start..].iter().position(|&b| b == 0x1b).unwrap();
+    let start = query
+        + KITTEN_DETECT[query..]
+            .iter()
+            .position(|&b| b == b';')
+            .unwrap()
+        + 1;
+    let end = start
+        + KITTEN_DETECT[start..]
+            .iter()
+            .position(|&b| b == 0x1b)
+            .unwrap();
     t.advance(&KITTEN_DETECT[..start]);
     t.advance(b64(path.as_os_str().as_encoded_bytes()).as_bytes());
     t.advance(&KITTEN_DETECT[end..]);
