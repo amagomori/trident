@@ -80,12 +80,14 @@ pub(crate) fn map(path: &Path) -> std::io::Result<&'static [u8]> {
 }
 
 impl Fallback {
-    /// Whether `c` has a color glyph or an outline here; fonts can map characters to
-    /// glyphs in formats this renderer cannot read (such as Apple's `hvgl`).
+    /// Whether `c` has a color glyph, an outline, or is meant to be blank here; fonts can
+    /// map characters to glyphs in formats this renderer cannot read (such as Apple's `hvgl`).
     fn can_draw(&self, c: char) -> bool {
         let id = self.font.glyph_id(c);
         id != GlyphId(0)
-            && (self.face.is_some() || self.font.outline(id).is_some_and(|o| !o.curves.is_empty()))
+            && (self.face.is_some()
+                || c.is_whitespace()
+                || self.font.outline(id).is_some_and(|o| !o.curves.is_empty()))
     }
 }
 
