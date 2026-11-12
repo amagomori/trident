@@ -99,7 +99,7 @@ CI runs these on Linux and macOS for every pull request.
 ### Measuring latency
 
 From a Linux or macOS desktop session, run `python3 .github/scripts/latency.py
---base ../baseline --head . --runs 5` (both checkouts need the harness), or use
+--base ../baseline --head . --runs 5`, or use
 `--app target/release/terminal`. It reports per-run p50/p99/mean input-to-present
 latency and their min–max spread, plus presented/wasted/late frames and bytes/s
 under sustained output. Load mode runs without probes for `--duration` seconds
@@ -107,6 +107,8 @@ under sustained output. Load mode runs without probes for `--duration` seconds
 and require both adjacent frames to have parsed new bytes; idle gaps do not count.
 `--json results.json` saves samples; `--xvfb` is for smoke
 tests only. See the script docstring for setup and comparison controls.
+An uninstrumented baseline is skipped with a diagnostic; the head must produce
+latency data. Meaningful comparisons require instrumentation in both checkouts.
 
 Probes enter through the app's normal PTY input path. Output is matched to the
 frame carrying parsed output. On X11, Present CompleteNotify supplies the

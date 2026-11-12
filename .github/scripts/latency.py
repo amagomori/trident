@@ -3,8 +3,8 @@
 Run from a desktop session with cargo and the app's build dependencies installed:
   python3 .github/scripts/latency.py --app target/release/terminal --runs 5
   python3 .github/scripts/latency.py --base ../baseline --head . --json results.json
-Checkouts must contain the instrumentation; first land this harness on main, then
-compare scheduling branches against it. Each checkout gets its own target directory.
+An uninstrumented baseline is skipped with a diagnostic; head must produce data.
+Each checkout gets its own target directory.
 Linux needs DISPLAY or WAYLAND_DISPLAY; macOS needs a logged-in GUI session.
 --xvfb needs xvfb-run and is only a smoke test, not a real-display measurement.
 Keep display refresh, window size, power mode and background load fixed. Runs are
@@ -105,6 +105,7 @@ def main():
     if sys.platform != "darwin" and not args.xvfb and not any(os.environ.get(k) for k in ("DISPLAY", "WAYLAND_DISPLAY")):
         parser.error("run in a desktop session or use --xvfb for smoke testing")
     results = []
+    unavailable = set()
     with tempfile.TemporaryDirectory(prefix="terminal-latency-") as temporary:
         tmp = Path(temporary)
         apps = {"app": args.app.resolve()} if args.app else {
@@ -114,6 +115,8 @@ def main():
         for workload in workloads:
             for run in range(1, args.runs + 1):
                 for label, app in apps.items():
+                    if label in unavailable:
+                        continue
                     log = tmp / "samples.log"
                     log.unlink(missing_ok=True)
                     env = dict(os.environ, TERM_LATENCY_LOG=str(log),
@@ -125,9 +128,16 @@ def main():
                         env.pop("WAYLAND_DISPLAY", None)
                         env.pop("WAYLAND_SOCKET", None)
                         command = ["xvfb-run", "-a", *command]
-                    subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL,
-                                   timeout=30 + (args.probes * .2 if workload == "echo" else args.duration))
-                    results.append(dict(app=label, workload=workload, run=run, **summarize(log, workload)))
+                    try:
+                        subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL,
+                                       timeout=30 + (args.probes * .2 if workload == "echo" else args.duration))
+                        result = summarize(log, workload)
+                    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, RuntimeError) as error:
+                        reason = "no latency log; checkout may lack latency instrumentation" if not log.exists() else str(error)
+                        print(f"{label}: no latency data ({reason}); skipping", file=sys.stderr)
+                        unavailable.add(label)
+                        continue
+                    results.append(dict(app=label, workload=workload, run=run, **result))
     print("| app | workload | run | p50 ms | p99 ms | mean ms | return p50 ms | return p99 ms | timing | samples | frames | fps | wasted | late | bytes/s | refresh mHz |")
     print("|" + " --- |" * 16)
     for row in results:
@@ -144,7 +154,8 @@ def main():
                 print(f"{label} {workload} spread: " + ", ".join(spread))
     if args.json:
         args.json.write_text(json.dumps(results, indent=2) + "\n")
+    return 0 if any(row['app'] != 'base' for row in results) else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
