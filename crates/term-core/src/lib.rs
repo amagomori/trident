@@ -94,6 +94,7 @@ pub struct Modes {
     pub sgr_mouse: bool,
     pub focus_events: bool,
     pub alt_scroll: bool,
+    pub synchronized_output: bool,
 }
 
 /// A point in the terminal's history: `line` counts every line ever scrolled into

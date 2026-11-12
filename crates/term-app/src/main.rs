@@ -66,6 +66,7 @@ const DEFER_AFTER: usize = 64 * 1024;
 /// How long held-back output waits, unless the queue fills first: about one 60 Hz frame.
 const MAX_DEFER: Duration = Duration::from_millis(16);
 const RESIZE_INTERVAL: Duration = Duration::from_millis(100);
+const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
 
 #[derive(Default)]
 struct ResizeThrottle {
@@ -234,6 +235,8 @@ struct Session {
     presentation: Option<present_wayland::Feedback>,
     latency: Option<latency::Latency>,
     resize: ResizeThrottle,
+    synchronized_since: Option<Instant>,
+    redraw_pending: bool,
 }
 
 fn advance_output(term: &mut Terminal, output: pty::Output) {
@@ -328,6 +331,10 @@ fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
         _ => return None,
     };
     Some(config::Chord { modifiers, key })
+}
+
+fn sync_expired(since: Option<Instant>, now: Instant) -> bool {
+    since.is_some_and(|since| now.duration_since(since) >= SYNC_TIMEOUT)
 }
 
 struct App {
@@ -546,6 +553,8 @@ impl App {
             sequence: 0,
             #[cfg(target_os = "linux")]
             presentation,
+            synchronized_since: None,
+            redraw_pending: false,
         })
     }
 
@@ -600,11 +609,22 @@ impl App {
         let batch = s.pty.take_output();
         let processed = batch.bytes.len();
         s.since_frame += processed;
+        let was_synchronized = s.term.modes.synchronized_output;
         update_terminal(&mut s.term, &mut s.scroll, |term| {
             advance_output(term, batch)
         });
         if s.term.modes.mouse == MouseMode::Off {
             self.reported_button = None;
+        }
+        if s.term.modes.synchronized_output {
+            if !was_synchronized {
+                s.synchronized_since = Some(Instant::now());
+            }
+        } else {
+            s.synchronized_since = None;
+            if was_synchronized || s.redraw_pending {
+                s.window.request_redraw();
+            }
         }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
@@ -1192,13 +1212,23 @@ impl ApplicationHandler<UserEvent> for App {
                 s.window.request_redraw();
             }
         }
-        let deadline = self.session.as_ref().and_then(|s| {
-            wake_deadline(
+        let mut deadline = None;
+        if let Some(s) = &mut self.session {
+            if sync_expired(s.synchronized_since, Instant::now()) {
+                s.term.modes.synchronized_output = false;
+                s.synchronized_since = None;
+                s.window.request_redraw();
+            }
+            deadline = wake_deadline(
                 frame_wakeup(s.redraw_at.map(|(latch, _)| latch), s.deferred),
                 s.resize.deadline,
                 s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
-            )
-        });
+            );
+            if let Some(since) = s.synchronized_since {
+                let sync_deadline = since + SYNC_TIMEOUT;
+                deadline = Some(deadline.map_or(sync_deadline, |d| d.min(sync_deadline)));
+            }
+        }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -1297,6 +1327,11 @@ impl ApplicationHandler<UserEvent> for App {
                             preedit: search.preedit_columns(),
                             cursor: search.cursor_column(),
                         });
+                    if s.term.modes.synchronized_output {
+                        s.redraw_pending = true;
+                        return;
+                    }
+                    s.redraw_pending = false;
                     let target = s
                         .target
                         .take()
@@ -1859,6 +1894,22 @@ mod tests {
         assert_eq!(frame_wakeup(None, Some(now)), Some(now + MAX_DEFER));
         assert_eq!(frame_wakeup(Some(latch), Some(now)), Some(latch));
         assert_eq!(frame_wakeup(Some(latch), None), Some(latch));
+    }
+
+    #[test]
+    fn synchronized_output_timeout() {
+        let start = Instant::now();
+        assert!(!sync_expired(None, start + SYNC_TIMEOUT));
+        assert!(!sync_expired(Some(start), start));
+        assert!(!sync_expired(
+            Some(start),
+            start + SYNC_TIMEOUT - Duration::from_nanos(1)
+        ));
+        assert!(sync_expired(Some(start), start + SYNC_TIMEOUT));
+        assert!(sync_expired(
+            Some(start),
+            start + Duration::from_millis(300)
+        ));
     }
 
     #[test]

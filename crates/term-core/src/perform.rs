@@ -125,6 +125,28 @@ impl Perform for Terminal {
                 }
                 _ => {}
             },
+            ('p', [b'?', b'$']) => {
+                let mode = arg(params, 0, 0);
+                let enabled = match mode {
+                    1 => Some(self.modes.app_cursor),
+                    6 => Some(self.modes.origin),
+                    7 => Some(self.modes.autowrap),
+                    25 => Some(self.modes.show_cursor),
+                    47 | 1047 | 1049 => Some(self.is_alt_screen()),
+                    1000 => Some(self.modes.mouse == MouseMode::Click),
+                    1002 => Some(self.modes.mouse == MouseMode::Drag),
+                    1003 => Some(self.modes.mouse == MouseMode::Motion),
+                    1004 => Some(self.modes.focus_events),
+                    1006 => Some(self.modes.sgr_mouse),
+                    1007 => Some(self.modes.alt_scroll),
+                    2004 => Some(self.modes.bracketed_paste),
+                    2026 => Some(self.modes.synchronized_output),
+                    _ => None,
+                };
+                let status = enabled.map_or(0, |set| if set { 1 } else { 2 });
+                let reply = format!("\x1b[?{mode};{status}$y");
+                self.responses.extend_from_slice(reply.as_bytes());
+            }
             ('q', [b' ']) => {
                 self.cursor_shape = match arg(params, 0, 0) {
                     3 | 4 => CursorShape::Underline,
@@ -279,6 +301,7 @@ impl Terminal {
             1006 => self.modes.sgr_mouse = enable,
             1007 => self.modes.alt_scroll = enable,
             2004 => self.modes.bracketed_paste = enable,
+            2026 => self.modes.synchronized_output = enable,
             _ => {}
         }
     }
