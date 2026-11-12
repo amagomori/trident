@@ -48,7 +48,7 @@ impl Pty {
         };
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", env!("CARGO_PKG_NAME"));
+        cmd.env("TERM_PROGRAM", env!("CARGO_BIN_NAME"));
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         if let Some(home) = std::env::var_os("HOME")
             && std::env::current_dir()

@@ -46,7 +46,7 @@ fn usage() -> ! {
            -e, --command ...   Run this command instead of your shell\n  \
            -h, --help          Show this help\n  \
            -V, --version       Show the version",
-        env!("CARGO_PKG_NAME"),
+        env!("CARGO_BIN_NAME"),
         env!("CARGO_PKG_VERSION")
     );
     std::process::exit(0);
@@ -79,7 +79,7 @@ fn parse_args() -> Result<Options, String> {
             }
             "-h" | "--help" => usage(),
             "-V" | "--version" => {
-                println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+                println!("{} {}", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other} (see --help)")),
