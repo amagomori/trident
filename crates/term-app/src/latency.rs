@@ -3,6 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
+#[path = "present_wayland.rs"]
+mod wayland;
+#[cfg(target_os = "linux")]
 #[path = "present_x11.rs"]
 mod x11;
 
@@ -18,6 +21,8 @@ pub struct Latency {
     random: u32,
     sequence: usize,
     feedback: Arc<Mutex<Vec<String>>>,
+    #[cfg(target_os = "linux")]
+    wayland: Option<wayland::Feedback>,
 }
 
 impl Latency {
@@ -48,6 +53,8 @@ impl Latency {
             random: 1,
             sequence: 0,
             feedback: Arc::default(),
+            #[cfg(target_os = "linux")]
+            wayland: None,
         })
     }
 
@@ -59,13 +66,31 @@ impl Latency {
         ));
     }
 
-    pub fn feedback(&mut self, window: &winit::window::Window) {
+    pub fn feedback(&mut self, window: Arc<winit::window::Window>) {
         #[cfg(target_os = "linux")]
-        if let Err(error) = x11::start(window, self.start, self.feedback.clone()) {
-            eprintln!("terminal: presentation feedback unavailable: {error}");
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if matches!(
+                window.window_handle().map(|h| h.as_raw()),
+                Ok(RawWindowHandle::Wayland(_))
+            ) {
+                match wayland::Feedback::new(window, self.start, self.feedback.clone()) {
+                    Ok(feedback) => self.wayland = Some(feedback),
+                    Err(error) => eprintln!("terminal: presentation feedback unavailable: {error}"),
+                }
+            } else if let Err(error) = x11::start(&window, self.start, self.feedback.clone()) {
+                eprintln!("terminal: presentation feedback unavailable: {error}");
+            }
         }
         #[cfg(not(target_os = "linux"))]
         let _ = window;
+    }
+
+    pub fn pre_present(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(feedback) = &self.wayland {
+            feedback.request(self.sequence);
+        }
     }
 
     pub fn output(&mut self, bytes: usize) {
@@ -118,6 +143,8 @@ impl Latency {
 
 impl Drop for Latency {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        drop(self.wayland.take());
         self.lines.extend(self.feedback.lock().unwrap().drain(..));
         if let Err(error) = std::fs::write(&self.path, self.lines.join("\n")) {
             eprintln!("terminal: latency log: {error}");
@@ -144,6 +171,8 @@ mod tests {
             random: 1,
             sequence: 0,
             feedback: Arc::default(),
+            #[cfg(target_os = "linux")]
+            wayland: None,
         };
         log.frame(now, 0);
         log.input(now);

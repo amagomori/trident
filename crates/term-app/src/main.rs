@@ -198,7 +198,7 @@ impl App {
                 .unwrap_or(0),
         );
         if let Some(log) = &mut latency {
-            log.feedback(&window);
+            log.feedback(window.clone());
         }
         Ok(Session {
             latency,
@@ -615,7 +615,18 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::RedrawRequested => {
                 if let Some(s) = &mut self.session {
                     let pad = PADDING * s.window.scale_factor() as f32;
-                    if s.renderer.render(&s.term, &mut s.fonts, pad, self.focused) {
+                    let mut pre_present = || {
+                        if let Some(log) = &mut s.latency {
+                            log.pre_present();
+                        }
+                    };
+                    if s.renderer.render(
+                        &s.term,
+                        &mut s.fonts,
+                        pad,
+                        self.focused,
+                        Some(&mut pre_present),
+                    ) {
                         if let Some(log) = &mut s.latency {
                             log.frame(Instant::now(), s.since_frame);
                         }

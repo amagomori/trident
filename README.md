@@ -110,11 +110,17 @@ tests only. See the script docstring for setup and comparison controls.
 
 Probes enter through the app's normal PTY input path. Output is matched to the
 frame carrying parsed output. On X11, Present completion feedback supplies the
-presentation timestamp; skipped or missing completions count as wasted frames.
+presentation timestamp. On Wayland, `wp_presentation` feedback is requested before
+each surface commit and converted from the compositor's advertised clock; the mode
+records vsync/hardware-clock/hardware-completion/zero-copy flags. Skipped or missing
+completions count as wasted frames.
 Present-return latency is reported separately. Each run labels its timing source;
 without feedback it explicitly reports `present-return (no feedback)` instead.
-Wayland and macOS presentation feedback are pending. X11 completion is not an
-optical measurement of pixel scanout; compositor/display processing may add delay.
+macOS presentation feedback is pending. These timestamps are not an optical
+measurement of pixel scanout; compositor/display processing may add delay.
+For a Wayland smoke test, start Weston headless and run with its `WAYLAND_DISPLAY`
+and `XDG_RUNTIME_DIR`, with `DISPLAY` unset. Headless feedback validates protocol
+matching, not physical-display latency.
 
 ## License
 

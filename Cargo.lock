@@ -2230,6 +2230,9 @@ dependencies = [
  "resvg",
  "term-core",
  "term-render",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "winit",
  "x11rb",
 ]

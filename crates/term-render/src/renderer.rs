@@ -284,6 +284,7 @@ impl Renderer {
         fonts: &mut Fonts,
         padding: f32,
         focused: bool,
+        pre_present: Option<&mut dyn FnMut()>,
     ) -> bool {
         for _ in 0..2 {
             if self.build(term, fonts, padding, focused) {
@@ -306,7 +307,7 @@ impl Renderer {
                 .prepare(&self.device, &self.queue, &self.uniforms, term, quads);
             self.image_clip = self.grid_clip(term, &metrics, padding);
         }
-        self.draw()
+        self.draw(pre_present)
     }
 
     fn grid_clip(&self, term: &Terminal, metrics: &CellMetrics, padding: f32) -> [u32; 4] {
@@ -453,7 +454,7 @@ impl Renderer {
         ok
     }
 
-    fn draw(&mut self) -> bool {
+    fn draw(&mut self, pre_present: Option<&mut dyn FnMut()>) -> bool {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -535,6 +536,9 @@ impl Renderer {
             }
         }
         self.queue.submit([encoder.finish()]);
+        if let Some(pre_present) = pre_present {
+            pre_present();
+        }
         self.queue.present(frame);
         true
     }
