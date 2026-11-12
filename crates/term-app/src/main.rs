@@ -256,7 +256,11 @@ impl PendingOutput {
 
     fn retain(&mut self, mut batch: pty::Output, consumed: usize, now: Instant) {
         self.bytes = batch.bytes.split_off(consumed);
-        self.shell_returns = batch.shell_returns.into_iter().map(|offset| offset - consumed).collect();
+        self.shell_returns = batch
+            .shell_returns
+            .into_iter()
+            .map(|offset| offset - consumed)
+            .collect();
         self.waiting_since = (!self.is_empty()).then_some(now);
     }
 
@@ -394,6 +398,7 @@ struct App {
     scroll_accum: f64,
     clipboard: clipboard::Clipboard,
     error: Option<String>,
+    exit_pending: bool,
 }
 
 impl App {
@@ -429,6 +434,7 @@ impl App {
             scroll_accum: 0.0,
             clipboard: clipboard::Clipboard::default(),
             error: None,
+            exit_pending: false,
         }
     }
 
@@ -1087,13 +1093,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Output => self.output_ready(),
             UserEvent::Exit => {
+                self.exit_pending = true;
                 self.process_output();
-                event_loop.exit();
             }
         }
     }
@@ -1139,6 +1145,13 @@ impl ApplicationHandler<UserEvent> for App {
             {
                 s.target = Some(target);
                 s.window.request_redraw();
+            }
+        }
+        if self.exit_pending {
+            self.process_output();
+            if self.session.as_ref().is_none_or(|s| s.output.is_empty()) {
+                event_loop.exit();
+                return;
             }
         }
         let mut deadline = None;
@@ -1347,6 +1360,13 @@ mod tests {
         assert_eq!(options.command(&config), ["bash"]);
     }
 
+    fn batch(bytes: &[u8]) -> pty::Output {
+        pty::Output {
+            bytes: bytes.to_vec(),
+            shell_returns: Vec::new(),
+        }
+    }
+
     #[test]
     fn scrollback_option() {
         let parse = |args: &[&str]| parse_args_from(args.iter().map(|s| s.to_string()));
@@ -1546,7 +1566,7 @@ mod tests {
         let prompt = b"\x1b[?2004h$ ";
         advance_output(
             &mut term,
-            pty::Output {
+            &mut pty::Output {
                 bytes: [
                     setup.as_slice(),
                     prompt.as_slice(),
@@ -1562,7 +1582,7 @@ mod tests {
         assert!(term.modes.bracketed_paste);
         advance_output(
             &mut term,
-            pty::Output {
+            &mut pty::Output {
                 bytes: Vec::new(),
                 shell_returns: Vec::new(),
             },
@@ -1574,27 +1594,33 @@ mod tests {
     fn leftover_does_not_acknowledge_queued_pty_output() {
         let mut output = PendingOutput::default();
         let mut term = Terminal::new(10, 2);
-        let batch = b"\x1b[?2026h028\x1b[?2026l\x1b[?2026h".to_vec();
-        let consumed = term.advance_until_sync_end(&batch);
-        output.retain(batch, consumed, Instant::now());
+        let mut first = batch(b"\x1b[?2026h028\x1b[?2026l\x1b[?2026h\x1b[?1000;1004;2004h");
+        let consumed = advance_output(&mut term, &mut first);
+        output.retain(first, consumed, Instant::now());
         let wake_pending = std::sync::atomic::AtomicBool::new(false);
-        let mut queued = b"\r099\x1b[?2026l".to_vec();
+        let mut queued = Some(pty::Output {
+            bytes: b"\r099\x1b[?2026l".to_vec(),
+            shell_returns: vec![0],
+        });
         assert!(!wake_pending.swap(true, Ordering::AcqRel));
         output.presented();
-        let batch = output.next_batch(|| panic!("leftover must precede PTY output"));
-        term.advance_until_sync_end(&batch);
+        let mut next = output.next_batch(|| panic!("leftover must precede PTY output"));
+        advance_output(&mut term, &mut next);
         assert!(term.modes.synchronized_output);
         assert!(wake_pending.load(Ordering::Acquire));
-        let batch = output.next_batch(|| {
+        let mut next = output.next_batch(|| {
             wake_pending.store(false, Ordering::Release);
-            std::mem::take(&mut queued)
+            queued.take().unwrap()
         });
-        term.advance_until_sync_end(&batch);
+        advance_output(&mut term, &mut next);
         assert!(!term.modes.synchronized_output);
         assert_eq!(term.viewport_row(0).cells[0].c, '0');
         assert_eq!(term.viewport_row(0).cells[1].c, '9');
         assert_eq!(term.viewport_row(0).cells[2].c, '9');
-        assert!(queued.is_empty());
+        assert!(queued.is_none());
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(!term.modes.bracketed_paste);
         assert!(!wake_pending.load(Ordering::Acquire));
     }
 
@@ -1602,9 +1628,9 @@ mod tests {
     fn leftover_output_waits_for_presentation_and_preserves_order() {
         let mut output = PendingOutput::default();
         let mut term = Terminal::new(10, 2);
-        let batch = b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW\x1b[?2026l".to_vec();
-        let consumed = term.advance_until_sync_end(&batch);
-        output.retain(batch, consumed, Instant::now());
+        let mut first = batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW\x1b[?2026l");
+        let consumed = advance_output(&mut term, &mut first);
+        output.retain(first, consumed, Instant::now());
         assert!(output.waiting_since.is_some());
         let text = |term: &Terminal| {
             term.viewport_row(0)
@@ -1617,12 +1643,62 @@ mod tests {
         assert_eq!(text(&term), "OLD");
         assert!(output.presented());
         assert!(output.waiting_since.is_none());
-        let batch = std::mem::take(&mut output.bytes);
-        let consumed = term.advance_until_sync_end(&batch);
-        output.retain(batch, consumed, Instant::now());
+        let mut next = output.next_batch(|| panic!("leftover must precede PTY output"));
+        let consumed = advance_output(&mut term, &mut next);
+        output.retain(next, consumed, Instant::now());
         assert_eq!(text(&term), "NEW");
         assert!(!output.presented());
         assert!(output.waiting_since.is_none());
+    }
+
+    #[test]
+    fn shell_return_markers_follow_retained_frames() {
+        let mut term = Terminal::new(10, 2);
+        let mut pending = PendingOutput::default();
+        let first = b"\x1b[?1000;1004;2004h\x1b[?2026hOLD\x1b[?2026l";
+        let second = b"\x1b[?2026h\x1b[?1000;1004;2004h\rNEW\x1b[?2026l";
+        let prompt = b"\x1b[?2004h$ ";
+        let mut output = pty::Output {
+            bytes: [first.as_slice(), second.as_slice(), prompt.as_slice()].concat(),
+            shell_returns: vec![first.len(), first.len() + second.len()],
+        };
+        for expected in [first.len(), second.len()] {
+            let consumed = advance_output(&mut term, &mut output);
+            assert_eq!(consumed, expected);
+            assert_eq!(term.modes.mouse, MouseMode::Off);
+            assert!(!term.modes.focus_events);
+            assert!(!term.modes.bracketed_paste);
+            pending.retain(output, consumed, Instant::now());
+            assert!(!pending.is_empty());
+            pending.presented();
+            output = pending.next_batch(|| panic!("retained markers must precede PTY output"));
+        }
+        assert_eq!(advance_output(&mut term, &mut output), prompt.len());
+        assert!(term.modes.bracketed_paste);
+    }
+
+    #[test]
+    fn marker_only_output_is_not_empty_or_lost() {
+        let mut term = Terminal::new(10, 2);
+        term.advance(b"\x1b[?1000;1004;2004h");
+        let mut pending = PendingOutput::default();
+        pending.retain(
+            pty::Output {
+                bytes: Vec::new(),
+                shell_returns: vec![0],
+            },
+            0,
+            Instant::now(),
+        );
+        assert!(!pending.is_empty());
+        assert!(pending.presented());
+        let mut output = pending.next_batch(|| panic!("marker must precede PTY output"));
+        assert_eq!(advance_output(&mut term, &mut output), 0);
+        pending.retain(output, 0, Instant::now());
+        assert!(pending.is_empty());
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(!term.modes.bracketed_paste);
     }
 
     #[test]
