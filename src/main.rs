@@ -248,7 +248,8 @@ impl App {
         // Normalize newlines to carriage returns, as typed Enter would send.
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bytes = if s.term.modes.bracketed_paste {
-            let text = text.replace("\x1b[201~", "");
+            // Strip every ESC so the text cannot end the bracketed paste early.
+            let text = text.replace('\x1b', "");
             format!("\x1b[200~{text}\x1b[201~")
         } else {
             text
@@ -400,8 +401,7 @@ impl App {
                         self.report_mouse(b, true, true)
                     }
                     (Some(MouseMode::Motion), None) => {
-                        // Motion with no button held is reported as button 3 ("released").
-                        self.report_mouse(ReportButton::Left, false, true)
+                        self.report_mouse(ReportButton::None, true, true)
                     }
                     _ => {}
                 }
@@ -441,7 +441,7 @@ impl App {
             return;
         }
         let Some(s) = &mut self.session else { return };
-        if s.term.is_alt_screen() {
+        if s.term.is_alt_screen() && s.term.modes.alt_scroll {
             // Programs on the alternate screen (less, man, vim) get arrow keys instead.
             let key: &[u8] = match (steps > 0, s.term.modes.app_cursor) {
                 (true, true) => b"\x1bOA",

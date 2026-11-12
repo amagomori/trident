@@ -116,10 +116,12 @@ pub fn encode_key(
     }
 
     if alt && let Key::Character(s) = base {
-        let s = if mods.shift_key() {
-            s.to_uppercase()
-        } else {
-            s.to_string()
+        // Prefer the shifted logical key (Alt+Shift+. is ">"); fall back to uppercasing
+        // when the platform composed something else (macOS Option).
+        let s = match key {
+            Key::Character(k) if mods.shift_key() && k.is_ascii() => k.to_string(),
+            _ if mods.shift_key() => s.to_uppercase(),
+            _ => s.to_string(),
         };
         return Some(with_alt(s.into_bytes()));
     }
@@ -136,6 +138,8 @@ pub enum MouseButton {
     Left = 0,
     Middle = 1,
     Right = 2,
+    /// Motion with no button held.
+    None = 3,
     WheelUp = 64,
     WheelDown = 65,
 }
@@ -202,6 +206,11 @@ mod tests {
             Some(b"\x1bb".to_vec())
         );
         assert_eq!(key(ch("é"), Some("é"), none), Some("é".as_bytes().to_vec()));
+        let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
+        assert_eq!(
+            encode_key(&ch(">"), &ch("."), Some(">"), alt_shift, false, true),
+            Some(b"\x1b>".to_vec())
+        );
     }
 
     #[test]
@@ -267,6 +276,10 @@ mod tests {
         assert_eq!(
             encode_mouse(MouseButton::WheelUp, true, false, 0, 0, none, false),
             Some(vec![0x1b, b'[', b'M', 32 + 64, 33, 33])
+        );
+        assert_eq!(
+            encode_mouse(MouseButton::None, true, true, 4, 9, none, true),
+            Some(b"\x1b[<35;5;10M".to_vec())
         );
     }
 }
