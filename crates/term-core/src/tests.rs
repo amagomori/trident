@@ -231,6 +231,27 @@ fn synchronized_frame_end_stops_before_next_frame() {
 }
 
 #[test]
+fn synchronized_reset_after_split_unrelated_escape() {
+    let mut t = term(10, 2, "\x1b[?2026hOLD\x1b[3");
+    let batch = b"1mX\x1b[?2026l\x1b[?2026h\rNEW";
+    assert_eq!(t.advance_until_sync_end(batch), b"1mX\x1b[?2026l".len());
+    assert_eq!(t.viewport_row(0).text(), "OLDX");
+    assert!(!t.modes.synchronized_output);
+}
+
+#[test]
+fn synchronized_reset_split_across_multiple_reads() {
+    let mut t = term(10, 2, "\x1b[?2026hOLD");
+    for byte in b"\x1b[?2026" {
+        assert_eq!(t.advance_until_sync_end(&[*byte]), 1);
+        assert!(t.modes.synchronized_output);
+    }
+    assert_eq!(t.advance_until_sync_end(b"l\x1b[?2026h\rNEW"), 1);
+    assert!(!t.modes.synchronized_output);
+    assert_eq!(t.viewport_row(0).text(), "OLD");
+}
+
+#[test]
 fn synchronized_advance_preserves_plain_flood_batching() {
     let mut t = term(10, 2, "");
     let batch = b"line\r\n".repeat(DEFAULT_SCROLLBACK + 100);
