@@ -15,7 +15,12 @@ term-core = { path = "crates/term-core" }
 term-render = { path = "crates/term-render" }
 ab_glyph = "0.2"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
+flate2 = "1"
+libc = "0.2"
+memchr = "2"
+png = "0.18"
 pollster = "0.4"
 portable-pty = "0.9"
 unicode-width = "0.2"

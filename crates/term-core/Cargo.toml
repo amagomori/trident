@@ -8,5 +8,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
+flate2.workspace = true
+memchr.workspace = true
+png.workspace = true
 unicode-width.workspace = true
 vte.workspace = true
+
+[target."cfg(unix)".dependencies]
+libc.workspace = true
