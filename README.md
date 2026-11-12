@@ -76,6 +76,13 @@ control characters made visible; other files get a one-line summary such as
 `ELF executable, 16.2 KiB`. A missing, unreadable or corrupt file prints an error
 and the command exits with status 1. Sample files live in `crates/term-app/samples`.
 
+Inside tmux, `terminal show` sends images through tmux's passthrough. tmux 3.3 and
+later drop passthrough unless it is turned on, so add this to `~/.tmux.conf`:
+
+```
+set -g allow-passthrough on
+```
+
 ## Layout
 
 A Cargo workspace of three crates:

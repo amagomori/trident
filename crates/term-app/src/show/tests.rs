@@ -19,6 +19,7 @@ fn big_window() -> Window {
         rows: 60,
         cell_w: 10.0,
         cell_h: 20.0,
+        tmux: false,
     }
 }
 
@@ -205,7 +206,7 @@ fn large_images_are_sent_in_chunks() {
         pixels: (0..300 * 300 * 4).map(|i| (i * 7 % 251) as u8).collect(),
     };
     let mut out = Vec::new();
-    write_kitty(&mut out, &image).unwrap();
+    write_kitty(&mut out, &image, big_window()).unwrap();
     let text = String::from_utf8(out.clone()).unwrap();
     assert!(text.matches("\x1b_G").count() > 1);
     assert!(text.starts_with("\x1b_Ga=T,f=32,o=z,q=2,s=300,v=300,m=1;"));
@@ -301,6 +302,7 @@ fn images_shrink_to_the_window_but_never_grow() {
         rows: 25,
         cell_w: 10.0,
         cell_h: 20.0,
+        tmux: false,
     };
     let none = Options::default();
     // 800x480 text area, minus a row for the prompt.
@@ -362,4 +364,116 @@ fn parses_the_pixel_size_report() {
     );
     assert_eq!(parse_pixel_report(b"\x1b[?62;22c"), None);
     assert_eq!(parse_pixel_report(b"\x1b[4;0;0t"), None);
+}
+
+fn noise(width: u32, height: u32) -> Rgba {
+    Rgba {
+        width,
+        height,
+        pixels: (0..width * height * 4)
+            .map(|i| (i * 7 % 251) as u8)
+            .collect(),
+    }
+}
+
+fn in_tmux() -> Window {
+    Window {
+        tmux: true,
+        ..big_window()
+    }
+}
+
+/// Splits tmux output into the escapes inside its passthroughs (inner ESCs undoubled) and
+/// whatever follows the last one.
+fn unwrap_passthrough(mut out: &[u8]) -> (Vec<Vec<u8>>, Vec<u8>) {
+    let mut escapes = Vec::new();
+    while let Some(rest) = out.strip_prefix(b"\x1bPtmux;") {
+        let mut escape = Vec::new();
+        let mut i = 0;
+        loop {
+            match (rest[i], rest.get(i + 1)) {
+                (0x1b, Some(0x1b)) => {
+                    escape.push(0x1b);
+                    i += 2;
+                }
+                (0x1b, Some(b'\\')) => break,
+                (0x1b, other) => panic!("lone ESC inside the passthrough, then {other:?}"),
+                (b, _) => {
+                    escape.push(b);
+                    i += 1;
+                }
+            }
+        }
+        escapes.push(escape);
+        out = &rest[i + 2..];
+    }
+    (escapes, out.to_vec())
+}
+
+#[test]
+fn inside_tmux_every_escape_goes_through_passthrough() {
+    let image = noise(300, 300);
+    let mut out = Vec::new();
+    write_kitty(&mut out, &image, in_tmux()).unwrap();
+    let (escapes, rest) = unwrap_passthrough(&out);
+    assert!(escapes.len() > 1);
+    // 300 pixels on 20-pixel rows: the cursor steps over 15 rows.
+    assert_eq!(rest, b"\n".repeat(15));
+    let last = escapes.len() - 1;
+    for (i, escape) in escapes.iter().enumerate() {
+        let start = match i {
+            0 => "\x1b7\x1b_Ga=T,f=32,o=z,q=2,C=1,s=300,v=300,m=1;",
+            i if i == last => "\x1b8\x1b_Gm=0;",
+            _ => "\x1b_Gm=1;",
+        };
+        assert!(escape.starts_with(start.as_bytes()), "escape {i}");
+        assert!(escape.ends_with(b"\x1b\\"));
+        // One kitty escape per passthrough, each within the protocol's chunk size.
+        let body = &escape[start.len()..escape.len() - 2];
+        assert!(!body.contains(&0x1b) && body.len() <= CHUNK);
+    }
+}
+
+#[test]
+fn a_small_image_inside_tmux_needs_no_saved_cursor() {
+    let mut out = Vec::new();
+    write_kitty(&mut out, &noise(4, 4), in_tmux()).unwrap();
+    let (escapes, rest) = unwrap_passthrough(&out);
+    assert_eq!(escapes.len(), 1);
+    assert!(escapes[0].starts_with(b"\x1b_Ga=T,f=32,o=z,q=2,C=1,s=4,v=4,m=0;"));
+    assert_eq!(rest, b"\n");
+}
+
+#[test]
+fn tmux_output_places_the_image_at_the_cursor() {
+    let image = noise(300, 300);
+    let mut out = Vec::new();
+    write_kitty(&mut out, &image, in_tmux()).unwrap();
+    let (escapes, rest) = unwrap_passthrough(&out);
+    // What tmux 3.2a sends the terminal: each passthrough as is, then it resets the
+    // scroll region and homes the cursor; the newlines it draws as CR LF.
+    let mut term = Terminal::new(80, 40);
+    term.set_cell_pixel_size(10.0, 20.0);
+    term.advance(b"one\r\ntwo\r\n");
+    for escape in escapes {
+        term.advance(&escape);
+        term.advance(b"\x1b[1;40r\x1b[1;1H");
+    }
+    assert!(term.take_responses().is_empty());
+    let placements = term.visible_placements();
+    assert_eq!(placements.len(), 1);
+    let p = placements[0].placement;
+    assert_eq!((placements[0].row, p.col, p.cols, p.rows), (2, 0, 30, 15));
+    assert_eq!(term.image(p.image_id).unwrap().pixels, image.pixels);
+    // tmux's own cursor, which it puts back, steps past the image's 15 rows.
+    assert_eq!(rest, b"\n".repeat(15));
+}
+
+#[test]
+fn outside_tmux_escapes_go_straight_to_the_terminal() {
+    let mut out = Vec::new();
+    write_kitty(&mut out, &noise(300, 300), big_window()).unwrap();
+    assert!(out.starts_with(b"\x1b_Ga=T,f=32,o=z,q=2,s=300,v=300,m=1;"));
+    assert!(out.ends_with(b"\x1b\\\n"));
+    assert!(!out.windows(2).any(|w| w == b"\x1bP" || w == b"\x1b7"));
 }

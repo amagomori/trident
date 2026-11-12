@@ -33,6 +33,8 @@ struct Window {
     rows: u32,
     cell_w: f32,
     cell_h: f32,
+    /// Running inside tmux, which only hands graphics to the terminal through passthrough.
+    tmux: bool,
 }
 
 impl Default for Window {
@@ -42,6 +44,7 @@ impl Default for Window {
             rows: 24,
             cell_w: 8.0,
             cell_h: 16.0,
+            tmux: false,
         }
     }
 }
@@ -73,7 +76,9 @@ pub fn usage() -> String {
            --width N    Draw images N columns wide\n  \
            --height N   Draw images N rows tall (with --width: fit inside both)\n  \
            --fit        Scale images up or down to fill the window\n  \
-           -h, --help   Show this help",
+           -h, --help   Show this help\n\n\
+         Inside tmux, images go through its passthrough; tmux 3.3 and later drop them\n\
+         unless `set -g allow-passthrough on` is in its config.",
         env!("CARGO_BIN_NAME")
     )
 }
@@ -118,7 +123,10 @@ pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
             return 2;
         }
     };
-    let window = window_size();
+    let window = Window {
+        tmux: std::env::var_os("TMUX").is_some(),
+        ..window_size()
+    };
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
     let mut status = 0;
@@ -155,11 +163,11 @@ fn show(
     match detect(&bytes) {
         Kind::Raster(format) => {
             let image = decode_raster(&bytes, format, options, window)?;
-            write_kitty(out, &image).map_err(write_err)
+            write_kitty(out, &image, window).map_err(write_err)
         }
         Kind::Svg => {
             let image = render_svg(&bytes, path, options, window)?;
-            write_kitty(out, &image).map_err(write_err)
+            write_kitty(out, &image, window).map_err(write_err)
         }
         Kind::Text => write_text(out, &bytes).map_err(write_err),
         Kind::Binary(kind) => {
@@ -440,26 +448,68 @@ fn load_fonts(db: &mut resvg::usvg::fontdb::Database) {
 
 /// Sends `image` as one kitty `a=T` command (zlib-compressed RGBA, split into chunks) and
 /// moves to the line below it.
-fn write_kitty(out: &mut impl Write, image: &Rgba) -> io::Result<()> {
+///
+/// Inside tmux each escape goes through its passthrough. tmux keeps its own cursor, which
+/// wouldn't follow the terminal's past the image, so the image leaves the cursor alone
+/// (`C=1`) and newlines step over its rows instead. tmux also homes the terminal's cursor
+/// after every passthrough, and the image is placed when its last chunk arrives, so the
+/// first chunk saves the cursor (`ESC 7`) and the last restores it (`ESC 8`).
+fn write_kitty(out: &mut impl Write, image: &Rgba, window: Window) -> io::Result<()> {
     let mut zlib = ZlibEncoder::new(Vec::new(), Compression::fast());
     zlib.write_all(&image.pixels)?;
     let payload = BASE64.encode(zlib.finish()?);
     let chunks: Vec<&[u8]> = payload.as_bytes().chunks(CHUNK).collect();
+    let keep_cursor = if window.tmux { ",C=1" } else { "" };
+    let mut escape = Vec::with_capacity(CHUNK + 64);
     for (i, chunk) in chunks.iter().enumerate() {
         let more = u8::from(i + 1 < chunks.len());
+        escape.clear();
+        if window.tmux && chunks.len() > 1 {
+            if i == 0 {
+                escape.extend_from_slice(b"\x1b7");
+            } else if more == 0 {
+                escape.extend_from_slice(b"\x1b8");
+            }
+        }
         if i == 0 {
             write!(
-                out,
-                "\x1b_Ga=T,f=32,o=z,q=2,s={},v={},m={more};",
+                escape,
+                "\x1b_Ga=T,f=32,o=z,q=2{keep_cursor},s={},v={},m={more};",
                 image.width, image.height
             )?;
         } else {
-            write!(out, "\x1b_Gm={more};")?;
+            write!(escape, "\x1b_Gm={more};")?;
         }
-        out.write_all(chunk)?;
-        out.write_all(b"\x1b\\")?;
+        escape.extend_from_slice(chunk);
+        escape.extend_from_slice(b"\x1b\\");
+        if window.tmux {
+            out.write_all(&tmux_passthrough(&escape))?;
+        } else {
+            out.write_all(&escape)?;
+        }
     }
-    out.write_all(b"\n")
+    if window.tmux {
+        let rows = (image.height as f32 / window.cell_h).ceil().max(1.0) as usize;
+        out.write_all(&b"\n".repeat(rows))
+    } else {
+        out.write_all(b"\n")
+    }
+}
+
+/// `escape` wrapped in tmux's DCS passthrough (`ESC P tmux; ... ESC \`, every ESC inside
+/// doubled), which tmux forwards to the terminal it runs in. tmux 3.3 and later only do so
+/// with `allow-passthrough` on, and drop it silently otherwise.
+fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
+    let mut wrapped = Vec::with_capacity(escape.len() + 16);
+    wrapped.extend_from_slice(b"\x1bPtmux;");
+    for &b in escape {
+        if b == 0x1b {
+            wrapped.push(b);
+        }
+        wrapped.push(b);
+    }
+    wrapped.extend_from_slice(b"\x1b\\");
+    wrapped
 }
 
 /// Prints text with control characters made visible (`^[` for ESC), so a file can't
@@ -554,6 +604,7 @@ mod unix {
             rows,
             cell_w,
             cell_h,
+            tmux: false,
         })
     }
 
