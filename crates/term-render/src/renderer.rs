@@ -59,6 +59,11 @@ pub struct Renderer {
 pub const PADDING: f32 = 6.0;
 
 impl Renderer {
+    #[cfg(target_os = "macos")]
+    pub fn gpu_device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
     /// Creates a renderer drawing into `window`, whose drawable area is `width` x `height`
     /// physical pixels.
     pub fn new<W>(window: Arc<W>, width: u32, height: u32) -> Result<Renderer, String>
@@ -285,7 +290,8 @@ impl Renderer {
         padding: f32,
         focused: bool,
         banner: Option<&str>,
-    ) {
+        pre_present: Option<&mut dyn FnMut()>,
+    ) -> bool {
         for _ in 0..2 {
             if self.build(term, fonts, padding, focused, banner) {
                 break;
@@ -307,7 +313,7 @@ impl Renderer {
                 .prepare(&self.device, &self.queue, &self.uniforms, term, quads);
             self.image_clip = self.grid_clip(term, &metrics, padding);
         }
-        self.draw();
+        self.draw(pre_present)
     }
 
     fn grid_clip(&self, term: &Terminal, metrics: &CellMetrics, padding: f32) -> [u32; 4] {
@@ -500,15 +506,15 @@ impl Renderer {
         ok
     }
 
-    fn draw(&mut self) {
+    fn draw(&mut self, pre_present: Option<&mut dyn FnMut()>) -> bool {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return false;
             }
-            _ => return,
+            _ => return false,
         };
         let instances = &self.backgrounds;
         if instances.len() > self.instance_capacity {
@@ -582,7 +588,11 @@ impl Renderer {
             }
         }
         self.queue.submit([encoder.finish()]);
+        if let Some(pre_present) = pre_present {
+            pre_present();
+        }
         self.queue.present(frame);
+        true
     }
 }
 

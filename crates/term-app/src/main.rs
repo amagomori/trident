@@ -1,6 +1,7 @@
 mod clipboard;
 mod flow_control;
 mod input;
+mod latency;
 mod pty;
 mod show;
 
@@ -132,6 +133,7 @@ struct Session {
     since_frame: usize,
     /// When output was first held back.
     deferred: Option<Instant>,
+    latency: Option<latency::Latency>,
     resize: ResizeThrottle,
 }
 
@@ -246,7 +248,19 @@ impl App {
             pty.resize(cols, rows, cell);
         }
         window.request_redraw();
+        let mut latency = latency::Latency::from_env(
+            window
+                .current_monitor()
+                .and_then(|m| m.refresh_rate_millihertz())
+                .unwrap_or(0),
+        );
+        if let Some(log) = &mut latency {
+            log.feedback(window.clone());
+            #[cfg(target_os = "macos")]
+            log.metal_feedback(renderer.gpu_device());
+        }
         Ok(Session {
+            latency,
             window,
             renderer,
             fonts,
@@ -314,12 +328,18 @@ impl App {
                 .request_user_attention(Some(winit::window::UserAttentionType::Informational));
         }
         if processed > 0 {
+            if let Some(log) = &mut s.latency {
+                log.output(processed);
+            }
             s.window.request_redraw();
         }
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
         let Some(s) = &mut self.session else { return };
+        if let Some(log) = &mut s.latency {
+            log.input(Instant::now());
+        }
         s.term.scroll_to_bottom();
         s.term.selection = None;
         s.pty.write(bytes);
@@ -606,6 +626,15 @@ impl ApplicationHandler<UserEvent> for App {
             s.window.request_redraw();
         }
         let now = Instant::now();
+        if let Some(log) = self.session.as_mut().and_then(|s| s.latency.as_mut()) {
+            if log.finished(now) {
+                event_loop.exit();
+                return;
+            }
+            if let Some(bytes) = log.probe(now) {
+                self.write_input(bytes);
+            }
+        }
         if self.session.as_ref().is_some_and(|s| s.resize.ready(now)) {
             self.resize_grid();
         }
@@ -622,6 +651,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .map(|since| since + MAX_DEFER)
                 .into_iter()
                 .chain(s.resize.deadline)
+                .chain(s.latency.as_ref().and_then(|l| l.wake_deadline(now)))
                 .min()
         });
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
@@ -672,16 +702,26 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
                 if let Some(s) = &mut self.session {
-                    s.since_frame = 0;
                     let pad = PADDING * s.window.scale_factor() as f32;
                     s.pty.refresh_flow();
-                    s.renderer.render(
+                    let mut pre_present = || {
+                        if let Some(log) = &mut s.latency {
+                            log.pre_present();
+                        }
+                    };
+                    if s.renderer.render(
                         &s.term,
                         &mut s.fonts,
                         pad,
                         self.focused,
                         s.pty.flow.banner().as_deref(),
-                    );
+                        Some(&mut pre_present),
+                    ) {
+                        if let Some(log) = &mut s.latency {
+                            log.frame(Instant::now(), s.since_frame);
+                        }
+                        s.since_frame = 0;
+                    }
                 }
             }
             _ => {}

@@ -1404,6 +1404,7 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
  "objc2 0.6.5",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
 ]
 
@@ -2223,14 +2224,24 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "block2 0.6.2",
  "flate2",
  "image",
  "libc",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "portable-pty",
  "resvg",
  "term-core",
  "term-render",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wgpu",
  "winit",
+ "x11rb",
 ]
 
 [[package]]

@@ -105,6 +105,47 @@ cargo fmt
 
 CI runs these on Linux and macOS for every pull request.
 
+### Measuring latency
+
+From a Linux or macOS desktop session, run `python3 .github/scripts/latency.py
+--base ../baseline --head . --runs 5`, or use
+`--app target/release/terminal`. It reports per-run p50/p99/mean input-to-present
+latency and their min–max spread, plus presented/wasted/late frames and bytes/s
+under sustained output. Load mode runs without probes for `--duration` seconds
+(default 10) and reports throughput only. Late intervals exceed 1.5 refresh periods
+and require both adjacent frames to have parsed new bytes; idle gaps do not count.
+`--json results.json` saves samples; `--xvfb` is for smoke
+tests only. See the script docstring for setup and comparison controls.
+An uninstrumented baseline is skipped with a diagnostic; the head must produce
+latency data. Meaningful comparisons require instrumentation in both checkouts.
+
+Probes enter through the app's normal PTY input path. Output is matched to the
+frame carrying parsed output. On X11, Present CompleteNotify supplies the
+presentation timestamp (`x11-present`). On Wayland, `wp_presentation` feedback
+(`wayland-presentation`) is requested before
+each surface commit and converted from the compositor's advertised clock; the mode
+records vsync/hardware-clock/hardware-completion/zero-copy flags. Skipped or missing
+completions count as wasted frames.
+Present-return latency is reported separately. Each run labels its timing source;
+without feedback it explicitly reports `present-return (no feedback)` instead.
+On macOS, Metal drawable presented handlers use `presentedTime` (`metal-presented`).
+The opt-in harness hooks the concrete command-buffer `presentDrawable:` method;
+the direct drawable `present` path used with `presentsWithTransaction` is not
+hooked. The app does not enable that setting (CAMetalLayer defaults to false).
+Only Wayland presentation timing is verified, through headless Weston protocol
+testing. Metal and X11 timing are **unverified**, and the table and JSON label
+them accordingly. QA's paravirtual Metal run returned `presentedTime == 0` for all
+681 callbacks (skipped); real-Mac timing remains unverified. X11 completion
+matching is untested because no DRI3/GPU X server was available.
+These timestamps are not an optical
+measurement of pixel scanout; compositor/display processing may add delay.
+For a Wayland smoke test, start Weston headless and run with its `WAYLAND_DISPLAY`
+and `XDG_RUNTIME_DIR`, with `DISPLAY` unset. Headless feedback validates protocol
+matching, not physical-display latency.
+Likewise, llvmpipe on an X server can produce no Present completion events even
+when the Present extension is advertised; such runs explicitly use the labeled
+present-return fallback and cannot prove real-display scheduling gains.
+
 ## License
 
 MIT. The bundled JetBrains Mono fonts are under the SIL Open Font License 1.1
