@@ -19,6 +19,7 @@ fn big_window() -> Window {
         rows: 60,
         cell_w: 10.0,
         cell_h: 20.0,
+        tmux: false,
     }
 }
 
@@ -205,7 +206,7 @@ fn large_images_are_sent_in_chunks() {
         pixels: (0..300 * 300 * 4).map(|i| (i * 7 % 251) as u8).collect(),
     };
     let mut out = Vec::new();
-    write_kitty(&mut out, &image).unwrap();
+    write_kitty(&mut out, &image, big_window(), |_| unreachable!()).unwrap();
     let text = String::from_utf8(out.clone()).unwrap();
     assert!(text.matches("\x1b_G").count() > 1);
     assert!(text.starts_with("\x1b_Ga=T,f=32,o=z,q=2,s=300,v=300,m=1;"));
@@ -301,6 +302,7 @@ fn images_shrink_to_the_window_but_never_grow() {
         rows: 25,
         cell_w: 10.0,
         cell_h: 20.0,
+        tmux: false,
     };
     let none = Options::default();
     // 800x480 text area, minus a row for the prompt.
@@ -362,4 +364,200 @@ fn parses_the_pixel_size_report() {
     );
     assert_eq!(parse_pixel_report(b"\x1b[?62;22c"), None);
     assert_eq!(parse_pixel_report(b"\x1b[4;0;0t"), None);
+}
+
+fn noise(width: u32, height: u32) -> Rgba {
+    Rgba {
+        width,
+        height,
+        pixels: (0..width * height * 4)
+            .map(|i| (i * 7 % 251) as u8)
+            .collect(),
+    }
+}
+
+fn in_tmux() -> Window {
+    Window {
+        tmux: true,
+        ..big_window()
+    }
+}
+
+/// tmux output for `image`, with the waits it asked for marked by `<room>` and `<chunk>`.
+fn tmux_output(image: &Rgba) -> Vec<u8> {
+    let out = std::cell::RefCell::new(Vec::new());
+    let mut writer = Marked(&out);
+    write_kitty(&mut writer, image, in_tmux(), |wait| {
+        out.borrow_mut().extend_from_slice(match wait {
+            TmuxWait::Room => b"<room>",
+            TmuxWait::Chunk => b"<chunk>",
+        })
+    })
+    .unwrap();
+    out.into_inner()
+}
+
+struct Marked<'a>(&'a std::cell::RefCell<Vec<u8>>);
+
+impl Write for Marked<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Splits tmux output, after the room made for the image (`rows` newlines and the cursor
+/// back up), into the escapes inside its passthroughs (inner ESCs undoubled, `<chunk>` marks
+/// checked) and whatever follows the last one.
+fn unwrap_passthrough(out: &[u8], rows: usize) -> (Vec<Vec<u8>>, Vec<u8>) {
+    let room = [
+        b"\n".repeat(rows),
+        format!("\x1b[{rows}A<room>").into_bytes(),
+    ]
+    .concat();
+    let mut out = out
+        .strip_prefix(&room[..])
+        .expect("room for the image first");
+    let mut escapes = Vec::new();
+    while let Some(rest) = out.strip_prefix(b"\x1bPtmux;") {
+        let mut escape = Vec::new();
+        let mut i = 0;
+        loop {
+            match (rest[i], rest.get(i + 1)) {
+                (0x1b, Some(0x1b)) => {
+                    escape.push(0x1b);
+                    i += 2;
+                }
+                (0x1b, Some(b'\\')) => break,
+                (0x1b, other) => panic!("lone ESC inside the passthrough, then {other:?}"),
+                (b, _) => {
+                    escape.push(b);
+                    i += 1;
+                }
+            }
+        }
+        escapes.push(escape);
+        out = &rest[i + 2..];
+        if out.starts_with(b"\x1bPtmux;") {
+            panic!("no pause between chunks");
+        }
+        if let Some(rest) = out.strip_prefix(b"<chunk>") {
+            out = rest;
+        }
+    }
+    (escapes, out.to_vec())
+}
+
+#[test]
+fn inside_tmux_every_escape_goes_through_passthrough() {
+    let image = noise(300, 300);
+    let (escapes, rest) = unwrap_passthrough(&tmux_output(&image), 15);
+    assert!(escapes.len() > 1);
+    // 300 pixels on 20-pixel rows: the cursor steps over 15 rows.
+    assert_eq!(rest, b"\n".repeat(15));
+    let last = escapes.len() - 1;
+    for (i, escape) in escapes.iter().enumerate() {
+        let start = match i {
+            0 => "\x1b7\x1b_Ga=T,f=32,o=z,q=2,C=1,s=300,v=300,m=1;",
+            i if i == last => "\x1b8\x1b_Gm=0;",
+            _ => "\x1b_Gm=1;",
+        };
+        assert!(escape.starts_with(start.as_bytes()), "escape {i}");
+        assert!(escape.ends_with(b"\x1b\\"));
+        // One kitty escape per passthrough, each within the protocol's chunk size.
+        let body = &escape[start.len()..escape.len() - 2];
+        assert!(!body.contains(&0x1b) && body.len() <= CHUNK);
+    }
+}
+
+#[test]
+fn a_small_image_inside_tmux_needs_no_saved_cursor() {
+    let out = tmux_output(&noise(4, 4));
+    let (escapes, rest) = unwrap_passthrough(&out, 1);
+    assert_eq!(escapes.len(), 1);
+    assert!(escapes[0].starts_with(b"\x1b_Ga=T,f=32,o=z,q=2,C=1,s=4,v=4,m=0;"));
+    assert_eq!(rest, b"\n");
+}
+
+/// Replays tmux output for `image` the way tmux 3.2a hands it to a 80x40 terminal holding
+/// `before`: newlines as CR LF, erasing the new row (`ESC [ K`) when they scroll, and after
+/// each passthrough the scroll region reset and the cursor homed. Returns the terminal with
+/// the cursor back where tmux keeps it.
+fn replay_in_tmux(image: &Rgba, rows: usize, before: &[u8]) -> Terminal {
+    let (escapes, rest) = unwrap_passthrough(&tmux_output(image), rows);
+    assert_eq!(rest, b"\n".repeat(rows));
+    let mut term = Terminal::new(80, 40);
+    term.set_cell_pixel_size(10.0, 20.0);
+    term.advance(before);
+    newlines(&mut term, rows);
+    term.advance(format!("\x1b[{rows}A").as_bytes());
+    let (row, col) = term.cursor_position().unwrap();
+    for escape in escapes {
+        term.advance(&escape);
+        term.advance(b"\x1b[1;40r\x1b[1;1H");
+    }
+    term.advance(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+    newlines(&mut term, rows);
+    assert!(term.take_responses().is_empty());
+    term
+}
+
+fn newlines(term: &mut Terminal, n: usize) {
+    for _ in 0..n {
+        let at_bottom = term.cursor_position().unwrap().0 == 39;
+        term.advance(if at_bottom { b"\r\n\x1b[K" } else { b"\r\n" });
+    }
+}
+
+#[test]
+fn tmux_output_places_the_image_at_the_cursor() {
+    let image = noise(300, 300);
+    let term = replay_in_tmux(&image, 15, b"one\r\ntwo\r\n");
+    let placements = term.visible_placements();
+    assert_eq!(placements.len(), 1);
+    let p = placements[0].placement;
+    assert_eq!((placements[0].row, p.col, p.cols, p.rows), (2, 0, 30, 15));
+    assert_eq!(term.image(p.image_id).unwrap().pixels, image.pixels);
+    // tmux's own cursor steps past the image's 15 rows.
+    assert_eq!(term.cursor_position().unwrap(), (17, 0));
+}
+
+#[test]
+fn tmux_output_at_the_bottom_survives_tmux_scrolling() {
+    // 39 lines put the cursor on the last row: the room made scrolls the screen first.
+    let before: Vec<u8> = (1..40)
+        .flat_map(|n| format!("{n}\r\n").into_bytes())
+        .collect();
+    let mut term = replay_in_tmux(&noise(300, 300), 15, &before);
+    let placements = term.visible_placements();
+    assert_eq!(placements.len(), 1);
+    assert_eq!((placements[0].row, placements[0].placement.rows), (24, 15));
+    assert_eq!(term.cursor_position().unwrap(), (39, 0));
+    // A prompt, then tmux scrolling the pane for the next line: it erases the new bottom
+    // row, which the image is clear of.
+    term.advance(b"$ \x1b[1;40r\x1b[40;1H\n\x1b[K");
+    let placements = term.visible_placements();
+    assert_eq!(placements.len(), 1);
+    assert_eq!(placements[0].row, 23);
+}
+
+#[test]
+fn outside_tmux_escapes_go_straight_to_the_terminal() {
+    let mut out = Vec::new();
+    write_kitty(&mut out, &noise(300, 300), big_window(), |_| unreachable!()).unwrap();
+    assert!(out.starts_with(b"\x1b_Ga=T,f=32,o=z,q=2,s=300,v=300,m=1;"));
+    assert!(out.ends_with(b"\x1b\\\n"));
+    assert!(!out.windows(2).any(|w| w == b"\x1bP" || w == b"\x1b7"));
+}
+
+#[test]
+fn reads_tmux_allow_passthrough() {
+    assert!(!passthrough_allowed("allow-passthrough* off\n"));
+    assert!(!passthrough_allowed("allow-passthrough off\n"));
+    assert!(passthrough_allowed("allow-passthrough on\n"));
+    assert!(passthrough_allowed("allow-passthrough* all\n"));
+    assert!(!passthrough_allowed(""));
 }

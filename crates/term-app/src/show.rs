@@ -9,11 +9,19 @@ use flate2::write::ZlibEncoder;
 use image::{ImageDecoder, ImageFormat};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Base64 bytes per kitty escape; the protocol allows at most 4096.
 const CHUNK: usize = 4096;
 /// Largest side sent, matching what the terminal accepts.
 const MAX_SIDE: u32 = 10_000;
+/// How long to wait for a tmux command; a tmux on PATH older than the server can hang.
+const TMUX_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Pause after each chunk inside tmux before 3.3: below the rate at which a slow terminal
+/// reading 4 KiB every 5 ms fills tmux's buffer, so a 500 KiB image takes about 0.6 s.
+const OLD_TMUX_CHUNK_PAUSE: Duration = Duration::from_millis(5);
 /// How long to wait for the terminal to answer a size query.
 #[cfg(unix)]
 const QUERY_TIMEOUT_MS: u64 = 300;
@@ -33,6 +41,8 @@ struct Window {
     rows: u32,
     cell_w: f32,
     cell_h: f32,
+    /// Running inside tmux, which only hands graphics to the terminal through passthrough.
+    tmux: bool,
 }
 
 impl Default for Window {
@@ -42,6 +52,7 @@ impl Default for Window {
             rows: 24,
             cell_w: 8.0,
             cell_h: 16.0,
+            tmux: false,
         }
     }
 }
@@ -73,7 +84,10 @@ pub fn usage() -> String {
            --width N    Draw images N columns wide\n  \
            --height N   Draw images N rows tall (with --width: fit inside both)\n  \
            --fit        Scale images up or down to fill the window\n  \
-           -h, --help   Show this help",
+           -h, --help   Show this help\n\n\
+         Inside tmux, images go through its passthrough. tmux 3.3 and later drop that\n\
+         unless allow-passthrough is on, so, like `kitten icat`, show turns it on for\n\
+         the pane it runs in.",
         env!("CARGO_BIN_NAME")
     )
 }
@@ -118,7 +132,10 @@ pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
             return 2;
         }
     };
-    let window = window_size();
+    let window = Window {
+        tmux: std::env::var_os("TMUX").is_some(),
+        ..window_size()
+    };
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
     let mut status = 0;
@@ -155,11 +172,11 @@ fn show(
     match detect(&bytes) {
         Kind::Raster(format) => {
             let image = decode_raster(&bytes, format, options, window)?;
-            write_kitty(out, &image).map_err(write_err)
+            write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
         }
         Kind::Svg => {
             let image = render_svg(&bytes, path, options, window)?;
-            write_kitty(out, &image).map_err(write_err)
+            write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
         }
         Kind::Text => write_text(out, &bytes).map_err(write_err),
         Kind::Binary(kind) => {
@@ -440,26 +457,169 @@ fn load_fonts(db: &mut resvg::usvg::fontdb::Database) {
 
 /// Sends `image` as one kitty `a=T` command (zlib-compressed RGBA, split into chunks) and
 /// moves to the line below it.
-fn write_kitty(out: &mut impl Write, image: &Rgba) -> io::Result<()> {
+///
+/// Inside tmux each escape goes through its passthrough. tmux keeps its own cursor, which
+/// wouldn't follow the terminal's past the image, so the image leaves the cursor alone
+/// (`C=1`) and newlines step over its rows instead. Those newlines go out first, and the
+/// cursor back up, so that tmux scrolls the pane before the image is drawn: scrolling it
+/// after would erase the new bottom row (`ESC [ K`) across the image, which drops it.
+/// tmux also homes the terminal's cursor after every passthrough, and the image is placed
+/// when its last chunk arrives, so the first chunk saves the cursor (`ESC 7`) and the last
+/// restores it (`ESC 8`). `wait` is called, with `out` flushed, once the room is made and
+/// after every chunk but the last.
+fn write_kitty(
+    out: &mut impl Write,
+    image: &Rgba,
+    window: Window,
+    mut wait: impl FnMut(TmuxWait),
+) -> io::Result<()> {
     let mut zlib = ZlibEncoder::new(Vec::new(), Compression::fast());
     zlib.write_all(&image.pixels)?;
     let payload = BASE64.encode(zlib.finish()?);
     let chunks: Vec<&[u8]> = payload.as_bytes().chunks(CHUNK).collect();
+    let keep_cursor = if window.tmux { ",C=1" } else { "" };
+    let rows = (image.height as f32 / window.cell_h).ceil().max(1.0) as usize;
+    if window.tmux {
+        out.write_all(&b"\n".repeat(rows))?;
+        write!(out, "\x1b[{rows}A")?;
+        out.flush()?;
+        wait(TmuxWait::Room);
+    }
+    let mut escape = Vec::with_capacity(CHUNK + 64);
     for (i, chunk) in chunks.iter().enumerate() {
         let more = u8::from(i + 1 < chunks.len());
+        escape.clear();
+        if window.tmux && chunks.len() > 1 {
+            if i == 0 {
+                escape.extend_from_slice(b"\x1b7");
+            } else if more == 0 {
+                escape.extend_from_slice(b"\x1b8");
+            }
+        }
         if i == 0 {
             write!(
-                out,
-                "\x1b_Ga=T,f=32,o=z,q=2,s={},v={},m={more};",
+                escape,
+                "\x1b_Ga=T,f=32,o=z,q=2{keep_cursor},s={},v={},m={more};",
                 image.width, image.height
             )?;
         } else {
-            write!(out, "\x1b_Gm={more};")?;
+            write!(escape, "\x1b_Gm={more};")?;
         }
-        out.write_all(chunk)?;
-        out.write_all(b"\x1b\\")?;
+        escape.extend_from_slice(chunk);
+        escape.extend_from_slice(b"\x1b\\");
+        if window.tmux {
+            out.write_all(&tmux_passthrough(&escape))?;
+            if more == 1 {
+                out.flush()?;
+                wait(TmuxWait::Chunk);
+            }
+        } else {
+            out.write_all(&escape)?;
+        }
     }
-    out.write_all(b"\n")
+    if window.tmux {
+        out.write_all(&b"\n".repeat(rows))
+    } else {
+        out.write_all(b"\n")
+    }
+}
+
+/// Where [`write_kitty`] waits for tmux.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TmuxWait {
+    /// The newlines making room for the image are out; tmux must draw them first.
+    Room,
+    /// A chunk is out and more follow.
+    Chunk,
+}
+
+/// What [`write_kitty`] waits for inside tmux, after turning on its passthrough.
+fn tmux_wait(window: Window) -> impl FnMut(TmuxWait) {
+    let old_tmux = window.tmux && allow_passthrough();
+    move |wait| match wait {
+        TmuxWait::Room => {
+            #[cfg(unix)]
+            unix::sync();
+        }
+        // tmux before 3.3 throws away output, passthrough included, while the terminal falls
+        // behind reading it (`TTY_BLOCK`), which a large image does at full speed.
+        TmuxWait::Chunk if old_tmux => std::thread::sleep(OLD_TMUX_CHUNK_PAUSE),
+        TmuxWait::Chunk => {}
+    }
+}
+
+/// Turns `allow-passthrough` on for this tmux pane unless it already is, as `kitten icat`
+/// does: tmux 3.3 and later default it to off and then drop passthrough silently. Whether
+/// the tmux predates the option (`show` fails), in which case everything is passed through.
+fn allow_passthrough() -> bool {
+    static OLD_TMUX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OLD_TMUX.get_or_init(|| {
+        let pane = std::env::var("TMUX_PANE").ok();
+        let target: Vec<&str> = pane.iter().flat_map(|p| ["-t", p.as_str()]).collect();
+        let Some(current) = tmux(&[&["show", "-Ap"], &target[..], &["allow-passthrough"]].concat())
+        else {
+            return true;
+        };
+        if !passthrough_allowed(&current)
+            && tmux(&[&["set", "-p"], &target[..], &["allow-passthrough", "on"]].concat()).is_none()
+        {
+            eprintln!(
+                "{} show: couldn't turn on tmux's allow-passthrough, so images may not draw",
+                env!("CARGO_BIN_NAME")
+            );
+        }
+        false
+    })
+}
+
+/// Whether `tmux show -Ap allow-passthrough` output (`allow-passthrough* off`) allows it.
+fn passthrough_allowed(show: &str) -> bool {
+    let value = show.trim();
+    value.ends_with(" on") || value.ends_with(" all")
+}
+
+/// Runs tmux with `args`; its output if it succeeds within [`TMUX_TIMEOUT`].
+fn tmux(args: &[&str]) -> Option<String> {
+    let mut child = Command::new("tmux")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + TMUX_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut output = String::new();
+                io::Read::read_to_string(&mut child.stdout.take()?, &mut output).ok()?;
+                return Some(output);
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(Some(_)) => return None,
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// `escape` wrapped in tmux's DCS passthrough (`ESC P tmux; ... ESC \`, every ESC inside
+/// doubled), which tmux forwards to the terminal it runs in (3.3 and later only with
+/// `allow-passthrough` on).
+fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
+    let mut wrapped = Vec::with_capacity(escape.len() + 16);
+    wrapped.extend_from_slice(b"\x1bPtmux;");
+    for &b in escape {
+        if b == 0x1b {
+            wrapped.push(b);
+        }
+        wrapped.push(b);
+    }
+    wrapped.extend_from_slice(b"\x1b\\");
+    wrapped
 }
 
 /// Prints text with control characters made visible (`^[` for ESC), so a file can't
@@ -554,6 +714,7 @@ mod unix {
             rows,
             cell_w,
             cell_h,
+            tmux: false,
         })
     }
 
@@ -566,12 +727,25 @@ mod unix {
 
     /// Asks for the text area size, followed by a device attributes query that every
     /// terminal answers, so one that ignores the first doesn't cost the whole timeout.
-    fn query_pixels(mut tty: File) -> Option<(u32, u32)> {
+    fn query_pixels(tty: File) -> Option<(u32, u32)> {
+        parse_pixel_report(&query(tty, b"\x1b[14t\x1b[c", da1_answered))
+    }
+
+    /// Waits until the terminal (tmux, inside it) has handled everything written so far, by
+    /// asking for the cursor position.
+    pub(super) fn sync() {
+        if let Ok(tty) = File::options().read(true).write(true).open("/dev/tty") {
+            query(tty, b"\x1b[6n", |reply| reply.contains(&b'R'));
+        }
+    }
+
+    /// Writes `request` to the tty and reads the reply until `done` or the timeout.
+    fn query(mut tty: File, request: &[u8], done: fn(&[u8]) -> bool) -> Vec<u8> {
         let fd = tty.as_raw_fd();
         // SAFETY: tcgetattr/tcsetattr read and write a termios struct for an open fd.
         let mut saved: libc::termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
-            return None;
+            return Vec::new();
         }
         let mut raw = saved;
         raw.c_lflag &= !(libc::ICANON | libc::ECHO);
@@ -581,7 +755,7 @@ mod unix {
         raw.c_cc[libc::VTIME] = 1;
         unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) };
         let mut reply = Vec::new();
-        if tty.write_all(b"\x1b[14t\x1b[c").is_ok() {
+        if tty.write_all(request).is_ok() {
             let start = Instant::now();
             while start.elapsed().as_millis() < u128::from(QUERY_TIMEOUT_MS) {
                 let mut buf = [0; 256];
@@ -591,13 +765,13 @@ mod unix {
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
                 }
-                if da1_answered(&reply) {
+                if done(&reply) {
                     break;
                 }
             }
         }
         unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
-        parse_pixel_report(&reply)
+        reply
     }
 
     fn da1_answered(reply: &[u8]) -> bool {
