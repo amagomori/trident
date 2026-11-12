@@ -102,14 +102,16 @@ From a Linux or macOS desktop session, run `python3 .github/scripts/latency.py
 --base ../baseline --head . --runs 5` (both checkouts need the harness), or use
 `--app target/release/terminal`. It reports per-run p50/p99/mean input-to-present
 latency and their min–max spread, plus presented/wasted/late frames and bytes/s
-under sustained output. `--json results.json` saves samples; `--xvfb` is for smoke
+under sustained output. Load mode runs without probes for `--duration` seconds
+(default 10) and reports throughput only. Late intervals exceed 1.5 refresh periods
+and require both adjacent frames to have parsed new bytes; idle gaps do not count.
+`--json results.json` saves samples; `--xvfb` is for smoke
 tests only. See the script docstring for setup and comparison controls.
 
 Probes enter through the app's normal PTY input path. Output is matched to the
 next successful `queue.present()` return, not physical display feedback; GPU and
 compositor queuing plus up to one refresh of scanout remain unmeasured. True
-presentation feedback (wp_presentation / CAMetalLayer) is future work. Load-mode
-latencies match arbitrary output, not verified echoes; use echo mode for latency.
+presentation feedback (wp_presentation / CAMetalLayer) is future work.
 
 ## License
 

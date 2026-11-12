@@ -22,13 +22,21 @@ impl Latency {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let now = Instant::now();
+        let duration = std::env::var("TERM_LATENCY_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|s| *s > 0);
         Some(Self {
             path: path.into(),
             start: now,
             pending: Vec::new(),
             echoed: Vec::new(),
             lines: vec![format!("refresh_mhz {refresh}")],
-            deadline: (count > 0).then_some(now + Duration::from_secs(1)),
+            deadline: if count > 0 {
+                Some(now + Duration::from_secs(1))
+            } else {
+                duration.map(|s| now + Duration::from_secs(s))
+            },
             remaining: count,
             sent: 0,
             random: 1,

@@ -12,7 +12,9 @@ interleaved; compare the reported min-max spread, not just a single percentile.
 The timestamp is after queue.present returns, NOT compositor presentation feedback:
 GPU/compositor queuing and up to a refresh of scanout are additional, unmeasured delay.
 Inputs are injected through write_input (no OS keyboard permission required).
-Any parsed output matches pending inputs, so load latency is NOT echo latency.
+Load runs for --duration seconds without input probes and reports throughput only.
+Late intervals exceed 1.5 refresh periods and both adjacent frames parsed new bytes;
+idle gaps between echo probes do not count.
 """
 
 import argparse
@@ -43,12 +45,15 @@ def summarize(path, workload):
     if len(frames) < 2 or (workload == "echo" and not latencies):
         raise RuntimeError("no usable samples: app must contain TERM_LATENCY_LOG instrumentation")
     seconds = (frames[-1][0] - frames[0][0]) / 1e6
+    if workload == "load":
+        latencies = []
     return dict(p50_ms=percentile(latencies, .5) if latencies else None,
                 p99_ms=percentile(latencies, .99) if latencies else None,
                 mean_ms=statistics.mean(latencies) / 1000 if latencies else None,
                 samples=len(latencies), frames=len(frames), fps=(len(frames)-1)/seconds,
                 wasted=sum(b == 0 and i == 0 for _, b, i in frames),
-                late=sum(b[0]-a[0] > 1.5e9/refresh for a, b in zip(frames, frames[1:])) if refresh else None,
+                late=sum(a[1] > 0 and b[1] > 0 and b[0]-a[0] > 1.5e9/refresh
+                         for a, b in zip(frames, frames[1:])) if refresh else None,
                 bytes_s=sum(f[1] for f in frames[1:])/seconds, refresh_mhz=refresh)
 
 
@@ -66,12 +71,13 @@ def main():
     parser.add_argument("--head", type=Path, default=Path.cwd())
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--probes", type=int, default=100)
+    parser.add_argument("--duration", type=int, default=10, help="load duration in seconds")
     parser.add_argument("--workload", choices=["echo", "load", "both"], default="both")
     parser.add_argument("--json", type=Path)
     parser.add_argument("--xvfb", action="store_true")
     args = parser.parse_args()
-    if args.runs < 1 or args.probes < 1 or (args.app and args.base):
-        parser.error("runs/probes must be positive; --app and --base are exclusive")
+    if args.runs < 1 or args.probes < 1 or args.duration < 1 or (args.app and args.base):
+        parser.error("runs/probes/duration must be positive; --app and --base are exclusive")
     if sys.platform != "darwin" and not args.xvfb and not any(os.environ.get(k) for k in ("DISPLAY", "WAYLAND_DISPLAY")):
         parser.error("run in a desktop session or use --xvfb for smoke testing")
     results = []
@@ -86,18 +92,20 @@ def main():
                 for label, app in apps.items():
                     log = tmp / "samples.log"
                     log.unlink(missing_ok=True)
-                    env = dict(os.environ, TERM_LATENCY_LOG=str(log), TERM_LATENCY_PROBE=str(args.probes))
+                    env = dict(os.environ, TERM_LATENCY_LOG=str(log),
+                               TERM_LATENCY_PROBE=str(args.probes if workload == "echo" else 0),
+                               TERM_LATENCY_SECONDS=str(args.duration if workload == "load" else 0))
                     command = [str(app), "-e"] + (["cat"] if workload == "echo" else
                         ["sh", "-c", "while :; do printf '%0150d\\n' 1; done"])
                     if args.xvfb:
                         command = ["xvfb-run", "-a", *command]
                     subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL,
-                                   timeout=30 + args.probes * .2)
+                                   timeout=30 + (args.probes * .2 if workload == "echo" else args.duration))
                     results.append(dict(app=label, workload=workload, run=run, **summarize(log, workload)))
     print("| app | workload | run | p50 ms | p99 ms | mean ms | samples | frames | fps | wasted | late | bytes/s | refresh mHz |")
     print("|" + " --- |" * 13)
     for row in results:
-        print("| " + " | ".join(f"{v:.2f}" if isinstance(v, float) else str(v) for v in row.values()) + " |")
+        print("| " + " | ".join("—" if v is None else f"{v:.2f}" if isinstance(v, float) else str(v) for v in row.values()) + " |")
     for label in apps:
         for workload in workloads:
             rows = [r for r in results if r['app'] == label and r['workload'] == workload]
@@ -106,7 +114,8 @@ def main():
                 values = [r[key] for r in rows if r[key] is not None]
                 if values:
                     spread.append(f"{key}: {min(values):.2f}–{max(values):.2f}")
-            print(f"{label} {workload} spread: " + ", ".join(spread))
+            if spread:
+                print(f"{label} {workload} spread: " + ", ".join(spread))
     if args.json:
         args.json.write_text(json.dumps(results, indent=2) + "\n")
 
