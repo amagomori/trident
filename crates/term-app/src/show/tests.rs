@@ -477,3 +477,12 @@ fn outside_tmux_escapes_go_straight_to_the_terminal() {
     assert!(out.ends_with(b"\x1b\\\n"));
     assert!(!out.windows(2).any(|w| w == b"\x1bP" || w == b"\x1b7"));
 }
+
+#[test]
+fn reads_tmux_allow_passthrough() {
+    assert!(!passthrough_allowed("allow-passthrough* off\n"));
+    assert!(!passthrough_allowed("allow-passthrough off\n"));
+    assert!(passthrough_allowed("allow-passthrough on\n"));
+    assert!(passthrough_allowed("allow-passthrough* all\n"));
+    assert!(!passthrough_allowed(""));
+}

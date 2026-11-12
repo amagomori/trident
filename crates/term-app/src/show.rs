@@ -9,11 +9,15 @@ use flate2::write::ZlibEncoder;
 use image::{ImageDecoder, ImageFormat};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Base64 bytes per kitty escape; the protocol allows at most 4096.
 const CHUNK: usize = 4096;
 /// Largest side sent, matching what the terminal accepts.
 const MAX_SIDE: u32 = 10_000;
+/// How long to wait for a tmux command; a tmux on PATH older than the server can hang.
+const TMUX_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long to wait for the terminal to answer a size query.
 #[cfg(unix)]
 const QUERY_TIMEOUT_MS: u64 = 300;
@@ -77,8 +81,9 @@ pub fn usage() -> String {
            --height N   Draw images N rows tall (with --width: fit inside both)\n  \
            --fit        Scale images up or down to fill the window\n  \
            -h, --help   Show this help\n\n\
-         Inside tmux, images go through its passthrough; tmux 3.3 and later drop them\n\
-         unless `set -g allow-passthrough on` is in its config.",
+         Inside tmux, images go through its passthrough. tmux 3.3 and later drop that\n\
+         unless allow-passthrough is on, so, like `kitten icat`, show turns it on for\n\
+         the pane it runs in.",
         env!("CARGO_BIN_NAME")
     )
 }
@@ -163,10 +168,12 @@ fn show(
     match detect(&bytes) {
         Kind::Raster(format) => {
             let image = decode_raster(&bytes, format, options, window)?;
+            allow_passthrough(window);
             write_kitty(out, &image, window).map_err(write_err)
         }
         Kind::Svg => {
             let image = render_svg(&bytes, path, options, window)?;
+            allow_passthrough(window);
             write_kitty(out, &image, window).map_err(write_err)
         }
         Kind::Text => write_text(out, &bytes).map_err(write_err),
@@ -496,9 +503,70 @@ fn write_kitty(out: &mut impl Write, image: &Rgba, window: Window) -> io::Result
     }
 }
 
+/// Inside tmux, turns `allow-passthrough` on for this pane unless it already is, as `kitten
+/// icat` does: tmux 3.3 and later default it to off and then drop passthrough silently. Older
+/// tmux has no such option (`show` fails) and passes everything through.
+fn allow_passthrough(window: Window) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if !window.tmux {
+        return;
+    }
+    ONCE.call_once(|| {
+        let pane = std::env::var("TMUX_PANE").ok();
+        let target: Vec<&str> = pane.iter().flat_map(|p| ["-t", p.as_str()]).collect();
+        let Some(current) = tmux(&[&["show", "-Ap"], &target[..], &["allow-passthrough"]].concat())
+        else {
+            return;
+        };
+        if passthrough_allowed(&current) {
+            return;
+        }
+        if tmux(&[&["set", "-p"], &target[..], &["allow-passthrough", "on"]].concat()).is_none() {
+            eprintln!(
+                "{} show: couldn't turn on tmux's allow-passthrough, so images may not draw",
+                env!("CARGO_BIN_NAME")
+            );
+        }
+    });
+}
+
+/// Whether `tmux show -Ap allow-passthrough` output (`allow-passthrough* off`) allows it.
+fn passthrough_allowed(show: &str) -> bool {
+    let value = show.trim();
+    value.ends_with(" on") || value.ends_with(" all")
+}
+
+/// Runs tmux with `args`; its output if it succeeds within [`TMUX_TIMEOUT`].
+fn tmux(args: &[&str]) -> Option<String> {
+    let mut child = Command::new("tmux")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + TMUX_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut output = String::new();
+                io::Read::read_to_string(&mut child.stdout.take()?, &mut output).ok()?;
+                return Some(output);
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(Some(_)) => return None,
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 /// `escape` wrapped in tmux's DCS passthrough (`ESC P tmux; ... ESC \`, every ESC inside
-/// doubled), which tmux forwards to the terminal it runs in. tmux 3.3 and later only do so
-/// with `allow-passthrough` on, and drop it silently otherwise.
+/// doubled), which tmux forwards to the terminal it runs in (3.3 and later only with
+/// `allow-passthrough` on).
 fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
     let mut wrapped = Vec::with_capacity(escape.len() + 16);
     wrapped.extend_from_slice(b"\x1bPtmux;");
