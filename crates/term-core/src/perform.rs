@@ -190,6 +190,9 @@ impl Perform for Terminal {
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
+            [b"133", b"D", ..] => {
+                self.reset_input_modes();
+            }
             [b"0" | b"2", rest @ ..] if !rest.is_empty() => {
                 let title = rest
                     .iter()

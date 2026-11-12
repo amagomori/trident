@@ -134,6 +134,16 @@ struct Session {
     resize: ResizeThrottle,
 }
 
+fn advance_output(term: &mut Terminal, output: pty::Output) {
+    let mut start = 0;
+    for offset in output.shell_returns {
+        term.advance(&output.bytes[start..offset]);
+        term.reset_input_modes();
+        start = offset;
+    }
+    term.advance(&output.bytes[start..]);
+}
+
 /// Whether output that just arrived can be held back: only during a flood, and never once
 /// the reader is stalled on a full queue.
 fn defer_output(deferring: bool, since_frame: usize, queue_full: bool) -> bool {
@@ -284,13 +294,14 @@ impl App {
         let Some(s) = &mut self.session else { return };
         s.pty.wake_pending.store(false, Ordering::Release);
         s.deferred = None;
-        // One `advance` over everything queued, so a burst long enough to scroll through
-        // all of scrollback only builds the lines that end up kept.
         let batch = s.pty.take_output();
-        let processed = batch.len();
+        let processed = batch.bytes.len();
         s.since_frame += processed;
-        s.term.advance(&batch);
+        advance_output(&mut s.term, batch);
         release_freed_memory(&mut s.term);
+        if s.term.modes.mouse == MouseMode::Off {
+            self.reported_button = None;
+        }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
         if let Some(title) = s.term.take_title() {
@@ -731,6 +742,37 @@ mod tests {
         }
         assert!(!resize.ready(now + Duration::from_millis(99)));
         assert!(resize.ready(now + RESIZE_INTERVAL));
+    }
+
+    #[test]
+    fn output_markers_reset_modes_before_prompt_bytes() {
+        let mut term = Terminal::new(10, 2);
+        let setup = b"\x1b[?1000;1004;2004h";
+        let prompt = b"\x1b[?2004h$ ";
+        advance_output(
+            &mut term,
+            pty::Output {
+                bytes: [
+                    setup.as_slice(),
+                    prompt.as_slice(),
+                    setup.as_slice(),
+                    prompt.as_slice(),
+                ]
+                .concat(),
+                shell_returns: vec![setup.len(), setup.len() * 2 + prompt.len()],
+            },
+        );
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(term.modes.bracketed_paste);
+        advance_output(
+            &mut term,
+            pty::Output {
+                bytes: Vec::new(),
+                shell_returns: Vec::new(),
+            },
+        );
+        assert!(term.modes.bracketed_paste);
     }
 
     #[test]
