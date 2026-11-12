@@ -154,7 +154,8 @@ impl App {
         eprintln!("terminal: rendering with {}", renderer.adapter_info);
 
         let (cols, rows) = grid_size(&window, &fonts);
-        let term = Terminal::new(cols, rows);
+        let mut term = Terminal::new(cols, rows);
+        term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
         let proxy = self.proxy.clone();
         let pty = Pty::spawn(
             &self.options.command,
@@ -182,6 +183,8 @@ impl App {
     fn resize_grid(&mut self) {
         let Some(s) = &mut self.session else { return };
         let (cols, rows) = grid_size(&s.window, &s.fonts);
+        s.term
+            .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         if (cols, rows) != (s.term.cols(), s.term.rows()) {
             s.term.resize(cols, rows);
             s.pty
