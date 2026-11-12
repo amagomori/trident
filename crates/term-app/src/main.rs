@@ -1,4 +1,5 @@
 mod clipboard;
+mod flow_control;
 mod input;
 mod pty;
 mod show;
@@ -599,6 +600,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(s) = &mut self.session
+            && std::mem::take(&mut s.pty.flow_redraw)
+        {
+            s.window.request_redraw();
+        }
         let now = Instant::now();
         if self.session.as_ref().is_some_and(|s| s.resize.ready(now)) {
             self.resize_grid();
@@ -668,7 +674,14 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(s) = &mut self.session {
                     s.since_frame = 0;
                     let pad = PADDING * s.window.scale_factor() as f32;
-                    s.renderer.render(&s.term, &mut s.fonts, pad, self.focused);
+                    s.pty.refresh_flow();
+                    s.renderer.render(
+                        &s.term,
+                        &mut s.fonts,
+                        pad,
+                        self.focused,
+                        s.pty.flow.banner().as_deref(),
+                    );
                 }
             }
             _ => {}

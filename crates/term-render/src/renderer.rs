@@ -278,9 +278,16 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, term: &Terminal, fonts: &mut Fonts, padding: f32, focused: bool) {
+    pub fn render(
+        &mut self,
+        term: &Terminal,
+        fonts: &mut Fonts,
+        padding: f32,
+        focused: bool,
+        banner: Option<&str>,
+    ) {
         for _ in 0..2 {
-            if self.build(term, fonts, padding, focused) {
+            if self.build(term, fonts, padding, focused, banner) {
                 break;
             }
         }
@@ -313,7 +320,14 @@ impl Renderer {
     }
 
     /// Builds this frame's instances; false if the atlas filled up and was reset.
-    fn build(&mut self, term: &Terminal, fonts: &mut Fonts, padding: f32, focused: bool) -> bool {
+    fn build(
+        &mut self,
+        term: &Terminal,
+        fonts: &mut Fonts,
+        padding: f32,
+        focused: bool,
+        banner: Option<&str>,
+    ) -> bool {
         let mut backgrounds = std::mem::take(&mut self.backgrounds);
         let mut glyphs = std::mem::take(&mut self.glyphs);
         let mut overlays = std::mem::take(&mut self.overlays);
@@ -436,6 +450,45 @@ impl Renderer {
             );
             bar.color[3] = 0.35;
             overlays.push(bar);
+        }
+
+        if let Some(text) = banner {
+            let layout = crate::banner::layout(
+                text,
+                self.config.width as f32,
+                self.config.height as f32,
+                cw,
+                ch,
+            );
+            let scale = layout.scale;
+            let x = (self.config.width as f32 - layout.width) / 2.0;
+            let y = (self.config.height as f32 - layout.height) / 2.0;
+            overlays.push(self.rect(x, y, layout.width, layout.height, colors::FOREGROUND));
+            'banner: for (row, line) in layout.lines.iter().enumerate() {
+                for (i, c) in line.chars().enumerate() {
+                    let key = GlyphKey {
+                        c,
+                        style: Style::new(false, false),
+                        cells: 1,
+                    };
+                    match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                        Ok(Some(g)) => overlays.push(Instance {
+                            pos: [
+                                x + ((i + 1) as f32 * cw + g.left) * scale,
+                                y + ((row as f32 + 0.5) * ch + g.top) * scale,
+                            ],
+                            size: [g.width * scale, g.height * scale],
+                            uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
+                            color: self.color(colors::BACKGROUND, 1.0),
+                        }),
+                        Ok(None) => {}
+                        Err(_) => {
+                            ok = false;
+                            break 'banner;
+                        }
+                    }
+                }
+            }
         }
 
         backgrounds.append(&mut glyphs);
