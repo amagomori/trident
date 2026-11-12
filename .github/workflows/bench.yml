@@ -30,7 +30,11 @@ jobs:
             head
             base
           key: bench
-      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Install valgrind, Xvfb and Mesa
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind xvfb libgl1-mesa-dri libegl1 libx11-xcb1 \
+            libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0
       - name: Compare against the base branch
         run: python3 head/.github/scripts/bench.py --base base --head head --summary "$GITHUB_STEP_SUMMARY" --json bench.json
       - uses: actions/upload-artifact@v4
