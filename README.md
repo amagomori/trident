@@ -28,7 +28,7 @@ cargo run --release
 Or install the `terminal` binary into `~/.cargo/bin`:
 
 ```sh
-cargo install --path .
+cargo install --path crates/term-app
 ```
 
 No system libraries are needed beyond a graphics driver (on Linux: Mesa or a vendor Vulkan/GL
@@ -59,20 +59,19 @@ Hold Shift to select text while a program (vim, tmux, htop) is using the mouse.
 
 ## Layout
 
-| File | What it does |
+A Cargo workspace of three crates:
+
+| Crate | What it does |
 | --- | --- |
-| `src/term/` | Terminal state: grid, scrollback, cursor, modes, selection, and the VT/xterm escape sequence handling (parsed with [`vte`](https://crates.io/crates/vte)) |
-| `src/renderer.rs`, `src/shader.wgsl` | wgpu renderer: builds per-cell instances and draws them in one pass |
-| `src/atlas.rs`, `src/font.rs` | Glyph rasterization ([`ab_glyph`](https://crates.io/crates/ab_glyph)) and the GPU glyph atlas |
-| `src/pty.rs` | Runs the shell on a pseudo-terminal ([`portable-pty`](https://crates.io/crates/portable-pty)) |
-| `src/input.rs` | Encodes keys and mouse events into the bytes programs expect |
-| `src/main.rs` | Window and event loop ([`winit`](https://crates.io/crates/winit)) |
+| `crates/term-core` | Terminal state: grid, scrollback, cursor, modes, selection, colors, and the VT/xterm escape sequence handling (parsed with [`vte`](https://crates.io/crates/vte)). No GPU or window dependencies, so it builds and tests headless |
+| `crates/term-render` | wgpu renderer (`renderer.rs`, `shader.wgsl`) that draws a frame as one instanced pass, plus glyph rasterization ([`ab_glyph`](https://crates.io/crates/ab_glyph)), fallback fonts and the GPU glyph atlas. Takes any window with raw window and display handles |
+| `crates/term-app` | The `terminal` binary: window and event loop ([`winit`](https://crates.io/crates/winit)), the shell on a pseudo-terminal ([`portable-pty`](https://crates.io/crates/portable-pty)), key and mouse encoding, and the clipboard |
 
 ## Development
 
 ```sh
-cargo test
-cargo clippy --all-targets
+cargo test --workspace
+cargo clippy --workspace --all-targets
 cargo fmt
 ```
 
@@ -81,4 +80,4 @@ CI runs these on Linux and macOS for every pull request.
 ## License
 
 MIT. The bundled JetBrains Mono fonts are under the SIL Open Font License 1.1
-(`assets/fonts/OFL.txt`).
+(`crates/term-render/assets/fonts/OFL.txt`).

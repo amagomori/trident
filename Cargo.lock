@@ -1815,27 +1815,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-app"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "portable-pty",
+ "term-core",
+ "term-render",
+ "winit",
+]
+
+[[package]]
+name = "term-core"
+version = "0.1.0"
+dependencies = [
+ "unicode-width",
+ "vte",
+]
+
+[[package]]
+name = "term-render"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "bytemuck",
+ "pollster",
+ "term-core",
+ "wgpu",
+]
+
+[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "terminal"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "arboard",
- "bytemuck",
- "pollster",
- "portable-pty",
- "unicode-width",
- "vte",
- "wgpu",
- "winit",
 ]
 
 [[package]]

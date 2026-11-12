@@ -1,13 +1,18 @@
-[package]
-name = "terminal"
+[workspace]
+resolver = "3"
+members = ["crates/term-core", "crates/term-render", "crates/term-app"]
+default-members = ["crates/term-app"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-description = "A fast GPU-rendered terminal emulator written from scratch in Rust"
 license = "MIT"
 repository = "https://github.com/amagomori/terminal"
 
-[dependencies]
+[workspace.dependencies]
+term-core = { path = "crates/term-core" }
+term-render = { path = "crates/term-render" }
 ab_glyph = "0.2"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 bytemuck = { version = "1", features = ["derive"] }

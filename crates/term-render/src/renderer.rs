@@ -2,11 +2,11 @@
 //! backgrounds, glyphs from the atlas, decorations and the cursor).
 
 use crate::atlas::{Atlas, GlyphKey};
-use crate::colors::{self, Rgb};
 use crate::font::{CellMetrics, Fonts, Style};
-use crate::term::{CursorShape, Flags, Terminal};
 use std::sync::Arc;
-use winit::window::Window;
+use term_core::colors::{self, Rgb};
+use term_core::{CursorShape, Flags, Terminal};
+use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -47,7 +47,12 @@ pub struct Renderer {
 pub const PADDING: f32 = 6.0;
 
 impl Renderer {
-    pub fn new(window: Arc<Window>) -> Result<Renderer, String> {
+    /// Creates a renderer drawing into `window`, whose drawable area is `width` x `height`
+    /// physical pixels.
+    pub fn new<W>(window: Arc<W>, width: u32, height: u32) -> Result<Renderer, String>
+    where
+        W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + 'static,
+    {
         let instance = wgpu::Instance::new(
             wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())),
         );
@@ -81,9 +86,8 @@ impl Renderer {
             .copied()
             .find(|f| !f.is_srgb())
             .unwrap_or(caps.formats[0]);
-        let size = window.inner_size();
         let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .get_default_config(&adapter, width.max(1), height.max(1))
             .ok_or("surface is not supported by the adapter")?;
         config.format = format;
         config.present_mode = wgpu::PresentMode::AutoVsync;

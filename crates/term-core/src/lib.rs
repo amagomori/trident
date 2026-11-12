@@ -1,6 +1,8 @@
 //! Terminal state: the screen grid, scrollback and the VT/xterm control sequence handling
 //! that mutates them. Bytes from the shell go in through [`Terminal::advance`].
 
+pub mod colors;
+
 mod cell;
 mod perform;
 
