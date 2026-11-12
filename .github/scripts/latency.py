@@ -122,6 +122,8 @@ def main():
                     command = [str(app), "-e"] + (["cat"] if workload == "echo" else
                         ["sh", "-c", "while :; do printf '%0150d\\n' 1; done"])
                     if args.xvfb:
+                        env.pop("WAYLAND_DISPLAY", None)
+                        env.pop("WAYLAND_SOCKET", None)
                         command = ["xvfb-run", "-a", *command]
                     subprocess.run(command, env=env, check=True, stdout=subprocess.DEVNULL,
                                    timeout=30 + (args.probes * .2 if workload == "echo" else args.duration))
