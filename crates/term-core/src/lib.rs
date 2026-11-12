@@ -134,6 +134,8 @@ pub struct Terminal {
     /// Lines ever pushed into the primary scrollback (including ones since dropped).
     history: u64,
     max_scrollback: usize,
+    /// Whether scrollback or the grid gave up rows since the last `take_shrunk`.
+    shrunk: bool,
     /// How many lines the view is scrolled back from the bottom.
     display_offset: usize,
     pub selection: Option<Selection>,
@@ -182,6 +184,7 @@ impl Terminal {
             cursor_shape: CursorShape::Block,
             history: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
+            shrunk: false,
             display_offset: 0,
             selection: None,
             title: None,
@@ -221,6 +224,35 @@ impl Terminal {
 
     pub fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.responses)
+    }
+
+    /// Whether scrollback was erased or the grid or history limit shrank since the last
+    /// call, so the app can hand the freed memory back to the OS. Ordinary scrolling,
+    /// which recycles rows, never sets it.
+    pub fn take_shrunk(&mut self) -> bool {
+        std::mem::take(&mut self.shrunk)
+    }
+
+    /// Change how many lines of scrollback are kept, dropping the oldest ones past it.
+    pub fn set_scrollback_limit(&mut self, lines: usize) {
+        if lines < self.max_scrollback {
+            self.shrunk = true;
+        }
+        self.max_scrollback = lines;
+        let excess = self.primary.scrollback.len().saturating_sub(lines);
+        if excess == 0 {
+            return;
+        }
+        self.primary.scrollback.drain(..excess);
+        self.primary.scrollback.shrink_to_fit();
+        if !self.primary.placements.is_empty() {
+            let first = self.history - self.primary.scrollback.len() as u64;
+            self.drop_placements_before(first);
+        }
+        if !self.alt_active {
+            self.display_offset = self.display_offset.min(lines);
+        }
+        self.selection = None;
     }
 
     pub fn take_title(&mut self) -> Option<String> {
@@ -328,6 +360,9 @@ impl Terminal {
         }
         self.selection = None;
         self.display_offset = 0;
+        if cols < self.cols || rows < self.rows {
+            self.shrunk = true;
+        }
 
         let mut alt_shifted = 0;
         for alt in [false, true] {
@@ -738,7 +773,12 @@ impl Terminal {
                 }
             }
             3 => {
-                self.screen_mut().scrollback.clear();
+                let scrollback = &mut self.screen_mut().scrollback;
+                if !scrollback.is_empty() {
+                    scrollback.clear();
+                    scrollback.shrink_to_fit();
+                    self.shrunk = true;
+                }
                 if !self.alt_active {
                     let history = self.history;
                     self.drop_placements_before(history);
@@ -919,6 +959,7 @@ impl Terminal {
         let max_scrollback = self.max_scrollback;
         let mut fresh = Terminal::new(cols, rows);
         fresh.max_scrollback = max_scrollback;
+        fresh.shrunk = self.shrunk || !self.primary.scrollback.is_empty();
         fresh.cell_pixels = self.cell_pixels;
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
