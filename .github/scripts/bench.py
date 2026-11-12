@@ -6,8 +6,9 @@
 
 The gate is the instruction count of each workload's measured region under callgrind,
 which is deterministic, so it doesn't flake on noisy CI runners. Wall-clock medians are
-reported alongside but never fail the check. The workloads live in `src/term/bench.rs`
-(`term-core` once the crates are split) as the ignored `bench_workloads` test.
+reported alongside but never fail the check. The workloads are the `bench` module in
+`src/term/tests.rs` (`term-core` once the crates are split), run as the ignored
+`bench_workloads` test.
 """
 
 import argparse
