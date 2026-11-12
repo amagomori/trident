@@ -19,12 +19,12 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
-/// Output parsed since the last frame before more waits for the frame, so a flood reaches
+/// Output parsed since the last frame before more is held back, so a flood reaches
 /// `advance` in batches long enough to skip the lines it evicts. Interactive output (echo,
 /// replies to queries) never gets near it and is parsed the moment it arrives.
 const DEFER_AFTER: usize = 64 * 1024;
-/// Longest deferred output waits when no frame comes, e.g. for a hidden window.
-const MAX_DEFER: Duration = Duration::from_millis(50);
+/// How long held-back output waits, unless the queue fills first: about one 60 Hz frame.
+const MAX_DEFER: Duration = Duration::from_millis(16);
 
 #[derive(Debug)]
 enum UserEvent {
@@ -98,18 +98,16 @@ struct Session {
     fonts: Fonts,
     term: Terminal,
     pty: Pty,
-    /// A redraw was requested for parsed output and has not been drawn yet.
-    frame_pending: bool,
     /// Output parsed since the last frame was drawn.
     since_frame: usize,
-    /// When parsing was first held off for the pending frame.
+    /// When output was first held back.
     deferred: Option<Instant>,
 }
 
-/// Whether output that just arrived can wait for the pending frame: only during a flood,
-/// and never once the reader is stalled on a full queue.
-fn defer_output(frame_pending: bool, since_frame: usize, queue_full: bool) -> bool {
-    frame_pending && since_frame >= DEFER_AFTER && !queue_full
+/// Whether output that just arrived can be held back: only during a flood, and never once
+/// the reader is stalled on a full queue.
+fn defer_output(deferring: bool, since_frame: usize, queue_full: bool) -> bool {
+    (deferring || since_frame >= DEFER_AFTER) && !queue_full
 }
 
 struct App {
@@ -193,7 +191,6 @@ impl App {
             fonts,
             term,
             pty,
-            frame_pending: false,
             since_frame: 0,
             deferred: None,
         })
@@ -223,7 +220,7 @@ impl App {
 
     fn output_ready(&mut self) {
         let Some(s) = &mut self.session else { return };
-        if defer_output(s.frame_pending, s.since_frame, s.pty.output_full()) {
+        if defer_output(s.deferred.is_some(), s.since_frame, s.pty.output_full()) {
             s.deferred.get_or_insert_with(Instant::now);
         } else {
             self.process_output();
@@ -231,17 +228,7 @@ impl App {
     }
 
     fn process_output(&mut self) {
-        if self.parse_output() > 0
-            && let Some(s) = &mut self.session
-        {
-            s.frame_pending = true;
-            s.window.request_redraw();
-        }
-    }
-
-    /// Parses all queued output; the number of bytes parsed.
-    fn parse_output(&mut self) -> usize {
-        let Some(s) = &mut self.session else { return 0 };
+        let Some(s) = &mut self.session else { return };
         s.pty.wake_pending.store(false, Ordering::Release);
         s.deferred = None;
         // One `advance` over everything queued, so a burst long enough to scroll through
@@ -260,7 +247,9 @@ impl App {
             s.window
                 .request_user_attention(Some(winit::window::UserAttentionType::Informational));
         }
-        processed
+        if processed > 0 {
+            s.window.request_redraw();
+        }
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
@@ -580,11 +569,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
-                if self.session.as_ref().is_some_and(|s| s.deferred.is_some()) {
-                    self.parse_output();
-                }
                 if let Some(s) = &mut self.session {
-                    s.frame_pending = false;
                     s.since_frame = 0;
                     let pad = PADDING * s.window.scale_factor() as f32;
                     s.renderer.render(&s.term, &mut s.fonts, pad, self.focused);
@@ -626,10 +611,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_waits_for_the_frame_only_during_a_flood() {
-        assert!(!defer_output(false, usize::MAX, false));
-        assert!(!defer_output(true, DEFER_AFTER - 1, false));
-        assert!(defer_output(true, DEFER_AFTER, false));
-        assert!(!defer_output(true, DEFER_AFTER, true));
+    fn output_is_held_back_only_during_a_flood() {
+        assert!(!defer_output(false, 0, false));
+        assert!(!defer_output(false, DEFER_AFTER - 1, false));
+        assert!(defer_output(false, DEFER_AFTER, false));
+        assert!(defer_output(true, 0, false));
+        assert!(!defer_output(false, DEFER_AFTER, true));
+        assert!(!defer_output(true, 0, true));
     }
 }
