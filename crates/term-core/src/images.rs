@@ -286,7 +286,8 @@ impl Terminal {
             .filter_map(|p| {
                 let line = p.line + base;
                 let row = line as i64 - top;
-                (row < self.rows as i64 && row + p.rows as i64 > 0).then_some(VisiblePlacement {
+                let on = p.col < self.cols && row < self.rows as i64 && row + p.rows as i64 > 0;
+                on.then_some(VisiblePlacement {
                     placement: Placement { line, ..*p },
                     row: row as isize,
                 })
@@ -326,7 +327,7 @@ impl Terminal {
         let rows = self.rows as i64;
         let on = |p: &Placement, base: u64, top: i64| {
             let row = screen_row(p.line, base, self.history);
-            row < rows && row + p.rows as i64 > top
+            p.col < self.cols && row < rows && row + p.rows as i64 > top
         };
         let primary_top = -(self.display_offset as i64);
         let primary = self
