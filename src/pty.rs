@@ -4,11 +4,12 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// Input queued for the writer thread, so a full PTY never blocks the UI.
+    input: Sender<Vec<u8>>,
     child: Box<dyn Child + Send + Sync>,
     pub output: Receiver<Vec<u8>>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
@@ -66,12 +67,29 @@ impl Pty {
             .master
             .try_clone_reader()
             .map_err(|e| format!("cannot read pty: {e}"))?;
-        let writer = pair
+        let mut writer = pair
             .master
             .take_writer()
             .map_err(|e| format!("cannot write pty: {e}"))?;
+        let (input, input_rx) = channel::<Vec<u8>>();
+        std::thread::Builder::new()
+            .name("pty-writer".into())
+            .spawn(move || {
+                for bytes in input_rx {
+                    if writer
+                        .write_all(&bytes)
+                        .and_then(|_| writer.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| format!("cannot start writer thread: {e}"))?;
 
-        let (tx, rx): (Sender<Vec<u8>>, _) = channel();
+        // Bounded, so a shell producing output faster than we parse it is paused by
+        // the kernel instead of growing this queue without limit.
+        let (tx, rx): (SyncSender<Vec<u8>>, _) = sync_channel(16);
         let wake_pending = Arc::new(AtomicBool::new(false));
         let pending = wake_pending.clone();
         std::thread::Builder::new()
@@ -97,7 +115,7 @@ impl Pty {
 
         Ok(Pty {
             master: pair.master,
-            writer,
+            input,
             child,
             output: rx,
             wake_pending,
@@ -108,8 +126,7 @@ impl Pty {
         if bytes.is_empty() {
             return;
         }
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        let _ = self.input.send(bytes.to_vec());
     }
 
     pub fn resize(&self, cols: usize, rows: usize, cell: (f32, f32)) {
