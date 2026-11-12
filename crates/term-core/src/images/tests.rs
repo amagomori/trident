@@ -499,3 +499,13 @@ fn shifting_cells_under_an_image_removes_it() {
         assert!(t.visible_placements().is_empty());
     }
 }
+
+#[test]
+fn erasing_to_end_of_line_drops_cut_off_images() {
+    let mut t = term();
+    place_at(&mut t, 1, 6);
+    t.resize(5, 5);
+    t.advance(b"\x1b[3;1H\x1b[K");
+    t.resize(10, 5);
+    assert!(t.visible_placements().is_empty());
+}
