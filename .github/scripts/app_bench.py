@@ -129,8 +129,7 @@ def start_xvfb() -> tuple[subprocess.Popen, str]:
 def measure_app(binaries: dict[str, Path], rounds: int) -> dict:
     xvfb, display = start_xvfb()
     env = {k: v for k, v in os.environ.items() if k != "WAYLAND_DISPLAY"}
-    env |= {"DISPLAY": display, "LIBGL_ALWAYS_SOFTWARE": "1"}
-    env.setdefault("WGPU_BACKEND", "gl")
+    env |= {"DISPLAY": display, "LIBGL_ALWAYS_SOFTWARE": "1", "WGPU_BACKEND": "gl"}
     samples = {label: [] for label in binaries}
     try:
         with tempfile.TemporaryDirectory() as tmp:
