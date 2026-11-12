@@ -1,0 +1,19 @@
+[package]
+name = "term-app"
+description = "A fast GPU-rendered terminal emulator written from scratch in Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "terminal"
+path = "src/main.rs"
+
+[dependencies]
+arboard.workspace = true
+portable-pty.workspace = true
+term-core.workspace = true
+term-render.workspace = true
+winit.workspace = true

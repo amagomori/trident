@@ -1,0 +1,12 @@
+[package]
+name = "term-core"
+description = "Terminal state for terminal: VT/xterm parser, cell grid, modes and scrollback"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+unicode-width.workspace = true
+vte.workspace = true

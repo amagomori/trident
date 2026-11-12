@@ -1,0 +1,15 @@
+[package]
+name = "term-render"
+description = "wgpu renderer, glyph atlas and fonts for terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ab_glyph.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+term-core.workspace = true
+wgpu.workspace = true

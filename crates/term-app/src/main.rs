@@ -1,20 +1,15 @@
-mod atlas;
 mod clipboard;
-mod colors;
-mod font;
 mod input;
 mod pty;
-mod renderer;
-mod term;
 
 use input::MouseButton as ReportButton;
 use pty::Pty;
-use renderer::{PADDING, Renderer};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use term::{MouseMode, Point, SelectionKind, Terminal};
+use term_core::{MouseMode, Point, SelectionKind, Terminal};
+use term_render::{Fonts, PADDING, Renderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -96,7 +91,7 @@ fn parse_args() -> Result<Options, String> {
 struct Session {
     window: Arc<Window>,
     renderer: Renderer,
-    fonts: font::Fonts,
+    fonts: Fonts,
     term: Terminal,
     pty: Pty,
 }
@@ -138,7 +133,7 @@ impl App {
     }
 
     fn start(&mut self, event_loop: &ActiveEventLoop) -> Result<Session, String> {
-        let probe = font::Fonts::new(self.options.font.as_deref(), self.font_size)?;
+        let probe = Fonts::new(self.options.font.as_deref(), self.font_size)?;
         let m = probe.metrics;
         let attrs = Window::default_attributes()
             .with_title("terminal")
@@ -153,8 +148,9 @@ impl App {
         );
         window.set_ime_allowed(true);
         let scale = window.scale_factor() as f32;
-        let fonts = font::Fonts::new(self.options.font.as_deref(), self.font_size * scale)?;
-        let renderer = Renderer::new(window.clone())?;
+        let fonts = Fonts::new(self.options.font.as_deref(), self.font_size * scale)?;
+        let size = window.inner_size();
+        let renderer = Renderer::new(window.clone(), size.width, size.height)?;
         eprintln!("terminal: rendering with {}", renderer.adapter_info);
 
         let (cols, rows) = grid_size(&window, &fonts);
@@ -458,7 +454,7 @@ impl App {
     }
 }
 
-fn grid_size(window: &Window, fonts: &font::Fonts) -> (usize, usize) {
+fn grid_size(window: &Window, fonts: &Fonts) -> (usize, usize) {
     let size = window.inner_size();
     let pad = 2.0 * PADDING * window.scale_factor() as f32;
     let cols = ((size.width as f32 - pad) / fonts.metrics.width)

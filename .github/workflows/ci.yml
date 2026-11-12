@@ -24,6 +24,12 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets
-      - run: cargo test
-      - run: cargo build --release
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+      - name: term-core has no GPU, window or PTY dependencies
+        run: |
+          if cargo tree -p term-core -e normal --prefix none | grep -E '^(wgpu|winit|portable-pty|arboard) '; then
+            echo "term-core must build headless" >&2
+            exit 1
+          fi
+      - run: cargo build --release --workspace

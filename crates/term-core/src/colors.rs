@@ -1,6 +1,6 @@
 //! The color scheme (Tokyo Night) and resolution of terminal colors to RGB.
 
-use crate::term::Color;
+use crate::Color;
 
 pub type Rgb = (u8, u8, u8);
 
