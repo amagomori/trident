@@ -424,6 +424,26 @@ fn synchronized_frame_starts_within_batch() {
 }
 
 #[test]
+fn synchronized_frame_end_stops_before_next_frame() {
+    let mut t = term(10, 2, "\x1b[?2026hOLD");
+    let batch = b"\x1b[?2026l\x1b[?2026h\rNEW";
+    let consumed = t.advance_until_sync_end(batch);
+    assert_eq!(consumed, b"\x1b[?2026l".len());
+    assert!(!t.modes.synchronized_output);
+    assert_eq!(t.viewport_row(0).text(), "OLD");
+    assert_eq!(
+        t.advance_until_sync_end(&batch[consumed..]),
+        batch.len() - consumed
+    );
+    assert!(t.modes.synchronized_output);
+    assert_eq!(t.viewport_row(0).text(), "NEW");
+    t.advance(b"\x1b[?2026");
+    assert_eq!(t.advance_until_sync_end(b"lignored"), 1);
+    assert_eq!(t.advance_until_sync_end(b""), 0);
+    assert_eq!(t.advance_until_sync_end(b"\x1b[?2026lplain"), 13);
+}
+
+#[test]
 fn title_and_modes() {
     let mut t = term(
         10,

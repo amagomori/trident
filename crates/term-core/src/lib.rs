@@ -179,6 +179,7 @@ pub struct Terminal {
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
     synchronized_output_started: bool,
+    synchronized_output_ended: bool,
     pub bell: bool,
     images: images::ImageStore,
     /// Cell size in pixels, as reported by the app.
@@ -228,6 +229,7 @@ impl Terminal {
             title_changed: false,
             responses: Vec::new(),
             synchronized_output_started: false,
+            synchronized_output_ended: false,
             bell: false,
             images: images::ImageStore::new(),
             cell_pixels: (8.0, 16.0),
@@ -263,6 +265,21 @@ impl Terminal {
         self.cols
     }
 
+    /// Advance through the first synchronized-frame end, leaving the next frame unread.
+    pub fn advance_until_sync_end(&mut self, bytes: &[u8]) -> usize {
+        self.synchronized_output_ended = false;
+        let mut consumed = 0;
+        for end in memchr::memchr_iter(b'l', bytes) {
+            self.advance(&bytes[consumed..=end]);
+            consumed = end + 1;
+            if self.synchronized_output_ended {
+                return consumed;
+            }
+        }
+        self.advance(&bytes[consumed..]);
+        bytes.len()
+    }
+
     pub fn rows(&self) -> usize {
         self.rows
     }
@@ -274,6 +291,11 @@ impl Terminal {
     /// Whether a synchronized frame began since the last call.
     pub fn take_synchronized_output_started(&mut self) -> bool {
         std::mem::take(&mut self.synchronized_output_started)
+    }
+
+    /// Whether the last synchronized advance ended a frame.
+    pub fn synchronized_output_ended(&self) -> bool {
+        self.synchronized_output_ended
     }
 
     /// Whether scrollback was erased or the grid or history limit shrank since the last

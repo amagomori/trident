@@ -302,6 +302,9 @@ impl Terminal {
             1007 => self.modes.alt_scroll = enable,
             2004 => self.modes.bracketed_paste = enable,
             2026 => {
+                if !enable && self.modes.synchronized_output {
+                    self.synchronized_output_ended = true;
+                }
                 if enable && !self.modes.synchronized_output {
                     self.synchronized_output_started = true;
                 }
