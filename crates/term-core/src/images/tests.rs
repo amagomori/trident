@@ -529,3 +529,30 @@ fn images_past_the_right_edge_can_be_evicted() {
     t.add_image(3, image(20, 40)).unwrap();
     assert!(t.image(1).is_none());
 }
+
+#[test]
+fn cell_size_change_respans_pixel_sized_placements() {
+    let mut t = term();
+    let native = place_at(&mut t, 0, 0);
+    let fixed = t
+        .place_image(
+            1,
+            PlaceOptions {
+                cols: 3,
+                rows: 3,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!((native.cols, native.rows), (2, 2));
+    let generation = t.image_generation();
+    t.set_cell_pixel_size(5.0, 10.0);
+    let spans: Vec<_> = t
+        .visible_placements()
+        .iter()
+        .map(|v| (v.placement.cols, v.placement.rows))
+        .collect();
+    assert!(spans.contains(&(4, 4)));
+    assert!(spans.contains(&(fixed.cols, fixed.rows)));
+    assert_ne!(t.image_generation(), generation);
+}

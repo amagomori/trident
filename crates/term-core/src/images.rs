@@ -125,6 +125,11 @@ impl ImageStore {
     }
 }
 
+/// The number of `cell`-pixel cells `px` pixels after `offset` cover.
+fn span(px: u32, offset: u32, cell: f32) -> usize {
+    (((px + offset) as f32 / cell.max(1.0)).ceil() as usize).max(1)
+}
+
 /// Placements are stored with `line` relative to a per-screen base: absolute for the primary
 /// screen, the screen row for the alternate one (which has no scrollback, so its rows keep
 /// their place while the primary's history grows).
@@ -288,9 +293,6 @@ impl Terminal {
                 height,
             });
         let (cell_w, cell_h) = self.cell_pixels;
-        let span = |px: u32, offset: u32, cell: f32| -> usize {
-            (((px + offset) as f32 / cell.max(1.0)).ceil() as usize).max(1)
-        };
         let base = self.placement_base(self.alt_active);
         let placement = Placement {
             image_id,
@@ -363,8 +365,35 @@ impl Terminal {
     }
 
     /// The size of one cell in pixels, used to size images and for `CSI 14/16 t`.
+    /// Placements the client did not size in cells are re-spanned to keep their pixel size.
     pub fn set_cell_pixel_size(&mut self, width: f32, height: f32) {
+        if self.cell_pixels == (width, height) {
+            return;
+        }
         self.cell_pixels = (width, height);
+        let mut changed = false;
+        for p in self
+            .primary
+            .placements
+            .iter_mut()
+            .chain(self.alternate.placements.iter_mut())
+        {
+            let cols = if p.fixed_cols {
+                p.cols
+            } else {
+                span(p.source.width, p.x_offset, width)
+            };
+            let rows = if p.fixed_rows {
+                p.rows
+            } else {
+                span(p.source.height, p.y_offset, height)
+            };
+            changed |= (cols, rows) != (p.cols, p.rows);
+            (p.cols, p.rows) = (cols, rows);
+        }
+        if changed {
+            self.images.generation += 1;
+        }
     }
 
     fn placement_base(&self, alt: bool) -> u64 {
