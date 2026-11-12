@@ -158,7 +158,7 @@ def main():
                 print(f"{label} {workload} spread: " + ", ".join(spread))
     if args.json:
         args.json.write_text(json.dumps(results, indent=2) + "\n")
-    return 0 if any(row['app'] != 'base' for row in results) else 1
+    return 0 if not (unavailable - {'base'}) and any(row['app'] != 'base' for row in results) else 1
 
 
 if __name__ == "__main__":
