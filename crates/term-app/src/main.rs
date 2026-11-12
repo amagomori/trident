@@ -26,23 +26,25 @@ const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFER_AFTER: usize = 64 * 1024;
 /// How long held-back output waits, unless the queue fills first: about one 60 Hz frame.
 const MAX_DEFER: Duration = Duration::from_millis(16);
-const RESIZE_DELAY: Duration = Duration::from_millis(16);
-const RESIZE_MAX_WAIT: Duration = Duration::from_millis(64);
+const RESIZE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
-struct ResizeDebounce {
-    first: Option<Instant>,
+struct ResizeThrottle {
+    last_applied: Option<Instant>,
     deadline: Option<Instant>,
 }
 
-impl ResizeDebounce {
+impl ResizeThrottle {
     fn schedule(&mut self, now: Instant) {
-        let first = *self.first.get_or_insert(now);
-        self.deadline = Some((now + RESIZE_DELAY).min(first + RESIZE_MAX_WAIT));
+        self.deadline = Some(
+            self.last_applied
+                .map_or(now, |last| (last + RESIZE_INTERVAL).max(now)),
+        );
     }
 
-    fn cancel(&mut self) {
-        *self = Self::default();
+    fn applied(&mut self, now: Instant) {
+        self.last_applied = Some(now);
+        self.deadline = None;
     }
 
     fn ready(&self, now: Instant) -> bool {
@@ -129,7 +131,7 @@ struct Session {
     since_frame: usize,
     /// When output was first held back.
     deferred: Option<Instant>,
-    resize: ResizeDebounce,
+    resize: ResizeThrottle,
 }
 
 /// Whether output that just arrived can be held back: only during a flood, and never once
@@ -241,13 +243,13 @@ impl App {
             pty,
             since_frame: 0,
             deferred: None,
-            resize: ResizeDebounce::default(),
+            resize: ResizeThrottle::default(),
         })
     }
 
     fn resize_grid(&mut self) {
         let Some(s) = &mut self.session else { return };
-        s.resize.cancel();
+        s.resize.applied(Instant::now());
         let (cols, rows) = grid_size(&s.window, &s.fonts);
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
@@ -697,31 +699,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resize_debounce_trails_and_cancels() {
+    fn resize_throttle_leads_trails_and_resets() {
         let now = Instant::now();
-        let mut resize = ResizeDebounce::default();
+        let mut resize = ResizeThrottle::default();
         assert!(!resize.ready(now));
         assert_eq!(resize.deadline, None);
         resize.schedule(now);
+        assert!(resize.ready(now));
+        resize.applied(now);
         resize.schedule(now + Duration::from_millis(10));
-        assert!(!resize.ready(now + RESIZE_DELAY));
-        assert!(resize.ready(now + Duration::from_millis(26)));
-        resize.cancel();
+        assert!(!resize.ready(now + Duration::from_millis(99)));
+        assert!(resize.ready(now + RESIZE_INTERVAL));
+        resize.applied(now + Duration::from_millis(50));
         assert_eq!(resize.deadline, None);
-        assert!(!resize.ready(now + RESIZE_MAX_WAIT));
-        resize.schedule(now + RESIZE_MAX_WAIT);
-        assert_eq!(resize.deadline, Some(now + RESIZE_MAX_WAIT + RESIZE_DELAY));
+        assert!(!resize.ready(now + RESIZE_INTERVAL));
+        resize.schedule(now + RESIZE_INTERVAL);
+        assert_eq!(resize.deadline, Some(now + Duration::from_millis(150)));
+        resize.applied(now + Duration::from_millis(150));
+        resize.schedule(now + Duration::from_millis(300));
+        assert!(resize.ready(now + Duration::from_millis(300)));
     }
 
     #[test]
-    fn resize_debounce_bounds_continuous_drag() {
+    fn resize_throttle_keeps_deadline_during_drag() {
         let now = Instant::now();
-        let mut resize = ResizeDebounce::default();
-        for millis in (0..64).step_by(8) {
+        let mut resize = ResizeThrottle::default();
+        resize.applied(now);
+        for millis in (1..100).step_by(8) {
             resize.schedule(now + Duration::from_millis(millis));
+            assert_eq!(resize.deadline, Some(now + RESIZE_INTERVAL));
         }
-        assert!(!resize.ready(now + Duration::from_millis(63)));
-        assert!(resize.ready(now + RESIZE_MAX_WAIT));
+        assert!(!resize.ready(now + Duration::from_millis(99)));
+        assert!(resize.ready(now + RESIZE_INTERVAL));
     }
 
     #[test]
