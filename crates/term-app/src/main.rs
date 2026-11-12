@@ -239,33 +239,50 @@ struct PendingOutput {
 }
 
 impl PendingOutput {
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty() && self.shell_returns.is_empty()
+    }
+
+    fn next_batch(&mut self, take_pty: impl FnOnce() -> pty::Output) -> pty::Output {
+        if self.is_empty() {
+            take_pty()
+        } else {
+            pty::Output {
+                bytes: std::mem::take(&mut self.bytes),
+                shell_returns: std::mem::take(&mut self.shell_returns),
+            }
+        }
+    }
+
     fn retain(&mut self, mut batch: pty::Output, consumed: usize, now: Instant) {
         self.bytes = batch.bytes.split_off(consumed);
         self.shell_returns = batch.shell_returns.into_iter().map(|offset| offset - consumed).collect();
-        self.waiting_since = (!self.bytes.is_empty() || !self.shell_returns.is_empty()).then_some(now);
+        self.waiting_since = (!self.is_empty()).then_some(now);
     }
 
     fn presented(&mut self) -> bool {
         self.waiting_since = None;
-        !self.bytes.is_empty()
+        !self.is_empty()
     }
 }
 
 fn advance_output(term: &mut Terminal, output: &mut pty::Output) -> usize {
     let mut start = 0;
     let mut applied = 0;
+    let mut ended = false;
     for &offset in &output.shell_returns {
         start += term.advance_until_sync_end(&output.bytes[start..offset]);
         if start == offset {
             term.reset_input_modes();
             applied += 1;
         }
-        if term.synchronized_output_ended() {
+        ended = term.synchronized_output_ended();
+        if ended {
             break;
         }
     }
     output.shell_returns.drain(..applied);
-    if !term.synchronized_output_ended() {
+    if !ended {
         start += term.advance_until_sync_end(&output.bytes[start..]);
     }
     start
@@ -601,16 +618,12 @@ impl App {
         if s.output.waiting_since.is_some() {
             return;
         }
-        s.pty.wake_pending.store(false, Ordering::Release);
         s.deferred = None;
-        let mut batch = if s.output.bytes.is_empty() && s.output.shell_returns.is_empty() {
+        let from_leftover = !s.output.is_empty();
+        let mut batch = s.output.next_batch(|| {
+            s.pty.wake_pending.store(false, Ordering::Release);
             s.pty.take_output()
-        } else {
-            pty::Output {
-                bytes: std::mem::take(&mut s.output.bytes),
-                shell_returns: std::mem::take(&mut s.output.shell_returns),
-            }
-        };
+        });
         let was_synchronized = s.term.modes.synchronized_output;
         let mut processed = 0;
         update_terminal(&mut s.term, &mut s.scroll, |term| {
@@ -647,6 +660,9 @@ impl App {
                 log.output(processed);
             }
             s.request_frame();
+        }
+        if from_leftover && s.output.is_empty() {
+            self.process_output();
         }
     }
 
@@ -696,9 +712,8 @@ impl App {
             s.since_frame = 0;
             s.sequence += 1;
         }
-        if s.output.presented() {
-            self.process_output();
-        }
+        s.output.presented();
+        self.process_output();
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
@@ -1553,6 +1568,34 @@ mod tests {
             },
         );
         assert!(term.modes.bracketed_paste);
+    }
+
+    #[test]
+    fn leftover_does_not_acknowledge_queued_pty_output() {
+        let mut output = PendingOutput::default();
+        let mut term = Terminal::new(10, 2);
+        let batch = b"\x1b[?2026h028\x1b[?2026l\x1b[?2026h".to_vec();
+        let consumed = term.advance_until_sync_end(&batch);
+        output.retain(batch, consumed, Instant::now());
+        let wake_pending = std::sync::atomic::AtomicBool::new(false);
+        let mut queued = b"\r099\x1b[?2026l".to_vec();
+        assert!(!wake_pending.swap(true, Ordering::AcqRel));
+        output.presented();
+        let batch = output.next_batch(|| panic!("leftover must precede PTY output"));
+        term.advance_until_sync_end(&batch);
+        assert!(term.modes.synchronized_output);
+        assert!(wake_pending.load(Ordering::Acquire));
+        let batch = output.next_batch(|| {
+            wake_pending.store(false, Ordering::Release);
+            std::mem::take(&mut queued)
+        });
+        term.advance_until_sync_end(&batch);
+        assert!(!term.modes.synchronized_output);
+        assert_eq!(term.viewport_row(0).cells[0].c, '0');
+        assert_eq!(term.viewport_row(0).cells[1].c, '9');
+        assert_eq!(term.viewport_row(0).cells[2].c, '9');
+        assert!(queued.is_empty());
+        assert!(!wake_pending.load(Ordering::Acquire));
     }
 
     #[test]
