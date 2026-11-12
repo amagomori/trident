@@ -9,6 +9,11 @@ which is deterministic, so it doesn't flake on noisy CI runners. Wall-clock medi
 reported alongside but never fail the check. The workloads are the `bench` module in
 `src/term/tests.rs` (`term-core` once the crates are split), run as the ignored
 `bench_workloads` test.
+
+The same check measures the real `terminal` app (see `app_bench.py`, Linux with Xvfb and
+Mesa): RSS with the window open, peak and settled RSS after a scrollback burst, and idle
+CPU in both states. It fails when RSS grows more than `--mem-threshold` percent or idle
+CPU rises more than `--cpu-threshold` points of one core; `--no-app` skips it.
 """
 
 import argparse
@@ -19,6 +24,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+sys.dont_write_bytecode = True
+from app_bench import build_app, measure_app, report_app
 
 TEST = "bench_workloads"
 
@@ -186,6 +194,12 @@ def main() -> int:
     parser.add_argument("--base", type=Path, help="baseline checkout, e.g. main")
     parser.add_argument("--threshold", type=float, default=3.0, help="max %% instruction increase")
     parser.add_argument("--rounds", type=int, default=5, help="wall-clock rounds per checkout")
+    parser.add_argument("--mem-threshold", type=float, default=5.0, help="max %% RSS increase")
+    parser.add_argument(
+        "--cpu-threshold", type=float, default=1.0, help="max idle CPU increase, %% of a core"
+    )
+    parser.add_argument("--app-rounds", type=int, default=3, help="app runs per checkout")
+    parser.add_argument("--no-app", action="store_true", help="skip memory and idle CPU")
     parser.add_argument("--summary", type=Path, help="append the markdown report here")
     parser.add_argument("--json", type=Path, help="write raw results here")
     args = parser.parse_args()
@@ -204,7 +218,20 @@ def main() -> int:
         binaries["head"] = head
         results = measure(binaries, args.rounds, tmp)
 
+        if not args.no_app:
+            apps = {}
+            if args.base:
+                apps["base"] = build_app(args.base.resolve(), tmp, "base")
+            apps["head"] = build_app(args.head.resolve(), tmp, "head")
+            results["app"] = measure_app(apps, args.app_rounds)
+
     text, regressions = report(results, args.threshold)
+    if "app" in results:
+        app_lines, app_regressions = report_app(
+            results["app"], args.mem_threshold, args.cpu_threshold
+        )
+        text += "\n" + "\n".join(app_lines)
+        regressions += app_regressions
     print(text)
     if args.summary:
         with args.summary.open("a") as f:
