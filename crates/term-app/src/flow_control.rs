@@ -28,15 +28,14 @@ impl FlowControl {
         let was_paused = self.paused;
         self.flags(settings);
         for &byte in bytes {
-            if Some(byte) == settings.start
-                || (settings.ixany && Some(byte) != settings.stop)
-                || (settings.isig && settings.signals.contains(&Some(byte)))
-            {
+            if Some(byte) == settings.start {
                 self.paused = false;
             } else if settings.ixon && Some(byte) == settings.stop {
                 self.paused = true;
                 self.pause_sequence = sequence;
                 self.output_budget = 0;
+            } else if settings.ixany || (settings.isig && settings.signals.contains(&Some(byte))) {
+                self.paused = false;
             }
         }
         self.paused != was_paused
@@ -149,6 +148,28 @@ mod tests {
                 assert_eq!(flow.paused, !isig);
             }
         }
+    }
+
+    #[test]
+    fn flow_keys_take_precedence_over_signals() {
+        let mut flow = FlowControl::default();
+        let mut settings = FlowSettings {
+            isig: true,
+            signals: [Some(0x03), None, None],
+            stop: Some(0x03),
+            ..settings(true, false)
+        };
+        assert!(flow.input(b"\x03", settings, 7));
+        assert!(flow.paused);
+        assert!(!flow.input(b"\x03", settings, 7));
+        assert!(flow.paused);
+        settings.start = Some(0x03);
+        settings.stop = Some(0x13);
+        assert!(flow.input(b"\x03", settings, 7));
+        assert!(!flow.paused);
+        settings.stop = settings.start;
+        assert!(!flow.input(b"\x03", settings, 7));
+        assert!(!flow.paused);
     }
 
     #[test]
