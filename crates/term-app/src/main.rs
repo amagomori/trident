@@ -561,6 +561,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(s) = &mut self.session
+            && std::mem::take(&mut s.pty.flow_redraw)
+        {
+            s.window.request_redraw();
+        }
         let deferred = self.session.as_ref().and_then(|s| s.deferred);
         match deferred {
             Some(since) if since.elapsed() >= MAX_DEFER => {

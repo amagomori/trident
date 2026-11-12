@@ -42,6 +42,7 @@ impl Pending {
 
 pub struct Pty {
     pub flow: crate::flow_control::FlowControl,
+    pub flow_redraw: bool,
     master: Box<dyn MasterPty + Send>,
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Vec<u8>>,
@@ -165,6 +166,7 @@ impl Pty {
 
         Ok(Pty {
             flow: Default::default(),
+            flow_redraw: false,
             master: pair.master,
             input,
             child,
@@ -196,7 +198,7 @@ impl Pty {
             return;
         }
         let settings = self.flow_flags().unwrap_or_default();
-        self.flow.input(
+        self.flow_redraw |= self.flow.input(
             bytes,
             settings,
             self.output.read_sequence.load(Ordering::SeqCst),

@@ -21,7 +21,8 @@ impl FlowControl {
         }
     }
 
-    pub fn input(&mut self, bytes: &[u8], settings: FlowSettings, sequence: u64) {
+    pub fn input(&mut self, bytes: &[u8], settings: FlowSettings, sequence: u64) -> bool {
+        let was_paused = self.paused;
         self.flags(settings);
         for &byte in bytes {
             if Some(byte) == settings.start || (settings.ixany && Some(byte) != settings.stop) {
@@ -31,6 +32,7 @@ impl FlowControl {
                 self.pause_sequence = sequence;
             }
         }
+        self.paused != was_paused
     }
 
     pub fn banner(&self) -> Option<String> {
@@ -107,6 +109,16 @@ mod tests {
         assert!(flow.paused);
         flow.output(8);
         assert!(!flow.paused);
+    }
+
+    #[test]
+    fn input_reports_pause_state_changes() {
+        let mut flow = FlowControl::default();
+        assert!(flow.input(b"\x13", settings(true, false), 0));
+        assert!(!flow.input(b"", settings(true, false), 0));
+        assert!(!flow.input(b"x", settings(true, false), 0));
+        assert!(flow.input(b"\x1b[M", settings(true, true), 0));
+        assert!(!flow.input(b"\x11", settings(true, false), 0));
     }
 
     #[test]
