@@ -5,6 +5,7 @@ pub mod colors;
 pub mod images;
 
 mod cell;
+mod ghost;
 mod kitty;
 mod perform;
 
@@ -147,6 +148,8 @@ pub struct Terminal {
     cell_pixels: (f32, f32),
     kitty: kitty::Kitty,
     parser: vte::Parser,
+    /// Whether `parser` is known to be in its ground state between calls to `advance`.
+    parser_ground: bool,
 }
 
 impl Terminal {
@@ -190,14 +193,22 @@ impl Terminal {
             cell_pixels: (8.0, 16.0),
             kitty: kitty::Kitty::default(),
             parser: vte::Parser::new(),
+            parser_ground: true,
         }
     }
 
     /// Feed bytes from the shell.
     pub fn advance(&mut self, bytes: &[u8]) {
         let mut parser = std::mem::take(&mut self.parser);
-        self.advance_bytes(&mut parser, bytes);
+        match self.ghost_split(bytes) {
+            Some(split) => {
+                self.advance_ghost(&mut parser, &bytes[..split]);
+                self.advance_bytes(&mut parser, &bytes[split..]);
+            }
+            None => self.advance_bytes(&mut parser, bytes),
+        }
         self.parser = parser;
+        self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
     }
 
     pub fn cols(&self) -> usize {
