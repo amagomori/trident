@@ -65,8 +65,8 @@ def summarize(path, workload):
     timing = f"presented: {source or 'unknown'}" if feedback else "present-return (no feedback)"
     wasted = len(frames) - len(successful) if feedback else 0
     previous = 0
-    for time, count in ordered:
-        if count == 0 and not any(previous < t <= time for t in inputs):
+    for seq, (time, count) in sorted(frames.items()):
+        if seq in successful and count == 0 and not any(previous < t <= time for t in inputs):
             wasted += 1
         previous = time
     return dict(p50_ms=percentile(latencies, .5) if latencies else None,
