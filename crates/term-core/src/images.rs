@@ -226,6 +226,11 @@ impl Terminal {
         removed
     }
 
+    /// The ids of all stored images.
+    pub(crate) fn image_ids(&self) -> Vec<u32> {
+        self.images.images.keys().copied().collect()
+    }
+
     /// Whether either screen still shows image `id`.
     pub(crate) fn image_placed(&self, id: u32) -> bool {
         let placed = |s: &crate::Screen| s.placements.iter().any(|p| p.image_id == id);

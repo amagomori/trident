@@ -325,7 +325,7 @@ fn file_transmission() {
     assert_eq!(send(&mut t, "f", &file, 1), "\x1b_Gi=1;OK\x1b\\");
     assert!(file.exists());
     // t=t only takes files meant for it, and deletes them.
-    assert!(send(&mut t, "t", &file, 2).contains("EPERM"));
+    assert!(send(&mut t, "t", &file, 2).contains("EBADF"));
     assert!(file.exists());
     std::fs::remove_file(&file).unwrap();
     let temp = dir.join(format!("kan54-tty-graphics-protocol-{pid}"));
@@ -336,7 +336,7 @@ fn file_transmission() {
         .unwrap()
         .join(format!("tty-graphics-protocol-{pid}"));
     std::fs::write(&outside, &rgb).unwrap();
-    assert!(send(&mut t, "t", &outside, 4).contains("EPERM"));
+    assert!(send(&mut t, "t", &outside, 4).contains("EBADF"));
     assert!(outside.exists());
     std::fs::remove_file(&outside).unwrap();
 
@@ -350,12 +350,53 @@ fn file_transmission() {
         assert!(reply.starts_with("\x1b_Gi=5;E"), "{special}: {reply:?}");
         assert!(!reply.contains("OK"));
     }
-    assert!(send(&mut t, "f", std::path::Path::new("relative"), 5).contains("EINVAL"));
-    assert!(send(&mut t, "f", &dir, 5).contains("EPERM"));
+    assert!(send(&mut t, "f", std::path::Path::new("relative"), 5).contains("EBADF"));
+    assert!(send(&mut t, "f", &dir, 5).contains("EBADF"));
     let fifo = dir.join(format!("kan54-fifo-{pid}"));
     let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
-    assert!(send(&mut t, "f", &fifo, 5).contains("EPERM"));
+    assert!(send(&mut t, "f", &fifo, 5).contains("EBADF"));
     std::fs::remove_file(&fifo).unwrap();
     assert!(t.image(5).is_none());
+}
+
+#[test]
+fn review_edge_cases() {
+    let mut t = term();
+    // An empty control part, and CAN / SUB aborting an APC, leave the stream intact.
+    t.advance(b"\x1b_;\x1b\\a\x1b_Ga=t\x18b\x1b_Gq=1\x1ac");
+    let text: String = t.viewport_row(0).cells[..3].iter().map(|c| c.c).collect();
+    assert_eq!(text, "abc");
+
+    // A huge r does not loop over billions of rows.
+    t.advance(&apc(
+        "a=T,f=32,s=1,v=1,i=1,r=4294967295,c=4294967295,q=2",
+        &[0; 4],
+    ));
+    assert_eq!(t.cursor_position(), Some((23, 79)));
+
+    // A failed upload under an image number keeps the number on the old image.
+    t.advance(&apc("a=t,f=32,s=1,v=1,I=3,q=2", &[0; 4]));
+    let old = t.kitty.numbers[&3];
+    t.advance(&apc("a=t,f=32,s=1,v=1,I=3,q=2", &[0; 3]));
+    assert_eq!(t.kitty.numbers[&3], old);
+
+    // d=R frees unplaced images in the range too.
+    t.advance(&apc("a=t,f=32,s=1,v=1,i=5,q=2", &[0; 4]));
+    t.advance(b"\x1b_Ga=d,d=R,x=2,y=6\x1b\\");
+    assert!(t.image(5).is_none() && t.image(1).is_some());
+}
+
+#[test]
+fn padded_payload_fits_exact_limit() {
+    let mut tr = super::Transmission {
+        control: Default::default(),
+        data: Vec::new(),
+        carry: Vec::new(),
+        limit: 4,
+        error: None,
+    };
+    tr.push(b64(&[1, 2, 3, 4]).as_bytes());
+    tr.finish();
+    assert_eq!((tr.error, tr.data), (None, vec![1, 2, 3, 4]));
 }

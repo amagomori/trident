@@ -16,6 +16,8 @@ use std::io::Read;
 use std::sync::LazyLock;
 
 const ESC: u8 = 0x1b;
+const CAN: u8 = 0x18;
+const SUB: u8 = 0x1a;
 /// Longest control part (`a=T,f=100,...`) accepted.
 const MAX_CONTROL: usize = 1024;
 /// Longest file path accepted for `t=f` / `t=t`.
@@ -216,7 +218,9 @@ impl Transmission {
         if self.error.is_some() || chunk.is_empty() {
             return;
         }
-        if self.data.len() + chunk.len() / 4 * 3 > self.limit {
+        let padding = chunk.iter().rev().take(2).filter(|&&b| b == b'=').count();
+        let decoded = (chunk.len() / 4 * 3).saturating_sub(padding);
+        if self.data.len() + decoded > self.limit {
             self.fail("EFBIG:image data too large");
         } else if BASE64.decode_vec(chunk, &mut self.data).is_err() {
             self.fail("EINVAL:bad base64 payload");
@@ -263,11 +267,17 @@ impl Terminal {
                         bytes
                     }
                 }
-                Scan::Apc => match memchr::memchr(ESC, bytes) {
-                    Some(i) => {
+                Scan::Apc => match memchr::memchr3(ESC, CAN, SUB, bytes) {
+                    Some(i) if bytes[i] == ESC => {
                         self.apc_push(&bytes[..i]);
                         self.kitty.scan = Scan::ApcEsc;
                         &bytes[i + 1..]
+                    }
+                    Some(i) => {
+                        // CAN and SUB abort the APC; vte returns to ground on them too.
+                        self.kitty.apc = Apc::default();
+                        self.kitty.scan = Scan::Ground;
+                        &bytes[i..]
                     }
                     None => {
                         self.apc_push(bytes);
@@ -309,6 +319,10 @@ impl Terminal {
                 return;
             }
             let Some(end) = end else { return };
+            if apc.control.is_empty() {
+                apc.ignored = true;
+                return;
+            }
             bytes = &bytes[end + 1..];
             self.kitty.apc.in_payload = true;
             self.apc_command();
@@ -394,10 +408,10 @@ impl Terminal {
             0 => self.free_image_id(),
             id => id,
         };
-        if control.number != 0 {
+        let mut result = self.add_image(id, image).map_err(image_error);
+        if result.is_ok() && control.number != 0 {
             self.kitty.numbers.insert(control.number, id);
         }
-        let mut result = self.add_image(id, image).map_err(image_error);
         if result.is_ok() && control.action == b'T' {
             control.id = id;
             control.number = 0;
@@ -451,10 +465,10 @@ impl Terminal {
         let placement = self.place_image(id, opts).map_err(image_error)?;
         if !control.keep_cursor {
             // Like kitty: the cursor ends on the image's last row, just past its right edge.
-            for _ in 1..placement.rows {
+            for _ in 1..placement.rows.min(self.rows) {
                 self.linefeed();
             }
-            let col = self.cursor.col + placement.cols;
+            let col = self.cursor.col.saturating_add(placement.cols);
             self.cursor.col = col.min(self.cols - 1);
             self.cursor.pending_wrap = col >= self.cols;
         }
@@ -494,6 +508,10 @@ impl Terminal {
         if free {
             let mut ids: Vec<u32> = removed;
             ids.extend(target);
+            if c.delete == b'R' {
+                let range = c.source.x..=c.source.y;
+                ids.extend(self.image_ids().into_iter().filter(|id| range.contains(id)));
+            }
             ids.sort_unstable();
             ids.dedup();
             for id in ids {
@@ -547,7 +565,9 @@ fn image_error(error: ImageError) -> &'static str {
 fn decode_transmission(c: &Control, data: Vec<u8>, limit: usize) -> Result<Image, &'static str> {
     let data = match c.medium {
         b'd' => data,
-        b'f' | b't' => read_file(&data, c.medium == b't', c.offset, c.size, limit)?,
+        // One error for every refusal, so replies say little about files the client can't read.
+        b'f' | b't' => read_file(&data, c.medium == b't', c.offset, c.size, limit)
+            .map_err(|_| "EBADF:cannot read image file")?,
         _ => return Err("EINVAL:unsupported transmission medium"),
     };
     let bpp = match c.format {
