@@ -129,8 +129,9 @@ def report(results: dict, threshold: float) -> tuple[str, list[str]]:
         return "\n".join(lines) + "\n", regressions
 
     lines += [
-        f"Fails when a workload runs more than {threshold:g}% more instructions than the base "
-        "branch. Wall clock is shared-runner time, for reference only.",
+        f"Fails when a workload runs more than {threshold:g}% more instructions per byte (or "
+        "keystroke) than the base branch, or is removed. Wall clock is shared-runner time, for "
+        "reference only.",
         "",
         "| Workload | Instructions (base → head) | Change | Wall clock (base → head) | Change | |",
         "| --- | ---: | ---: | ---: | ---: | --- |",
@@ -140,18 +141,25 @@ def report(results: dict, threshold: float) -> tuple[str, list[str]]:
         if b is None:
             lines.append(f"| `{name}` | new: {h['instructions']:,} | | {rate(h)} | | new |")
             continue
-        change = (h["instructions"] - b["instructions"]) / b["instructions"] * 100
+        # Per byte or keystroke, so resizing a workload's input doesn't read as a change.
+        b_per, h_per = b["instructions"] / b["count"], h["instructions"] / h["count"]
+        change = (h_per - b_per) / b_per * 100
         status = "regressed" if change > threshold else "faster" if change < -threshold else "ok"
         if status == "regressed":
             regressions.append(name)
+        per = "" if b["count"] == h["count"] else f" (per {b['unit'].rstrip('s')})"
         lines.append(
             f"| `{name}` | {b['instructions']:,} → {h['instructions']:,} | "
-            f"{pct(h['instructions'], b['instructions'])} | {rate(b)} → {rate(h)} | "
+            f"{pct(h_per, b_per)}{per} | {rate(b)} → {rate(h)} | "
             f"{wall_change(b, h)} | {status} |"
         )
+    for name in base.keys() - head.keys():
+        # Dropping a workload must not be a way past the gate.
+        regressions.append(name)
+        lines.append(f"| `{name}` | {base[name]['instructions']:,} → removed | | | | removed |")
     lines.append("")
     if regressions:
-        lines.append(f"**Regressed:** {', '.join(f'`{n}`' for n in regressions)}")
+        lines.append(f"**Regressed or removed:** {', '.join(f'`{n}`' for n in regressions)}")
     else:
         lines.append("No regressions.")
     return "\n".join(lines) + "\n", regressions
