@@ -458,14 +458,14 @@ fn exit_wakeup(deadline: Option<Instant>, exit: Option<Instant>) -> Option<Insta
     [deadline, exit].into_iter().flatten().min()
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[derive(Default)]
 struct ExitPresentation {
     target: Option<usize>,
     linger: Option<Instant>,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 impl ExitPresentation {
     fn update(&mut self, presented: usize, skipped: usize, now: Instant, refresh: u32) -> bool {
         if let Some(target) = self.target {
@@ -526,7 +526,7 @@ struct App {
     clipboard: clipboard::Clipboard,
     error: Option<String>,
     exit_deadline: Option<Instant>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     exit_presentation: ExitPresentation,
 }
 
@@ -583,7 +583,7 @@ impl App {
             clipboard: clipboard::Clipboard::default(),
             error: None,
             exit_deadline: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             exit_presentation: ExitPresentation::default(),
         }
     }
@@ -903,6 +903,11 @@ impl App {
         #[cfg(target_os = "macos")]
         let exit_target = (self.exit_deadline.is_some() && self.exit_presentation.target.is_none())
             .then(present_macos::arm_exit);
+        #[cfg(target_os = "linux")]
+        let exit_target = (self.exit_deadline.is_some()
+            && self.exit_presentation.target.is_none()
+            && s.presentation.is_some())
+        .then_some(s.sequence + 1);
         let rendered = s.renderer.render(
             &s.term,
             &mut s.fonts,
@@ -914,7 +919,7 @@ impl App {
             Some(&mut pre_present),
         );
         if rendered {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             if let Some(target) = exit_target {
                 self.exit_presentation.target = Some(target);
             }
@@ -1529,10 +1534,19 @@ impl ApplicationHandler<UserEvent> for App {
             .session
             .as_ref()
             .is_none_or(|s| s.output.is_empty() && s.output.waiting_since.is_none());
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let output_done = {
-            if self.exit_deadline.is_some() {
-                let (presented, skipped) = present_macos::feedback();
+            #[cfg(target_os = "macos")]
+            let feedback = Some(present_macos::feedback());
+            #[cfg(target_os = "linux")]
+            let feedback = self
+                .session
+                .as_ref()
+                .and_then(|s| s.presentation.as_ref())
+                .map(|feedback| feedback.exit_feedback());
+            if self.exit_deadline.is_some()
+                && let Some((presented, skipped)) = feedback
+            {
                 let refresh = self
                     .session
                     .as_ref()
@@ -1548,7 +1562,7 @@ impl ApplicationHandler<UserEvent> for App {
                     s.request_frame();
                 }
             }
-            output_done && self.exit_presentation.ready(Instant::now())
+            output_done && (feedback.is_none() || self.exit_presentation.ready(Instant::now()))
         };
         if exit_ready(self.exit_deadline, output_done, Instant::now()) {
             event_loop.exit();
@@ -1573,8 +1587,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         deadline = exit_wakeup(deadline, self.exit_deadline);
-        #[cfg(target_os = "macos")]
-        if self.exit_deadline.is_some() {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if self.exit_deadline.is_some() && self.exit_presentation.target.is_some() {
             deadline = exit_wakeup(
                 deadline,
                 Some(self.exit_presentation.wakeup(Instant::now())),

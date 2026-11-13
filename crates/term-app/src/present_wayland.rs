@@ -14,6 +14,8 @@ struct State {
     start: Instant,
     lines: Option<Arc<Mutex<Vec<String>>>>,
     clock: FrameClock,
+    presented: usize,
+    discarded: usize,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -76,6 +78,7 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, usize> for State
                 flags,
                 ..
             } => {
+                state.presented = state.presented.max(*seq + 1);
                 if let Some(epoch) = state.epoch {
                     let seconds = (u64::from(tv_sec_hi) << 32) | u64::from(tv_sec_lo);
                     let time =
@@ -110,6 +113,7 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, usize> for State
                 }
             }
             wp_presentation_feedback::Event::Discarded => {
+                state.discarded = state.discarded.max(*seq + 1);
                 state.clock.discarded(*seq);
                 if let Some(lines) = &state.lines {
                     lines.lock().unwrap().push(format!(
@@ -166,6 +170,8 @@ impl Feedback {
             start,
             lines,
             clock: FrameClock::default(),
+            presented: 0,
+            discarded: 0,
         };
         let registry = connection.display().get_registry(&qh, ());
         queue.roundtrip(&mut state)?;
@@ -197,6 +203,10 @@ impl Feedback {
     pub fn request(&self, sequence: usize) {
         self.presentation
             .feedback(&self.surface, &self.qh, sequence);
+    }
+
+    pub fn exit_feedback(&self) -> (usize, usize) {
+        (self.state.presented, self.state.discarded)
     }
 
     pub fn clock(&mut self) -> Option<&mut FrameClock> {
