@@ -440,8 +440,15 @@ pub fn watch(
                 }
                 next_sample += Duration::from_millis(200);
                 loop {
+                    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
                     let active = !foreground.running.is_empty()
-                        || last_kick.elapsed() < Duration::from_secs(1);
+                        || last_kick.elapsed() < Duration::from_secs(1)
+                        // Only a noncanonical line editor is safe to leave unsampled.
+                        // SAFETY: this thread owns fd; termios is read only on success.
+                        || unsafe {
+                            libc::tcgetattr(fd.as_raw_fd(), termios.as_mut_ptr()) != 0
+                                || termios.assume_init().c_lflag & libc::ICANON != 0
+                        };
                     let result = if active {
                         receiver.recv_timeout(next_sample.saturating_duration_since(Instant::now()))
                     } else {
@@ -840,7 +847,7 @@ mod tests {
             |_| panic!("no PTY group"),
         )
         .unwrap();
-        assert_idle(&activity);
+        assert_sampling(&activity);
         let start = Instant::now();
         drop(watcher);
         assert!(start.elapsed() < Duration::from_millis(500));
@@ -858,14 +865,45 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn assert_sampling(activity: &Activity) {
+        use std::sync::atomic::Ordering;
+        std::thread::sleep(Duration::from_millis(1500));
+        let samples = activity.samples.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(activity.samples.load(Ordering::Relaxed) > samples);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn idle_watcher_kick_tracks_real_foreground_command() {
+        shell_command_finishes("bash", &["--noprofile", "--norc", "-i"], b"sleep 1\n", true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn silent_builtin_then_command_finishes() {
+        shell_command_finishes(
+            "bash",
+            &["--noprofile", "--norc", "-i"],
+            b"read -t 2 x; sleep 2\n",
+            true,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_shell_prompt_keeps_sampling() {
+        shell_command_finishes("/bin/sh", &["-i"], b"sleep 1\n", false);
+    }
+
+    #[cfg(unix)]
+    fn shell_command_finishes(shell: &str, args: &[&str], input: &[u8], idle: bool) {
         use portable_pty::{CommandBuilder, PtySize, native_pty_system};
         use std::io::Write;
 
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-        let mut command = CommandBuilder::new("/bin/sh");
-        command.arg("-i");
+        let mut command = CommandBuilder::new(shell);
+        command.args(args);
         let mut child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
         let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
@@ -883,11 +921,15 @@ mod tests {
             },
         )
         .unwrap();
-        assert_idle(&activity);
+        if idle {
+            assert_idle(&activity);
+        } else {
+            assert_sampling(&activity);
+        }
         // Kick before the shell forks, as happens on an Enter write.
         activity.kick();
         let mut writer = pair.master.take_writer().unwrap();
-        writer.write_all(b"sleep 1\n").unwrap();
+        writer.write_all(input).unwrap();
         writer.flush().unwrap();
         let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(event.name.is_some_and(|name| name.starts_with("sleep")));
@@ -936,11 +978,33 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_exit_kick_stops_idle_watcher() {
+        use portable_pty::{PtySize, native_pty_system};
         use std::sync::atomic::Ordering;
-        let (_reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
+            .try_clone_to_owned()
+            .unwrap();
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: fd owns a live PTY; termios is initialized before use.
+        unsafe {
+            assert_eq!(
+                libc::tcgetattr(std::os::fd::AsRawFd::as_raw_fd(&fd), termios.as_mut_ptr()),
+                0
+            );
+            let mut termios = termios.assume_init();
+            termios.c_lflag &= !libc::ICANON;
+            assert_eq!(
+                libc::tcsetattr(
+                    std::os::fd::AsRawFd::as_raw_fd(&fd),
+                    libc::TCSANOW,
+                    &termios
+                ),
+                0
+            );
+        }
         let activity = std::sync::Arc::new(Activity::default());
         let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let watcher = watch(writer.into(), 1, stopped.clone(), activity.clone(), |_| {
+        let watcher = watch(fd, 1, stopped.clone(), activity.clone(), |_| {
             panic!("no PTY group")
         })
         .unwrap();
