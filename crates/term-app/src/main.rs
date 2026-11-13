@@ -197,6 +197,34 @@ fn advance_output(term: &mut Terminal, output: pty::Output) {
     term.advance(&output.bytes[start..]);
 }
 
+fn update_terminal(
+    term: &mut Terminal,
+    scroll: &mut PixelScroll,
+    update: impl FnOnce(&mut Terminal),
+) {
+    let offset = term.display_offset();
+    let history = term.viewport_to_point(0, 0).line + offset as u64;
+    let alt = term.is_alt_screen();
+    update(term);
+    let shrunk = release_freed_memory(term);
+    let new_history = term.viewport_to_point(0, 0).line + term.display_offset() as u64;
+    if shrunk || alt || term.is_alt_screen() || new_history < history {
+        scroll.reset();
+        return;
+    }
+    let added = new_history - history;
+    if offset == 0 && scroll.offset > 0.0 {
+        term.scroll_display(added.min(isize::MAX as u64) as isize);
+    } else if term.display_offset()
+        != (offset as u64 + added).min(term.scrollback_len() as u64) as usize
+    {
+        scroll.reset();
+    }
+    if term.display_offset() == term.scrollback_len() {
+        scroll.reset();
+    }
+}
+
 impl Session {
     fn frame_deadline(&mut self) -> Option<(Instant, Instant)> {
         #[cfg(target_os = "linux")]
@@ -425,12 +453,9 @@ impl App {
         let batch = s.pty.take_output();
         let processed = batch.bytes.len();
         s.since_frame += processed;
-        let before = (s.term.display_offset(), s.term.is_alt_screen());
-        advance_output(&mut s.term, batch);
-        if before != (s.term.display_offset(), s.term.is_alt_screen()) {
-            s.scroll.reset();
-        }
-        release_freed_memory(&mut s.term);
+        update_terminal(&mut s.term, &mut s.scroll, |term| {
+            advance_output(term, batch)
+        });
         if s.term.modes.mouse == MouseMode::Off {
             self.reported_button = None;
         }
@@ -717,14 +742,16 @@ impl App {
 
 /// After scrollback or the grid shrinks, hand the memory the dropped rows freed back to
 /// the OS: glibc keeps freed heap pages otherwise.
-fn release_freed_memory(term: &mut Terminal) {
-    if term.take_shrunk() {
+fn release_freed_memory(term: &mut Terminal) -> bool {
+    let shrunk = term.take_shrunk();
+    if shrunk {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         // SAFETY: malloc_trim only releases free heap memory; it has no preconditions.
         unsafe {
             libc::malloc_trim(0);
         }
     }
+    shrunk
 }
 
 fn grid_size(window: &Window, fonts: &Fonts) -> (usize, usize) {
@@ -975,6 +1002,104 @@ mod tests {
         assert_eq!(scroll.offset, 0.0);
         assert_eq!(scroll.update(f64::NAN, 10.0, 0, 5), 0);
         assert_eq!(scroll.update(5.0, 0.0, 0, 5), 0);
+    }
+
+    fn streaming_terminal(limit: usize) -> Terminal {
+        let mut term = Terminal::new(20, 5);
+        term.set_scrollback_limit(limit);
+        for line in 0..80 {
+            term.advance(format!("line {line}\r\n").as_bytes());
+        }
+        release_freed_memory(&mut term);
+        term
+    }
+
+    fn drawn_rows(term: &Terminal) -> Vec<String> {
+        (-1..term.rows() as isize)
+            .map(|row| {
+                term.viewport_row_signed(row)
+                    .cells
+                    .iter()
+                    .map(|cell| cell.c)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_output_preserves_fraction_and_rows() {
+        for initial_lines in [0, 30] {
+            let mut term = streaming_terminal(100);
+            let mut scroll = PixelScroll::default();
+            let steps = scroll.update(
+                initial_lines as f64 * 20.0 + 9.0,
+                20.0,
+                term.display_offset(),
+                term.scrollback_len(),
+            );
+            term.scroll_display(steps);
+            let rows = drawn_rows(&term);
+            for added in 1..=3 {
+                update_terminal(&mut term, &mut scroll, |term| term.advance(b"\r\nnext"));
+                assert_eq!(term.display_offset(), initial_lines + added);
+                assert_eq!(scroll.offset, 9.0);
+                assert_eq!(drawn_rows(&term), rows);
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_bottom_anchors_a_batch_of_output_lines() {
+        let mut term = streaming_terminal(100);
+        let mut scroll = PixelScroll { offset: 9.0 };
+        let rows = drawn_rows(&term);
+        update_terminal(&mut term, &mut scroll, |term| {
+            term.advance(b"\r\na\r\nb\r\nc")
+        });
+        assert_eq!(term.display_offset(), 3);
+        assert_eq!(scroll.offset, 9.0);
+        assert_eq!(drawn_rows(&term), rows);
+    }
+
+    #[test]
+    fn streaming_output_clamps_fraction_at_history_top() {
+        for initial_lines in [0, 1] {
+            let mut term = streaming_terminal(2);
+            term.scroll_display(initial_lines);
+            let mut scroll = PixelScroll { offset: 9.0 };
+            update_terminal(&mut term, &mut scroll, |term| term.advance(b"a\r\nb\r\n"));
+            assert_eq!(term.display_offset(), term.scrollback_len());
+            assert_eq!(term.display_offset(), 2);
+            assert_eq!(scroll.offset, 0.0);
+        }
+        let mut term = streaming_terminal(0);
+        let mut scroll = PixelScroll { offset: 9.0 };
+        update_terminal(&mut term, &mut scroll, |term| term.advance(b"a\r\nb\r\n"));
+        assert_eq!(term.scrollback_len(), 0);
+        assert_eq!(term.display_offset(), 0);
+        assert_eq!(scroll.offset, 0.0);
+    }
+
+    #[test]
+    fn streaming_output_resets_fraction_on_view_jumps() {
+        for bytes in [
+            b"\x1b[3J".as_slice(),
+            b"\x1b[3Jnew\r\n",
+            b"\x1b[?1049h",
+            b"\x1bc",
+        ] {
+            let mut term = streaming_terminal(100);
+            term.scroll_display(30);
+            let mut scroll = PixelScroll { offset: 9.0 };
+            update_terminal(&mut term, &mut scroll, |term| term.advance(bytes));
+            assert_eq!(scroll.offset, 0.0);
+        }
+        let mut term = streaming_terminal(100);
+        term.scroll_display(30);
+        let mut scroll = PixelScroll { offset: 9.0 };
+        update_terminal(&mut term, &mut scroll, Terminal::scroll_to_bottom);
+        assert_eq!(term.display_offset(), 0);
+        assert_eq!(scroll.offset, 0.0);
     }
 
     #[test]
