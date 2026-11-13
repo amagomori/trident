@@ -186,6 +186,42 @@ line, column, and entry printed to stderr and shown in a banner (alongside the
 output-paused notice when applicable). Startup errors use defaults; reload errors
 keep the last valid config. Fixing the config clears the banner.
 
+#### Color themes
+
+Bundled themes are `tokyo-night` (the unchanged default), `tokyo-day`,
+`solarized-dark`, and `solarized-light`. Set one at the top of the config:
+
+```toml
+theme = "solarized-dark"
+```
+
+To follow the OS appearance, use `theme = "auto"` (Tokyo Night / Tokyo Day),
+or select your own pair:
+
+```toml
+theme = { light = "solarized-light", dark = "solarized-dark" }
+```
+
+Automatic mode reads the initial appearance and switches the existing window
+live, without restarting the shell or losing scrollback. On macOS this uses native
+appearance events; on Linux (X11 and Wayland) it uses the desktop's
+`org.freedesktop.portal.Settings` appearance portal. A desktop without this portal,
+an unavailable appearance, or “no preference” uses the dark theme. Fixed themes
+ignore OS appearance changes. No appearance listener is started for fixed themes.
+
+A theme name may instead be an absolute path or a path relative to the config's
+directory, for example `theme = "themes/my-theme.toml"`. Theme files have a
+`[colors]` table with the same 20 keys and `"#rrggbb"` values shown above (16 ANSI
+colors plus foreground, background, cursor, selection); omitted keys inherit
+Tokyo Night. The files in [`themes/`](themes/) are complete examples and are also
+embedded in the binary, so bundled themes need no installation. Config `[colors]`
+entries override the selected theme (both palettes in automatic mode).
+
+Both files in an automatic pair are validated before applying either. Referenced
+theme files are hot-reloaded, including atomic saves, missing files created later,
+and symlinks. An invalid or unreadable theme shows a diagnostic banner and keeps
+the last valid palettes, just like an invalid config.
+
 ### Dropping files
 
 Drop a local file from your file manager onto the window to insert its POSIX-shell-quoted
