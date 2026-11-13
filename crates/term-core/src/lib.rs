@@ -139,9 +139,10 @@ pub struct Terminal {
     max_scrollback: usize,
     /// Whether scrollback or the grid gave up rows since the last `take_shrunk`.
     shrunk: bool,
-    /// Fingerprint of the primary screen when ED 3 last erased the scrollback, so an ED 2
-    /// that follows it (`clear` sends `ED 3; ED 2` on macOS) leaves that screen out of history.
-    erased_screen: Option<u64>,
+    /// Set by ED 3 on the primary screen and cleared by anything but a cursor move, so the
+    /// ED 2 of `clear` (`ED 3; CUP; ED 2` on macOS) leaves the erased screen out of history.
+    /// Only lasts until the end of an `advance` call.
+    pub(crate) clear_armed: bool,
     /// How many lines the view is scrolled back from the bottom.
     display_offset: usize,
     pub selection: Option<Selection>,
@@ -192,7 +193,7 @@ impl Terminal {
             history: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             shrunk: false,
-            erased_screen: None,
+            clear_armed: false,
             display_offset: 0,
             selection: None,
             title: None,
@@ -220,6 +221,7 @@ impl Terminal {
         }
         self.parser = parser;
         self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
+        self.clear_armed = false;
     }
 
     pub fn cols(&self) -> usize {
@@ -844,7 +846,7 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn push_screen_to_history(&mut self) {
-        if self.erased_screen.take() == Some(self.screen_fingerprint()) {
+        if std::mem::take(&mut self.clear_armed) {
             return;
         }
         let mut used = self
@@ -881,17 +883,7 @@ impl Terminal {
         }
         self.display_offset = 0;
         self.selection = None;
-        self.erased_screen = (!self.alt_active).then(|| self.screen_fingerprint());
-    }
-
-    /// Changes whenever the primary screen's content, size, images or history change.
-    fn screen_fingerprint(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (self.cols, self.rows, self.history).hash(&mut h);
-        (self.primary.placements.len(), self.images.generation).hash(&mut h);
-        self.primary.lines.hash(&mut h);
-        h.finish()
+        self.clear_armed = !self.alt_active;
     }
 
     fn erase_line(&mut self, mode: u16) {

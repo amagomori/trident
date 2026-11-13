@@ -11,10 +11,12 @@ fn arg(params: &Params, index: usize, default: u16) -> u16 {
 
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
+        self.clear_armed = false;
         self.put_char(c);
     }
 
     fn execute(&mut self, byte: u8) {
+        self.clear_armed = false;
         match byte {
             0x07 => self.bell = true,
             0x08 => {
@@ -36,6 +38,9 @@ impl Perform for Terminal {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        if !matches!((action, intermediates), ('H' | 'f' | 'J', [])) {
+            self.clear_armed = false;
+        }
         if ignore {
             return;
         }
@@ -150,6 +155,7 @@ impl Perform for Terminal {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.clear_armed = false;
         match (byte, intermediates) {
             (b'7', []) => self.save_cursor(),
             (b'8', []) => self.restore_cursor(),
@@ -188,6 +194,7 @@ impl Perform for Terminal {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        self.clear_armed = false;
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
             [b"133", b"D", ..] => {

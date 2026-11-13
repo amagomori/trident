@@ -152,6 +152,19 @@ fn clear_leaves_history_empty_in_either_order() {
 }
 
 #[test]
+fn erase_display_all_after_separate_ed3_keeps_screen() {
+    // A program's lone ED 3 (or the app's clear-scrollback action), then Ctrl+L later.
+    for ctrl_l in [&b"\x1b[2J"[..], b"\x1b[H\x1b[2J"] {
+        let mut t = term(10, 3, "one\r\ntwo");
+        t.advance(b"\x1b[3J");
+        t.advance(ctrl_l);
+        assert_eq!(t.scrollback_len(), 2);
+        t.scroll_display(2);
+        assert_eq!(screen(&t)[..2], ["one", "two"]);
+    }
+}
+
+#[test]
 fn erase_display_all_after_ed3_keeps_new_output() {
     let mut t = term(10, 3, "one\r\ntwo");
     t.advance(b"\x1b[3J\x1b[3;1Hthree\x1b[H\x1b[2J");
@@ -159,8 +172,16 @@ fn erase_display_all_after_ed3_keeps_new_output() {
     t.scroll_display(3);
     assert_eq!(screen(&t), ["one", "two", "three"]);
 
-    let t = term(10, 3, "one\r\ntwo\x1b[3J\x1b[?1049h\x1b[?1049l\x1b[2J");
-    assert_eq!(t.scrollback_len(), 2);
+    for between in [
+        "\x1b[?1049h\x1b[?1049l",
+        "\r\n",
+        "\x1b[1m",
+        "\x1b]0;t\x07",
+        "\x1b7",
+    ] {
+        let t = term(10, 3, &format!("one\r\ntwo\x1b[3J{between}\x1b[H\x1b[2J"));
+        assert_eq!(t.scrollback_len(), 2, "{between:?}");
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
 /// A terminal color as the application specified it; resolved to RGB at render time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Color {
     DefaultFg,
     DefaultBg,
@@ -7,7 +7,7 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Flags(u16);
 
 impl Flags {
@@ -45,7 +45,7 @@ impl std::ops::BitOr for Flags {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub c: char,
     pub fg: Color,
@@ -74,7 +74,7 @@ impl Cell {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
     /// The line continues on the next row because it soft-wrapped.
@@ -84,7 +84,7 @@ pub struct Row {
     hidden: Option<Box<Hidden>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Hidden {
     cells: Vec<Cell>,
     /// The last cell of the row is a `PAD` blank standing in for a wide character that no
