@@ -725,8 +725,8 @@ mod tests {
 
     #[test]
     fn defaults_and_full_config() {
-        assert!(cfg("").unwrap().drop_preview);
-        assert!(!cfg("drop_preview = false").unwrap().drop_preview);
+        assert!(parse_text("").unwrap().drop_preview);
+        assert!(!parse_text("drop_preview = false").unwrap().drop_preview);
         assert_eq!(parse_text("").unwrap(), Config::default());
         let config = parse_text(
             r##"

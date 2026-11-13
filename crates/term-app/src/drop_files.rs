@@ -4,7 +4,7 @@ use std::path::Path;
 use term_core::Terminal;
 
 /// POSIX shell quoting, preserving Unix filename bytes, with a separator for multi-drop.
-pub fn quoted_path(path: &Path, bracketed: bool) -> Option<Vec<u8>> {
+pub fn quoted_path(path: &Path) -> Option<Vec<u8>> {
     #[cfg(unix)]
     let path = {
         use std::os::unix::ffi::OsStrExt;
@@ -17,9 +17,6 @@ pub fn quoted_path(path: &Path, bracketed: bool) -> Option<Vec<u8>> {
         return None;
     }
     let mut bytes = Vec::new();
-    if bracketed {
-        bytes.extend_from_slice(b"\x1b[200~");
-    }
     bytes.push(b'\'');
     for &byte in path {
         if byte == b'\'' {
@@ -29,9 +26,6 @@ pub fn quoted_path(path: &Path, bracketed: bool) -> Option<Vec<u8>> {
         }
     }
     bytes.extend_from_slice(b"' ");
-    if bracketed {
-        bytes.extend_from_slice(b"\x1b[201~");
-    }
     Some(bytes)
 }
 
@@ -63,7 +57,7 @@ mod tests {
     #[test]
     fn quoted_path_survives_shell_metacharacters() {
         let path = "/tmp/Jarett's image $(false); \"hi\" 画.png";
-        let quoted = quoted_path(Path::new(path), false).unwrap();
+        let quoted = quoted_path(Path::new(path)).unwrap();
         let output = std::process::Command::new("sh")
             .args([
                 "-c",
@@ -73,17 +67,13 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, path.as_bytes());
-        assert_eq!(
-            quoted_path(Path::new("/tmp/a b"), true).unwrap(),
-            b"\x1b[200~'/tmp/a b' \x1b[201~"
-        );
+        assert_eq!(quoted_path(Path::new("/tmp/a b")).unwrap(), b"'/tmp/a b' ");
     }
 
     #[test]
     fn line_editor_controls_are_not_injected() {
         for path in ["/tmp/a\nb", "/tmp/a\rb", "/tmp/\x1b[201~", "/tmp/a\x7fb"] {
-            assert!(quoted_path(Path::new(path), true).is_none());
-            assert!(quoted_path(Path::new(path), false).is_none());
+            assert!(quoted_path(Path::new(path)).is_none());
         }
     }
 

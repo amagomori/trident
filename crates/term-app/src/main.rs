@@ -639,7 +639,7 @@ impl App {
         // Flush any deferred echo before inserting rows above the current prompt.
         self.process_output();
         let Some(s) = &mut self.session else { return };
-        let Some(bytes) = drop_files::quoted_path(&path, s.term.modes.bracketed_paste) else {
+        let Some(bytes) = drop_files::quoted_path(&path) else {
             eprintln!("terminal: cannot drop a path containing control characters");
             return;
         };
