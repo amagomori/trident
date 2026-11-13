@@ -1520,6 +1520,7 @@ impl App {
                 {
                     search.set_preedit(text, cursor);
                 }
+                self.refresh_link();
                 self.update_ime_cursor_area();
                 if let Some(s) = &self.session {
                     s.window.request_redraw();
@@ -1774,6 +1775,14 @@ impl App {
         }
         let (row, col) = self.cell_at(self.mouse_pos)?;
         let s = self.session.as_ref()?;
+        if pointer_in_search_bar(
+            self.search.is_some(),
+            self.mouse_pos,
+            s.window.inner_size(),
+            (s.fonts.metrics.width, s.fonts.metrics.height),
+        ) {
+            return None;
+        }
         s.term.link_at(s.term.viewport_to_point_signed(row, col))
     }
 
@@ -2018,6 +2027,30 @@ fn warn_vsync_unsupported(config: &config::Config, renderer: &Renderer) {
     if !config.vsync && !renderer.vsync_optional {
         diag!("terminal: vsync = false: this GPU surface only supports vsync; keeping it on");
     }
+}
+
+fn pointer_in_search_bar(
+    visible: bool,
+    pos: PhysicalPosition<f64>,
+    size: PhysicalSize<u32>,
+    cell: (f32, f32),
+) -> bool {
+    if !visible {
+        return false;
+    }
+    let layout = term_render::search_layout(
+        0,
+        0..0,
+        0,
+        size.width as f32,
+        size.height as f32,
+        cell.0,
+        cell.1,
+    );
+    pos.x >= 0.0
+        && pos.x < size.width as f64
+        && pos.y >= layout.cursor_area[1] as f64
+        && pos.y < size.height as f64
 }
 
 fn grid_size(window: &Window, fonts: &Fonts, padding: f32) -> (usize, usize) {
@@ -2655,6 +2688,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn search_bar_hit_test_uses_visible_physical_bounds() {
+        let size = PhysicalSize::new(800, 600);
+        let cell = (10.0, 20.0);
+        for (x, y) in [(0.0, 580.0), (799.9, 599.9), (400.0, 590.0)] {
+            let pos = PhysicalPosition::new(x, y);
+            assert!(pointer_in_search_bar(true, pos, size, cell));
+            assert!(!pointer_in_search_bar(false, pos, size, cell));
+        }
+        for (x, y) in [
+            (-0.1, 590.0),
+            (800.0, 590.0),
+            (400.0, 579.9),
+            (400.0, 600.0),
+        ] {
+            assert!(!pointer_in_search_bar(
+                true,
+                PhysicalPosition::new(x, y),
+                size,
+                cell,
+            ));
+        }
+        assert!(pointer_in_search_bar(
+            true,
+            PhysicalPosition::new(0.0, 0.0),
+            PhysicalSize::new(1, 1),
+            cell,
+        ));
+        assert!(!pointer_in_search_bar(
+            true,
+            PhysicalPosition::new(0.0, 0.0),
+            PhysicalSize::new(0, 0),
+            cell,
+        ));
     }
 
     #[test]
