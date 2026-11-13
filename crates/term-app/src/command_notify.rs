@@ -47,17 +47,26 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+fn message(finished: &Finished) -> String {
+    format!(
+        "{} finished in {}",
+        finished
+            .name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Command"),
+        format_duration(finished.duration)
+    )
+}
+
 pub fn notify(finished: Finished) {
-    #[cfg(target_os = "linux")]
+    let message = message(&finished);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let message = format!(
-            "{} finished in {}",
-            finished.name.as_deref().unwrap_or("Command"),
-            format_duration(finished.duration)
-        );
         let _ = std::thread::Builder::new()
             .name("command-notification".into())
             .spawn(move || {
+                #[cfg(target_os = "linux")]
                 if let Err(error) = notify_rust::Notification::new()
                     .summary(&message)
                     .appname("terminal")
@@ -65,10 +74,87 @@ pub fn notify(finished: Finished) {
                 {
                     eprintln!("terminal: notification failed: {error}");
                 }
+                #[cfg(target_os = "macos")]
+                notify_macos(&message);
             });
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (finished.name, format_duration(finished.duration));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = message;
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn applescript_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(target_os = "macos")]
+fn notify_macos(message: &str) {
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_foundation::{NSBundle, NSError, NSString, NSUUID};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
+        UNUserNotificationCenter,
+    };
+
+    if NSBundle::mainBundle().bundleIdentifier().is_none() {
+        let script = format!(
+            "display notification {} with title \"terminal\"",
+            applescript_string(message)
+        );
+        match std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &script])
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => eprintln!(
+                "terminal: notification failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => eprintln!("terminal: notification failed: {error}"),
+        }
+        return;
+    }
+
+    let message = message.to_owned();
+    let authorized = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+        if !error.is_null() || !granted.as_bool() {
+            eprintln!("terminal: notification authorization denied or failed");
+            return;
+        }
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str("terminal"));
+        content.setBody(&NSString::from_str(&message));
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSUUID::UUID().UUIDString(),
+            &content,
+            None,
+        );
+        let completed = RcBlock::new(|error: *mut NSError| {
+            if !error.is_null() {
+                eprintln!("terminal: notification delivery failed");
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, Some(&completed));
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert,
+            &authorized,
+        );
+}
+
+#[cfg(target_os = "macos")]
+fn command_name(group: libc::pid_t) -> Option<String> {
+    let mut buffer = [0u8; 1024];
+    // SAFETY: the writable buffer is valid for the supplied byte count.
+    let length = unsafe { libc::proc_name(group, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return None;
+    }
+    let bytes = buffer.split(|&byte| byte == 0).next()?;
+    (!bytes.is_empty()).then(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
 #[cfg(target_os = "linux")]
@@ -117,11 +203,11 @@ pub fn watch(
                     (group > 0).then_some(group as u32 == shell),
                     Instant::now(),
                     || {
-                        #[cfg(target_os = "linux")]
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
                         {
                             command_name(group)
                         }
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                         {
                             None
                         }
@@ -139,6 +225,40 @@ pub fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages() {
+        for (name, expected) in [
+            (Some("sleep 12"), "sleep 12 finished in 12s"),
+            (None, "Command finished in 12s"),
+            (Some(""), "Command finished in 12s"),
+            (Some("ビルド"), "ビルド finished in 12s"),
+        ] {
+            assert_eq!(
+                message(&Finished {
+                    name: name.map(str::to_owned),
+                    duration: Duration::from_secs(12),
+                }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn applescript_literals() {
+        for (input, expected) in [
+            ("", "\"\""),
+            ("sleep 12", "\"sleep 12\""),
+            ("a\\b\"c", "\"a\\\\b\\\"c\""),
+            (
+                "\" & do shell script \"bad",
+                "\"\\\" & do shell script \\\"bad\"",
+            ),
+            ("line\nnext\r\tビルド", "\"line\nnext\r\tビルド\""),
+        ] {
+            assert_eq!(applescript_string(input), expected);
+        }
+    }
 
     #[test]
     fn durations() {
