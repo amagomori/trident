@@ -83,7 +83,7 @@ pub struct Pair {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
-    colors: BTreeMap<String, String>,
+    colors: BTreeMap<toml::Spanned<String>, String>,
 }
 
 fn load(config: &Path, name: &str) -> Result<Palette, String> {
@@ -105,9 +105,18 @@ fn parse(path: &Path, text: &str) -> Result<Palette, String> {
     let file: File = toml::from_str(text).map_err(|e: toml::de::Error| {
         crate::config::diagnostic(path, text, e.span().map_or(0, |s| s.start), e.message())
     })?;
+    let colors = file
+        .colors
+        .iter()
+        .map(|(key, value)| (key.get_ref().clone(), value.clone()))
+        .collect();
     let mut palette = Palette::default();
-    apply(&mut palette, &file.colors).map_err(|(key, message)| {
-        let offset = text.find(&key).unwrap_or(0);
+    apply(&mut palette, &colors).map_err(|(key, message)| {
+        let offset = file
+            .colors
+            .keys()
+            .find(|entry| entry.get_ref() == &key)
+            .map_or(0, |entry| entry.span().start);
         crate::config::diagnostic(path, text, offset, &format!("colors.{key}: {message}"))
     })?;
     Ok(palette)
@@ -189,6 +198,32 @@ pub fn files(config: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_color_points_to_exact_key() {
+        let error = parse(
+            Path::new("theme.toml"),
+            "[colors]\nbright_white = \"#ffffff\"\nwhite = \"oops\"\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "terminal: theme.toml:3:1: colors.white: expected \"#rrggbb\", got \"oops\""
+        );
+    }
+
+    #[test]
+    fn invalid_color_ignores_key_in_comment() {
+        let error = parse(
+            Path::new("theme.toml"),
+            "# white = \"oops\"\n[colors]\n# white is the next color\nwhite = \"oops\"\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "terminal: theme.toml:4:1: colors.white: expected \"#rrggbb\", got \"oops\""
+        );
+    }
 
     #[test]
     fn bundled_themes_are_complete() {
