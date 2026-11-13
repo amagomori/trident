@@ -719,6 +719,40 @@ fn shrinking_resize_signals_shrink() {
 }
 
 #[test]
+fn shrinking_resize_obeys_scrollback_limit() {
+    for limit in [0, 2, 10] {
+        let mut t = Terminal::new(20, 5);
+        t.set_scrollback_limit(limit);
+        t.advance(b"zero\r\none\r\ntwo\r\nthree\r\nfour");
+        assert_eq!(t.cursor.row, 4);
+        t.take_shrunk();
+        t.resize(20, 2);
+        assert_eq!(t.scrollback_len(), limit.min(3));
+        assert_eq!(t.history, 3);
+        assert_eq!(t.first_line(), 3 - limit.min(3) as u64);
+        assert_eq!(screen(&t), ["three", "four"]);
+        assert_eq!(t.display_offset(), 0);
+        assert!(t.take_shrunk());
+        t.scroll_display(100);
+        t.resize(20, 1);
+        assert_eq!(t.scrollback_len(), limit.min(4));
+        assert_eq!(t.history, 4);
+        assert_eq!(t.first_line(), 4 - limit.min(4) as u64);
+        assert_eq!(t.display_offset(), 0);
+        t.scroll_display(100);
+        assert_eq!(t.display_offset(), limit.min(4));
+        assert_eq!(
+            t.viewport_row(0).text(),
+            match limit {
+                0 => "four",
+                2 => "two",
+                _ => "zero",
+            }
+        );
+    }
+}
+
+#[test]
 fn lowering_scrollback_limit_signals_shrink() {
     let mut t = filled_history(50);
     let before = t.scrollback_len();

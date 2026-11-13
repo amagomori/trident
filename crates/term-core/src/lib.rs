@@ -404,7 +404,12 @@ impl Terminal {
                 for _ in 0..excess {
                     let row = screen.lines.remove(0);
                     if !alt {
-                        screen.scrollback.push_back(row);
+                        if self.max_scrollback > 0 {
+                            screen.scrollback.push_back(row);
+                            if screen.scrollback.len() > self.max_scrollback {
+                                screen.scrollback.pop_front();
+                            }
+                        }
                         self.history += 1;
                     } else {
                         shifted += 1;
@@ -433,6 +438,10 @@ impl Terminal {
             if alt {
                 alt_shifted = shifted;
             }
+        }
+        if !self.primary.placements.is_empty() {
+            let first = self.history - self.primary.scrollback.len() as u64;
+            self.drop_placements_before(first);
         }
         self.resize_placements(false, 0, rows);
         self.resize_placements(true, alt_shifted, rows);

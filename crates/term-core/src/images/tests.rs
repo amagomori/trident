@@ -458,6 +458,27 @@ fn generation_changes_only_with_placements() {
 }
 
 #[test]
+fn shrinking_resize_drops_images_in_evicted_history() {
+    for limit in [0, 2] {
+        let mut t = term();
+        t.set_scrollback_limit(limit);
+        place_at(&mut t, 0, 0);
+        place_at(&mut t, 1, 0);
+        place_at(&mut t, 3, 0);
+        t.advance(b"\x1b[5;1H");
+        let generation = t.image_generation();
+        t.resize(10, 2);
+        assert_eq!(t.scrollback_len(), limit);
+        let lines: Vec<_> = t.primary.placements.iter().map(|p| p.line).collect();
+        assert_eq!(lines, if limit == 0 { vec![3] } else { vec![1, 3] });
+        assert!(t.image_generation() > generation);
+        assert_eq!(t.visible_placements()[0].row, 0);
+        t.scroll_display(100);
+        assert_eq!(t.visible_placements()[0].row, 0);
+    }
+}
+
+#[test]
 fn window_size_reports() {
     let mut t = Terminal::new(80, 24);
     t.set_cell_pixel_size(9.6, 19.0);
