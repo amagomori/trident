@@ -802,11 +802,7 @@ impl Terminal {
         let insert = self.modes.insert;
         let line = &mut self.lines_mut()[row];
         if insert {
-            line.materialize_wrap_padding(col);
-            for _ in 0..width {
-                line.cells.insert(col, Cell::blank(&template));
-            }
-            line.cells.truncate(cols);
+            insert_printed_cells(line, col, cols, width, &template);
         }
         clear_wide_pair(&mut line.cells, col);
         if width == 2 {
@@ -1167,6 +1163,18 @@ impl Terminal {
 
 fn default_tabs(cols: usize) -> Vec<bool> {
     (0..cols).map(|c| c % 8 == 0 && c != 0).collect()
+}
+
+// Keep the allocating/shifting insert-mode path out of ordinary printing. Inlining
+// it here spills the hot character writer's state even when insert mode is off.
+#[cold]
+#[inline(never)]
+fn insert_printed_cells(line: &mut Row, col: usize, cols: usize, width: usize, template: &Cell) {
+    line.materialize_wrap_padding(col);
+    for _ in 0..width {
+        line.cells.insert(col, Cell::blank(template));
+    }
+    line.cells.truncate(cols);
 }
 
 /// Overwriting one half of a wide character must blank the other half.

@@ -704,6 +704,32 @@ fn backspace_after_last_column_moves_left() {
 }
 
 #[test]
+fn printing_in_insert_mode_preserves_width_colors_and_wrap() {
+    let t = term(6, 2, "abcde\x1b[1;2H\x1b[4h\x1b[31;44mX");
+    assert_eq!(screen(&t), ["aXbcde", ""]);
+    let row = t.viewport_row(0);
+    assert_eq!(row.cells.len(), 6);
+    assert_eq!(row.cells[1].fg, Color::Indexed(1));
+    assert_eq!(row.cells[1].bg, Color::Indexed(4));
+    assert_eq!(row.cells[2].fg, Color::DefaultFg);
+
+    let t = term(6, 2, "ab你cd\x1b[1;2H\x1b[4h好");
+    assert_eq!(screen(&t), ["a好b你", ""]);
+    let row = t.viewport_row(0);
+    assert_eq!(row.cells.len(), 6);
+    for col in [1, 4] {
+        assert!(row.cells[col].flags.contains(Flags::WIDE));
+        assert!(row.cells[col + 1].flags.contains(Flags::WIDE_SPACER));
+    }
+
+    let t = term(6, 2, "abcde\x1b[4hZQ");
+    assert_eq!(screen(&t), ["abcdeZ", "Q"]);
+    assert_eq!(t.cursor_position(), Some((1, 1)));
+    assert!(t.viewport_row(0).wrapped);
+    assert_eq!(t.viewport_row(1).cells.len(), 6);
+}
+
+#[test]
 fn insert_blank_shifts_wide_characters_intact() {
     let t = term(6, 1, "a\u{4f60}b\x1b[1G\x1b[@");
     let row = t.viewport_row(0);
