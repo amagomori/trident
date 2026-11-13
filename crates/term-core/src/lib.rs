@@ -148,7 +148,6 @@ pub struct Terminal {
     responses: Vec<u8>,
     synchronized_output_started: bool,
     synchronized_output_ended: bool,
-    synchronized_reset_prefix: u8,
     #[cfg(test)]
     ghost_advances: usize,
     pub bell: bool,
@@ -201,7 +200,6 @@ impl Terminal {
             responses: Vec::new(),
             synchronized_output_started: false,
             synchronized_output_ended: false,
-            synchronized_reset_prefix: 0,
             #[cfg(test)]
             ghost_advances: 0,
             bell: false,
@@ -226,40 +224,6 @@ impl Terminal {
         }
         self.parser = parser;
         self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
-        if self.parser_ground {
-            self.synchronized_reset_prefix = 0;
-        } else {
-            self.track_sync_reset_prefix(bytes);
-        }
-    }
-
-    // Split CSI sequences are rare. Keep their bookkeeping out of the ordinary
-    // parser's hot path, and accept the C0/DEL bytes that vte ignores in a CSI.
-    #[cold]
-    #[inline(never)]
-    fn track_sync_reset_prefix(&mut self, bytes: &[u8]) {
-        let (mut prefix, tail) = match memchr::memrchr(0x1b, bytes) {
-            Some(start) => (1, &bytes[start + 1..]),
-            None => (self.synchronized_reset_prefix as usize, bytes),
-        };
-        for &byte in tail {
-            if prefix == 0 {
-                break;
-            }
-            if matches!(byte, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f) {
-                continue;
-            }
-            if SYNC_RESET.get(prefix) == Some(&byte) {
-                prefix += 1;
-            } else {
-                prefix = 0;
-            }
-        }
-        self.synchronized_reset_prefix = if prefix < SYNC_RESET.len() {
-            prefix as u8
-        } else {
-            0
-        };
     }
 
     pub fn cols(&self) -> usize {
@@ -270,27 +234,15 @@ impl Terminal {
     pub fn advance_until_sync_end(&mut self, bytes: &[u8]) -> usize {
         self.synchronized_output_ended = false;
         let mut consumed = 0;
-        let prefix = self.synchronized_reset_prefix as usize;
-        if prefix > 0 {
-            // Finish only this split CSI, allowing embedded controls. The parser
-            // decides whether it actually ends a frame; never parse a later reset
-            // and overwrite the completed frame before checking that decision.
-            let mut matched = prefix;
-            let mut end = 0;
-            for &byte in bytes {
-                if !matches!(byte, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f) {
-                    if SYNC_RESET.get(matched) != Some(&byte) {
-                        break;
-                    }
-                    matched += 1;
-                }
-                end += 1;
-                if matched == SYNC_RESET.len() {
-                    break;
-                }
-            }
-            if end > 0 {
-                self.advance(&bytes[..end]);
+        if !self.parser_ground {
+            // A prior read may have stopped inside a reset, including one with
+            // embedded controls or multiple parameters. Check each possible final
+            // `l` before the next escape; only vte decides whether it ends a frame.
+            // Ordinary `advance` needs no sync-specific prefix bookkeeping.
+            let continuation = memchr::memchr(0x1b, bytes).unwrap_or(bytes.len());
+            for final_byte in memchr::memchr_iter(b'l', &bytes[..continuation]) {
+                let end = final_byte + 1;
+                self.advance(&bytes[consumed..end]);
                 consumed = end;
                 if self.synchronized_output_ended {
                     return consumed;
