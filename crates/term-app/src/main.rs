@@ -1,3 +1,10 @@
+macro_rules! diag {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod clipboard;
 mod command_notify;
 mod config;
@@ -781,7 +788,7 @@ impl App {
         let (config, config_error) = match config::load(&options.config_path) {
             Ok(config) => (config, None),
             Err(error) => {
-                eprintln!("{error}");
+                diag!("{error}");
                 (config::Config::default(), Some(error))
             }
         };
@@ -790,7 +797,7 @@ impl App {
         let watcher = config::watch(path, move || {
             let _ = wake.send_event(UserEvent::ConfigChanged);
         })
-        .map_err(|e| eprintln!("terminal: config reload unavailable: {e}"))
+        .map_err(|e| diag!("terminal: config reload unavailable: {e}"))
         .ok();
         App {
             startup_stderr: false,
@@ -826,7 +833,7 @@ impl App {
                     "terminal: {}:1:1: font: {error}",
                     self.options.config_path.display()
                 );
-                eprintln!("{error}");
+                diag!("{error}");
                 self.config_error = Some(error);
                 self.config = config::Config::default();
                 self.font_size = self.options.size(&self.config);
@@ -892,7 +899,7 @@ impl App {
         };
         let size = window.inner_size();
         let renderer = Renderer::new(window.clone(), size.width, size.height)?;
-        eprintln!("terminal: rendering with {}", renderer.adapter_info);
+        diag!("terminal: rendering with {}", renderer.adapter_info);
 
         let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
         let mut term = Terminal::new(cols, rows);
@@ -925,7 +932,7 @@ impl App {
             if let Err(error) =
                 present_macos::install(renderer.gpu_device(), start, lines, self.proxy.clone())
             {
-                eprintln!("terminal: presentation feedback unavailable: {error}");
+                diag!("terminal: presentation feedback unavailable: {error}");
             }
         }
         #[cfg(target_os = "linux")]
@@ -945,7 +952,7 @@ impl App {
                 match present_wayland::Feedback::new(window.clone(), start, lines) {
                     Ok(feedback) => Some(feedback),
                     Err(error) => {
-                        eprintln!("terminal: presentation feedback unavailable: {error}");
+                        diag!("terminal: presentation feedback unavailable: {error}");
                         None
                     }
                 }
@@ -1271,7 +1278,7 @@ impl App {
         self.process_output();
         let Some(s) = &mut self.session else { return };
         let Some(bytes) = drop_files::quoted_path(&path) else {
-            eprintln!("terminal: cannot drop a path containing control characters");
+            diag!("terminal: cannot drop a path containing control characters");
             return;
         };
         s.term.scroll_to_bottom();
@@ -1319,7 +1326,7 @@ impl App {
                 None
             };
             if next.shell != self.config.shell || next.env != self.config.env {
-                eprintln!("terminal: shell/env changes apply on the next launch");
+                diag!("terminal: shell/env changes apply on the next launch");
             }
             self.config = next;
             if let Some(s) = &mut self.session {
@@ -1345,7 +1352,7 @@ impl App {
         });
         self.config_error = result.err();
         if let Some(error) = &self.config_error {
-            eprintln!("{error}");
+            diag!("{error}");
         }
         if let Some(s) = &self.session {
             s.window.request_redraw();
@@ -2161,25 +2168,25 @@ fn main() {
     let options = match parse_args() {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("terminal: {e}");
+            diag!("terminal: {e}");
             std::process::exit(2);
         }
     };
     let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("terminal: cannot start event loop: {e}");
+            diag!("terminal: cannot start event loop: {e}");
             std::process::exit(1);
         }
     };
     let mut app = App::new(options, event_loop.create_proxy());
     app.startup_stderr = startup_stderr;
     if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("terminal: {e}");
+        diag!("terminal: {e}");
         std::process::exit(1);
     }
     if let Some(e) = app.error {
-        eprintln!("terminal: {e}");
+        diag!("terminal: {e}");
         std::process::exit(1);
     }
 }
@@ -2198,6 +2205,32 @@ mod tests {
         assert!(!shell_shortcuts_available(&term));
         term.advance(b"\x1b[?1049l");
         assert!(shell_shortcuts_available(&term));
+    }
+
+    #[test]
+    fn diagnostics_do_not_panic_when_stderr_is_closed() {
+        const CHILD: &str = "TERMINAL_TEST_CLOSED_STDERR";
+        if std::env::var_os(CHILD).is_some() {
+            let mut ready = [0];
+            std::io::stdin().read_exact(&mut ready).unwrap();
+            diag!("diagnostic to a closed pipe");
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::diagnostics_do_not_panic_when_stderr_is_closed",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stderr.take());
+        child.stdin.take().unwrap().write_all(b"1").unwrap();
+        assert!(child.wait().unwrap().success());
     }
 
     #[test]
@@ -2538,7 +2571,7 @@ mod tests {
             let bytes = queued.bytes.len();
             let start = Instant::now();
             output.drain_on_exit(&mut term, queued);
-            eprintln!(
+            diag!(
                 "EXIT_DRAIN_TIMING frames={frames} bytes={bytes} elapsed_ms={:.3}",
                 start.elapsed().as_secs_f64() * 1000.0
             );

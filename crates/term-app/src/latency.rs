@@ -57,7 +57,7 @@ impl Latency {
             signals: match signals::Signals::install() {
                 Ok(signals) => Some(signals),
                 Err(error) => {
-                    eprintln!("terminal: latency signals unavailable: {error}");
+                    diag!("terminal: latency signals unavailable: {error}");
                     None
                 }
             },
@@ -81,7 +81,7 @@ impl Latency {
                 Ok(RawWindowHandle::Wayland(_))
             ) && let Err(error) = x11::start(&window, self.start, self.feedback.clone())
             {
-                eprintln!("terminal: presentation feedback unavailable: {error}");
+                diag!("terminal: presentation feedback unavailable: {error}");
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -163,7 +163,7 @@ impl Drop for Latency {
     fn drop(&mut self) {
         self.lines.extend(self.feedback.lock().unwrap().drain(..));
         if let Err(error) = std::fs::write(&self.path, self.lines.join("\n")) {
-            eprintln!("terminal: latency log: {error}");
+            diag!("terminal: latency log: {error}");
         }
     }
 }

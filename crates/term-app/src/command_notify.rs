@@ -78,7 +78,7 @@ pub fn notify(finished: Finished) {
                     .appname("terminal")
                     .show()
                 {
-                    eprintln!("terminal: notification failed: {error}");
+                    diag!("terminal: notification failed: {error}");
                 }
                 #[cfg(target_os = "macos")]
                 notify_macos(&message);
@@ -113,11 +113,11 @@ fn notify_macos(message: &str) {
             .output()
         {
             Ok(output) if output.status.success() => {}
-            Ok(output) => eprintln!(
+            Ok(output) => diag!(
                 "terminal: notification failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
-            Err(error) => eprintln!("terminal: notification failed: {error}"),
+            Err(error) => diag!("terminal: notification failed: {error}"),
         }
         return;
     }
@@ -125,7 +125,7 @@ fn notify_macos(message: &str) {
     let message = message.to_owned();
     let authorized = RcBlock::new(move |granted: Bool, error: *mut NSError| {
         if !error.is_null() || !granted.as_bool() {
-            eprintln!("terminal: notification authorization denied or failed");
+            diag!("terminal: notification authorization denied or failed");
             return;
         }
         let content = UNMutableNotificationContent::new();
@@ -138,7 +138,7 @@ fn notify_macos(message: &str) {
         );
         let completed = RcBlock::new(|error: *mut NSError| {
             if !error.is_null() {
-                eprintln!("terminal: notification delivery failed");
+                diag!("terminal: notification delivery failed");
             }
         });
         UNUserNotificationCenter::currentNotificationCenter()
