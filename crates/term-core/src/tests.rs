@@ -90,6 +90,219 @@ fn erase_display() {
 }
 
 #[test]
+fn erase_display_all_keeps_used_rows_and_cursor() {
+    let mut t = term(10, 4, "one\r\n\r\nthree\x1b[2;3H");
+    let cursor = t.cursor_position();
+    t.advance(b"\x1b[2J");
+    assert_eq!(screen(&t), ["", "", "", ""]);
+    assert_eq!(t.cursor_position(), cursor);
+    assert_eq!(t.scrollback_len(), 3);
+    t.scroll_display(3);
+    assert_eq!(screen(&t), ["one", "", "three", ""]);
+}
+
+#[test]
+fn erase_display_all_blank_and_alternate_do_not_add_history() {
+    let mut t = term(10, 3, "\x1b[2J\x1b[2J");
+    assert_eq!(t.scrollback_len(), 0);
+    t.advance(b"primary\x1b[2J\x1b[?1049halternate\x1b[2J");
+    assert_eq!(screen(&t), ["", "", ""]);
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.scrollback_len(), 1);
+    t.scroll_display(1);
+    assert_eq!(t.viewport_row(0).text(), "primary");
+}
+
+#[test]
+fn erase_display_all_obeys_history_limit_and_ed3() {
+    for limit in [0, 1, 2] {
+        let mut t = term(10, 3, "one\r\ntwo\r\nthree");
+        t.set_scrollback_limit(limit);
+        t.advance(b"\x1b[2J");
+        assert_eq!(t.scrollback_len(), limit);
+        if limit > 0 {
+            t.scroll_display(1);
+            assert_eq!(t.viewport_row(0).text(), "three");
+        }
+        t.advance(b"new\x1b[H\x1b[2J\x1b[3J");
+        assert_eq!(t.scrollback_len(), 0);
+        assert_eq!(t.display_offset(), 0);
+        assert_eq!(screen(&t), ["", "", ""]);
+    }
+}
+
+#[test]
+fn clear_leaves_history_empty_in_either_order() {
+    // macOS `clear` sends ED 3 before ED 2; ncurses on Linux sends ED 2 first.
+    for clear in [&b"\x1b[3J\x1b[H\x1b[2J"[..], b"\x1b[H\x1b[2J\x1b[3J"] {
+        let mut t = filled_history(50);
+        t.advance(b"\r\nlast");
+        t.advance(clear);
+        assert_eq!(t.scrollback_len(), 0);
+        assert_eq!(t.display_offset(), 0);
+        assert!(screen(&t).iter().all(|r| r.is_empty()));
+
+        // Later output is still kept by the next Ctrl+L.
+        t.advance(b"after");
+        t.advance(b"\x1b[H\x1b[2J");
+        assert_eq!(t.scrollback_len(), 1);
+        t.scroll_display(1);
+        assert_eq!(t.viewport_row(0).text(), "after");
+    }
+}
+
+#[test]
+fn erase_display_all_after_separate_ed3_keeps_screen() {
+    // A program's lone ED 3 (or the app's clear-scrollback action), then Ctrl+L later.
+    for ctrl_l in [&b"\x1b[2J"[..], b"\x1b[H\x1b[2J"] {
+        let mut t = term(10, 3, "one\r\ntwo");
+        t.advance(b"\x1b[3J");
+        t.advance(ctrl_l);
+        assert_eq!(t.scrollback_len(), 2);
+        t.scroll_display(2);
+        assert_eq!(screen(&t)[..2], ["one", "two"]);
+    }
+}
+
+#[test]
+fn erase_display_all_after_ed3_and_partial_erase_keeps_screen() {
+    let t = term(10, 3, "one\r\ntwo\x1b[3J\x1b[2;1H\x1b[J\x1b[H\x1b[2J");
+    assert_eq!(t.scrollback_len(), 1);
+    assert_eq!(t.viewport_row(0).text(), "");
+    let mut t = term(10, 3, "one\r\ntwo\x1b[3J\x1b[1;2H\x1b[1J\x1b[H\x1b[2J");
+    assert_eq!(t.scrollback_len(), 2);
+    t.scroll_display(2);
+    assert_eq!(screen(&t)[..2], ["  e", "two"]);
+}
+
+#[test]
+fn erase_display_all_after_ed3_keeps_new_output() {
+    let mut t = term(10, 3, "one\r\ntwo");
+    t.advance(b"\x1b[3J\x1b[3;1Hthree\x1b[H\x1b[2J");
+    assert_eq!(t.scrollback_len(), 3);
+    t.scroll_display(3);
+    assert_eq!(screen(&t), ["one", "two", "three"]);
+
+    for between in [
+        "\x1b[?1049h\x1b[?1049l",
+        "\r\n",
+        "\x1b[1m",
+        "\x1b]0;t\x07",
+        "\x1b7",
+    ] {
+        let t = term(10, 3, &format!("one\r\ntwo\x1b[3J{between}\x1b[H\x1b[2J"));
+        assert_eq!(t.scrollback_len(), 2, "{between:?}");
+    }
+}
+
+#[test]
+fn clear_sequence_with_fragmented_ed3() {
+    for ed3 in [
+        "\x1b[3J",
+        "\x1b[03J",
+        "\x1b[3;1J",
+        "\x1b[3:1J",
+        "\x1b[\x073J",
+        "\x1b\x00[3J",
+        "\x1b[3\x7fJ",
+        "\x1b[?3J",
+    ] {
+        for between in ["", "\x1b[H", "\x1b[f", "new", "\r\n", "\x1b[J", "\x1b[1J"] {
+            let bytes = format!("{ed3}{between}\x1b[H\x1b[2J");
+            for split in 0..ed3.len() {
+                let mut fragmented = term(10, 3, "one\r\ntwo");
+                let mut whole = term(10, 3, "one\r\ntwo");
+                for chunk in [&bytes.as_bytes()[..split], &bytes.as_bytes()[split..]] {
+                    fragmented.advance(chunk);
+                }
+                whole.advance(bytes.as_bytes());
+                assert_eq!(
+                    fragmented.history, whole.history,
+                    "{bytes:?}, split {split}"
+                );
+                assert_eq!(fragmented.scrollback_len(), whole.scrollback_len());
+                assert_eq!(fragmented.cursor_position(), whole.cursor_position());
+                assert_eq!(screen(&fragmented), screen(&whole));
+                fragmented.scroll_display(isize::MAX);
+                whole.scroll_display(isize::MAX);
+                assert_eq!(screen(&fragmented), screen(&whole));
+            }
+        }
+    }
+}
+
+#[test]
+fn clear_tracking_preserves_repeat_and_disarms_on_unrendered_characters() {
+    for c in ['x', '界', '\u{10ffff}'] {
+        let mut t = Terminal::new(10, 3);
+        t.advance(format!("{c}\x1b[3J\x07\x1b[b").as_bytes());
+        assert_eq!(t.print_state.last(), Some(c));
+        assert_eq!(t.viewport_row(0).text(), format!("{c}{c}"));
+    }
+
+    let mut t = term(10, 3, "one\r\ntwo");
+    t.advance("\x1b[3J\u{301}\x1b[H\x1b[2J".as_bytes());
+    assert_eq!(t.scrollback_len(), 2);
+    assert_eq!(t.print_state.last(), Some('o'));
+
+    let mut t = term(10, 3, "one\r\ntwo");
+    t.advance("\x1b[?7l\x1b[3J\x1b[1;10H界\x1b[H\x1b[2J".as_bytes());
+    assert_eq!(t.scrollback_len(), 2);
+    assert_eq!(t.print_state.last(), Some('o'));
+}
+
+#[test]
+fn erase_display_all_retains_selection_and_scrolled_view() {
+    let mut t = term(10, 3, "old\r\none\r\ntwo\r\nthree");
+    t.scroll_display(1);
+    t.start_selection(t.viewport_to_point(1, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 2));
+    t.advance(b"\x1b[2J");
+    assert_eq!(screen(&t), ["old", "one", "two"]);
+    assert_eq!(t.selection_text().as_deref(), Some("one"));
+    assert_eq!(t.display_offset(), 4);
+}
+
+#[test]
+fn erase_display_all_keeps_images_and_hidden_cells() {
+    let mut t = term(12, 3, "     hidden");
+    t.resize(5, 3);
+    t.advance(b"\x1b[2J");
+    assert_eq!(t.scrollback_len(), 1);
+    t.resize(12, 3);
+    t.scroll_display(1);
+    assert_eq!(t.viewport_row(0).text(), "     hidden");
+
+    let mut t = Terminal::new(10, 3);
+    t.add_image(
+        1,
+        images::Image {
+            width: 1,
+            height: 1,
+            pixels: vec![255; 4],
+        },
+    )
+    .unwrap();
+    t.advance(b"\x1b[2;1H");
+    t.place_image(
+        1,
+        images::PlaceOptions {
+            cols: 1,
+            rows: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    t.advance(b"\x1b[2J");
+    assert_eq!(t.scrollback_len(), 2);
+    assert!(t.visible_placements().is_empty());
+    t.scroll_display(2);
+    assert_eq!(t.visible_placements()[0].row, 1);
+    t.advance(b"\x1b[3J");
+    assert!(t.visible_placements().is_empty());
+}
+
+#[test]
 fn sgr_colors() {
     let t = term(
         10,
@@ -784,7 +997,7 @@ fn scrolling_output_does_not_signal_shrink() {
 #[test]
 fn erase_saved_lines_signals_shrink() {
     let mut t = filled_history(50);
-    t.advance(b"\x1b[3J\x1b[2J");
+    t.advance(b"\x1b[2J\x1b[3J");
     assert_eq!(t.scrollback_len(), 0);
     assert!(t.take_shrunk());
     assert!(!t.take_shrunk());

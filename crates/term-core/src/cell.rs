@@ -152,6 +152,14 @@ impl Row {
         self.hidden = None;
     }
 
+    pub(crate) fn is_blank(&self) -> bool {
+        self.cells.iter().all(|c| *c == Cell::default())
+            && self
+                .hidden
+                .as_ref()
+                .is_none_or(|h| h.cells.iter().all(|c| *c == Cell::default()))
+    }
+
     #[cfg(test)]
     pub fn text(&self) -> String {
         let mut s: String = self

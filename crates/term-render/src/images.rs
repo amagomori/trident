@@ -66,7 +66,10 @@ pub(crate) fn layout(
         } else {
             p.source.height as f32 * scale.1
         };
-        if w <= 0.0 || h <= 0.0 || p.source.width == 0 || p.source.height == 0 {
+        let clipped_h = p
+            .clipped_rows
+            .map_or(h, |rows| h.min(rows as f32 * ch - y_off));
+        if w <= 0.0 || clipped_h <= 0.0 || p.source.width == 0 || p.source.height == 0 {
             continue;
         }
         let (iw, ih) = (image.width as f32, image.height as f32);
@@ -75,12 +78,12 @@ pub(crate) fn layout(
             image_id: p.image_id,
             layer: Layer::of(p.z),
             pos: [x, y],
-            size: [w, h],
+            size: [w, clipped_h],
             uv: [
                 s.x as f32 / iw,
                 s.y as f32 / ih,
                 (s.x + s.width) as f32 / iw,
-                (s.y + s.height) as f32 / ih,
+                (s.y as f32 + s.height as f32 * (clipped_h / h)) / ih,
             ],
         });
     }

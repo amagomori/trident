@@ -145,3 +145,38 @@ fn fit_shrinks_to_the_texture_limit_keeping_aspect() {
     // Nearest neighbor: pixel (1, 1) comes from source (10, 10).
     assert_eq!(&small.pixels[(30 + 1) * 4..(30 + 1) * 4 + 2], &[10, 10]);
 }
+
+#[test]
+fn erase_display_crops_bottom_clipped_images_without_squashing() {
+    for (image_height, rows, y_offset) in [
+        (40, 0, 0),
+        (40, 2, 0),
+        (40, 4, 0),
+        (40, 0, 10),
+        (40, 3, 10),
+        (1, 2, 0),
+        (1, 3, 10),
+    ] {
+        let mut t = term();
+        t.add_image(1, image(20, image_height)).unwrap();
+        t.advance(b"\x1b[5;1H");
+        t.place_image(
+            1,
+            term_core::images::PlaceOptions {
+                rows,
+                y_offset,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let original = layout(&t, CELL, 0.0, 0.0)[0];
+        t.advance(b"\x1b[2J");
+        assert!(layout(&t, CELL, 0.0, 0.0).is_empty());
+        t.scroll_display(5);
+        let saved = layout(&t, CELL, 0.0, 0.0)[0];
+        assert_eq!(saved.pos, original.pos);
+        let height = CELL.1 - y_offset as f32;
+        assert_eq!(saved.size, [original.size[0], height]);
+        assert_eq!(saved.uv, [0.0, 0.0, 1.0, height / original.size[1]]);
+    }
+}

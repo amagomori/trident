@@ -56,6 +56,9 @@ pub struct Placement {
     pub col: usize,
     pub cols: usize,
     pub rows: usize,
+    /// A bottom clip in cell rows, independent of the original span and source rectangle.
+    /// ED 2 uses this to save only the visible part, even for stretched single-pixel images.
+    pub clipped_rows: Option<usize>,
     pub x_offset: u32,
     pub y_offset: u32,
     pub source: Rect,
@@ -72,6 +75,13 @@ pub struct Placement {
 pub struct VisiblePlacement {
     pub placement: Placement,
     pub row: isize,
+}
+
+impl Placement {
+    /// Cell rows occupied after clipping, without changing the image's original scale.
+    pub fn visible_rows(&self) -> usize {
+        self.clipped_rows.unwrap_or(self.rows).min(self.rows)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,6 +320,7 @@ impl Terminal {
                 0 => span(source.height, opts.y_offset, cell_h),
                 n => n,
             },
+            clipped_rows: None,
             x_offset: opts.x_offset,
             y_offset: opts.y_offset,
             source,
@@ -348,7 +359,7 @@ impl Terminal {
                 let row = line as i64 - top;
                 let on = p.col < self.cols
                     && row < self.rows as i64
-                    && row + p.rows as i64 > -(extra_rows as i64);
+                    && row + p.visible_rows() as i64 > -(extra_rows as i64);
                 on.then_some(VisiblePlacement {
                     placement: Placement { line, ..*p },
                     row: row as isize,
@@ -390,7 +401,7 @@ impl Terminal {
         let rows = self.rows as i64;
         let on = |p: &Placement, base: u64, top: i64| {
             let row = screen_row(p.line, base, self.history);
-            p.col < self.cols && row < rows && row + p.rows as i64 > top
+            p.col < self.cols && row < rows && row + p.visible_rows() as i64 > top
         };
         let primary_top = -(self.display_offset as i64);
         let primary = self
@@ -437,6 +448,25 @@ impl Terminal {
         self.images.generation += 1;
     }
 
+    /// Crops primary placements at an absolute line before ED 2 saves the visible screen.
+    /// Keep the original geometry: clipping the integer source rectangle would lose
+    /// sub-pixel crops (e.g. half of a single-pixel image stretched over two rows).
+    pub(crate) fn clip_primary_placements(&mut self, end: u64) {
+        let mut changed = false;
+        self.primary.placements.retain_mut(|p| {
+            if p.line.saturating_add(p.visible_rows() as u64) <= end {
+                return true;
+            }
+            changed = true;
+            let rows = end.saturating_sub(p.line) as usize;
+            p.clipped_rows = Some(rows);
+            rows > 0
+        });
+        if changed {
+            self.images.generation += 1;
+        }
+    }
+
     /// Drops placements on the active screen that cover any cell of rows `top..=bottom`,
     /// columns `from..to` (screen coordinates).
     pub(crate) fn erase_placements(&mut self, top: usize, bottom: usize, from: usize, to: usize) {
@@ -446,7 +476,7 @@ impl Terminal {
         let before = placements.len();
         placements.retain(|p| {
             let row = screen_row(p.line, base, history);
-            let rows_hit = row <= bottom && row + p.rows as i64 > top;
+            let rows_hit = row <= bottom && row + p.visible_rows() as i64 > top;
             let cols_hit = p.col < to && p.col + p.cols > from;
             !(rows_hit && cols_hit)
         });

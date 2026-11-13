@@ -119,6 +119,33 @@ pub struct Selection {
     pub kind: SelectionKind,
 }
 
+// Printing already updates the last character. Packing the pending-clear bit into
+// that store avoids an extra write or branch for every character on the hot path.
+struct PrintState(u32);
+
+impl PrintState {
+    const EMPTY: Self = Self(0x110000);
+    const CLEAR_ARMED: u32 = 1 << 31;
+
+    fn last(&self) -> Option<char> {
+        char::from_u32(self.0 & !Self::CLEAR_ARMED)
+    }
+
+    fn clear_armed(&self) -> bool {
+        self.0 & Self::CLEAR_ARMED != 0
+    }
+
+    fn disarm_clear(&mut self) {
+        if self.clear_armed() {
+            self.0 &= !Self::CLEAR_ARMED;
+        }
+    }
+
+    fn arm_clear(&mut self) {
+        self.0 |= Self::CLEAR_ARMED;
+    }
+}
+
 pub struct Terminal {
     pub palette: colors::Palette,
     cols: usize,
@@ -139,6 +166,9 @@ pub struct Terminal {
     max_scrollback: usize,
     /// Whether scrollback or the grid gave up rows since the last `take_shrunk`.
     shrunk: bool,
+    /// Last printed character and a same-batch ED 3/CUP/ED 2 guard, so `clear`
+    /// leaves the erased screen out of history. Other dispatches disarm the guard.
+    print_state: PrintState,
     /// How many lines the view is scrolled back from the bottom.
     display_offset: usize,
     pub selection: Option<Selection>,
@@ -147,7 +177,6 @@ pub struct Terminal {
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
     pub bell: bool,
-    last_printed: Option<char>,
     images: images::ImageStore,
     /// Cell size in pixels, as reported by the app.
     cell_pixels: (f32, f32),
@@ -189,13 +218,13 @@ impl Terminal {
             history: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             shrunk: false,
+            print_state: PrintState::EMPTY,
             display_offset: 0,
             selection: None,
             title: None,
             title_changed: false,
             responses: Vec::new(),
             bell: false,
-            last_printed: None,
             images: images::ImageStore::new(),
             cell_pixels: (8.0, 16.0),
             kitty: kitty::Kitty::default(),
@@ -216,6 +245,7 @@ impl Terminal {
         }
         self.parser = parser;
         self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
+        self.print_state.disarm_clear();
     }
 
     pub fn cols(&self) -> usize {
@@ -679,6 +709,7 @@ impl Terminal {
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
             // Combining marks and other zero-width characters are not rendered.
+            self.print_state.disarm_clear();
             return;
         }
 
@@ -698,6 +729,7 @@ impl Terminal {
                 self.cursor.col = 0;
                 self.linefeed();
             } else {
+                self.print_state.disarm_clear();
                 return;
             }
         }
@@ -728,7 +760,7 @@ impl Terminal {
         }
         line.cells[col] = cell;
 
-        self.last_printed = Some(c);
+        self.print_state = PrintState(c as u32);
         if col + width >= cols {
             self.cursor.col = cols - 1;
             self.cursor.pending_wrap = true;
@@ -804,6 +836,9 @@ impl Terminal {
 
     fn erase_display(&mut self, mode: u16) {
         let (row, col) = (self.cursor.row, self.cursor.col);
+        if mode < 2 {
+            self.print_state.disarm_clear();
+        }
         match mode {
             0 => {
                 self.erase_cells(row, col, self.cols);
@@ -823,25 +858,65 @@ impl Terminal {
                 self.erase_cells(row, 0, col + 1);
             }
             2 => {
+                if !self.alt_active {
+                    self.push_screen_to_history();
+                }
                 for r in 0..self.rows {
                     self.erase_row(r);
                 }
             }
-            3 => {
-                let scrollback = &mut self.screen_mut().scrollback;
-                if !scrollback.is_empty() {
-                    scrollback.clear();
-                    scrollback.shrink_to_fit();
-                    self.shrunk = true;
-                }
-                if !self.alt_active {
-                    let history = self.history;
-                    self.drop_placements_before(history);
-                }
-                self.display_offset = 0;
-                self.selection = None;
-            }
+            3 => self.erase_saved_lines(),
             _ => {}
+        }
+    }
+
+    /// ED 2 on the primary screen: scroll the used rows into scrollback before they are
+    /// cleared, so earlier output stays reachable after Ctrl+L.
+    #[cold]
+    #[inline(never)]
+    fn push_screen_to_history(&mut self) {
+        if self.print_state.clear_armed() {
+            self.print_state.disarm_clear();
+            return;
+        }
+        let mut used = self
+            .primary
+            .lines
+            .iter()
+            .rposition(|r| !r.is_blank())
+            .map_or(0, |r| r + 1);
+        for p in &self.primary.placements {
+            let end = p.line.saturating_add(p.visible_rows() as u64);
+            used = used.max(end.saturating_sub(self.history).min(self.rows as u64) as usize);
+        }
+        if used > 0 {
+            // A bottom-clipped image must not overlap the fresh screen after
+            // scrolling, or erase_row below would delete it from history too.
+            self.clip_primary_placements(self.history + self.rows as u64);
+            self.scroll_up_region(0, self.rows - 1, used);
+        }
+    }
+
+    /// ED 3: drop the scrollback.
+    #[cold]
+    #[inline(never)]
+    fn erase_saved_lines(&mut self) {
+        let scrollback = &mut self.screen_mut().scrollback;
+        if !scrollback.is_empty() {
+            scrollback.clear();
+            scrollback.shrink_to_fit();
+            self.shrunk = true;
+        }
+        if !self.alt_active {
+            let history = self.history;
+            self.drop_placements_before(history);
+        }
+        self.display_offset = 0;
+        self.selection = None;
+        if !self.alt_active {
+            self.print_state.arm_clear();
+        } else {
+            self.print_state.disarm_clear();
         }
     }
 

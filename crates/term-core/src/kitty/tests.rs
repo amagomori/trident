@@ -292,6 +292,26 @@ fn placement_keys() {
 }
 
 #[test]
+fn kitty_command_between_ed3_and_ed2_keeps_screen() {
+    let mut t = term();
+    t.advance(&apc("a=t,f=24,s=10,v=20,i=1,q=2", &gradient_rgb(10, 20)));
+    t.advance(b"text\x1b[3J\x1b[2;1H\x1b_Ga=p,i=1,q=2\x1b\\\x1b[H\x1b[2J");
+    assert!(placements(&t).is_empty());
+    assert_eq!(t.scrollback_len(), 2);
+    t.scroll_display(2);
+    assert_eq!(placements(&t).len(), 1);
+    assert_eq!(t.viewport_row(0).text(), "text");
+
+    let mut t = term();
+    t.advance(&apc("a=t,f=24,s=10,v=20,i=1,q=2", &gradient_rgb(10, 20)));
+    t.advance(b"\x1b_Ga=p,i=1,q=2\x1b\\\r\ntext\x1b[3J\x1b_Ga=d,d=A\x1b\\\x1b[H\x1b[2J");
+    assert!(t.image(1).is_none());
+    assert_eq!(t.scrollback_len(), 2);
+    t.scroll_display(2);
+    assert_eq!(t.viewport_row(1).text(), "text");
+}
+
+#[test]
 fn deletes() {
     let mut t = term();
     for id in 1..=3 {

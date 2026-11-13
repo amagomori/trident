@@ -15,6 +15,7 @@ impl Perform for Terminal {
     }
 
     fn execute(&mut self, byte: u8) {
+        self.print_state.disarm_clear();
         match byte {
             0x07 => self.bell = true,
             0x08 => {
@@ -36,6 +37,11 @@ impl Perform for Terminal {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        if self.print_state.clear_armed()
+            && !matches!((action, intermediates), ('H' | 'f' | 'J', []))
+        {
+            self.print_state.disarm_clear();
+        }
         if ignore {
             return;
         }
@@ -77,7 +83,7 @@ impl Perform for Terminal {
             }
             ('Z', []) => self.back_tab(n(0)),
             ('b', []) => {
-                if let Some(c) = self.last_printed {
+                if let Some(c) = self.print_state.last() {
                     for _ in 0..n(0).min(self.cols * self.rows) {
                         self.put_char(c);
                     }
@@ -150,6 +156,7 @@ impl Perform for Terminal {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.print_state.disarm_clear();
         match (byte, intermediates) {
             (b'7', []) => self.save_cursor(),
             (b'8', []) => self.restore_cursor(),
@@ -188,6 +195,7 @@ impl Perform for Terminal {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        self.print_state.disarm_clear();
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
             [b"133", b"D", ..] => {
