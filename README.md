@@ -55,12 +55,19 @@ It starts your login shell (`$SHELL`) with `TERM=xterm-256color`.
 | Action | macOS | Linux |
 | --- | --- | --- |
 | Copy selection | Cmd+C | Ctrl+Shift+C (selecting also sets the primary selection) |
+| Search scrollback | Cmd+F | Ctrl+Shift+F |
 | Select a rectangle | Option-drag | Alt-drag |
 | Extend the current selection | Shift-click or Shift-drag | same |
 | Paste | Cmd+V | Ctrl+Shift+V, Shift+Insert, middle click |
 | Bigger / smaller / reset font | Cmd+= / Cmd+- / Cmd+0 | Ctrl+Shift+= / Ctrl+Shift+- / Ctrl+Shift+0 |
 | Scroll back | Shift+PageUp/PageDown, Shift+Home/End, mouse wheel | same |
 | Clear scrollback | Cmd+K | — |
+
+Search updates as you type across scrollback and the active screen, joining soft wraps.
+It ignores case unless the query contains an uppercase character. Enter or Up moves
+to the next older match; Shift+Enter or Down moves newer, wrapping at either end.
+Alt+R (or Ctrl+R) toggles regular expressions. Backspace edits the query; Escape
+closes search and clears highlights without changing the scroll position.
 
 Hold Shift to select text while a program (vim, tmux, htop) is using the mouse.
 For a rectangle in these programs, hold Shift+Alt (Shift+Option on macOS).

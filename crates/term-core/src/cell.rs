@@ -24,6 +24,8 @@ impl Flags {
     pub const WIDE_SPACER: Flags = Flags(1 << 8);
     /// Blank standing in for a wide character cut off at the right edge; any write replaces it.
     pub const PAD: Flags = Flags(1 << 9);
+    /// Unprinted padding before a soft wrap, from a wide character or widening the row.
+    pub const WIDE_WRAP: Flags = Flags(1 << 10);
 
     pub fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
@@ -130,11 +132,13 @@ impl Row {
                     ..Cell::default()
                 });
             }
-            let used = hidden
-                .iter()
-                .rposition(|c| *c != Cell::default())
-                .map_or(0, |i| i + 1);
-            hidden.truncate(used);
+            if !self.wrapped {
+                let used = hidden
+                    .iter()
+                    .rposition(|c| *c != Cell::default())
+                    .map_or(0, |i| i + 1);
+                hidden.truncate(used);
+            }
             if wide_at_edge || !hidden.is_empty() {
                 self.hidden = Some(Box::new(Hidden {
                     cells: hidden,
@@ -142,7 +146,11 @@ impl Row {
                 }));
             }
         } else {
-            cells.resize(cols, Cell::default());
+            let mut blank = Cell::default();
+            if self.wrapped {
+                blank.flags.insert(Flags::WIDE_WRAP);
+            }
+            cells.resize(cols, blank);
         }
         self.cells = cells;
     }
@@ -150,6 +158,14 @@ impl Row {
     /// Forgets the cells past the right edge, for when the line is erased to its end.
     pub fn clear_hidden(&mut self) {
         self.hidden = None;
+    }
+
+    pub fn materialize_wrap_padding(&mut self, from: usize) {
+        if self.wrapped {
+            for cell in &mut self.cells[from..] {
+                cell.flags.remove(Flags::WIDE_WRAP);
+            }
+        }
     }
 
     pub(crate) fn is_blank(&self) -> bool {

@@ -294,10 +294,11 @@ impl Renderer {
         pixel_offset: f32,
         focused: bool,
         banner: Option<&str>,
+        search: Option<&crate::SearchOverlay<'_>>,
         pre_present: Option<&mut dyn FnMut()>,
     ) -> bool {
         for _ in 0..2 {
-            if self.build(term, fonts, padding, pixel_offset, focused, banner) {
+            if self.build(term, fonts, padding, pixel_offset, focused, banner, search) {
                 break;
             }
         }
@@ -330,6 +331,7 @@ impl Renderer {
     }
 
     /// Builds this frame's instances; false if the atlas filled up and was reset.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         &mut self,
         term: &Terminal,
@@ -338,6 +340,7 @@ impl Renderer {
         pixel_offset: f32,
         focused: bool,
         banner: Option<&str>,
+        search: Option<&crate::SearchOverlay<'_>>,
     ) -> bool {
         let mut backgrounds = std::mem::take(&mut self.backgrounds);
         let mut glyphs = std::mem::take(&mut self.glyphs);
@@ -380,7 +383,19 @@ impl Renderer {
                     let mix = |f: u8, b: u8| ((f as u16 * 3 + b as u16 * 2) / 5) as u8;
                     fg = (mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2));
                 }
-                if term.is_selected(selection, term.viewport_to_point_signed(row, col)) {
+                let point = term.viewport_to_point_signed(row, col);
+                if let Some(search) = search {
+                    let index = search.matches.partition_point(|m| m.end < point);
+                    if search.matches.get(index).is_some_and(|m| m.contains(point)) {
+                        bg = if search.current == Some(index) {
+                            (205, 130, 40)
+                        } else {
+                            (75, 75, 135)
+                        };
+                        fg = (255, 255, 255);
+                    }
+                }
+                if term.is_selected(selection, point) {
                     bg = term.palette.selection;
                 }
                 let is_cursor = row >= 0 && cursor == Some((row as usize, col));
@@ -463,6 +478,67 @@ impl Renderer {
             );
             bar.color[3] = 0.35;
             overlays.push(bar);
+        }
+
+        if let Some(search) = search {
+            let layout = crate::search_layout(
+                search.cursor,
+                search.preedit.clone(),
+                search.status.chars().count(),
+                self.config.width as f32,
+                self.config.height as f32,
+                cw,
+                ch,
+            );
+            let y = layout.cursor_area[1];
+            overlays.push(self.rect(0.0, y, self.config.width as f32, ch, (35, 40, 65)));
+            let prefix = "Find: "
+                .chars()
+                .take(layout.prefix_columns)
+                .enumerate()
+                .map(|(i, c)| (i, c, false));
+            let input = search
+                .input
+                .chars()
+                .enumerate()
+                .skip(layout.input.start)
+                .take(layout.input.len())
+                .map(|(i, c)| {
+                    (
+                        layout.prefix_columns + i - layout.input.start,
+                        c,
+                        search.preedit.contains(&i),
+                    )
+                });
+            let status = search
+                .status
+                .chars()
+                .take(layout.status_columns)
+                .enumerate()
+                .map(|(i, c)| (layout.status_column + i, c, false));
+            for (i, c, preedit) in prefix.chain(input).chain(status) {
+                if preedit {
+                    overlays.push(self.rect(i as f32 * cw, y + ch - 2.0, cw, 1.0, (255, 255, 255)));
+                }
+                let key = GlyphKey {
+                    c,
+                    style: Style::new(false, false),
+                    cells: 1,
+                };
+                match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                    Ok(Some(g)) => overlays.push(Instance {
+                        pos: [i as f32 * cw + g.left, y + g.top],
+                        size: [g.width, g.height],
+                        uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
+                        color: self.color((255, 255, 255), 1.0),
+                    }),
+                    Ok(None) => {}
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
         }
 
         if let Some(text) = banner {

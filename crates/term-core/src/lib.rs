@@ -3,6 +3,7 @@
 
 pub mod colors;
 pub mod images;
+pub mod search;
 
 mod cell;
 mod ghost;
@@ -729,7 +730,8 @@ impl Terminal {
         if width == 2 && self.cursor.col == self.cols - 1 {
             if self.modes.autowrap {
                 let (row, col) = (self.cursor.row, self.cursor.col);
-                let blank = Cell::blank(&self.cursor.template);
+                let mut blank = Cell::blank(&self.cursor.template);
+                blank.flags.insert(Flags::WIDE_WRAP);
                 let line = &mut self.lines_mut()[row];
                 line.cells[col] = blank;
                 line.wrapped = true;
@@ -746,6 +748,7 @@ impl Terminal {
         let insert = self.modes.insert;
         let line = &mut self.lines_mut()[row];
         if insert {
+            line.materialize_wrap_padding(col);
             for _ in 0..width {
                 line.cells.insert(col, Cell::blank(&template));
             }
@@ -951,6 +954,7 @@ impl Terminal {
         }
         let blank = Cell::blank(&self.cursor.template);
         let line = &mut self.lines_mut()[row];
+        line.materialize_wrap_padding(col);
         let n = n.min(cols - col);
         if line.cells[col].flags.contains(Flags::WIDE_SPACER) {
             clear_wide_pair(&mut line.cells, col);
@@ -972,6 +976,7 @@ impl Terminal {
         }
         let blank = Cell::blank(&self.cursor.template);
         let line = &mut self.lines_mut()[row];
+        line.materialize_wrap_padding(col);
         let n = n.min(cols - col);
         clear_wide_pair(&mut line.cells, col);
         clear_wide_pair(&mut line.cells, col + n - 1);

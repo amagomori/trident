@@ -10,6 +10,7 @@ mod latency;
 #[cfg(target_os = "linux")]
 mod present_wayland;
 mod pty;
+mod search;
 mod show;
 
 use config::Action;
@@ -215,6 +216,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
 
 struct Session {
     scroll: PixelScroll,
+    ime_cursor_area: Option<[f32; 4]>,
     pty_cell: (f32, f32),
     window: Arc<Window>,
     renderer: Renderer,
@@ -329,6 +331,7 @@ fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
 }
 
 struct App {
+    search: Option<search::Search>,
     config: config::Config,
     config_error: Option<String>,
     _watcher: Option<config::ConfigWatcher>,
@@ -383,6 +386,7 @@ impl App {
         .map_err(|e| eprintln!("terminal: config reload unavailable: {e}"))
         .ok();
         App {
+            search: None,
             font_size: options.size(&config),
             config,
             config_error,
@@ -526,6 +530,7 @@ impl App {
         };
         Ok(Session {
             scroll: PixelScroll::default(),
+            ime_cursor_area: None,
             pty_cell: cell,
             latency,
             window,
@@ -556,6 +561,9 @@ impl App {
         if grid_changed {
             s.term.resize(cols, rows);
             release_freed_memory(&mut s.term);
+            if let Some(search) = &mut self.search {
+                search.dirty = true;
+            }
         }
         if pty_resize_needed(grid_changed, s.pty_cell, cell) {
             s.pty.resize(cols, rows, cell);
@@ -583,6 +591,9 @@ impl App {
     }
 
     fn process_output(&mut self) {
+        if let Some(search) = &mut self.search {
+            search.dirty = true;
+        }
         let Some(s) = &mut self.session else { return };
         s.pty.wake_pending.store(false, Ordering::Release);
         s.deferred = None;
@@ -629,6 +640,12 @@ impl App {
         let Some(text) = self.clipboard.get(primary) else {
             return;
         };
+        if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
+            search.insert(&text, &mut s.term);
+            s.scroll.reset();
+            s.window.request_redraw();
+            return;
+        }
         let Some(s) = &self.session else { return };
         // Normalize newlines to carriage returns, as typed Enter would send.
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
@@ -704,6 +721,9 @@ impl App {
                 s.term.palette = self.config.palette.clone();
                 s.term
                     .set_scrollback_limit(self.options.scrollback(&self.config));
+                if let Some(search) = &mut self.search {
+                    search.dirty = true;
+                }
                 release_freed_memory(&mut s.term);
                 if let Some(fonts) = fonts {
                     s.fonts = fonts;
@@ -735,6 +755,13 @@ impl App {
             return cfg!(target_os = "macos") && mods.super_key();
         };
         match action {
+            Action::Search => {
+                self.search.get_or_insert_with(search::Search::default);
+                self.update_ime_cursor_area();
+                if let Some(s) = &self.session {
+                    s.window.request_redraw();
+                }
+            }
             Action::None => return false,
             Action::Copy => self.copy(false),
             Action::Paste => self.paste(false),
@@ -746,11 +773,20 @@ impl App {
             } else {
                 self.config.font_size
             }),
-            Action::Send(text) => self.write_input(text.as_bytes()),
+            Action::Send(text) => {
+                if self.search.is_none() {
+                    self.write_input(text.as_bytes());
+                }
+            }
             Action::Clear => {
-                self.write_input(b"\x0c");
+                if self.search.is_none() {
+                    self.write_input(b"\x0c");
+                }
                 if let Some(s) = &mut self.session {
                     s.term.advance(b"\x1b[3J");
+                    if let Some(search) = &mut self.search {
+                        search.dirty = true;
+                    }
                     release_freed_memory(&mut s.term);
                     s.request_frame();
                 }
@@ -774,6 +810,94 @@ impl App {
             }
         }
         true
+    }
+
+    fn search_key(&mut self, event: &KeyEvent) {
+        use winit::keyboard::NamedKey;
+        if event.logical_key == Key::Named(NamedKey::Escape) {
+            self.search = None;
+        } else if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
+            let mut changed = false;
+            let base = event.key_without_modifiers();
+            let base = match &base {
+                Key::Character(c) => c.as_str(),
+                _ => "",
+            };
+            match &event.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    search.step(&mut s.term, !self.modifiers.shift_key())
+                }
+                Key::Named(NamedKey::ArrowUp) => search.step(&mut s.term, true),
+                Key::Named(NamedKey::ArrowDown) => search.step(&mut s.term, false),
+                Key::Named(NamedKey::Backspace) => {
+                    search.query.pop();
+                    changed = true;
+                }
+                Key::Character(c)
+                    if search::toggles_regex(
+                        c,
+                        base,
+                        self.modifiers,
+                        self.options.option_as_alt,
+                    ) =>
+                {
+                    search.regex = !search.regex;
+                    changed = true;
+                }
+                _ if search::accepts_text(self.modifiers, self.options.option_as_alt) => {
+                    if let Some(text) = &event.text {
+                        search
+                            .query
+                            .extend(text.chars().filter(|c| !c.is_control()));
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+            if changed {
+                search.refresh(&mut s.term, true);
+            }
+            s.scroll.reset();
+        }
+        if let Some(s) = &self.session {
+            s.window.request_redraw();
+        }
+        self.update_ime_cursor_area();
+    }
+
+    fn update_ime_cursor_area(&mut self) {
+        let Some(s) = &mut self.session else { return };
+        let m = s.fonts.metrics;
+        let area = if let Some(search) = &self.search {
+            let size = s.window.inner_size();
+            term_render::search_layout(
+                search.cursor_column(),
+                search.preedit_columns(),
+                search.status().chars().count(),
+                size.width as f32,
+                size.height as f32,
+                m.width,
+                m.height,
+            )
+            .cursor_area
+        } else {
+            let (row, col) = s.term.cursor_position().unwrap_or((0, 0));
+            let pad = self.config.padding * s.window.scale_factor() as f32;
+            [
+                pad + col as f32 * m.width,
+                pad + row as f32 * m.height + s.scroll.offset as f32,
+                m.width,
+                m.height,
+            ]
+        };
+        if s.ime_cursor_area == Some(area) {
+            return;
+        }
+        s.window.set_ime_cursor_area(
+            PhysicalPosition::new(area[0] as f64, area[1] as f64),
+            PhysicalSize::new(area[2] as f64, area[3] as f64),
+        );
+        s.ime_cursor_area = Some(area);
     }
 
     fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(isize, usize)> {
@@ -1082,11 +1206,15 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                if let Some(search) = &mut self.search {
+                    search.dirty = true;
+                }
                 if let Some(s) = &mut self.session {
                     s.renderer.resize(size.width, size.height);
                     s.resize.schedule(Instant::now());
                     s.window.request_redraw();
                 }
+                self.update_ime_cursor_area();
             }
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
@@ -1104,6 +1232,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed || self.shortcut(&event) {
                     return;
                 }
+                if self.search.is_some() {
+                    self.search_key(&event);
+                    return;
+                }
                 let Some(s) = &self.session else { return };
                 let base = event.key_without_modifiers();
                 let bytes = input::encode_key(
@@ -1118,12 +1250,53 @@ impl ApplicationHandler<UserEvent> for App {
                     self.write_input(&bytes);
                 }
             }
-            WindowEvent::Ime(Ime::Commit(text)) => self.write_input(text.as_bytes()),
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
+                    search.insert(&text, &mut s.term);
+                    s.scroll.reset();
+                    s.window.request_redraw();
+                } else {
+                    self.write_input(text.as_bytes());
+                }
+                self.update_ime_cursor_area();
+            }
+            WindowEvent::Ime(event) => {
+                if let Some(search) = &mut self.search {
+                    match event {
+                        Ime::Preedit(text, cursor) => search.set_preedit(text, cursor),
+                        Ime::Disabled => search.clear_preedit(),
+                        _ => {}
+                    }
+                }
+                self.update_ime_cursor_area();
+                if let Some(s) = &self.session {
+                    s.window.request_redraw();
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => self.mouse_input(state, button),
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
+                if let (Some(s), Some(search)) = (&mut self.session, &mut self.search)
+                    && search.dirty
+                {
+                    search.refresh(&mut s.term, false);
+                }
+                self.update_ime_cursor_area();
                 if let Some(s) = &mut self.session {
+                    let input = self.search.as_ref().map(search::Search::input);
+                    let status = self.search.as_ref().map(search::Search::status);
+                    let search = self
+                        .search
+                        .as_ref()
+                        .map(|search| term_render::SearchOverlay {
+                            matches: &search.matches,
+                            current: search.current,
+                            input: input.as_deref().unwrap_or_default(),
+                            status: status.as_deref().unwrap_or_default(),
+                            preedit: search.preedit_columns(),
+                            cursor: search.cursor_column(),
+                        });
                     let target = s
                         .target
                         .take()
@@ -1155,6 +1328,7 @@ impl ApplicationHandler<UserEvent> for App {
                         s.scroll.offset as f32,
                         self.focused,
                         banner.as_deref(),
+                        search.as_ref(),
                         Some(&mut pre_present),
                     ) {
                         if let Some(log) = &mut s.latency {
