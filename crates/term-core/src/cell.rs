@@ -81,7 +81,7 @@ pub struct Row {
     pub cells: Vec<Cell>,
     pub flags: RowFlags,
     pub(crate) prompt_col: u32,
-    pub(crate) output_end_col: Option<u32>,
+    pub(crate) output_end_col: u32,
     /// The line continues on the next row because it soft-wrapped.
     pub wrapped: bool,
     /// Cells past the right edge, kept when the window narrows so widening brings them back.
@@ -116,7 +116,7 @@ impl Row {
             wrapped: false,
             flags: RowFlags::default(),
             prompt_col: 0,
-            output_end_col: None,
+            output_end_col: u32::MAX,
             hidden: None,
         }
     }

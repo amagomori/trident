@@ -265,9 +265,8 @@ impl Terminal {
             .find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
             .map(|line| (line, self.line(line).prompt_col as usize));
         let output_end = (start..prompt.map_or(end, |(line, _)| line + 1)).find_map(|line| {
-            self.line(line)
-                .output_end_col
-                .map(|col| (line, col as usize))
+            let col = self.line(line).output_end_col;
+            (col != u32::MAX).then_some((line, col as usize))
         });
         let boundary = output_end.or(prompt);
         let mut stop = boundary.map_or(end, |(line, _)| line);
@@ -332,10 +331,9 @@ impl Terminal {
                 self.command_finished.push(CommandFinished { exit_code });
                 if !self.alt_active {
                     let row = self.cursor.row;
-                    self.primary.lines[row].output_end_col = Some(
+                    self.primary.lines[row].output_end_col =
                         u32::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
-                            .unwrap_or(u32::MAX),
-                    );
+                            .unwrap_or(u32::MAX - 1);
                     if let Some(prompt) = self.primary.lines[..=row]
                         .iter_mut()
                         .rev()
@@ -360,7 +358,7 @@ impl Terminal {
                         .unwrap_or(u32::MAX);
             } else if mark == b"C" {
                 line.flags.remove(RowFlags::OUTPUT_BEFORE_PROMPT);
-                line.output_end_col = None;
+                line.output_end_col = u32::MAX;
             }
         }
     }
