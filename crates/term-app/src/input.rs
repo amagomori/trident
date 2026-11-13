@@ -23,7 +23,7 @@ fn keypad_letter(key: PhysicalKey) -> Option<char> {
             KeyCode::NumpadDecimal => 'n',
             KeyCode::NumpadDivide => 'o',
             KeyCode::NumpadEnter => 'M',
-            KeyCode::NumpadEqual => 'X',
+            // Vim/terminfo has no SS3 equals termcode; keep '=' as ordinary text.
             _ => return None,
         },
         _ => return None,
@@ -275,7 +275,6 @@ mod tests {
                 "\r",
                 b'M',
             ),
-            (KeyCode::NumpadEqual, ch("="), "=", b'X'),
         ];
         for (physical, logical, text, suffix) in cases {
             let encode = |modes: &Modes| {
@@ -313,6 +312,33 @@ mod tests {
             ),
             Some(b"1".to_vec())
         );
+    }
+
+    #[test]
+    fn application_keypad_equals_is_plain_text() {
+        for app_keypad in [false, true] {
+            for text in [None, Some("="), Some("")] {
+                assert_eq!(
+                    encode_key(
+                        &ch("="),
+                        &ch("="),
+                        text,
+                        PhysicalKey::Code(KeyCode::NumpadEqual),
+                        ModifiersState::empty(),
+                        &Modes {
+                            app_keypad,
+                            ..Modes::default()
+                        },
+                        true,
+                    ),
+                    if text == Some("") {
+                        None
+                    } else {
+                        Some(b"=".to_vec())
+                    }
+                );
+            }
+        }
     }
 
     #[test]

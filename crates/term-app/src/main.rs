@@ -613,6 +613,48 @@ fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
     Some(config::Chord { modifiers, key })
 }
 
+fn shortcut_action(
+    config: &config::Config,
+    base: Key,
+    physical: winit::keyboard::PhysicalKey,
+    mods: ModifiersState,
+    modes: &term_core::Modes,
+    searching: bool,
+) -> Option<Action> {
+    if !searching && input::application_keypad_owns_key(physical, mods, modes) {
+        // Match configured keypad bindings before interpreting navigation aliases.
+        use winit::keyboard::{KeyCode, PhysicalKey};
+        let key = match physical {
+            PhysicalKey::Code(code) => match code {
+                KeyCode::Numpad0 => "0",
+                KeyCode::Numpad1 => "1",
+                KeyCode::Numpad2 => "2",
+                KeyCode::Numpad3 => "3",
+                KeyCode::Numpad4 => "4",
+                KeyCode::Numpad5 => "5",
+                KeyCode::Numpad6 => "6",
+                KeyCode::Numpad7 => "7",
+                KeyCode::Numpad8 => "8",
+                KeyCode::Numpad9 => "9",
+                KeyCode::NumpadAdd => "+",
+                KeyCode::NumpadSubtract => "-",
+                KeyCode::NumpadMultiply => "*",
+                KeyCode::NumpadDivide => "/",
+                KeyCode::NumpadDecimal => ".",
+                KeyCode::NumpadComma => ",",
+                KeyCode::NumpadEnter => "enter",
+                _ => return None,
+            },
+            _ => return None,
+        };
+        return config
+            .bindings
+            .get(&shortcut_chord(Key::Character(key.into()), mods)?)
+            .cloned();
+    }
+    config.bindings.get(&shortcut_chord(base, mods)?).cloned()
+}
+
 fn sync_expired(since: Option<Instant>, now: Instant) -> bool {
     since.is_some_and(|since| now.duration_since(since) >= SYNC_TIMEOUT)
 }
@@ -1495,23 +1537,21 @@ impl App {
 
     /// Handles terminal shortcuts; true if the key was consumed.
     fn shortcut(&mut self, event: &KeyEvent, held_at_focus: bool) -> bool {
-        // Num Lock/Shift can make keypad keys look like navigation shortcuts.
-        if self.search.is_none()
-            && self.session.as_ref().is_some_and(|s| {
-                input::application_keypad_owns_key(
-                    event.physical_key,
-                    self.modifiers,
-                    &s.term.modes,
-                )
-            })
-        {
-            return false;
-        }
         let mods = self.modifiers;
-        let Some(chord) = shortcut_chord(event.key_without_modifiers(), mods) else {
-            return false;
-        };
-        let Some(action) = self.config.bindings.get(&chord).cloned() else {
+        let modes = self
+            .session
+            .as_ref()
+            .map(|s| &s.term.modes)
+            .cloned()
+            .unwrap_or_default();
+        let Some(action) = shortcut_action(
+            &self.config,
+            event.key_without_modifiers(),
+            event.physical_key,
+            mods,
+            &modes,
+            self.search.is_some(),
+        ) else {
             return cfg!(target_os = "macos") && mods.super_key();
         };
         if suppress_shortcut_repeat(&action, event.repeat, held_at_focus) {
@@ -2618,6 +2658,100 @@ mod tests {
         }
     }
 
+    #[test]
+    fn keypad_bindings_precede_claim_but_navigation_aliases_do_not() {
+        use winit::keyboard::{KeyCode, NamedKey, PhysicalKey};
+        let config = config::Config {
+            bindings: config::default_bindings_for(false),
+            ..Default::default()
+        };
+        let modes = term_core::Modes {
+            app_keypad: true,
+            ..Default::default()
+        };
+        for (code, text, action) in [
+            (KeyCode::NumpadAdd, "+", Action::Increase),
+            (KeyCode::NumpadSubtract, "-", Action::Decrease),
+        ] {
+            assert_eq!(
+                shortcut_action(
+                    &config,
+                    Key::Character(text.into()),
+                    PhysicalKey::Code(code),
+                    ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    &modes,
+                    false
+                ),
+                Some(action)
+            );
+        }
+        let physical = PhysicalKey::Code(KeyCode::Numpad1);
+        let mac = config::Config {
+            bindings: config::default_bindings_for(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            shortcut_action(
+                &mac,
+                Key::Character("0".into()),
+                winit::keyboard::PhysicalKey::Code(KeyCode::Numpad0),
+                ModifiersState::SUPER,
+                &modes,
+                false
+            ),
+            Some(Action::Reset)
+        );
+        let end = Key::Named(NamedKey::End);
+        assert_eq!(
+            shortcut_action(
+                &config,
+                end.clone(),
+                physical,
+                ModifiersState::SHIFT,
+                &modes,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            shortcut_action(
+                &config,
+                end.clone(),
+                physical,
+                ModifiersState::SHIFT,
+                &modes,
+                true
+            ),
+            Some(Action::Bottom)
+        );
+        assert_eq!(
+            shortcut_action(
+                &config,
+                end,
+                physical,
+                ModifiersState::SHIFT,
+                &term_core::Modes::default(),
+                false
+            ),
+            Some(Action::Bottom)
+        );
+        let custom = config::parse(
+            std::path::Path::new("test.toml"),
+            "[keybindings]\n'shift+1' = 'copy'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            shortcut_action(
+                &custom,
+                Key::Named(NamedKey::End),
+                physical,
+                ModifiersState::SHIFT,
+                &modes,
+                false
+            ),
+            Some(Action::Copy)
+        );
+    }
     #[test]
     fn clipboard_shortcuts_dispatch() {
         let bindings = config::default_bindings_for(false);
