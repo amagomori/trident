@@ -2,6 +2,23 @@ use super::*;
 
 mod golden;
 
+#[test]
+fn configured_palette_resolves_colors_and_osc_queries() {
+    let mut term = Terminal::new(80, 24);
+    term.palette.background = (1, 2, 3);
+    term.palette.foreground = (4, 5, 6);
+    term.palette.cursor = (7, 8, 9);
+    term.palette.ansi[1] = (10, 11, 12);
+    assert_eq!(term.palette.resolve(crate::Color::DefaultBg), (1, 2, 3));
+    assert_eq!(term.palette.resolve(crate::Color::Indexed(1)), (10, 11, 12));
+    assert_eq!(
+        term.palette.resolve(crate::Color::Indexed(196)),
+        (255, 0, 0)
+    );
+    term.advance(b"\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x1b\\");
+    assert_eq!(term.take_responses(), b"\x1b]10;rgb:0404/0505/0606\x07\x1b]11;rgb:0101/0202/0303\x07\x1b]12;rgb:0707/0808/0909\x1b\\");
+}
+
 fn term(cols: usize, rows: usize, input: &str) -> Terminal {
     let mut t = Terminal::new(cols, rows);
     t.advance(input.as_bytes());

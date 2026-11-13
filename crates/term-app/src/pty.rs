@@ -128,6 +128,7 @@ impl Pty {
     /// reader thread when output is ready, and with `true` once the shell exits.
     pub fn spawn(
         command: &[String],
+        env: &std::collections::BTreeMap<String, String>,
         cols: usize,
         rows: usize,
         cell: (f32, f32),
@@ -148,6 +149,9 @@ impl Pty {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", env!("CARGO_BIN_NAME"));
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         if let Some(home) = std::env::var_os("HOME")
             && std::env::current_dir()
                 .map(|d| d == std::path::Path::new("/"))

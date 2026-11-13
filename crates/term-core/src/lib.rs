@@ -118,6 +118,7 @@ pub struct Selection {
 }
 
 pub struct Terminal {
+    pub palette: colors::Palette,
     cols: usize,
     rows: usize,
     primary: Screen,
@@ -159,6 +160,7 @@ impl Terminal {
         let cols = cols.max(2);
         let rows = rows.max(1);
         Terminal {
+            palette: colors::Palette::default(),
             cols,
             rows,
             primary: Screen::new(cols, rows),

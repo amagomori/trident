@@ -11,6 +11,9 @@ license = "MIT"
 repository = "https://github.com/amagomori/terminal"
 
 [workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+notify = "8"
 term-core = { path = "crates/term-core" }
 term-render = { path = "crates/term-render" }
 ab_glyph = "0.2"
