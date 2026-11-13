@@ -323,8 +323,8 @@ impl Terminal {
     }
 
     /// Whether scrollback was erased or the grid or history limit shrank since the last
-    /// call, so the app can hand the freed memory back to the OS. Ordinary scrolling,
-    /// which recycles rows, never sets it.
+    /// call, so the app can hand the freed memory back to the OS. Ordinary scrolling
+    /// never sets it; upward scrolling reuses rows once scrollback is full.
     pub fn take_shrunk(&mut self) -> bool {
         std::mem::take(&mut self.shrunk)
     }
@@ -706,23 +706,33 @@ impl Terminal {
             self.scroll_placements(top, bottom, -(n as isize), keeps_lines);
         }
         for _ in 0..n {
-            let blank = self.blank_row();
             let row = self.lines_mut().remove(top);
+            let spare = if to_history {
+                self.push_history(row)
+            } else {
+                Some(row)
+            };
+            let blank = match spare {
+                Some(mut row) => {
+                    row.reset(self.cols, &self.cursor.template);
+                    row
+                }
+                None => self.blank_row(),
+            };
             self.lines_mut().insert(bottom, blank);
-            if to_history {
-                self.push_history(row);
-            }
         }
     }
 
-    fn push_history(&mut self, row: Row) {
+    /// Returns the row evicted from the far end of scrollback, if any, for reuse.
+    fn push_history(&mut self, row: Row) -> Option<Row> {
         if self.max_scrollback == 0 {
-            return;
+            return Some(row);
         }
         self.primary.scrollback.push_back(row);
         self.history += 1;
+        let mut evicted = None;
         if self.primary.scrollback.len() > self.max_scrollback {
-            self.primary.scrollback.pop_front();
+            evicted = self.primary.scrollback.pop_front();
             if !self.primary.placements.is_empty() {
                 let first = self.history - self.primary.scrollback.len() as u64;
                 self.drop_placements_before(first);
@@ -731,6 +741,7 @@ impl Terminal {
         if self.display_offset > 0 {
             self.display_offset = (self.display_offset + 1).min(self.primary.scrollback.len());
         }
+        evicted
     }
 
     fn scroll_down_region(&mut self, top: usize, bottom: usize, n: usize) {

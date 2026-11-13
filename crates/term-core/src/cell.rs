@@ -95,6 +95,14 @@ struct Hidden {
 }
 
 impl Row {
+    /// Blank the row in place, keeping its allocation.
+    pub fn reset(&mut self, cols: usize, template: &Cell) {
+        self.cells.clear();
+        self.cells.resize(cols, Cell::blank(template));
+        self.wrapped = false;
+        self.hidden = None;
+    }
+
     pub fn new(cols: usize, template: &Cell) -> Row {
         Row {
             cells: vec![Cell::blank(template); cols],
