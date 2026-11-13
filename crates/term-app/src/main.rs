@@ -972,6 +972,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match self.start(event_loop) {
             Ok(session) => {
+                self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
                 self.process_output();
             }
@@ -1162,6 +1163,42 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipboard_shortcuts_dispatch() {
+        let bindings = config::default_bindings_for(false);
+        for (key, mods, action) in [
+            (
+                Key::Character("c".into()),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                Action::Copy,
+            ),
+            (
+                Key::Character("C".into()),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                Action::Copy,
+            ),
+            (
+                Key::Character("v".into()),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                Action::Paste,
+            ),
+            (
+                Key::Character("V".into()),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                Action::Paste,
+            ),
+            (
+                Key::Named(winit::keyboard::NamedKey::Insert),
+                ModifiersState::SHIFT,
+                Action::Paste,
+            ),
+        ] {
+            assert_eq!(
+                bindings.get(&shortcut_chord(key, mods).unwrap()),
+                Some(&action)
+            );
+        }
+    }
     #[test]
     fn configured_arrows_dispatch_with_named_keys() {
         use winit::keyboard::NamedKey;

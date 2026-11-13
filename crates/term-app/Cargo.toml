@@ -29,6 +29,7 @@ winit.workspace = true
 libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+smithay-clipboard = "0.7.3"
 x11rb = { version = "0.13", features = ["present", "dri3"] }
 wayland-client = "0.31.15"
 wayland-backend = { version = "0.3.17", features = ["client_system"] }
