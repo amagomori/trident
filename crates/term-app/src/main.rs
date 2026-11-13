@@ -277,6 +277,15 @@ impl PendingOutput {
         self.waiting_since = None;
         !self.is_empty()
     }
+
+    fn finish_presentation(&mut self, rendered: bool, now: Instant) -> bool {
+        if rendered {
+            self.presented();
+        } else if self.waiting_since.is_some() {
+            self.waiting_since = Some(now);
+        }
+        rendered
+    }
 }
 
 fn advance_output(term: &mut Terminal, output: &mut pty::Output) -> usize {
@@ -387,6 +396,21 @@ fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
 
 fn sync_expired(since: Option<Instant>, now: Instant) -> bool {
     since.is_some_and(|since| now.duration_since(since) >= SYNC_TIMEOUT)
+}
+
+fn sync_wakeup(
+    deadline: Option<Instant>,
+    waiting_since: Option<Instant>,
+    synchronized_since: Option<Instant>,
+) -> Option<Instant> {
+    [
+        deadline,
+        waiting_since.map(|since| since + MAX_DEFER),
+        synchronized_since.map(|since| since + SYNC_TIMEOUT),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
 }
 
 struct App {
@@ -694,7 +718,7 @@ impl App {
         } else {
             s.synchronized_since = None;
             if was_synchronized || s.redraw_pending {
-                s.window.request_redraw();
+                s.request_frame();
             }
         }
         let responses = s.term.take_responses();
@@ -765,7 +789,7 @@ impl App {
             #[cfg(not(target_os = "linux"))]
             let _ = (started, target);
         };
-        if s.renderer.render(
+        let rendered = s.renderer.render(
             &s.term,
             &mut s.fonts,
             pad,
@@ -774,15 +798,17 @@ impl App {
             banner.as_deref(),
             search.as_ref(),
             Some(&mut pre_present),
-        ) {
+        );
+        if rendered {
             if let Some(log) = &mut s.latency {
                 log.frame(Instant::now(), s.since_frame);
             }
             s.since_frame = 0;
             s.sequence += 1;
         }
-        s.output.presented();
-        self.process_output();
+        if s.output.finish_presentation(rendered, Instant::now()) {
+            self.process_output();
+        }
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
@@ -1383,14 +1409,7 @@ impl ApplicationHandler<UserEvent> for App {
                 s.resize.deadline,
                 s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
             );
-            if let Some(since) = s.output.waiting_since {
-                let output_deadline = since + MAX_DEFER;
-                deadline = Some(deadline.map_or(output_deadline, |d| d.min(output_deadline)));
-            }
-            if let Some(since) = s.synchronized_since {
-                let sync_deadline = since + SYNC_TIMEOUT;
-                deadline = Some(deadline.map_or(sync_deadline, |d| d.min(sync_deadline)));
-            }
+            deadline = sync_wakeup(deadline, s.output.waiting_since, s.synchronized_since);
         }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -2192,6 +2211,46 @@ mod tests {
             Some(start),
             start + Duration::from_millis(300)
         ));
+    }
+
+    #[test]
+    fn sync_deadlines_bound_vblank_waits_without_idle_timers() {
+        let now = Instant::now();
+        assert_eq!(sync_wakeup(None, None, None), None);
+        assert_eq!(sync_wakeup(Some(now), None, None), Some(now));
+        assert_eq!(
+            sync_wakeup(Some(now + SYNC_TIMEOUT * 2), None, Some(now)),
+            Some(now + SYNC_TIMEOUT)
+        );
+        assert_eq!(
+            sync_wakeup(Some(now + SYNC_TIMEOUT), Some(now), Some(now)),
+            Some(now + MAX_DEFER)
+        );
+        assert_eq!(sync_wakeup(Some(now), Some(now), Some(now)), Some(now));
+    }
+
+    #[test]
+    fn failed_presentation_retains_frame_and_retries_without_draining() {
+        let now = Instant::now();
+        let mut pending = PendingOutput {
+            bytes: b"next frame".to_vec(),
+            waiting_since: Some(now),
+            ..PendingOutput::default()
+        };
+        let retry = now + MAX_DEFER;
+        assert!(!pending.finish_presentation(false, retry));
+        assert_eq!(pending.waiting_since, Some(retry));
+        assert_eq!(pending.bytes, b"next frame");
+        assert!(pending.finish_presentation(true, retry));
+        assert_eq!(pending.waiting_since, None);
+        assert_eq!(pending.bytes, b"next frame");
+        let mut empty = PendingOutput::default();
+        assert!(!empty.finish_presentation(false, now));
+        assert_eq!(empty.waiting_since, None);
+        assert!(empty.finish_presentation(true, now));
+        empty.waiting_since = Some(now);
+        assert!(!empty.finish_presentation(false, retry));
+        assert_eq!(empty.waiting_since, Some(retry));
     }
 
     #[test]
