@@ -251,6 +251,79 @@ fn selection_text_joins_wrapped_lines() {
 }
 
 #[test]
+fn block_selection_is_a_rectangle_in_every_drag_direction() {
+    let mut t = term(6, 3, "abcdef\r\nghijkl\r\nmnopqr");
+    for (a, b) in [
+        ((0, 1), (2, 3)),
+        ((2, 3), (0, 1)),
+        ((0, 3), (2, 1)),
+        ((2, 1), (0, 3)),
+    ] {
+        t.start_selection(t.viewport_to_point(a.0, a.1), SelectionKind::Block);
+        t.update_selection(t.viewport_to_point(b.0, b.1));
+        assert_eq!(t.selection_text().as_deref(), Some("bcd\nhij\nnop"));
+        let range = t.selection_range();
+        for row in 0..3 {
+            for col in 0..6 {
+                assert_eq!(
+                    t.is_selected(range, t.viewport_to_point(row, col)),
+                    (1..=3).contains(&col)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn block_selection_keeps_spaces_and_physical_rows() {
+    let mut t = term(5, 4, "abcdefghij\r\n\r\nx");
+    t.start_selection(t.viewport_to_point(0, 1), SelectionKind::Block);
+    assert_eq!(t.selection_text(), None);
+    t.update_selection(t.viewport_to_point(3, 3));
+    assert_eq!(t.selection_text().as_deref(), Some("bcd\nghi\n   \n   "));
+    t.update_selection(t.viewport_to_point(2, 1));
+    assert_eq!(t.selection_text().as_deref(), Some("b\ng\n "));
+}
+
+#[test]
+fn selection_includes_either_half_of_a_wide_character() {
+    let mut t = term(6, 2, "a界b\r\ncd界");
+    for kind in [SelectionKind::Simple, SelectionKind::Block] {
+        t.start_selection(t.viewport_to_point(0, 2), kind);
+        t.update_selection(t.viewport_to_point(1, 2));
+        let expected = if kind == SelectionKind::Block {
+            "界\n界"
+        } else {
+            "界b\ncd界"
+        };
+        assert_eq!(t.selection_text().as_deref(), Some(expected));
+        let range = t.selection_range();
+        assert!(t.is_selected(range, t.viewport_to_point(0, 1)));
+        assert!(t.is_selected(range, t.viewport_to_point(1, 3)));
+        if kind == SelectionKind::Block {
+            assert!(!t.is_selected(range, t.viewport_to_point(0, 3)));
+            assert!(!t.is_selected(range, t.viewport_to_point(1, 1)));
+        }
+    }
+}
+
+#[test]
+fn block_selection_stays_anchored_in_scrollback_and_clips_evicted_rows() {
+    let mut t = term(4, 2, "abcd\r\nefgh");
+    t.set_scrollback_limit(1);
+    t.start_selection(t.viewport_to_point(0, 1), SelectionKind::Block);
+    t.update_selection(t.viewport_to_point(1, 2));
+    t.advance(b"\r\nijkl");
+    t.scroll_display(1);
+    assert_eq!(t.selection_text().as_deref(), Some("bc\nfg"));
+    assert!(t.is_selected(t.selection_range(), t.viewport_to_point(0, 1)));
+    t.advance(b"\r\nmnop");
+    assert_eq!(t.selection_text().as_deref(), Some("fg"));
+    t.advance(b"\r\nqrst");
+    assert_eq!(t.selection_text(), None);
+}
+
+#[test]
 fn resize_keeps_content_and_cursor() {
     let mut t = term(10, 4, "1\r\n2\r\n3\r\n4");
     t.resize(10, 2);

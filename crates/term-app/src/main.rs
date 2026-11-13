@@ -102,6 +102,7 @@ struct Options {
     font: Option<PathBuf>,
     font_size: f32,
     option_as_alt: bool,
+    copy_on_select: bool,
     command: Vec<String>,
 }
 
@@ -142,6 +143,7 @@ fn usage() -> ! {
            --font-size <SIZE>  Font size in points (default: {DEFAULT_FONT_SIZE})\n  \
            --option-as-alt     On macOS, make Option act as Alt/Meta\n  \
            --scrollback <LINES> History lines (default: 10000; 0 disables; max: 1000000)\n  \
+           --copy-on-select    Copy selected text to the clipboard on mouse release\n  \
            -e, --command ...   Run this command instead of your shell\n  \
            -h, --help          Show this help\n  \
            -V, --version       Show the version\n\n\
@@ -165,6 +167,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
         font: None,
         font_size: DEFAULT_FONT_SIZE,
         option_as_alt: !cfg!(target_os = "macos"),
+        copy_on_select: false,
         command: Vec::new(),
     };
     let mut args = args.into_iter();
@@ -189,6 +192,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
                     .ok_or("--font-size needs a number between 4 and 200")?;
             }
             "--option-as-alt" => options.option_as_alt = true,
+            "--copy-on-select" => options.copy_on_select = true,
             "-e" | "--command" => {
                 options.command = args.by_ref().collect();
                 if options.command.is_empty() {
@@ -339,6 +343,24 @@ struct App {
     scroll_accum: f64,
     clipboard: clipboard::Clipboard,
     error: Option<String>,
+}
+
+fn select_at(term: &mut Terminal, point: Point, modifiers: ModifiersState, clicks: u8) {
+    if modifiers.shift_key() && term.selection.is_some() {
+        // Keep the original anchor and selection shape, including rectangular selections.
+        term.update_selection(point);
+    } else {
+        let kind = if modifiers.alt_key() {
+            SelectionKind::Block
+        } else {
+            match clicks {
+                2 => SelectionKind::Word,
+                3 => SelectionKind::Line,
+                _ => SelectionKind::Simple,
+            }
+        };
+        term.start_selection(point, kind);
+    }
 }
 
 impl App {
@@ -768,6 +790,15 @@ impl App {
 
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) {
         let pressed = state == ElementState::Pressed;
+        // Finish a local drag even if Shift was released while mouse reporting is on.
+        if button == MouseButton::Left && !pressed && self.left_down {
+            self.left_down = false;
+            self.copy(true);
+            if self.options.copy_on_select {
+                self.copy(false);
+            }
+            return;
+        }
         if self.mouse_reporting() {
             let button = match button {
                 MouseButton::Left => ReportButton::Left,
@@ -781,29 +812,24 @@ impl App {
         }
         match button {
             MouseButton::Left => {
-                self.left_down = pressed;
                 if !pressed {
-                    self.copy(true);
                     return;
                 }
+                self.left_down = true;
                 let Some((row, col)) = self.cell_at(self.mouse_pos) else {
                     return;
                 };
                 let Some(s) = &mut self.session else { return };
                 let point = s.term.viewport_to_point_signed(row, col);
-                let clicks = match self.last_click {
+                let modified = self.modifiers.shift_key() || self.modifiers.alt_key();
+                let clicks = match self.last_click.filter(|_| !modified) {
                     Some((at, p, n)) if p == point && at.elapsed() < Duration::from_millis(400) => {
                         n % 3 + 1
                     }
                     _ => 1,
                 };
-                self.last_click = Some((Instant::now(), point, clicks));
-                let kind = match clicks {
-                    2 => SelectionKind::Word,
-                    3 => SelectionKind::Line,
-                    _ => SelectionKind::Simple,
-                };
-                s.term.start_selection(point, kind);
+                self.last_click = (!modified).then_some((Instant::now(), point, clicks));
+                select_at(&mut s.term, point, self.modifiers, clicks);
                 s.request_frame();
             }
             MouseButton::Middle if pressed => self.paste(true),
@@ -815,6 +841,14 @@ impl App {
         let old = self.cell_at(self.mouse_pos);
         self.mouse_pos = pos;
         let cell = self.cell_at(pos);
+        if self.left_down {
+            if let (Some((row, col)), Some(s)) = (cell, &mut self.session) {
+                let point = s.term.viewport_to_point_signed(row, col);
+                s.term.update_selection(point);
+                s.request_frame();
+            }
+            return;
+        }
         if self.mouse_reporting() {
             let mode = self.session.as_ref().map(|s| s.term.modes.mouse);
             if cell != old {
@@ -829,13 +863,6 @@ impl App {
                 }
             }
             return;
-        }
-        if self.left_down
-            && let (Some((row, col)), Some(s)) = (cell, &mut self.session)
-        {
-            let point = s.term.viewport_to_point_signed(row, col);
-            s.term.update_selection(point);
-            s.request_frame();
         }
     }
 
@@ -1388,6 +1415,66 @@ mod tests {
         assert!(pty_resize_needed(false, (17.0, 37.0), cell));
         assert!(pty_resize_needed(false, cell, (9.0, 19.0)));
         assert!(pty_resize_needed(false, cell, (8.0, 20.0)));
+    }
+
+    #[test]
+    fn shift_click_extends_from_original_anchor_and_keeps_shape() {
+        let mut term = Terminal::new(10, 3);
+        let anchor = term.viewport_to_point(1, 4);
+        let head = term.viewport_to_point(0, 1);
+        for kind in [
+            SelectionKind::Simple,
+            SelectionKind::Word,
+            SelectionKind::Line,
+            SelectionKind::Block,
+        ] {
+            term.start_selection(anchor, kind);
+            term.update_selection(term.viewport_to_point(2, 8));
+            select_at(&mut term, head, ModifiersState::SHIFT, 2);
+            let selection = term.selection.unwrap();
+            assert_eq!(selection.anchor, anchor);
+            assert_eq!(selection.head, head);
+            assert_eq!(selection.kind, kind);
+            let next = term.viewport_to_point(2, 6);
+            select_at(&mut term, next, ModifiersState::SHIFT, 1);
+            assert_eq!(term.selection.unwrap().anchor, anchor);
+            assert_eq!(term.selection.unwrap().head, next);
+        }
+    }
+
+    #[test]
+    fn selection_modifiers_work_without_an_existing_selection() {
+        let mut term = Terminal::new(10, 3);
+        let point = term.viewport_to_point(1, 4);
+        select_at(&mut term, point, ModifiersState::SHIFT, 1);
+        assert_eq!(term.selection.unwrap().kind, SelectionKind::Simple);
+        // Alt/Option starts a block even if this would otherwise be a multi-click.
+        select_at(&mut term, point, ModifiersState::ALT, 3);
+        assert_eq!(term.selection.unwrap().kind, SelectionKind::Block);
+        term.selection = None;
+        select_at(
+            &mut term,
+            point,
+            ModifiersState::SHIFT | ModifiersState::ALT,
+            1,
+        );
+        assert_eq!(term.selection.unwrap().kind, SelectionKind::Block);
+    }
+
+    #[test]
+    fn clipboard_copy_on_select_is_opt_in_and_not_a_command_argument() {
+        assert!(!parse_args_from(std::iter::empty()).unwrap().copy_on_select);
+        let args = [
+            "--copy-on-select",
+            "--option-as-alt",
+            "-e",
+            "echo",
+            "--copy-on-select",
+        ];
+        let options = parse_args_from(args.into_iter().map(String::from)).unwrap();
+        assert!(options.copy_on_select);
+        assert!(options.option_as_alt);
+        assert_eq!(options.command, ["echo", "--copy-on-select"]);
     }
 
     #[test]
