@@ -138,6 +138,45 @@ fn shell_integration_prompt_redraw_and_empty_output() {
 }
 
 #[test]
+fn shell_integration_output_ends_before_missing_newline_marker() {
+    for marker in ["%", "⏎"] {
+        let mut t = Terminal::new(20, 3);
+        t.advance(format!("\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07{marker}                \r\x1b]133;A\x07$ ").as_bytes());
+        t.select_command_output();
+        assert_eq!(t.selection_text().as_deref(), Some("abc"));
+    }
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;A\x07$ ");
+    t.select_command_output();
+    assert_eq!(t.selection_text().as_deref(), Some("abc"));
+
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]133;A\x07$ seq 1 40\r\n\x1b]133;C\x07");
+    for n in 1..=40 {
+        t.advance(format!("{n}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    t.select_command_output();
+    assert_eq!(
+        t.selection_text().unwrap(),
+        (1..=40)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn shell_marks_seen_persists_for_session() {
+    let mut t = Terminal::new(20, 3);
+    assert!(!t.has_shell_marks());
+    t.advance(b"plain\x1b]133;invalid\x07");
+    assert!(!t.has_shell_marks());
+    t.advance(b"\x1b]133;A\x07\x1b[3J\x1b[2J");
+    assert!(t.has_shell_marks());
+}
+
+#[test]
 fn shell_integration_unterminated_output() {
     for (output, expected) in [
         ("foo", "foo"),

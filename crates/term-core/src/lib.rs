@@ -205,10 +205,15 @@ pub struct Terminal {
     /// Whether `parser` is known to be in its ground state between calls to `advance`.
     parser_ground: bool,
     zone: Zone,
+    shell_marks_seen: bool,
     command_finished: Vec<CommandFinished>,
 }
 
 impl Terminal {
+    pub fn has_shell_marks(&self) -> bool {
+        self.shell_marks_seen
+    }
+
     pub fn take_command_finished(&mut self) -> Vec<CommandFinished> {
         std::mem::take(&mut self.command_finished)
     }
@@ -259,8 +264,14 @@ impl Terminal {
         let prompt = (start..end)
             .find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
             .map(|line| (line, self.line(line).prompt_col as usize));
-        let mut stop = prompt.map_or(end, |(line, _)| line);
-        let partial = prompt.filter(|(_, col)| *col > 0);
+        let output_end = (start..prompt.map_or(end, |(line, _)| line + 1)).find_map(|line| {
+            self.line(line)
+                .output_end_col
+                .map(|col| (line, col as usize))
+        });
+        let boundary = output_end.or(prompt);
+        let mut stop = boundary.map_or(end, |(line, _)| line);
+        let partial = boundary.filter(|(_, col)| *col > 0);
         while partial.is_none()
             && stop > start
             && self.line(stop - 1).cells.iter().all(|cell| cell.c == ' ')
@@ -289,6 +300,9 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn shell_mark(&mut self, mark: &[u8], args: &[&[u8]]) {
+        if matches!(mark, b"A" | b"B" | b"C" | b"D") {
+            self.shell_marks_seen = true;
+        }
         let flag = match mark {
             b"A" => {
                 self.zone = Zone::Prompt;
@@ -318,6 +332,10 @@ impl Terminal {
                 self.command_finished.push(CommandFinished { exit_code });
                 if !self.alt_active {
                     let row = self.cursor.row;
+                    self.primary.lines[row].output_end_col = Some(
+                        u32::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
+                            .unwrap_or(u32::MAX),
+                    );
                     if let Some(prompt) = self.primary.lines[..=row]
                         .iter_mut()
                         .rev()
@@ -342,6 +360,7 @@ impl Terminal {
                         .unwrap_or(u32::MAX);
             } else if mark == b"C" {
                 line.flags.remove(RowFlags::OUTPUT_BEFORE_PROMPT);
+                line.output_end_col = None;
             }
         }
     }
@@ -351,6 +370,7 @@ impl Terminal {
         let rows = rows.max(1);
         Terminal {
             zone: Zone::None,
+            shell_marks_seen: false,
             command_finished: Vec::new(),
             palette: colors::Palette::default(),
             cols,
@@ -1178,9 +1198,11 @@ impl Terminal {
             2 => {
                 let flags = self.screen().lines[row].flags;
                 let prompt_col = self.screen().lines[row].prompt_col;
+                let output_end_col = self.screen().lines[row].output_end_col;
                 self.erase_row(row);
                 self.lines_mut()[row].flags = flags;
                 self.lines_mut()[row].prompt_col = prompt_col;
+                self.lines_mut()[row].output_end_col = output_end_col;
             }
             _ => {}
         }

@@ -1287,6 +1287,13 @@ impl App {
                 }
             }
             Action::JumpToPromptUp | Action::JumpToPromptDown | Action::SelectCommandOutput => {
+                if !self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.term.has_shell_marks())
+                {
+                    return false;
+                }
                 if let Some(s) = &mut self.session {
                     s.scroll.reset();
                     if action == Action::SelectCommandOutput {
