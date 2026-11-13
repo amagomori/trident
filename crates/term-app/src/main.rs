@@ -21,8 +21,8 @@ use input::MouseButton as ReportButton;
 use pty::Pty;
 use std::collections::HashSet;
 use std::fs::{File, FileType};
-use std::io::Write;
-use std::os::fd::AsFd;
+use std::io::{Read, Write};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
 use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -42,6 +42,7 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
+const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
 
 #[derive(Default)]
 struct PixelScroll {
@@ -508,7 +509,11 @@ fn inherit_new_window_stderr(kind: Option<FileType>) -> bool {
     kind.is_some_and(|kind| kind.is_file() || kind.is_char_device())
 }
 
-fn new_window_stderr() -> Stdio {
+fn pipe_new_window_stderr(kind: Option<FileType>) -> bool {
+    kind.is_some_and(|kind| kind.is_fifo() || kind.is_socket())
+}
+
+fn new_window_stderr() -> (Stdio, bool) {
     let kind = std::io::stderr()
         .as_fd()
         .try_clone_to_owned()
@@ -516,10 +521,39 @@ fn new_window_stderr() -> Stdio {
         .map(|metadata| metadata.file_type())
         .ok();
     if inherit_new_window_stderr(kind) {
-        Stdio::inherit()
+        (Stdio::inherit(), false)
+    } else if pipe_new_window_stderr(kind) {
+        (Stdio::piped(), true)
     } else {
-        Stdio::null()
+        (Stdio::null(), false)
     }
+}
+
+fn forward_new_window_stderr(mut reader: impl Read, mut writer: impl Write) -> std::io::Result<()> {
+    let mut chunk = [0; 4096];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(len) => {
+                let _ = writer.write_all(&chunk[..len]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn finish_startup_stderr() -> std::io::Result<()> {
+    let null = File::options().write(true).open("/dev/null")?;
+    if null.as_raw_fd() == libc::STDERR_FILENO {
+        let _ = null.into_raw_fd();
+        return Ok(());
+    }
+    // SAFETY: both descriptors are valid; dup2 atomically replaces stderr.
+    if unsafe { libc::dup2(null.as_raw_fd(), libc::STDERR_FILENO) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
@@ -699,6 +733,7 @@ fn sync_wakeup(
 }
 
 struct App {
+    startup_stderr: bool,
     search: Option<search::Search>,
     config: config::Config,
     config_error: Option<String>,
@@ -758,6 +793,7 @@ impl App {
         .map_err(|e| eprintln!("terminal: config reload unavailable: {e}"))
         .ok();
         App {
+            startup_stderr: false,
             search: None,
             font_size: options.size(&config),
             config,
@@ -1173,6 +1209,13 @@ impl App {
             Some(&mut pre_present),
         );
         if rendered {
+            if self.startup_stderr {
+                if let Err(error) = finish_startup_stderr() {
+                    let _ = writeln!(std::io::stderr(), "terminal: startup stderr: {error}");
+                    std::process::exit(1);
+                }
+                self.startup_stderr = false;
+            }
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             if let Some(target) = exit_target {
                 self.exit_presentation.submitted(target, Instant::now());
@@ -1340,26 +1383,40 @@ impl App {
                         .name("new-window".into())
                         .spawn(|| {
                             let result = std::env::current_exe().and_then(|exe| {
-                                std::process::Command::new(exe)
+                                let (stderr, startup_stderr) = new_window_stderr();
+                                let mut command = std::process::Command::new(exe);
+                                command
                                     .args(std::env::args_os().skip(1))
                                     .stdin(Stdio::null())
                                     .stdout(Stdio::null())
-                                    .stderr(new_window_stderr())
-                                    .spawn()
+                                    .stderr(stderr);
+                                if startup_stderr {
+                                    command.env(STARTUP_STDERR, "1");
+                                }
+                                command.spawn()
                             });
                             match result {
-                                Ok(mut child) => match child.wait() {
-                                    Ok(status) if !status.success() => {
-                                        let _ = writeln!(
-                                            std::io::stderr(),
-                                            "terminal: new window exited with {status}"
-                                        );
-                                    }
-                                    Err(error) => {
+                                Ok(mut child) => {
+                                    if let Some(stderr) = child.stderr.take()
+                                        && let Err(error) =
+                                            forward_new_window_stderr(stderr, std::io::stderr())
+                                    {
                                         let _ = writeln!(std::io::stderr(), "new window: {error}");
                                     }
-                                    Ok(_) => {}
-                                },
+                                    match child.wait() {
+                                        Ok(status) if !status.success() => {
+                                            let _ = writeln!(
+                                                std::io::stderr(),
+                                                "terminal: new window exited with {status}"
+                                            );
+                                        }
+                                        Err(error) => {
+                                            let _ =
+                                                writeln!(std::io::stderr(), "new window: {error}");
+                                        }
+                                        Ok(_) => {}
+                                    }
+                                }
                                 Err(error) => {
                                     let _ = writeln!(std::io::stderr(), "new window: {error}");
                                 }
@@ -2095,6 +2152,9 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 fn main() {
+    let startup_stderr = std::env::var_os(STARTUP_STDERR).is_some();
+    // SAFETY: main has not started any threads or spawned the PTY yet.
+    unsafe { std::env::remove_var(STARTUP_STDERR) };
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
@@ -2113,6 +2173,7 @@ fn main() {
         }
     };
     let mut app = App::new(options, event_loop.create_proxy());
+    app.startup_stderr = startup_stderr;
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("terminal: {e}");
         std::process::exit(1);
@@ -2140,6 +2201,57 @@ mod tests {
     }
 
     #[test]
+    fn new_window_stderr_forwards_empty_and_large_output() {
+        for input in [
+            Vec::new(),
+            b"startup failed\n".to_vec(),
+            vec![b'x'; 100_000],
+        ] {
+            let mut output = Vec::new();
+            forward_new_window_stderr(input.as_slice(), &mut output).unwrap();
+            assert_eq!(output, input);
+        }
+    }
+
+    #[test]
+    fn new_window_stderr_drains_after_writer_closes() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut input = std::io::Cursor::new(vec![b'x'; 100_000]);
+        forward_new_window_stderr(&mut input, Closed).unwrap();
+        assert_eq!(input.position(), 100_000);
+    }
+
+    #[test]
+    fn new_window_stderr_retries_interrupted_reads_and_reports_errors() {
+        struct Errors(bool);
+        impl Read for Errors {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                let kind = if self.0 {
+                    self.0 = false;
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    std::io::ErrorKind::Other
+                };
+                Err(kind.into())
+            }
+        }
+        assert_eq!(
+            forward_new_window_stderr(Errors(true), Vec::new())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Other
+        );
+    }
+
+    #[test]
     fn new_window_stderr_inherits_only_files_and_character_devices() {
         use std::os::unix::net::UnixStream;
         let file = File::open(std::env::current_exe().unwrap()).unwrap();
@@ -2147,20 +2259,22 @@ mod tests {
         let directory = File::open(".").unwrap();
         let (_, pipe) = std::io::pipe().unwrap();
         let (socket, _) = UnixStream::pair().unwrap();
-        for (fd, expected) in [
-            (file.as_fd(), true),
-            (null.as_fd(), true),
-            (directory.as_fd(), false),
-            (pipe.as_fd(), false),
-            (socket.as_fd(), false),
+        for (fd, inherit, pipe) in [
+            (file.as_fd(), true, false),
+            (null.as_fd(), true, false),
+            (directory.as_fd(), false, false),
+            (pipe.as_fd(), false, true),
+            (socket.as_fd(), false, true),
         ] {
             let kind = File::from(fd.try_clone_to_owned().unwrap())
                 .metadata()
                 .unwrap()
                 .file_type();
-            assert_eq!(inherit_new_window_stderr(Some(kind)), expected);
+            assert_eq!(inherit_new_window_stderr(Some(kind)), inherit);
+            assert_eq!(pipe_new_window_stderr(Some(kind)), pipe);
         }
         assert!(!inherit_new_window_stderr(None));
+        assert!(!pipe_new_window_stderr(None));
     }
 
     #[test]
