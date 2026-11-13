@@ -49,6 +49,36 @@ fn scrolling_recycles_rows_as_fresh_blanks() {
 }
 
 #[test]
+fn recycling_releases_oversized_rows_after_narrowing() {
+    let mut t = Terminal::new(1000, 3);
+    t.set_scrollback_limit(100);
+    for _ in 0..103 {
+        t.advance(b"wide\r\n");
+    }
+    assert_eq!(t.scrollback_len(), 100);
+    assert!(
+        t.primary
+            .scrollback
+            .iter()
+            .all(|r| r.cells.capacity() >= 1000)
+    );
+
+    t.resize(80, 3);
+    for _ in 0..103 {
+        t.advance(b"narrow\r\n");
+    }
+    assert_eq!(t.scrollback_len(), 100);
+    for row in t.primary.scrollback.iter().chain(&t.primary.lines) {
+        assert_eq!(row.cells.len(), 80);
+        assert!(
+            row.cells.capacity() <= 160,
+            "capacity {}",
+            row.cells.capacity()
+        );
+    }
+}
+
+#[test]
 fn recycling_preserves_scrollback_order() {
     let mut t = Terminal::new(8, 2);
     t.set_scrollback_limit(2);

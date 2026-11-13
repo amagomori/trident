@@ -95,9 +95,12 @@ struct Hidden {
 }
 
 impl Row {
-    /// Blank the row in place, keeping its allocation.
+    /// Blank the row in place, keeping its allocation unless it is oversized.
     pub fn reset(&mut self, cols: usize, template: &Cell) {
         self.cells.clear();
+        if self.cells.capacity() > cols.saturating_mul(2) {
+            self.cells.shrink_to(cols);
+        }
         self.cells.resize(cols, Cell::blank(template));
         self.wrapped = false;
         self.hidden = None;
