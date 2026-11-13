@@ -935,8 +935,15 @@ bright_white = "#fefdfc"
                     assert_eq!(configured.bindings[&chord], expected);
                 }
             }
-            assert!(!defaults.contains_key(&Chord::parse(&format!("{prefix}+up")).unwrap()));
-            assert!(!defaults.contains_key(&Chord::parse(&format!("{prefix}+down")).unwrap()));
+            for (key, action) in [
+                ("up", Action::JumpToPromptUp),
+                ("down", Action::JumpToPromptDown),
+            ] {
+                assert_eq!(
+                    defaults.get(&Chord::parse(&format!("{prefix}+{key}")).unwrap()),
+                    Some(&action)
+                );
+            }
         }
         assert_eq!(Chord::parse("CMD+option+X"), Chord::parse("super+alt+x"));
         for chord in [
