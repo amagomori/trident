@@ -51,7 +51,7 @@ pub fn insert_preview(term: &mut Terminal, image: &[u8], rows: usize) {
     output.extend_from_slice(format!("\x1b[{};1H\x1b[{rows}L", top + 1).as_bytes());
     output.extend_from_slice(image);
     output.extend_from_slice(format!("\x1b[{};{}H", top + rows + 1, col + 1).as_bytes());
-    term.advance(&output);
+    term.advance_preserving_wrap(&output);
 }
 
 #[cfg(test)]
@@ -105,6 +105,24 @@ mod tests {
         for path in ["/tmp/a\nb", "/tmp/a\rb", "/tmp/\x1b[201~", "/tmp/a\x7fb"] {
             assert!(quoted_path(Path::new(path)).is_none());
         }
+    }
+
+    #[test]
+    fn preview_preserves_pending_wrap_at_right_margin() {
+        let mut term = Terminal::new(20, 24);
+        term.advance(b"$ echo abcdefghijklm");
+        assert_eq!(term.cursor_position(), Some((0, 19)));
+        insert_preview(&mut term, b"", 2);
+        term.advance(&quoted_path(Path::new("/tmp/a")).unwrap());
+        let line = |row| {
+            term.viewport_row(row)
+                .cells
+                .iter()
+                .map(|cell| cell.c)
+                .collect::<String>()
+        };
+        assert_eq!(line(2), "$ echo abcdefghijklm");
+        assert!(line(3).starts_with("'/tmp/a' "));
     }
 
     #[test]

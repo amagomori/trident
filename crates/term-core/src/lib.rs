@@ -233,6 +233,13 @@ impl Terminal {
         }
     }
 
+    /// Apply locally generated output without consuming the prompt's deferred wrap.
+    pub fn advance_preserving_wrap(&mut self, bytes: &[u8]) {
+        let pending_wrap = self.cursor.pending_wrap;
+        self.advance(bytes);
+        self.cursor.pending_wrap = pending_wrap;
+    }
+
     /// Feed bytes from the shell.
     pub fn advance(&mut self, bytes: &[u8]) {
         let mut parser = std::mem::take(&mut self.parser);
