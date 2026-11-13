@@ -108,6 +108,8 @@ pub enum SelectionKind {
     Simple,
     Word,
     Line,
+    /// A rectangle in screen columns, keeping each physical row separate.
+    Block,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -489,6 +491,10 @@ impl Terminal {
         } else {
             (sel.head, sel.anchor)
         };
+        if sel.kind == SelectionKind::Block {
+            start.col = sel.anchor.col.min(sel.head.col);
+            end.col = sel.anchor.col.max(sel.head.col);
+        }
         let first = self.first_line();
         let last = self.history + self.rows as u64 - 1;
         if end.line < first || start.line > last {
@@ -497,7 +503,7 @@ impl Terminal {
         start.line = start.line.max(first);
         end.line = end.line.min(last);
         match sel.kind {
-            SelectionKind::Simple => {
+            SelectionKind::Simple | SelectionKind::Block => {
                 if sel.anchor == sel.head {
                     return None;
                 }
@@ -515,7 +521,38 @@ impl Terminal {
     }
 
     pub fn is_selected(&self, range: Option<(Point, Point)>, point: Point) -> bool {
-        range.is_some_and(|(s, e)| s <= point && point <= e)
+        range
+            .and_then(|range| self.selection_columns(range, point.line))
+            .is_some_and(|(from, to)| (from..=to).contains(&point.col))
+    }
+
+    /// Inclusive columns on one physical row, shared by highlighting and copying.
+    /// Selecting either half of a wide glyph selects the whole glyph.
+    fn selection_columns(&self, (start, end): (Point, Point), line: u64) -> Option<(usize, usize)> {
+        if !(start.line..=end.line).contains(&line) {
+            return None;
+        }
+        let block = self.selection?.kind == SelectionKind::Block;
+        let mut from = if block || line == start.line {
+            start.col
+        } else {
+            0
+        };
+        let mut to = if block || line == end.line {
+            end.col
+        } else {
+            self.cols - 1
+        };
+        from = from.min(self.cols - 1);
+        to = to.min(self.cols - 1);
+        let row = self.line(line);
+        if from > 0 && row.cells[from].flags.contains(Flags::WIDE_SPACER) {
+            from -= 1;
+        }
+        if to + 1 < self.cols && row.cells[to].flags.contains(Flags::WIDE) {
+            to += 1;
+        }
+        Some((from, to))
     }
 
     fn word_boundary(&self, mut point: Point, forward: bool) -> Point {
@@ -541,25 +578,21 @@ impl Terminal {
 
     pub fn selection_text(&self) -> Option<String> {
         let (start, end) = self.selection_range()?;
+        let block = self.selection?.kind == SelectionKind::Block;
         let mut out = String::new();
         for line in start.line..=end.line {
             let row = self.line(line);
-            let from = if line == start.line { start.col } else { 0 };
-            let to = if line == end.line {
-                end.col.min(self.cols - 1)
-            } else {
-                self.cols - 1
-            };
+            let (from, to) = self.selection_columns((start, end), line)?;
             let mut text: String = row.cells[from..=to]
                 .iter()
                 .filter(|c| !c.flags.contains(Flags::WIDE_SPACER))
                 .map(|c| c.c)
                 .collect();
-            if !(row.wrapped && line != end.line) {
+            if !block && !(row.wrapped && line != end.line) {
                 text.truncate(text.trim_end().len());
             }
             out.push_str(&text);
-            if line != end.line && !row.wrapped {
+            if line != end.line && (block || !row.wrapped) {
                 out.push('\n');
             }
         }

@@ -46,6 +46,7 @@ terminal [OPTIONS] [-e COMMAND [ARGS...]]
   --font-size <SIZE>  Font size in points (default: 14)
   --scrollback <LINES> History lines (default: 10000; 0 disables; maximum: 1000000)
   --option-as-alt     On macOS, make Option act as Alt/Meta
+  --copy-on-select    Copy selected text to the clipboard on mouse release
   -e, --command ...   Run this command instead of your shell
 ```
 
@@ -54,12 +55,23 @@ It starts your login shell (`$SHELL`) with `TERM=xterm-256color`.
 | Action | macOS | Linux |
 | --- | --- | --- |
 | Copy selection | Cmd+C | Ctrl+Shift+C (selecting also sets the primary selection) |
+| Select a rectangle | Option-drag | Alt-drag |
+| Extend the current selection | Shift-click or Shift-drag | same |
 | Paste | Cmd+V | Ctrl+Shift+V, Shift+Insert, middle click |
 | Bigger / smaller / reset font | Cmd+= / Cmd+- / Cmd+0 | Ctrl+Shift+= / Ctrl+Shift+- / Ctrl+Shift+0 |
 | Scroll back | Shift+PageUp/PageDown, Shift+Home/End, mouse wheel | same |
 | Clear scrollback | Cmd+K | — |
 
 Hold Shift to select text while a program (vim, tmux, htop) is using the mouse.
+For a rectangle in these programs, hold Shift+Alt (Shift+Option on macOS).
+Shift-click keeps the original anchor and selection shape; without an existing
+selection, it starts a normal drag. Rectangular copies keep spaces and put each
+screen row on its own line, even across soft wraps. Wide characters are copied whole.
+
+Clipboard copy-on-select is off by default; launch with `--copy-on-select` to copy
+on mouse release as well as with the copy shortcut. Linux's primary selection is
+always updated on release, independently of this option. Option-drag works on
+macOS whether or not `--option-as-alt` is set.
 
 ### Configuration
 
