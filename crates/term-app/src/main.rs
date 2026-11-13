@@ -19,7 +19,9 @@ mod show;
 use config::Action;
 use input::MouseButton as ReportButton;
 use pty::Pty;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -31,7 +33,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::{Key, ModifiersState, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
@@ -476,6 +478,28 @@ fn shell_shortcuts_available(term: &Terminal) -> bool {
     term.has_shell_marks() && !term.is_alt_screen()
 }
 
+#[derive(Default)]
+struct HeldAtFocus(HashSet<PhysicalKey>);
+
+impl HeldAtFocus {
+    fn observe(&mut self, key: PhysicalKey, state: ElementState, synthetic: bool) -> bool {
+        match state {
+            ElementState::Released => {
+                self.0.remove(&key);
+            }
+            ElementState::Pressed if synthetic => {
+                self.0.insert(key);
+            }
+            ElementState::Pressed => {}
+        }
+        self.0.contains(&key)
+    }
+}
+
+fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) -> bool {
+    (repeat || held_at_focus) && matches!(action, Action::NewWindow)
+}
+
 fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
     let modifiers = u8::from(mods.control_key())
         | (u8::from(mods.shift_key()) << 1)
@@ -662,6 +686,7 @@ struct App {
     session: Option<Session>,
     font_size: f32,
     modifiers: ModifiersState,
+    held_at_focus: HeldAtFocus,
     focused: bool,
     mouse_pos: PhysicalPosition<f64>,
     left_down: bool,
@@ -720,6 +745,7 @@ impl App {
             proxy,
             session: None,
             modifiers: ModifiersState::empty(),
+            held_at_focus: HeldAtFocus::default(),
             focused: true,
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             left_down: false,
@@ -1262,7 +1288,7 @@ impl App {
     }
 
     /// Handles terminal shortcuts; true if the key was consumed.
-    fn shortcut(&mut self, event: &KeyEvent) -> bool {
+    fn shortcut(&mut self, event: &KeyEvent, held_at_focus: bool) -> bool {
         let mods = self.modifiers;
         let Some(chord) = shortcut_chord(event.key_without_modifiers(), mods) else {
             return false;
@@ -1270,6 +1296,9 @@ impl App {
         let Some(action) = self.config.bindings.get(&chord).cloned() else {
             return cfg!(target_os = "macos") && mods.super_key();
         };
+        if suppress_shortcut_repeat(&action, event.repeat, held_at_focus) {
+            return true;
+        }
         match action {
             Action::Search => {
                 let search = self.search.get_or_insert_with(search::Search::default);
@@ -1291,6 +1320,9 @@ impl App {
                             let result = std::env::current_exe().and_then(|exe| {
                                 std::process::Command::new(exe)
                                     .args(std::env::args_os().skip(1))
+                                    .stdin(Stdio::null())
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null())
                                     .spawn()
                             });
                             match result {
@@ -1943,8 +1975,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed || self.shortcut(&event) {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                let held_at_focus =
+                    self.held_at_focus
+                        .observe(event.physical_key, event.state, is_synthetic);
+                if event.state != ElementState::Pressed || self.shortcut(&event, held_at_focus) {
                     return;
                 }
                 let find_preedit = self.search.as_ref().map(|f| f.preedit.as_str());
@@ -2067,6 +2106,46 @@ mod tests {
         assert!(!shell_shortcuts_available(&term));
         term.advance(b"\x1b[?1049l");
         assert!(shell_shortcuts_available(&term));
+    }
+
+    #[test]
+    fn keys_held_at_focus_stay_guarded_until_released() {
+        use winit::keyboard::KeyCode;
+        let n = PhysicalKey::Code(KeyCode::KeyN);
+        let other = PhysicalKey::Code(KeyCode::ArrowUp);
+        let mut held = HeldAtFocus::default();
+        assert!(!held.observe(n, ElementState::Pressed, false));
+        assert!(!held.observe(n, ElementState::Released, false));
+        assert!(held.observe(n, ElementState::Pressed, true));
+        assert!(held.observe(n, ElementState::Pressed, false));
+        assert!(!held.observe(other, ElementState::Released, false));
+        assert!(held.observe(n, ElementState::Pressed, false));
+        assert!(!held.observe(n, ElementState::Released, false));
+        assert!(!held.observe(n, ElementState::Pressed, false));
+        assert!(held.observe(n, ElementState::Pressed, true));
+        assert!(!held.observe(n, ElementState::Released, true));
+        assert!(!held.observe(n, ElementState::Pressed, false));
+    }
+
+    #[test]
+    fn only_new_window_suppresses_shortcut_repeats() {
+        for action in [
+            Action::NewWindow,
+            Action::LineUp,
+            Action::LineDown,
+            Action::Increase,
+            Action::Decrease,
+            Action::Copy,
+            Action::None,
+        ] {
+            assert!(!suppress_shortcut_repeat(&action, false, false));
+            for (repeat, synthetic) in [(true, false), (false, true), (true, true)] {
+                assert_eq!(
+                    suppress_shortcut_repeat(&action, repeat, synthetic),
+                    matches!(action, Action::NewWindow)
+                );
+            }
+        }
     }
 
     #[test]
