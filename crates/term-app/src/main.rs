@@ -559,6 +559,9 @@ impl App {
         if grid_changed {
             s.term.resize(cols, rows);
             release_freed_memory(&mut s.term);
+            if let Some(search) = &mut self.search {
+                search.dirty = true;
+            }
         }
         if pty_resize_needed(grid_changed, s.pty_cell, cell) {
             s.pty.resize(cols, rows, cell);
@@ -716,6 +719,9 @@ impl App {
                 s.term.palette = self.config.palette.clone();
                 s.term
                     .set_scrollback_limit(self.options.scrollback(&self.config));
+                if let Some(search) = &mut self.search {
+                    search.dirty = true;
+                }
                 release_freed_memory(&mut s.term);
                 if let Some(fonts) = fonts {
                     s.fonts = fonts;
@@ -820,16 +826,12 @@ impl App {
                     changed = true;
                 }
                 Key::Character(c)
-                    if c.eq_ignore_ascii_case("r")
-                        && (self.modifiers.alt_key() || self.modifiers.control_key()) =>
+                    if search::toggles_regex(c, self.modifiers, self.options.option_as_alt) =>
                 {
                     search.regex = !search.regex;
                     changed = true;
                 }
-                _ if !self.modifiers.control_key()
-                    && !self.modifiers.super_key()
-                    && !self.modifiers.alt_key() =>
-                {
+                _ if search::accepts_text(self.modifiers, self.options.option_as_alt) => {
                     if let Some(text) = &event.text {
                         search
                             .query

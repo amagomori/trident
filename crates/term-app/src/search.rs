@@ -1,4 +1,15 @@
 use term_core::{Terminal, search::Match};
+use winit::keyboard::ModifiersState;
+
+pub fn accepts_text(mods: ModifiersState, option_as_alt: bool) -> bool {
+    !mods.control_key() && !mods.super_key() && !(mods.alt_key() && option_as_alt)
+}
+
+pub fn toggles_regex(key: &str, mods: ModifiersState, option_as_alt: bool) -> bool {
+    key.eq_ignore_ascii_case("r")
+        && !mods.super_key()
+        && (mods.control_key() || (mods.alt_key() && option_as_alt))
+}
 
 #[derive(Default)]
 pub struct Search {
@@ -76,6 +87,30 @@ impl Search {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_modifiers() {
+        assert!(accepts_text(ModifiersState::empty(), true));
+        assert!(accepts_text(ModifiersState::SHIFT, true));
+        assert!(accepts_text(ModifiersState::ALT, false));
+        assert!(!accepts_text(ModifiersState::ALT, true));
+        assert!(!accepts_text(ModifiersState::CONTROL, false));
+        assert!(!accepts_text(ModifiersState::SUPER, false));
+        assert!(!accepts_text(
+            ModifiersState::ALT | ModifiersState::CONTROL,
+            false
+        ));
+    }
+
+    #[test]
+    fn regex_command_modifiers() {
+        assert!(toggles_regex("r", ModifiersState::CONTROL, false));
+        assert!(toggles_regex("R", ModifiersState::ALT, true));
+        assert!(!toggles_regex("r", ModifiersState::ALT, false));
+        assert!(!toggles_regex("∞", ModifiersState::ALT, false));
+        assert!(!toggles_regex("", ModifiersState::CONTROL, true));
+        assert!(!toggles_regex("r", ModifiersState::empty(), true));
+    }
 
     #[test]
     fn navigation_refresh_and_errors() {

@@ -24,6 +24,8 @@ impl Flags {
     pub const WIDE_SPACER: Flags = Flags(1 << 8);
     /// Blank standing in for a wide character cut off at the right edge; any write replaces it.
     pub const PAD: Flags = Flags(1 << 9);
+    /// Unprinted column before a wide character that soft-wrapped.
+    pub const WIDE_WRAP: Flags = Flags(1 << 10);
 
     pub fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0

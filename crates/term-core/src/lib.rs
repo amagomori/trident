@@ -730,7 +730,8 @@ impl Terminal {
         if width == 2 && self.cursor.col == self.cols - 1 {
             if self.modes.autowrap {
                 let (row, col) = (self.cursor.row, self.cursor.col);
-                let blank = Cell::blank(&self.cursor.template);
+                let mut blank = Cell::blank(&self.cursor.template);
+                blank.flags.insert(Flags::WIDE_WRAP);
                 let line = &mut self.lines_mut()[row];
                 line.cells[col] = blank;
                 line.wrapped = true;
