@@ -310,6 +310,13 @@ fn shell_output_start_is_invalidated_on_resize() {
     assert_eq!(start.col, 0);
     assert_eq!(start.line, t.first_line());
     assert_eq!(t.selection_text().as_deref(), Some("$ ru"));
+
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]133;A\x07$ run\x1b]133;C\x07result\x1b]133;D;0\x07");
+    t.resize(8, 3);
+    t.select_command_output();
+    assert_eq!(t.selection_range().unwrap().0, Point { line: 0, col: 0 });
+    assert_eq!(t.selection_text().as_deref(), Some("$ runres"));
 }
 
 #[test]
@@ -318,6 +325,9 @@ fn shell_output_starts_on_prompt_row() {
         ("result", "result"),
         ("", ""),
         ("first\r\nlast", "first\nlast"),
+        ("\r\nresult", "result"),
+        ("\r\nfirst\r\nlast", "first\nlast"),
+        ("\r\n", ""),
         ("12345678901234567890", "12345678901234567890"),
     ] {
         for streamed in [false, true] {

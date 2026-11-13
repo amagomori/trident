@@ -299,9 +299,20 @@ impl Terminal {
         {
             stop -= 1;
         }
-        let anchor = Point {
-            line: start + (start_col / self.cols) as u64,
-            col: start_col % self.cols,
+        let start_col = start_col.min(self.cols);
+        let anchor = if self.line(start).cells[start_col..]
+            .iter()
+            .all(|cell| cell.c == ' ')
+        {
+            Point {
+                line: start + 1,
+                col: 0,
+            }
+        } else {
+            Point {
+                line: start,
+                col: start_col,
+            }
         };
         let head = Point {
             line: partial.map_or_else(|| stop.saturating_sub(1), |(line, _)| line),
