@@ -1,5 +1,26 @@
 use std::process::{Command, Stdio};
+use winit::event::MouseButton;
 use winit::keyboard::ModifiersState;
+
+pub enum MouseAction {
+    Open(term_core::Link),
+    Release,
+}
+
+pub fn mouse_action(
+    button: MouseButton,
+    pressed: bool,
+    link_pressed: bool,
+    hover: impl FnOnce() -> Option<term_core::Link>,
+) -> Option<MouseAction> {
+    if button != MouseButton::Left {
+        return None;
+    }
+    if !pressed {
+        return link_pressed.then_some(MouseAction::Release);
+    }
+    hover().map(MouseAction::Open)
+}
 
 pub fn command_modifier(modifiers: ModifiersState) -> bool {
     if cfg!(target_os = "macos") {
@@ -44,6 +65,42 @@ pub fn open(uri: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn releases_only_intercept_recorded_link_presses() {
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            for link_pressed in [false, true] {
+                let action = mouse_action(button, false, link_pressed, || {
+                    panic!("releases must not depend on the hovered link")
+                });
+                assert_eq!(
+                    matches!(action, Some(MouseAction::Release)),
+                    button == MouseButton::Left && link_pressed,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_left_presses_open_hovered_links() {
+        let link = term_core::Link {
+            uri: "https://example.com".into(),
+            start: term_core::Point { line: 0, col: 0 },
+            end: term_core::Point { line: 0, col: 1 },
+        };
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            match mouse_action(button, true, false, || Some(link.clone())) {
+                Some(MouseAction::Open(opened)) => {
+                    assert_eq!(button, MouseButton::Left);
+                    assert_eq!(opened, link);
+                }
+                None => assert_ne!(button, MouseButton::Left),
+                Some(MouseAction::Release) => panic!("press cannot release a link"),
+            }
+        }
+        assert!(mouse_action(MouseButton::Left, true, false, || None).is_none());
+    }
+
     #[test]
     fn allowlist_and_arguments() {
         for uri in [
