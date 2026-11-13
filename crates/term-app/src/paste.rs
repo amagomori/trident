@@ -15,7 +15,7 @@ pub fn prompt(text: &str) -> String {
         .count();
     let what = if text.contains(['\n', '\r']) {
         let s = if lines == 1 { "" } else { "s" };
-        format!("Paste {lines} line{s} with Enter?")
+        format!("Paste {lines} line{s}?")
     } else {
         "Paste text with control characters?".to_owned()
     };
@@ -63,13 +63,10 @@ mod tests {
 
     #[test]
     fn prompt_counts_lines() {
-        assert_eq!(
-            prompt("ls\n"),
-            "Paste 1 line with Enter? Enter pastes, Esc cancels"
-        );
+        assert_eq!(prompt("ls\n"), "Paste 1 line? Enter pastes, Esc cancels");
         assert_eq!(
             prompt("a\r\nb\nc"),
-            "Paste 3 lines with Enter? Enter pastes, Esc cancels"
+            "Paste 3 lines? Enter pastes, Esc cancels"
         );
         assert_eq!(
             prompt("x\x03"),
