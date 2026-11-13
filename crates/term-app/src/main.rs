@@ -440,7 +440,7 @@ impl App {
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let proxy = self.proxy.clone();
         let command_proxy = self.proxy.clone();
-        let pty = Pty::spawn(
+        let mut pty = Pty::spawn(
             self.options.command(&self.config),
             &self.config.env,
             spawn_cols,
@@ -457,6 +457,7 @@ impl App {
                 let _ = command_proxy.send_event(UserEvent::CommandFinished(finished));
             },
         )?;
+        pty.set_command_notifications(self.config.notify_long_commands_after != 0)?;
         let attrs = Window::default_attributes()
             .with_title("terminal")
             .with_inner_size(logical_size);
@@ -678,6 +679,8 @@ impl App {
             }
             self.config = next;
             if let Some(s) = &mut self.session {
+                s.pty
+                    .set_command_notifications(self.config.notify_long_commands_after != 0)?;
                 s.term.palette = self.config.palette.clone();
                 s.term
                     .set_scrollback_limit(self.options.scrollback(&self.config));

@@ -8,27 +8,33 @@ pub struct Finished {
 
 #[derive(Default)]
 struct Foreground {
-    running: Option<(Instant, Option<String>)>,
+    running: std::collections::BTreeMap<i32, (Instant, Option<String>)>,
 }
 
 impl Foreground {
     fn sample(
         &mut self,
-        shell: Option<bool>,
+        group: Option<i32>,
         now: Instant,
         name: impl FnOnce() -> Option<String>,
-    ) -> Option<Finished> {
-        match shell {
-            Some(false) if self.running.is_none() => self.running = Some((now, name())),
-            Some(true) => {
-                return self.running.take().map(|(start, name)| Finished {
-                    name,
-                    duration: now.duration_since(start),
+        exited: impl Fn(i32) -> bool,
+    ) -> Vec<Finished> {
+        let mut finished = Vec::new();
+        self.running.retain(|&pid, (start, name)| {
+            if Some(pid) != group && exited(pid) {
+                finished.push(Finished {
+                    name: name.take(),
+                    duration: now.duration_since(*start),
                 });
+                false
+            } else {
+                true
             }
-            _ => {}
+        });
+        if let Some(group) = group {
+            self.running.entry(group).or_insert_with(|| (now, name()));
         }
-        None
+        finished
     }
 }
 
@@ -184,23 +190,40 @@ fn command_name(group: libc::pid_t) -> Option<String> {
 }
 
 #[cfg(unix)]
+pub struct Watcher {
+    stop: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(unix)]
 pub fn watch(
     fd: std::os::fd::OwnedFd,
     shell: u32,
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     finished: impl Fn(Finished) + Send + 'static,
-) -> std::io::Result<()> {
+) -> std::io::Result<Watcher> {
     use std::os::fd::AsRawFd;
     use std::sync::atomic::Ordering;
-    std::thread::Builder::new()
+    let (stop, receiver) = std::sync::mpsc::channel();
+    let thread = std::thread::Builder::new()
         .name("command-watcher".into())
         .spawn(move || {
             let mut foreground = Foreground::default();
             while !stopped.load(Ordering::Acquire) {
                 // SAFETY: this thread owns the descriptor until it exits.
                 let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
-                let event = foreground.sample(
-                    (group > 0).then_some(group as u32 == shell),
+                let events = foreground.sample(
+                    (group > 0 && group as u32 != shell).then_some(group),
                     Instant::now(),
                     || {
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -212,14 +235,26 @@ pub fn watch(
                             None
                         }
                     },
+                    |pid| {
+                        // SAFETY: signal zero only checks whether the process group exists.
+                        (unsafe { libc::kill(-pid, 0) }) == -1
+                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                    },
                 );
-                if let Some(event) = event {
+                for event in events {
                     finished(event);
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                if receiver.recv_timeout(Duration::from_millis(200))
+                    != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                {
+                    break;
+                }
             }
-        })
-        .map(|_| ())
+        })?;
+    Ok(Watcher {
+        stop,
+        thread: Some(thread),
+    })
 }
 
 #[cfg(test)]
@@ -271,33 +306,41 @@ mod tests {
     fn transitions() {
         let mut state = Foreground::default();
         let now = Instant::now();
-        assert!(state.sample(Some(true), now, || None).is_none());
-        assert!(state.sample(None, now, || None).is_none());
+        assert!(state.sample(None, now, || None, |_| true).is_empty());
         assert!(
             state
-                .sample(Some(false), now, || Some("cargo build".into()))
-                .is_none()
+                .sample(Some(42), now, || Some("cargo build".into()), |_| false)
+                .is_empty()
+        );
+        // A stopped group still exists, even though the shell owns the terminal.
+        assert!(
+            state
+                .sample(None, now + Duration::from_secs(5), || None, |_| false)
+                .is_empty()
         );
         assert!(
             state
-                .sample(Some(false), now + Duration::from_secs(5), || None)
-                .is_none()
+                .sample(Some(42), now + Duration::from_secs(6), || None, |_| false)
+                .is_empty()
         );
-        assert!(state.sample(None, now, || None).is_none());
-        let event = state
-            .sample(Some(true), now + Duration::from_secs(12), || None)
-            .unwrap();
+        let events = state.sample(None, now + Duration::from_secs(12), || None, |_| true);
+        let event = &events[0];
         assert_eq!(event.name.as_deref(), Some("cargo build"));
         assert_eq!(event.duration, Duration::from_secs(12));
-        assert!(state.sample(Some(true), now, || None).is_none());
-        state.sample(Some(false), now, || None);
-        assert!(
-            state
-                .sample(Some(true), now, || None)
-                .unwrap()
-                .name
-                .is_none()
-        );
+        assert!(state.sample(None, now, || None, |_| true).is_empty());
+        state.sample(Some(43), now, || None, |_| false);
+        assert!(state.sample(None, now, || None, |_| true)[0].name.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_watcher_joins_thread_and_closes_descriptor() {
+        use std::os::fd::{AsRawFd, OwnedFd};
+        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let raw = fd.as_raw_fd();
+        let watcher = watch(fd, 1, Default::default(), |_| panic!("no PTY group")).unwrap();
+        drop(watcher);
+        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
     }
 
     #[test]
