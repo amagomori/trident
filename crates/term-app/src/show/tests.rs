@@ -271,6 +271,123 @@ fn text_is_printed_with_controls_made_visible() {
 }
 
 #[test]
+fn latin1_and_windows1252_are_text() {
+    for (bytes, expected) in [
+        (&b"caf\xe9, d\xe9j\xe0 vu\n"[..], "café, déjà vu\n"),
+        (
+            &b"\x93Hello\x94 \x80 \x96 \x91yes\x92\n"[..],
+            "“Hello” € – ‘yes’\n",
+        ),
+        (
+            &b"\x81\x8d\x8f\x90\x9d"[..],
+            "\u{81}\u{8d}\u{8f}\u{90}\u{9d}",
+        ),
+    ] {
+        assert_eq!(detect(bytes), Kind::DecodedText(expected.into()));
+    }
+    let bytes = b"caf\xe9 and enough printable text to allow an escape \x1b[31m\r\nnext\rend";
+    let Kind::DecodedText(text) = detect(bytes) else {
+        panic!("not text")
+    };
+    let mut out = Vec::new();
+    write_text(&mut out, text.as_bytes()).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "café and enough printable text to allow an escape ^[[31m\nnext\nend\n"
+    );
+}
+
+#[test]
+fn utf16_endianness_and_boms() {
+    for little in [true, false] {
+        for bom in [true, false] {
+            let text = "Hello café world\r\nnext\rend\n";
+            let mut bytes = Vec::new();
+            if bom {
+                bytes.extend(if little { [0xff, 0xfe] } else { [0xfe, 0xff] });
+            }
+            for unit in text.encode_utf16() {
+                bytes.extend(if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            assert_eq!(detect(&bytes), Kind::DecodedText(text.into()));
+            let mut out = Vec::new();
+            write_text(&mut out, decode_text(&bytes).unwrap().as_bytes()).unwrap();
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                "Hello café world\nnext\nend\n"
+            );
+        }
+    }
+    assert_eq!(decode_text(&[0xff, 0xfe]), Some(String::new()));
+    assert_eq!(decode_text(&[0xfe, 0xff]), Some(String::new()));
+    assert_eq!(decode_text(&[0xff, 0xfe, 0, 0xd8]), Some("�".into()));
+    assert_eq!(decode_text(&[0xff, 0xfe, 1]), None);
+    let mut out = Vec::new();
+    write_text(
+        &mut out,
+        decode_text(&[0xff, 0xfe, 0x1b, 0, 0x41, 0])
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(out, b"^[A\n");
+}
+
+#[test]
+fn encoding_heuristics_preserve_binaries() {
+    for bytes in [
+        &b"MZ is a text file\n"[..],
+        &b"PK\x03\x04 is a text file\n"[..],
+        &b"%PDF-1.7 is a text file\n"[..],
+    ] {
+        assert_eq!(detect(bytes), Kind::Text);
+    }
+    for bytes in [
+        &b"a\0b\0"[..],
+        &b"\0a\0b"[..],
+        &b"a\0b\0c\0\x01\0"[..],
+        &b"\0a\0b\0c\0\x01"[..],
+        &b"a\0b\0c\0d"[..],
+        &b"\xff\x01\x02\x03"[..],
+        &b"\0\0\0\0"[..],
+    ] {
+        assert_eq!(
+            detect(bytes),
+            Kind::Binary("binary data".into()),
+            "{bytes:?}"
+        );
+    }
+    assert_eq!(
+        detect(b"%PDF-1.7\nmostly printable caf\xe9"),
+        Kind::Binary("PDF document".into())
+    );
+    assert_eq!(
+        detect(b"\x7fELFprintable caf\xe9"),
+        Kind::Binary("ELF executable".into())
+    );
+    assert_eq!(detect(b""), Kind::Text);
+    assert_eq!(detect("café".as_bytes()), Kind::Text);
+}
+
+#[test]
+fn text_detection_checks_the_whole_file() {
+    let mut bytes = vec![b'a'; 8192];
+    bytes.push(0xff);
+    assert!(!is_text(&bytes));
+    assert!(matches!(detect(&bytes), Kind::DecodedText(_)));
+    bytes.push(0);
+    assert_eq!(detect(&bytes), Kind::Binary("binary data".into()));
+
+    let mut utf16 = b"a\0".repeat(4096);
+    utf16.extend(b"\x01\0");
+    assert_eq!(detect(&utf16), Kind::Binary("binary data".into()));
+}
+
+#[test]
 fn binaries_get_a_summary() {
     let mut out = Vec::new();
     show(
