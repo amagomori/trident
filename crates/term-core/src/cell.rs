@@ -81,7 +81,6 @@ pub struct Row {
     pub cells: Vec<Cell>,
     pub flags: RowFlags,
     pub(crate) prompt_col: u32,
-    pub(crate) output_end_col: u32,
     /// The line continues on the next row because it soft-wrapped.
     pub wrapped: bool,
     /// Cells past the right edge, kept when the window narrows so widening brings them back.
@@ -116,7 +115,6 @@ impl Row {
             wrapped: false,
             flags: RowFlags::default(),
             prompt_col: 0,
-            output_end_col: u32::MAX,
             hidden: None,
         }
     }
@@ -217,6 +215,7 @@ impl RowFlags {
     pub const FAILED: Self = Self(8);
     pub const SUCCEEDED: Self = Self(16);
     pub(crate) const OUTPUT_BEFORE_PROMPT: Self = Self(32);
+    pub(crate) const OUTPUT_END: Self = Self(64);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

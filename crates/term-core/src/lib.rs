@@ -265,8 +265,10 @@ impl Terminal {
             .find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
             .map(|line| (line, self.line(line).prompt_col as usize));
         let output_end = (start..prompt.map_or(end, |(line, _)| line + 1)).find_map(|line| {
-            let col = self.line(line).output_end_col;
-            (col != u32::MAX).then_some((line, col as usize))
+            let row = self.line(line);
+            row.flags
+                .contains(RowFlags::OUTPUT_END)
+                .then_some((line, row.prompt_col as usize))
         });
         let boundary = output_end.or(prompt);
         let mut stop = boundary.map_or(end, |(line, _)| line);
@@ -331,7 +333,8 @@ impl Terminal {
                 self.command_finished.push(CommandFinished { exit_code });
                 if !self.alt_active {
                     let row = self.cursor.row;
-                    self.primary.lines[row].output_end_col =
+                    self.primary.lines[row].flags.insert(RowFlags::OUTPUT_END);
+                    self.primary.lines[row].prompt_col =
                         u32::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
                             .unwrap_or(u32::MAX - 1);
                     if let Some(prompt) = self.primary.lines[..=row]
@@ -353,12 +356,14 @@ impl Terminal {
             if mark == b"A" {
                 line.flags.insert(RowFlags::PROMPT);
                 line.flags.insert(RowFlags::OUTPUT_BEFORE_PROMPT);
-                line.prompt_col =
-                    u32::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
-                        .unwrap_or(u32::MAX);
+                if !line.flags.contains(RowFlags::OUTPUT_END) {
+                    line.prompt_col =
+                        u32::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
+                            .unwrap_or(u32::MAX);
+                }
             } else if mark == b"C" {
                 line.flags.remove(RowFlags::OUTPUT_BEFORE_PROMPT);
-                line.output_end_col = u32::MAX;
+                line.flags.remove(RowFlags::OUTPUT_END);
             }
         }
     }
@@ -1196,11 +1201,9 @@ impl Terminal {
             2 => {
                 let flags = self.screen().lines[row].flags;
                 let prompt_col = self.screen().lines[row].prompt_col;
-                let output_end_col = self.screen().lines[row].output_end_col;
                 self.erase_row(row);
                 self.lines_mut()[row].flags = flags;
                 self.lines_mut()[row].prompt_col = prompt_col;
-                self.lines_mut()[row].output_end_col = output_end_col;
             }
             _ => {}
         }
