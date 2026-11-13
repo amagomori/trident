@@ -1588,11 +1588,12 @@ impl App {
     }
 }
 
-/// After scrollback or the grid shrinks, hand the memory the dropped rows freed back to
-/// the OS: glibc keeps freed heap pages otherwise.
+/// Hand memory from dropped rows or recycled buffers back to the OS: glibc keeps
+/// freed heap pages otherwise.
 fn release_freed_memory(term: &mut Terminal) -> bool {
     let shrunk = term.take_shrunk();
-    if shrunk {
+    let recycled = term.take_recycled_memory_freed();
+    if shrunk || recycled {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         // SAFETY: malloc_trim only releases free heap memory; it has no preconditions.
         unsafe {
@@ -2646,6 +2647,26 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn recycling_freed_memory_preserves_fraction() {
+        let mut term = Terminal::new(1000, 5);
+        term.set_scrollback_limit(100);
+        for _ in 0..105 {
+            term.advance(b"wide\r\n");
+        }
+        term.resize(80, 5);
+        assert!(release_freed_memory(&mut term));
+        term.advance(b"narrow\r\n");
+        assert!(term.take_recycled_memory_freed());
+        let mut scroll = PixelScroll { offset: 9.0 };
+        update_terminal(&mut term, &mut scroll, |term| {
+            term.advance(b"narrow\r\n");
+        });
+        assert_eq!(scroll.offset, 9.0);
+        assert!(!term.take_recycled_memory_freed());
+        assert!(!release_freed_memory(&mut term));
     }
 
     #[test]

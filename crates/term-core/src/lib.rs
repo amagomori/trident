@@ -169,6 +169,7 @@ pub struct Terminal {
     max_scrollback: usize,
     /// Whether scrollback or the grid gave up rows since the last `take_shrunk`.
     shrunk: bool,
+    recycled_memory_freed: bool,
     /// Last printed character and a same-batch ED 3/CUP/ED 2 guard, so `clear`
     /// leaves the erased screen out of history. Other dispatches disarm the guard.
     print_state: PrintState,
@@ -223,6 +224,7 @@ impl Terminal {
             history: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             shrunk: false,
+            recycled_memory_freed: false,
             print_state: PrintState::EMPTY,
             display_offset: 0,
             selection: None,
@@ -327,6 +329,11 @@ impl Terminal {
     /// never sets it; upward scrolling reuses rows once scrollback is full.
     pub fn take_shrunk(&mut self) -> bool {
         std::mem::take(&mut self.shrunk)
+    }
+
+    /// Whether recycled rows released oversized buffers since the last call.
+    pub fn take_recycled_memory_freed(&mut self) -> bool {
+        std::mem::take(&mut self.recycled_memory_freed)
     }
 
     /// Change how many lines of scrollback are kept, dropping the oldest ones past it.
@@ -714,7 +721,11 @@ impl Terminal {
             };
             let blank = match spare {
                 Some(mut row) => {
-                    row.reset(self.cols, &self.cursor.template);
+                    row.reset(
+                        self.cols,
+                        &self.cursor.template,
+                        &mut self.recycled_memory_freed,
+                    );
                     row
                 }
                 None => self.blank_row(),
@@ -1163,6 +1174,7 @@ impl Terminal {
         let mut fresh = Terminal::new(cols, rows);
         fresh.max_scrollback = max_scrollback;
         fresh.shrunk = self.shrunk || !self.primary.scrollback.is_empty();
+        fresh.recycled_memory_freed = self.recycled_memory_freed;
         fresh.cell_pixels = self.cell_pixels;
         fresh.palette = self.palette.clone();
         fresh.images = self.images.reset();

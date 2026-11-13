@@ -56,6 +56,7 @@ fn recycling_releases_oversized_rows_after_narrowing() {
         t.advance(b"wide\r\n");
     }
     assert_eq!(t.scrollback_len(), 100);
+    assert!(!t.take_recycled_memory_freed());
     assert!(
         t.primary
             .scrollback
@@ -64,6 +65,8 @@ fn recycling_releases_oversized_rows_after_narrowing() {
     );
 
     t.resize(80, 3);
+    assert!(t.take_shrunk());
+    assert!(!t.take_recycled_memory_freed());
     for _ in 0..103 {
         t.advance(b"narrow\r\n");
     }
@@ -76,6 +79,14 @@ fn recycling_releases_oversized_rows_after_narrowing() {
             row.cells.capacity()
         );
     }
+    assert!(!t.take_shrunk());
+    assert!(t.take_recycled_memory_freed());
+    assert!(!t.take_recycled_memory_freed());
+    for _ in 0..103 {
+        t.advance(b"narrow\r\n");
+    }
+    assert!(!t.take_recycled_memory_freed());
+    assert!(!t.take_shrunk());
 }
 
 #[test]
