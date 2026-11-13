@@ -15,6 +15,7 @@ memmap2.workspace = true
 png.workspace = true
 pollster.workspace = true
 term-core.workspace = true
+unicode-width.workspace = true
 ttf-parser.workspace = true
 wgpu.workspace = true
 

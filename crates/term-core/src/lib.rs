@@ -660,8 +660,14 @@ impl Terminal {
 
     /// Cursor position in viewport coordinates, if it is visible.
     pub fn cursor_position(&self) -> Option<(usize, usize)> {
+        self.input_cursor_position()
+            .filter(|_| self.modes.show_cursor)
+    }
+
+    /// Input position in viewport coordinates, even when an application hides the cursor.
+    pub fn input_cursor_position(&self) -> Option<(usize, usize)> {
         let row = self.cursor.row + self.display_offset;
-        (self.modes.show_cursor && row < self.rows).then_some((row, self.cursor.col))
+        (row < self.rows).then_some((row, self.cursor.col))
     }
 
     pub fn display_offset(&self) -> usize {

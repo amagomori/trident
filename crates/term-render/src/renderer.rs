@@ -2,12 +2,14 @@
 //! backgrounds, glyphs from the atlas, decorations and the cursor), with image placements
 //! drawn between them by `z`.
 
+use crate::Preedit;
 use crate::atlas::{Atlas, GlyphKey};
 use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
 use std::sync::Arc;
 use term_core::colors::Rgb;
 use term_core::{CursorShape, Flags, Terminal};
+use unicode_width::UnicodeWidthChar;
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
 #[repr(C)]
@@ -295,10 +297,20 @@ impl Renderer {
         focused: bool,
         banner: Option<&str>,
         search: Option<&crate::SearchOverlay<'_>>,
+        preedit: Option<Preedit<'_>>,
         pre_present: Option<&mut dyn FnMut()>,
     ) -> bool {
         for _ in 0..2 {
-            if self.build(term, fonts, padding, pixel_offset, focused, banner, search) {
+            if self.build(
+                term,
+                fonts,
+                padding,
+                pixel_offset,
+                focused,
+                banner,
+                search,
+                preedit,
+            ) {
                 break;
             }
         }
@@ -341,6 +353,7 @@ impl Renderer {
         focused: bool,
         banner: Option<&str>,
         search: Option<&crate::SearchOverlay<'_>>,
+        preedit: Option<Preedit<'_>>,
     ) -> bool {
         let mut backgrounds = std::mem::take(&mut self.backgrounds);
         let mut glyphs = std::mem::take(&mut self.glyphs);
@@ -357,7 +370,8 @@ impl Renderer {
             ..
         } = fonts.metrics;
         let selection = term.selection_range();
-        let cursor = term.cursor_position();
+        let preedit = preedit.filter(|p| !p.text.is_empty() && focused);
+        let cursor = term.cursor_position().filter(|_| preedit.is_none());
         let block_cursor = focused && term.cursor_shape == CursorShape::Block;
         let mut ok = true;
 
@@ -558,6 +572,75 @@ impl Renderer {
                         break;
                     }
                 }
+            }
+        }
+
+        if let Some(preedit) = preedit
+            && let Some((row, col)) = term.input_cursor_position()
+        {
+            let layout = preedit.layout(col, term.cols());
+            let x = padding + layout.column as f32 * cw;
+            let y = padding + row as f32 * ch + pixel_offset;
+            overlays.push(self.rect(x, y, layout.width as f32 * cw, ch, term.palette.background));
+            let (a, b) = layout.selection;
+            let left = a.saturating_sub(layout.start).min(layout.width);
+            let right = b.saturating_sub(layout.start).min(layout.width);
+            if right > left {
+                overlays.push(self.rect(
+                    x + left as f32 * cw,
+                    y,
+                    (right - left) as f32 * cw,
+                    ch,
+                    term.palette.selection,
+                ));
+            }
+            let mut column = 0;
+            let mut previous = 0;
+            for c in preedit.text.chars() {
+                let Some(width) = c.width() else { continue };
+                let position = if width == 0 { previous } else { column };
+                previous = position;
+                column += width;
+                if position < layout.start || column > layout.start + layout.width {
+                    continue;
+                }
+                let key = GlyphKey {
+                    c,
+                    style: Style::Regular,
+                    cells: width.max(1) as u8,
+                };
+                match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                    Ok(Some(g)) => overlays.push(Instance {
+                        pos: [
+                            x + (position - layout.start) as f32 * cw + g.left,
+                            y + g.top,
+                        ],
+                        size: [g.width, g.height],
+                        uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
+                        color: self.color(term.palette.foreground, 1.0),
+                    }),
+                    Ok(None) => {}
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            overlays.push(self.rect(
+                x,
+                y + underline_offset,
+                layout.width as f32 * cw,
+                stroke,
+                term.palette.foreground,
+            ));
+            if let Some(caret) = layout.caret {
+                overlays.push(self.rect(
+                    padding + caret as f32 * cw,
+                    y,
+                    stroke.max(1.0),
+                    ch,
+                    term.palette.cursor,
+                ));
             }
         }
 

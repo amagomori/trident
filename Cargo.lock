@@ -2656,6 +2656,7 @@ dependencies = [
  "pollster",
  "term-core",
  "ttf-parser",
+ "unicode-width",
  "wgpu",
  "yeslogic-fontconfig-sys",
 ]
