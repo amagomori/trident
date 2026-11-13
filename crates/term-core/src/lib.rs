@@ -823,6 +823,22 @@ impl Terminal {
                 self.erase_cells(row, 0, col + 1);
             }
             2 => {
+                if !self.alt_active {
+                    let mut used = self
+                        .primary
+                        .lines
+                        .iter()
+                        .rposition(|r| !r.is_blank())
+                        .map_or(0, |r| r + 1);
+                    for p in &self.primary.placements {
+                        let end = p.line.saturating_add(p.rows as u64);
+                        used = used
+                            .max(end.saturating_sub(self.history).min(self.rows as u64) as usize);
+                    }
+                    if used > 0 {
+                        self.scroll_up_region(0, self.rows - 1, used);
+                    }
+                }
                 for r in 0..self.rows {
                     self.erase_row(r);
                 }
