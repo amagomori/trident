@@ -888,6 +888,11 @@ impl App {
             (None, flow) => flow,
         };
         let started = Instant::now();
+        #[cfg(target_os = "linux")]
+        let exit_target = (self.exit_deadline.is_some()
+            && self.exit_presentation.target.is_none()
+            && s.presentation.is_some())
+        .then_some(s.sequence + 1);
         let mut pre_present = || {
             #[cfg(target_os = "linux")]
             if let Some(feedback) = &mut s.presentation {
@@ -903,11 +908,6 @@ impl App {
         #[cfg(target_os = "macos")]
         let exit_target = (self.exit_deadline.is_some() && self.exit_presentation.target.is_none())
             .then(present_macos::arm_exit);
-        #[cfg(target_os = "linux")]
-        let exit_target = (self.exit_deadline.is_some()
-            && self.exit_presentation.target.is_none()
-            && s.presentation.is_some())
-        .then_some(s.sequence + 1);
         let rendered = s.renderer.render(
             &s.term,
             &mut s.fonts,
