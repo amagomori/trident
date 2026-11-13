@@ -9,7 +9,6 @@ use crate::images::{self, ImagePipeline, Layer};
 use std::sync::Arc;
 use term_core::colors::Rgb;
 use term_core::{CursorShape, Flags, Terminal};
-use unicode_width::UnicodeWidthChar;
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
 #[repr(C)]
@@ -594,25 +593,21 @@ impl Renderer {
                     term.palette.selection,
                 ));
             }
-            let mut column = 0;
-            let mut previous = 0;
-            for c in preedit.text.chars() {
-                let Some(width) = c.width() else { continue };
-                let position = if width == 0 { previous } else { column };
-                previous = position;
-                column += width;
-                if position < layout.start || column > layout.start + layout.width {
+            for glyph in preedit.glyphs() {
+                if glyph.base_column < layout.start
+                    || glyph.column + glyph.width > layout.start + layout.width
+                {
                     continue;
                 }
                 let key = GlyphKey {
-                    c,
+                    c: glyph.character,
                     style: Style::Regular,
-                    cells: width.max(1) as u8,
+                    cells: glyph.width.max(1) as u8,
                 };
                 match self.atlas.get(key, fonts, &self.device, &self.queue) {
                     Ok(Some(g)) => overlays.push(Instance {
                         pos: [
-                            x + (position - layout.start) as f32 * cw + g.left,
+                            x + (glyph.column - layout.start) as f32 * cw + g.left,
                             y + g.top,
                         ],
                         size: [g.width, g.height],

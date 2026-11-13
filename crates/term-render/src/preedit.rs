@@ -16,6 +16,13 @@ pub struct PreeditLayout {
     pub selection: (usize, usize),
 }
 
+pub(crate) struct PreeditGlyph {
+    pub character: char,
+    pub column: usize,
+    pub base_column: usize,
+    pub width: usize,
+}
+
 fn columns(text: &str, end: usize) -> usize {
     text.char_indices()
         .take_while(|(byte, _)| *byte < end)
@@ -24,6 +31,25 @@ fn columns(text: &str, end: usize) -> usize {
 }
 
 impl Preedit<'_> {
+    pub(crate) fn glyphs(self) -> impl Iterator<Item = PreeditGlyph> {
+        self.text
+            .chars()
+            .filter_map(|c| c.width().map(|width| (c, width)))
+            .scan((0, 0), |(column, base_column), (character, width)| {
+                if width != 0 {
+                    *base_column = *column;
+                }
+                let glyph = PreeditGlyph {
+                    character,
+                    column: *column,
+                    base_column: *base_column,
+                    width,
+                };
+                *column += width;
+                Some(glyph)
+            })
+    }
+
     /// Fits a single-line composition in the grid, keeping its selected clause visible.
     pub fn layout(self, column: usize, cols: usize) -> PreeditLayout {
         let cols = cols.max(1);
@@ -52,6 +78,31 @@ impl Preedit<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combining_glyphs_use_the_pen_after_their_base() {
+        let preedit = Preedit {
+            text: "e\u{301}\u{300}日\u{3099}",
+            cursor: None,
+        };
+        let glyphs: Vec<_> = preedit.glyphs().collect();
+        assert_eq!(
+            glyphs
+                .iter()
+                .map(|g| (g.column, g.base_column, g.width))
+                .collect::<Vec<_>>(),
+            [(0, 0, 1), (1, 0, 0), (1, 0, 0), (1, 1, 2), (3, 1, 0)]
+        );
+
+        let mut fonts = crate::font::Fonts::new(None, 16.0).expect("bundled font");
+        let accent = fonts
+            .rasterize('\u{301}', crate::font::Style::Regular, 1)
+            .expect("combining acute");
+        assert!(accent.left < 0.0);
+        let left = glyphs[1].column as f32 * fonts.metrics.width + accent.left;
+        assert!(left >= 0.0, "accent must not land before its base cell");
+        assert!(left + accent.width as f32 <= fonts.metrics.width + 1.0);
+    }
 
     #[test]
     fn japanese_byte_offsets_become_wide_columns() {
