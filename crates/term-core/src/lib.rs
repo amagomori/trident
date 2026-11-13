@@ -226,25 +226,39 @@ impl Terminal {
         }
         self.parser = parser;
         self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
-        self.synchronized_reset_prefix = if self.parser_ground {
-            0
-        } else if let Some(start) = memchr::memrchr(0x1b, bytes) {
-            let tail = &bytes[start..];
-            if tail.len() < SYNC_RESET.len() && SYNC_RESET.starts_with(tail) {
-                tail.len() as u8
-            } else {
-                0
-            }
+        if self.parser_ground {
+            self.synchronized_reset_prefix = 0;
         } else {
-            let prefix = self.synchronized_reset_prefix as usize;
-            if prefix > 0
-                && prefix + bytes.len() < SYNC_RESET.len()
-                && SYNC_RESET[prefix..].starts_with(bytes)
-            {
-                (prefix + bytes.len()) as u8
-            } else {
-                0
+            self.track_sync_reset_prefix(bytes);
+        }
+    }
+
+    // Split CSI sequences are rare. Keep their bookkeeping out of the ordinary
+    // parser's hot path, and accept the C0/DEL bytes that vte ignores in a CSI.
+    #[cold]
+    #[inline(never)]
+    fn track_sync_reset_prefix(&mut self, bytes: &[u8]) {
+        let (mut prefix, tail) = match memchr::memrchr(0x1b, bytes) {
+            Some(start) => (1, &bytes[start + 1..]),
+            None => (self.synchronized_reset_prefix as usize, bytes),
+        };
+        for &byte in tail {
+            if prefix == 0 {
+                break;
             }
+            if matches!(byte, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f) {
+                continue;
+            }
+            if SYNC_RESET.get(prefix) == Some(&byte) {
+                prefix += 1;
+            } else {
+                prefix = 0;
+            }
+        }
+        self.synchronized_reset_prefix = if prefix < SYNC_RESET.len() {
+            prefix as u8
+        } else {
+            0
         };
     }
 
@@ -258,9 +272,24 @@ impl Terminal {
         let mut consumed = 0;
         let prefix = self.synchronized_reset_prefix as usize;
         if prefix > 0 {
-            let rest = &SYNC_RESET[prefix..];
-            let end = bytes.len().min(rest.len());
-            if bytes[..end] == rest[..end] {
+            // Finish only this split CSI, allowing embedded controls. The parser
+            // decides whether it actually ends a frame; never parse a later reset
+            // and overwrite the completed frame before checking that decision.
+            let mut matched = prefix;
+            let mut end = 0;
+            for &byte in bytes {
+                if !matches!(byte, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f) {
+                    if SYNC_RESET.get(matched) != Some(&byte) {
+                        break;
+                    }
+                    matched += 1;
+                }
+                end += 1;
+                if matched == SYNC_RESET.len() {
+                    break;
+                }
+            }
+            if end > 0 {
                 self.advance(&bytes[..end]);
                 consumed = end;
                 if self.synchronized_output_ended {

@@ -252,6 +252,25 @@ fn synchronized_reset_split_across_multiple_reads() {
 }
 
 #[test]
+fn synchronized_split_reset_allows_embedded_controls() {
+    for control in [0x00, 0x07, 0x08, 0x0d, 0x19, 0x1f, 0x7f] {
+        for split in 1..b"\x1b[?2026l".len() {
+            let mut t = term(10, 2, "\x1b[?2026hOLD");
+            t.advance(&b"\x1b[?2026l"[..split]);
+            // Padding itself may arrive in a separate read.
+            assert_eq!(t.advance_until_sync_end(&[control]), 1);
+            let mut batch = vec![control];
+            batch.extend_from_slice(&b"\x1b[?2026l"[split..]);
+            let end = batch.len();
+            batch.extend_from_slice(b"\x1b[?2026h\rNEW\x1b[?2026l");
+            assert_eq!(t.advance_until_sync_end(&batch), end);
+            assert!(!t.modes.synchronized_output);
+            assert_eq!(t.viewport_row(0).text(), "OLD");
+        }
+    }
+}
+
+#[test]
 fn synchronized_advance_preserves_plain_flood_batching() {
     let mut t = term(10, 2, "");
     let batch = b"line\r\n".repeat(DEFAULT_SCROLLBACK + 100);
