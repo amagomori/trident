@@ -864,7 +864,6 @@ impl App {
                     _ => {}
                 }
             }
-            return;
         }
     }
 
