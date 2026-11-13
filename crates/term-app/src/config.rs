@@ -914,6 +914,7 @@ bright_white = "#fefdfc"
             let prefix = if macos { "super" } else { "ctrl+shift" };
             let defaults = default_bindings_for(macos);
             for (suffix, name, action) in [
+                ("f", "search", Action::Search),
                 ("n", "new_window", Action::NewWindow),
                 ("alt+up", "scroll_line_up", Action::LineUp),
                 ("alt+down", "scroll_line_down", Action::LineDown),
@@ -935,6 +936,7 @@ bright_white = "#fefdfc"
                 }
             }
             assert!(!defaults.contains_key(&Chord::parse(&format!("{prefix}+up")).unwrap()));
+            assert!(!defaults.contains_key(&Chord::parse(&format!("{prefix}+down")).unwrap()));
         }
         assert_eq!(Chord::parse("CMD+option+X"), Chord::parse("super+alt+x"));
         for chord in [

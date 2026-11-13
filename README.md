@@ -131,7 +131,7 @@ bright_white = "#c0caf5"
 "ctrl+shift+v" = "none"     # remove a default shortcut; pass key to the shell
 ```
 
-Actions: `new_window`, `copy`, `paste`, `paste_primary` (primary selection where supported),
+Actions: `new_window`, `search`, `copy`, `paste`, `paste_primary` (primary selection where supported),
 `increase_font_size`, `decrease_font_size`, `reset_font_size`, `clear_scrollback`,
 `scroll_line_up`, `scroll_line_down`, `scroll_page_up`, `scroll_page_down`,
 `scroll_to_top`, `scroll_to_bottom`, `jump_to_prompt_up`, `jump_to_prompt_down`,
