@@ -19,6 +19,11 @@ fn scrolling_recycles_rows_as_fresh_blanks() {
             flags: Flags::BOLD | Flags::WIDE,
         });
         dirty.wrapped = true;
+        dirty.flags = RowFlags::PROMPT_START;
+        dirty.flags.insert(RowFlags::FAILED);
+        dirty.flags.insert(RowFlags::OUTPUT_START);
+        dirty.prompt_col = 2;
+        dirty.output_col = 3;
         dirty.resize(4);
         let allocation = dirty.cells.as_ptr();
         if mode == 0 {

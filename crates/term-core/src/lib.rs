@@ -10,13 +10,40 @@ mod ghost;
 mod kitty;
 mod perform;
 
-pub use cell::{Cell, Color, Flags, Row};
+pub use cell::{Cell, Color, Flags, Row, RowFlags};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
 use std::collections::VecDeque;
 
 const DEFAULT_SCROLLBACK: usize = 10_000;
 const SYNC_RESET: &[u8] = b"\x1b[?2026l";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Zone {
+    None,
+    Prompt,
+    Input,
+    Output,
+}
+
+struct ShellState {
+    zone: Zone,
+    marks_seen: bool,
+    command_finished: Vec<CommandFinished>,
+    mark_line: Option<u64>,
+    output_ends: Vec<OutputEnd>,
+}
+
+struct OutputEnd {
+    line: u64,
+    cells: Vec<Cell>,
+    wrapped: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandFinished {
+    pub exit_code: Option<i32>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
@@ -111,6 +138,7 @@ pub enum SelectionKind {
     Simple,
     Word,
     Line,
+    CommandOutput,
     /// A rectangle in screen columns, keeping each physical row separate.
     Block,
 }
@@ -190,13 +218,258 @@ pub struct Terminal {
     parser: vte::Parser,
     /// Whether `parser` is known to be in its ground state between calls to `advance`.
     parser_ground: bool,
+    shell: Box<ShellState>,
 }
 
 impl Terminal {
+    pub fn has_shell_marks(&self) -> bool {
+        self.shell.marks_seen
+    }
+
+    pub fn take_command_finished(&mut self) -> Vec<CommandFinished> {
+        std::mem::take(&mut self.shell.command_finished)
+    }
+
+    /// Put the nearest prompt strictly above/below the viewport top at its top.
+    pub fn jump_to_prompt(&mut self, previous: bool) {
+        if self.alt_active {
+            return;
+        }
+        let top = self.history - self.display_offset as u64;
+        let end = self.history + self.rows as u64;
+        let target = if previous {
+            (self.first_line()..top)
+                .rev()
+                .find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
+        } else {
+            (top + 1..end).find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
+        };
+        if let Some(target) = target {
+            self.display_offset = self.history.saturating_sub(target) as usize;
+        } else if !previous {
+            self.display_offset = 0;
+        }
+    }
+
+    /// Select the most recent command output beginning in or above the viewport.
+    pub fn select_command_output(&mut self) {
+        self.selection = None;
+        if self.alt_active {
+            return;
+        }
+        let end = self.history + self.rows as u64;
+        let visible_end = end - self.display_offset as u64;
+        let Some(start) = (self.first_line()..visible_end)
+            .rev()
+            .find(|&line| self.line(line).flags.contains(RowFlags::OUTPUT_START))
+        else {
+            return;
+        };
+        let start_col = self.line(start).output_col as usize;
+        let start_col = if start_col <= self.cols || self.line(start).wrapped {
+            start_col.min(self.cols)
+        } else {
+            0
+        };
+        let prompt = (start..end)
+            .find(|&line| {
+                self.line(line).flags.contains(RowFlags::PROMPT_START)
+                    && (line != start
+                        || self
+                            .line(line)
+                            .flags
+                            .contains(RowFlags::OUTPUT_BEFORE_PROMPT))
+            })
+            .map(|line| (line, self.line(line).prompt_col as usize));
+        let output_end = (start..prompt.map_or(end, |(line, _)| line + 1)).find_map(|line| {
+            let row = self.line(line);
+            row.flags
+                .contains(RowFlags::OUTPUT_END)
+                .then_some((line, row.prompt_col as usize))
+        });
+        let boundary = output_end.or(prompt);
+        let mut stop = boundary.map_or(end, |(line, _)| line);
+        let partial = boundary.filter(|(_, col)| *col > 0);
+        while partial.is_none()
+            && stop > start
+            && self.line(stop - 1).cells.iter().all(|cell| cell.c == ' ')
+        {
+            stop -= 1;
+        }
+        let start_cells = self
+            .command_output_end(start)
+            .map_or(&self.line(start).cells[..], |end| &end.cells);
+        let anchor = if start_cells[start_col.min(start_cells.len())..]
+            .iter()
+            .all(|cell| cell.c == ' ')
+        {
+            Point {
+                line: start + 1,
+                col: 0,
+            }
+        } else {
+            Point {
+                line: start,
+                col: start_col,
+            }
+        };
+        let head = Point {
+            line: partial.map_or_else(|| stop.saturating_sub(1), |(line, _)| line),
+            col: partial.map_or(self.cols - 1, |(_, col)| col - 1),
+        };
+        if (stop > start || partial.is_some()) && (head.line, head.col) >= (anchor.line, anchor.col)
+        {
+            self.selection = Some(Selection {
+                anchor,
+                head,
+                kind: if partial.is_some() || start_col > 0 {
+                    SelectionKind::CommandOutput
+                } else {
+                    SelectionKind::Line
+                },
+            });
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn shell_mark(&mut self, mark: &[u8], args: &[&[u8]]) {
+        if !matches!(mark, b"A" | b"B" | b"C" | b"D") {
+            return;
+        }
+        if !self.alt_active {
+            let first = self.first_line();
+            let last = self.history + self.rows as u64;
+            self.shell
+                .output_ends
+                .retain(|end| (first..last).contains(&end.line));
+            let current = self.history + self.cursor.row as u64;
+            if matches!(self.shell.zone, Zone::Prompt | Zone::Input)
+                && let Some(start) = self.shell.mark_line
+            {
+                let start = if self.max_scrollback == 0 {
+                    self.primary.lines[..=self.cursor.row]
+                        .iter()
+                        .rposition(|row| row.flags.contains(RowFlags::PROMPT))
+                        .map_or(self.history, |row| self.history + row as u64)
+                } else {
+                    start.max(self.first_line())
+                };
+                for line in start..=current {
+                    let row = if line < self.history {
+                        let index = self.primary.scrollback.len() - (self.history - line) as usize;
+                        &mut self.primary.scrollback[index]
+                    } else {
+                        &mut self.primary.lines[(line - self.history) as usize]
+                    };
+                    row.flags.insert(RowFlags::PROMPT);
+                }
+            }
+            self.shell.mark_line = Some(current);
+        } else {
+            self.shell.mark_line = None;
+        }
+        self.shell.marks_seen = true;
+        let flag = match mark {
+            b"A" => {
+                self.shell.zone = Zone::Prompt;
+                Some(RowFlags::PROMPT_START)
+            }
+            b"B" => {
+                self.shell.zone = Zone::Input;
+                Some(RowFlags::PROMPT)
+            }
+            b"C" => {
+                let current = self.history + self.cursor.row as u64;
+                self.shell.output_ends.retain(|end| end.line != current);
+                self.shell.zone = Zone::Output;
+                Some(RowFlags::OUTPUT_START)
+            }
+            b"D" => {
+                let command_ran = self.shell.zone == Zone::Output;
+                self.shell.zone = Zone::None;
+                self.reset_input_modes();
+                if !command_ran {
+                    return;
+                }
+                let exit_code = args
+                    .first()
+                    .and_then(|s| std::str::from_utf8(s).ok()?.parse::<i32>().ok());
+                if self.shell.command_finished.len() == 16 {
+                    self.shell.command_finished.remove(0);
+                }
+                self.shell
+                    .command_finished
+                    .push(CommandFinished { exit_code });
+                if !self.alt_active {
+                    let row = self.cursor.row;
+                    let line = &mut self.primary.lines[row];
+                    // CR and other cursor moves do not erase output to the right.
+                    // Snapshot its extent before the shell draws a prompt or a
+                    // missing-newline marker; a blank row after LF still ends at 0.
+                    let used = line
+                        .cells
+                        .iter()
+                        .rposition(|cell| cell.c != ' ' || cell.flags.contains(Flags::WIDE_SPACER))
+                        .map_or(0, |col| col + 1);
+                    let end = used.max(self.cursor.col + usize::from(self.cursor.pending_wrap));
+                    let absolute = self.history + row as u64;
+                    self.shell.output_ends.retain(|end| end.line != absolute);
+                    if self.shell.output_ends.len() == 16 {
+                        self.shell.output_ends.remove(0);
+                    }
+                    self.shell.output_ends.push(OutputEnd {
+                        line: absolute,
+                        cells: line.cells[..end.min(line.cells.len())].to_vec(),
+                        wrapped: line.wrapped,
+                    });
+                    line.flags.insert(RowFlags::OUTPUT_END);
+                    line.prompt_col = u32::try_from(end).unwrap_or(u32::MAX - 1);
+                    if let Some(prompt) = self.primary.lines[..=row]
+                        .iter_mut()
+                        .rev()
+                        .chain(self.primary.scrollback.iter_mut().rev())
+                        .find(|line| line.flags.contains(RowFlags::PROMPT_START))
+                    {
+                        prompt.flags.set_exit(exit_code);
+                    }
+                }
+                None
+            }
+            _ => None,
+        };
+        if let Some(flag) = flag.filter(|_| !self.alt_active) {
+            let line = &mut self.primary.lines[self.cursor.row];
+            line.flags.insert(flag);
+            if mark == b"A" {
+                line.flags.insert(RowFlags::PROMPT);
+                line.flags.insert(RowFlags::OUTPUT_BEFORE_PROMPT);
+                if !line.flags.contains(RowFlags::OUTPUT_END) {
+                    line.prompt_col =
+                        u32::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
+                            .unwrap_or(u32::MAX);
+                }
+            } else if mark == b"C" {
+                line.output_col =
+                    u16::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
+                        .unwrap_or(u16::MAX);
+                line.flags.remove(RowFlags::OUTPUT_BEFORE_PROMPT);
+                line.flags.remove(RowFlags::OUTPUT_END);
+            }
+        }
+    }
+
     pub fn new(cols: usize, rows: usize) -> Terminal {
         let cols = cols.max(2);
         let rows = rows.max(1);
         Terminal {
+            shell: Box::new(ShellState {
+                zone: Zone::None,
+                marks_seen: false,
+                command_finished: Vec::new(),
+                mark_line: None,
+                output_ends: Vec::new(),
+            }),
             palette: colors::Palette::default(),
             cols,
             rows,
@@ -472,6 +745,7 @@ impl Terminal {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        self.invalidate_output_ends();
         self.selection = None;
         self.display_offset = 0;
         if cols < self.cols || rows < self.rows {
@@ -615,6 +889,7 @@ impl Terminal {
                 start.col = 0;
                 end.col = self.cols - 1;
             }
+            SelectionKind::CommandOutput => {}
         }
         Some((start, end))
     }
@@ -644,11 +919,13 @@ impl Terminal {
         };
         from = from.min(self.cols - 1);
         to = to.min(self.cols - 1);
-        let row = self.line(line);
-        if from > 0 && row.cells[from].flags.contains(Flags::WIDE_SPACER) {
+        let cells = self.selection_cells(line);
+        from = from.min(cells.len().saturating_sub(1));
+        to = to.min(cells.len().saturating_sub(1));
+        if from > 0 && cells[from].flags.contains(Flags::WIDE_SPACER) {
             from -= 1;
         }
-        if to + 1 < self.cols && row.cells[to].flags.contains(Flags::WIDE) {
+        if to + 1 < cells.len() && cells[to].flags.contains(Flags::WIDE) {
             to += 1;
         }
         Some((from, to))
@@ -682,20 +959,74 @@ impl Terminal {
         for line in start.line..=end.line {
             let row = self.line(line);
             let (from, to) = self.selection_columns((start, end), line)?;
-            let mut text: String = row.cells[from..=to]
+            let cells = self.selection_cells(line);
+            let wrapped = self.output_end(line).map_or(row.wrapped, |end| end.wrapped);
+            let mut text: String = cells[from..=to]
                 .iter()
                 .filter(|c| !c.flags.contains(Flags::WIDE_SPACER))
                 .map(|c| c.c)
                 .collect();
-            if !block && !(row.wrapped && line != end.line) {
+            if !block && !(wrapped && line != end.line) {
                 text.truncate(text.trim_end().len());
             }
             out.push_str(&text);
-            if line != end.line && (block || !row.wrapped) {
+            if line != end.line && (block || !wrapped) {
                 out.push('\n');
             }
         }
         Some(out)
+    }
+
+    fn output_end(&self, line: u64) -> Option<&OutputEnd> {
+        if self.alt_active || self.selection?.kind != SelectionKind::CommandOutput {
+            return None;
+        }
+        self.command_output_end(line)
+    }
+
+    fn command_output_end(&self, line: u64) -> Option<&OutputEnd> {
+        let row = self.line(line);
+        self.shell.output_ends.iter().rev().find(|end| {
+            end.line == line
+                && row.flags.contains(RowFlags::OUTPUT_END)
+                && row.prompt_col as usize == end.cells.len()
+                && !end.cells.is_empty()
+        })
+    }
+
+    fn selection_cells(&self, line: u64) -> &[Cell] {
+        self.output_end(line)
+            .map_or(&self.line(line).cells, |end| &end.cells)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn invalidate_output_ends(&mut self) {
+        self.shell.output_ends.clear();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn invalidate_output_ends_in_region(&mut self, top: usize, bottom: usize, scrolled_up: usize) {
+        if self.alt_active {
+            return;
+        }
+        let shift = if top == 0 && self.max_scrollback > 0 {
+            scrolled_up as u64
+        } else {
+            0
+        };
+        let top = self.history + top as u64;
+        let bottom = self.history + bottom as u64;
+        self.shell.output_ends.retain_mut(|end| {
+            if (top..=bottom).contains(&end.line) {
+                return false;
+            }
+            if end.line > bottom {
+                end.line += shift;
+            }
+            true
+        });
     }
 
     // ---- Primitive grid operations used by the escape sequence handlers ----
@@ -707,6 +1038,9 @@ impl Terminal {
     /// Scroll the region `top..=bottom` up by `n` lines.
     fn scroll_up_region(&mut self, top: usize, bottom: usize, n: usize) {
         let n = n.min(bottom - top + 1);
+        if bottom - top != self.rows - 1 {
+            self.invalidate_output_ends_in_region(top, bottom, n);
+        }
         let to_history = top == 0 && !self.alt_active;
         if !self.screen().placements.is_empty() {
             let keeps_lines = to_history && self.max_scrollback > 0;
@@ -756,6 +1090,7 @@ impl Terminal {
     }
 
     fn scroll_down_region(&mut self, top: usize, bottom: usize, n: usize) {
+        self.invalidate_output_ends_in_region(top, bottom, 0);
         let n = n.min(bottom - top + 1);
         if !self.screen().placements.is_empty() {
             self.scroll_placements(top, bottom, n as isize, false);
@@ -983,6 +1318,7 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn erase_saved_lines(&mut self) {
+        self.invalidate_output_ends();
         let scrollback = &mut self.screen_mut().scrollback;
         if !scrollback.is_empty() {
             scrollback.clear();
@@ -1014,7 +1350,13 @@ impl Terminal {
                 }
             }
             1 => self.erase_cells(row, 0, col + 1),
-            2 => self.erase_row(row),
+            2 => {
+                if !self.screen().placements.is_empty() {
+                    self.erase_placements(row, row, 0, usize::MAX);
+                }
+                let blank = self.blank_row();
+                self.lines_mut()[row].erase(blank);
+            }
             _ => {}
         }
     }
@@ -1069,6 +1411,7 @@ impl Terminal {
         if (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row) {
             let bottom = self.scroll_bottom;
             let row = self.cursor.row;
+            self.invalidate_output_ends_in_region(row, bottom, 0);
             let n = n.min(bottom - row + 1);
             if !self.screen().placements.is_empty() {
                 self.scroll_placements(row, bottom, -(n as isize), false);
@@ -1147,6 +1490,7 @@ impl Terminal {
         if enable == self.alt_active {
             return;
         }
+        self.invalidate_output_ends();
         if enable {
             if save_cursor {
                 self.save_cursor();

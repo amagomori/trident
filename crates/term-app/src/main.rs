@@ -470,6 +470,10 @@ fn wake_deadline(
     [frame, resize, probe].into_iter().flatten().min()
 }
 
+fn shell_shortcuts_available(term: &Terminal) -> bool {
+    term.has_shell_marks() && !term.is_alt_screen()
+}
+
 fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
     let modifiers = u8::from(mods.control_key())
         | (u8::from(mods.shift_key()) << 1)
@@ -1286,6 +1290,24 @@ impl App {
                     self.write_input(text.as_bytes());
                 }
             }
+            Action::JumpToPromptUp | Action::JumpToPromptDown | Action::SelectCommandOutput => {
+                if !self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| shell_shortcuts_available(&s.term))
+                {
+                    return false;
+                }
+                if let Some(s) = &mut self.session {
+                    s.scroll.reset();
+                    if action == Action::SelectCommandOutput {
+                        s.term.select_command_output();
+                    } else {
+                        s.term.jump_to_prompt(action == Action::JumpToPromptUp);
+                    }
+                    s.request_frame();
+                }
+            }
             Action::Clear => {
                 if self.search.is_none() {
                     self.write_input(b"\x0c");
@@ -1954,6 +1976,19 @@ fn main() {
 mod tests {
     use super::*;
     #[test]
+    fn shell_shortcuts_follow_primary_screen_marks() {
+        let mut term = Terminal::new(20, 3);
+        assert!(!shell_shortcuts_available(&term));
+        term.advance(b"\x1b]133;A\x07");
+        assert!(shell_shortcuts_available(&term));
+        term.advance(b"\x1b[?1049h");
+        assert!(term.has_shell_marks());
+        assert!(!shell_shortcuts_available(&term));
+        term.advance(b"\x1b[?1049l");
+        assert!(shell_shortcuts_available(&term));
+    }
+
+    #[test]
     fn clipboard_shortcuts_dispatch() {
         let bindings = config::default_bindings_for(false);
         for (key, mods, action) in [
@@ -2009,14 +2044,14 @@ mod tests {
                 config::Chord::parse(&format!("ctrl+arrow{name}")).unwrap(),
                 chord
             );
-            assert!(
-                !config.bindings.contains_key(
-                    &shortcut_chord(
-                        Key::Named(key),
-                        ModifiersState::CONTROL | ModifiersState::SHIFT
-                    )
-                    .unwrap()
-                )
+            let shifted = shortcut_chord(
+                Key::Named(key),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+            )
+            .unwrap();
+            assert_eq!(
+                config.bindings.get(&shifted),
+                config::default_bindings().get(&shifted)
             );
         }
         assert!(

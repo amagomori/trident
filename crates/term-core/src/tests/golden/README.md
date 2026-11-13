@@ -24,3 +24,11 @@ can consume invalid UTF-8 differently at other boundaries. No output is normaliz
 away. The baseline cases cover basic shell-era VT behavior; extended SGR, CJK,
 alternate screen, regions and resize cases protect currently implemented features,
 not a claim of complete VT conformance or resize reflow support.
+
+`*-output.hex` captures interactive zsh 5.8.1, bash 5.1.16 and fish 3.3.1
+with the repository's shell snippets on an 80x24 PTY (`TERM=xterm-256color`,
+`LC_ALL=C.UTF-8`). Records are `case|expected UTF-8 hex|PTY output hex`;
+`startup` initializes the terminal before the commands. Cases execute `printf
+abc`, `printf 'abc\r'`, `printf 'abc\rx'`, CJK, 180 x characters, two lines,
+empty output and `false`. The golden test replays whole chunks and bytewise,
+asserting copied command output and exactly one completion with the right status.

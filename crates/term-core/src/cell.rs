@@ -79,6 +79,9 @@ impl Cell {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
+    pub flags: RowFlags,
+    pub(crate) prompt_col: u32,
+    pub(crate) output_col: u16,
     /// The line continues on the next row because it soft-wrapped.
     pub wrapped: bool,
     /// Cells past the right edge, kept when the window narrows so widening brings them back.
@@ -103,6 +106,15 @@ impl Row {
             *released = true;
         }
         self.cells.resize(cols, Cell::blank(template));
+        self.flags = RowFlags::default();
+        self.prompt_col = 0;
+        self.output_col = 0;
+        self.wrapped = false;
+        self.hidden = None;
+    }
+
+    pub(crate) fn erase(&mut self, blank: Row) {
+        self.cells = blank.cells;
         self.wrapped = false;
         self.hidden = None;
     }
@@ -111,6 +123,9 @@ impl Row {
         Row {
             cells: vec![Cell::blank(template); cols],
             wrapped: false,
+            flags: RowFlags::default(),
+            prompt_col: 0,
+            output_col: 0,
             hidden: None,
         }
     }
@@ -199,4 +214,46 @@ impl Row {
         s.truncate(s.trim_end().len());
         s
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowFlags(u8);
+
+impl RowFlags {
+    pub const PROMPT: Self = Self(1);
+    pub const PROMPT_START: Self = Self(2);
+    pub const OUTPUT_START: Self = Self(4);
+    pub const FAILED: Self = Self(8);
+    pub const SUCCEEDED: Self = Self(16);
+    pub(crate) const OUTPUT_BEFORE_PROMPT: Self = Self(32);
+    pub(crate) const OUTPUT_END: Self = Self(64);
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+
+    pub(crate) fn remove(&mut self, other: Self) {
+        self.0 &= !other.0;
+    }
+
+    pub(crate) fn set_exit(&mut self, exit: Option<i32>) {
+        self.0 &= !(Self::FAILED.0 | Self::SUCCEEDED.0);
+        if let Some(exit) = exit {
+            self.insert(if exit == 0 {
+                Self::SUCCEEDED
+            } else {
+                Self::FAILED
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn row_size_unchanged() {
+    assert_eq!(std::mem::size_of::<Row>(), 40);
 }
