@@ -43,6 +43,7 @@ use term_core::{MouseMode, Point, SelectionKind, Terminal};
 #[cfg(test)]
 use term_render::PADDING;
 use term_render::{Fonts, Renderer};
+mod links;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -242,6 +243,8 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
 
 struct Session {
     composition: ime::Composition,
+    link_pressed: bool,
+    hover: Option<term_core::Link>,
     ime_cursor_area: Option<[f32; 4]>,
     scroll: PixelScroll,
     pty_cell: (f32, f32),
@@ -988,6 +991,8 @@ impl App {
         };
         Ok(Session {
             composition: ime::Composition::default(),
+            link_pressed: false,
+            hover: None,
             ime_cursor_area: None,
             scroll: PixelScroll::default(),
             pty_cell: cell,
@@ -1176,6 +1181,7 @@ impl App {
             search.refresh(&mut s.term, false);
         }
         self.update_ime_cursor_area();
+        let hover = self.hover_link();
         let Some(s) = &mut self.session else { return };
         if s.term.modes.synchronized_output {
             s.redraw_pending = true;
@@ -1239,6 +1245,7 @@ impl App {
             banner.as_deref(),
             search.as_ref(),
             s.composition.preedit().filter(|_| search.is_none()),
+            hover.as_ref(),
             Some(&mut pre_present),
         );
         if rendered {
@@ -1684,6 +1691,30 @@ impl App {
             && !self.modifiers.shift_key()
     }
 
+    fn hover_link(&self) -> Option<term_core::Link> {
+        if !self.focused || !links::command_modifier(self.modifiers) {
+            return None;
+        }
+        let (row, col) = self.cell_at(self.mouse_pos)?;
+        let s = self.session.as_ref()?;
+        s.term.link_at(s.term.viewport_to_point_signed(row, col))
+    }
+
+    fn refresh_link(&mut self) {
+        let link = self.hover_link();
+        if let Some(s) = &mut self.session {
+            s.window.set_cursor(if link.is_some() {
+                winit::window::CursorIcon::Pointer
+            } else {
+                winit::window::CursorIcon::Text
+            });
+            if s.hover != link {
+                s.hover = link;
+                s.request_frame();
+            }
+        }
+    }
+
     fn report_mouse(&mut self, button: ReportButton, pressed: bool, motion: bool) {
         let Some((row, col)) = self.cell_at(self.mouse_pos) else {
             return;
@@ -1705,6 +1736,22 @@ impl App {
 
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) {
         let pressed = state == ElementState::Pressed;
+        if button == MouseButton::Left
+            && !pressed
+            && self.session.as_ref().is_some_and(|s| s.link_pressed)
+        {
+            self.session.as_mut().unwrap().link_pressed = false;
+            return;
+        }
+        if button == MouseButton::Left
+            && let Some(link) = self.hover_link()
+        {
+            if pressed {
+                self.session.as_mut().unwrap().link_pressed = true;
+                links::open(link.uri);
+            }
+            return;
+        }
         // Finish a local drag even if Shift was released while mouse reporting is on.
         if button == MouseButton::Left && !pressed && self.left_down {
             self.left_down = false;
@@ -1757,6 +1804,7 @@ impl App {
     fn cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
         let old = self.cell_at(self.mouse_pos);
         self.mouse_pos = pos;
+        self.refresh_link();
         let cell = self.cell_at(pos);
         if self.left_down {
             if let (Some((row, col)), Some(s)) = (cell, &mut self.session) {
@@ -1979,6 +2027,7 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(s) = &mut self.session {
             s.pty.refresh_flow();
         }
+        self.refresh_link();
         if let Some(s) = &mut self.session
             && std::mem::take(&mut s.pty.flow_redraw)
         {
@@ -2132,7 +2181,10 @@ impl ApplicationHandler<UserEvent> for App {
                     s.window.request_redraw();
                 }
             }
-            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+                self.refresh_link();
+            }
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
             WindowEvent::KeyboardInput {
                 event,
