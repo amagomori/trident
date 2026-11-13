@@ -295,6 +295,34 @@ fn shell_output_snapshot_lifetime() {
 }
 
 #[test]
+fn shell_output_starts_on_prompt_row() {
+    for (output, expected) in [
+        ("result", "result"),
+        ("", ""),
+        ("first\r\nlast", "first\nlast"),
+        ("12345678901234567890", "12345678901234567890"),
+    ] {
+        for streamed in [false, true] {
+            let mut t = Terminal::new(20, 3);
+            let bytes = format!(
+                "\x1b]133;A\x07$ run\x1b]133;B\x07\x1b]133;C\x07{output}\x1b]133;D;0\x07\x1b]133;A\x07$ "
+            );
+            for chunk in bytes
+                .as_bytes()
+                .chunks(if streamed { 1 } else { bytes.len() })
+            {
+                t.advance(chunk);
+            }
+            t.select_command_output();
+            assert_eq!(t.selection_text().as_deref().unwrap_or(""), expected);
+            if expected.is_empty() {
+                assert!(t.selection.is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn shell_integration_unterminated_output() {
     for (output, expected) in [
         ("foo", "foo"),

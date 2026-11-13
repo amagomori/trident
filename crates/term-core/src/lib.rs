@@ -32,6 +32,7 @@ struct ShellState {
     command_finished: Vec<CommandFinished>,
     mark_line: Option<u64>,
     output_ends: Vec<OutputEnd>,
+    output_starts: Vec<(u64, usize)>,
 }
 
 struct OutputEnd {
@@ -266,16 +267,22 @@ impl Terminal {
         else {
             return;
         };
-        if self.line(start).flags.contains(RowFlags::PROMPT_START)
-            && !self
-                .line(start)
-                .flags
-                .contains(RowFlags::OUTPUT_BEFORE_PROMPT)
-        {
-            return;
-        }
+        let start_col = self
+            .shell
+            .output_starts
+            .iter()
+            .rev()
+            .find(|(line, _)| *line == start)
+            .map_or(0, |(_, col)| *col);
         let prompt = (start..end)
-            .find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
+            .find(|&line| {
+                self.line(line).flags.contains(RowFlags::PROMPT_START)
+                    && (line != start
+                        || self
+                            .line(line)
+                            .flags
+                            .contains(RowFlags::OUTPUT_BEFORE_PROMPT))
+            })
             .map(|line| (line, self.line(line).prompt_col as usize));
         let output_end = (start..prompt.map_or(end, |(line, _)| line + 1)).find_map(|line| {
             let row = self.line(line);
@@ -292,17 +299,20 @@ impl Terminal {
         {
             stop -= 1;
         }
-        if stop > start || partial.is_some() {
+        let anchor = Point {
+            line: start + (start_col / self.cols) as u64,
+            col: start_col % self.cols,
+        };
+        let head = Point {
+            line: partial.map_or_else(|| stop.saturating_sub(1), |(line, _)| line),
+            col: partial.map_or(self.cols - 1, |(_, col)| col - 1),
+        };
+        if (stop > start || partial.is_some()) && (head.line, head.col) >= (anchor.line, anchor.col)
+        {
             self.selection = Some(Selection {
-                anchor: Point {
-                    line: start,
-                    col: 0,
-                },
-                head: Point {
-                    line: partial.map_or_else(|| stop - 1, |(line, _)| line),
-                    col: partial.map_or(self.cols - 1, |(_, col)| col - 1),
-                },
-                kind: if partial.is_some() {
+                anchor,
+                head,
+                kind: if partial.is_some() || start_col > 0 {
                     SelectionKind::CommandOutput
                 } else {
                     SelectionKind::Line
@@ -323,6 +333,9 @@ impl Terminal {
             self.shell
                 .output_ends
                 .retain(|end| (first..last).contains(&end.line));
+            self.shell
+                .output_starts
+                .retain(|(line, _)| (first..last).contains(line));
             let current = self.history + self.cursor.row as u64;
             if matches!(self.shell.zone, Zone::Prompt | Zone::Input)
                 && let Some(start) = self.shell.mark_line
@@ -362,6 +375,15 @@ impl Terminal {
             b"C" => {
                 let current = self.history + self.cursor.row as u64;
                 self.shell.output_ends.retain(|end| end.line != current);
+                self.shell
+                    .output_starts
+                    .retain(|(line, _)| *line != current);
+                if !self.alt_active {
+                    self.shell.output_starts.push((
+                        current,
+                        self.cursor.col + usize::from(self.cursor.pending_wrap),
+                    ));
+                }
                 self.shell.zone = Zone::Output;
                 Some(RowFlags::OUTPUT_START)
             }
@@ -447,6 +469,7 @@ impl Terminal {
                 command_finished: Vec::new(),
                 mark_line: None,
                 output_ends: Vec::new(),
+                output_starts: Vec::new(),
             }),
             palette: colors::Palette::default(),
             cols,
