@@ -64,7 +64,9 @@ impl Preedit<'_> {
         let column = column.min(cols.saturating_sub(occupied.min(cols)));
         let available = cols - column;
         let end = selection.1.max(caret.map_or(0, |c| c + 1));
-        let start = end.saturating_sub(available);
+        let start = end
+            .saturating_sub(available)
+            .min(caret.unwrap_or(usize::MAX));
         PreeditLayout {
             column,
             start,
@@ -154,6 +156,25 @@ mod tests {
             (0, 7, 10, Some(9))
         );
         assert_eq!(preedit.layout(3, 1).caret, Some(0));
+    }
+
+    #[test]
+    fn selection_wider_than_the_grid_keeps_the_caret_on_its_character() {
+        let layout = Preedit {
+            text: "abcdefghijklmnopqrst",
+            cursor: Some((0, 20)),
+        }
+        .layout(0, 10);
+        assert_eq!(
+            (layout.column, layout.start, layout.width, layout.caret),
+            (0, 0, 10, Some(0))
+        );
+        let layout = Preedit {
+            text: "abcdefghijklmnopqrst",
+            cursor: Some((5, 20)),
+        }
+        .layout(0, 10);
+        assert_eq!((layout.start, layout.caret), (5, Some(0)));
     }
 
     #[test]

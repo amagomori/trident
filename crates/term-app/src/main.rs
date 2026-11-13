@@ -1906,14 +1906,14 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
             WindowEvent::KeyboardInput { event, .. } => {
+                if event.state != ElementState::Pressed || self.shortcut(&event) {
+                    return;
+                }
                 if self
                     .session
                     .as_ref()
                     .is_some_and(|s| s.composition.preedit().is_some())
                 {
-                    return;
-                }
-                if event.state != ElementState::Pressed || self.shortcut(&event) {
                     return;
                 }
                 if self.search.is_some() {
