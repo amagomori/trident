@@ -132,11 +132,13 @@ impl Row {
                     ..Cell::default()
                 });
             }
-            let used = hidden
-                .iter()
-                .rposition(|c| *c != Cell::default())
-                .map_or(0, |i| i + 1);
-            hidden.truncate(used);
+            if !self.wrapped {
+                let used = hidden
+                    .iter()
+                    .rposition(|c| *c != Cell::default())
+                    .map_or(0, |i| i + 1);
+                hidden.truncate(used);
+            }
             if wide_at_edge || !hidden.is_empty() {
                 self.hidden = Some(Box::new(Hidden {
                     cells: hidden,

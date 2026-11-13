@@ -183,6 +183,25 @@ mod tests {
     }
 
     #[test]
+    fn narrowed_wrapped_trailing_space_is_restored() {
+        let mut t = Terminal::new(4, 2);
+        t.advance(b"abc e");
+        let expected = t.search("c e", false).unwrap();
+        assert_eq!(expected.len(), 1);
+        for width in [3, 8, 3, 4, 8] {
+            t.resize(width, 2);
+            if width >= 4 {
+                assert_eq!(t.search("c e", false).unwrap(), expected);
+                assert_eq!(t.search("c e", true).unwrap(), expected);
+                assert!(t.search("ce", false).unwrap().is_empty());
+                assert!(t.search("c  e", false).unwrap().is_empty());
+            }
+            assert!(t.search("", false).unwrap().is_empty());
+            assert!(t.search("[", true).is_err());
+        }
+    }
+
+    #[test]
     fn resized_soft_wraps_preserve_search_text() {
         for (cols, text, query, history) in [
             (10, "zzzzzFRESHWRAPTARGET", "FRESHWRAPTARGET", false),
