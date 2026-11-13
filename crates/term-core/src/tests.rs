@@ -3,6 +3,104 @@ use super::*;
 mod golden;
 
 #[test]
+fn scrolling_recycles_rows_as_fresh_blanks() {
+    for mode in 0..4 {
+        let mut t = Terminal::new(4, 3);
+        t.set_scrollback_limit(if mode == 0 { 1 } else { 0 });
+        if mode == 3 {
+            t.advance(b"\x1b[?1049h");
+        }
+        let top = if mode == 2 { 1 } else { 0 };
+        let mut dirty = Row::new(8, &Cell::default());
+        dirty.cells.fill(Cell {
+            c: 'x',
+            fg: Color::Indexed(2),
+            bg: Color::Indexed(3),
+            flags: Flags::BOLD | Flags::WIDE,
+        });
+        dirty.wrapped = true;
+        dirty.resize(4);
+        let allocation = dirty.cells.as_ptr();
+        if mode == 0 {
+            t.primary.scrollback.push_back(dirty);
+            t.history = 1;
+            t.scroll_display(1);
+        } else {
+            t.lines_mut()[top] = dirty;
+        }
+        t.lines_mut()[2].cells[0].c = 'z';
+        t.advance(b"\x1b[1;31;44m");
+        t.scroll_up_region(top, 2, 1);
+        let blank = &t.screen().lines[2];
+        assert_eq!(blank.cells.as_ptr(), allocation, "mode {mode}");
+        assert_eq!(*blank, t.blank_row(), "mode {mode}");
+        let mut widened = blank.clone();
+        widened.resize(8);
+        assert!(widened.cells[4..].iter().all(|c| *c == Cell::default()));
+        assert_eq!(t.screen().lines[1].text(), "z");
+        if mode == 0 {
+            assert_eq!(t.primary.scrollback[0].text(), "");
+            assert_eq!(t.history, 2);
+            assert_eq!(t.display_offset(), 1);
+        } else {
+            assert_eq!(t.scrollback_len(), 0);
+        }
+    }
+}
+
+#[test]
+fn recycling_releases_oversized_rows_after_narrowing() {
+    let mut t = Terminal::new(1000, 3);
+    t.set_scrollback_limit(100);
+    for _ in 0..103 {
+        t.advance(b"wide\r\n");
+    }
+    assert_eq!(t.scrollback_len(), 100);
+    assert!(!t.take_recycled_memory_freed());
+    assert!(
+        t.primary
+            .scrollback
+            .iter()
+            .all(|r| r.cells.capacity() >= 1000)
+    );
+
+    t.resize(80, 3);
+    assert!(t.take_shrunk());
+    assert!(!t.take_recycled_memory_freed());
+    for _ in 0..103 {
+        t.advance(b"narrow\r\n");
+    }
+    assert_eq!(t.scrollback_len(), 100);
+    for row in t.primary.scrollback.iter().chain(&t.primary.lines) {
+        assert_eq!(row.cells.len(), 80);
+        assert!(
+            row.cells.capacity() <= 160,
+            "capacity {}",
+            row.cells.capacity()
+        );
+    }
+    assert!(!t.take_shrunk());
+    assert!(t.take_recycled_memory_freed());
+    assert!(!t.take_recycled_memory_freed());
+    for _ in 0..103 {
+        t.advance(b"narrow\r\n");
+    }
+    assert!(!t.take_recycled_memory_freed());
+    assert!(!t.take_shrunk());
+}
+
+#[test]
+fn recycling_preserves_scrollback_order() {
+    let mut t = Terminal::new(8, 2);
+    t.set_scrollback_limit(2);
+    t.advance(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+    assert_eq!(screen(&t), ["five", "six"]);
+    let history: Vec<_> = t.primary.scrollback.iter().map(Row::text).collect();
+    assert_eq!(history, ["three", "four"]);
+    assert_eq!(t.history, 4);
+}
+
+#[test]
 fn configured_palette_resolves_colors_and_osc_queries() {
     let mut term = Terminal::new(80, 24);
     term.palette.background = (1, 2, 3);
