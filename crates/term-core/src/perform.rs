@@ -37,12 +37,8 @@ impl Perform for Terminal {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        if self.print_state.clear_armed()
-            && !matches!((action, intermediates), ('H' | 'f' | 'J', []))
-        {
-            self.print_state.disarm_clear();
-        }
         if ignore {
+            self.print_state.disarm_clear();
             return;
         }
         let private = intermediates.first() == Some(&b'?');
@@ -68,9 +64,20 @@ impl Perform for Terminal {
                 self.move_col(0);
             }
             ('G', []) | ('`', []) => self.move_col(n(0) - 1),
-            ('H', []) | ('f', []) => self.goto(n(0) - 1, n(1) - 1),
+            ('H', []) | ('f', []) => {
+                self.goto(n(0) - 1, n(1) - 1);
+                return;
+            }
             ('I', []) => self.tab(n(0)),
-            ('J', []) | ('J', [b'?']) => self.erase_display(arg(params, 0, 0)),
+            ('J', []) => {
+                self.erase_display(arg(params, 0, 0));
+                return;
+            }
+            ('J', [b'?']) => {
+                self.print_state.disarm_clear();
+                self.erase_display(arg(params, 0, 0));
+                return;
+            }
             ('K', []) | ('K', [b'?']) => self.erase_line(arg(params, 0, 0)),
             ('L', []) => self.insert_lines(n(0)),
             ('M', []) => self.delete_lines(n(0)),
@@ -153,6 +160,7 @@ impl Perform for Terminal {
             }
             _ => {}
         }
+        self.print_state.disarm_clear();
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
