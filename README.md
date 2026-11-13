@@ -59,6 +59,8 @@ It starts your login shell (`$SHELL`) with `TERM=xterm-256color`.
 | Select a rectangle | Option-drag | Alt-drag |
 | Extend the current selection | Shift-click or Shift-drag | same |
 | Paste | Cmd+V | Ctrl+Shift+V, Shift+Insert, middle click |
+| New window | Cmd+N | Ctrl+Shift+N |
+| Scroll one line up / down | Cmd+Option+Up/Down | Ctrl+Alt+Shift+Up/Down |
 | Bigger / smaller / reset font | Cmd+= / Cmd+- / Cmd+0 | Ctrl+Shift+= / Ctrl+Shift+- / Ctrl+Shift+0 |
 | Scroll back | Shift+PageUp/PageDown, Shift+Home/End, mouse wheel | same |
 | Clear scrollback | Cmd+K | — |
@@ -129,10 +131,11 @@ bright_white = "#c0caf5"
 "ctrl+shift+v" = "none"     # remove a default shortcut; pass key to the shell
 ```
 
-Actions: `copy`, `paste`, `paste_primary` (primary selection where supported),
+Actions: `new_window`, `copy`, `paste`, `paste_primary` (primary selection where supported),
 `increase_font_size`, `decrease_font_size`, `reset_font_size`, `clear_scrollback`,
-`scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`,
-`jump_to_prompt_up`, `jump_to_prompt_down`, `select_command_output`, `none`,
+`scroll_line_up`, `scroll_line_down`, `scroll_page_up`, `scroll_page_down`,
+`scroll_to_top`, `scroll_to_bottom`, `jump_to_prompt_up`, `jump_to_prompt_down`,
+`select_command_output`, `none`,
 or `{ send = "..." }`. Chords use `ctrl`, `shift`, `alt` (alias `option`), and
 `super` (alias `cmd`), plus a character or named key such as `pageup`, `home`,
 `insert`, `enter`, `escape`, `space`, arrows, or `f1` through `f35`.
@@ -164,6 +167,10 @@ Bash 4.4+ is required for command-start marks via `PS0` and command completion
 tracking. Older Bash (including macOS `/bin/bash` 3.2) gets prompt marks only,
 not command C/D tracking. Existing `PROMPT_COMMAND` arrays are retained as arrays
 on Bash 5.1+; string hooks and older Bash use a prepended string hook.
+
+New windows launch an independent process with the same command-line options.
+Line-scroll shortcuts leave the prompt-jump chords Cmd+Up/Down and
+Ctrl+Shift+Up/Down available for shell integration.
 
 Changes are watched in the file's parent directory, including atomic editor saves,
 and applied after about 100 ms of quiet. If the config directory (or a symlink

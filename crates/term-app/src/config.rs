@@ -73,6 +73,9 @@ struct SendBinding {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Search,
+    NewWindow,
+    LineUp,
+    LineDown,
     Copy,
     Paste,
     PastePrimary,
@@ -96,6 +99,9 @@ impl Action {
         Ok(match binding {
             Binding::Send(send) => Self::Send(send.send),
             Binding::Name(name) => match name.as_str() {
+                "new_window" => Self::NewWindow,
+                "scroll_line_up" => Self::LineUp,
+                "scroll_line_down" => Self::LineDown,
                 "copy" => Self::Copy,
                 "search" => Self::Search,
                 "paste" => Self::Paste,
@@ -221,6 +227,7 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
     let command = if macos { "super" } else { "ctrl+shift" };
     let mut bindings = BTreeMap::new();
     for (key, action) in [
+        ("n", Action::NewWindow),
         ("c", Action::Copy),
         ("f", Action::Search),
         ("v", Action::Paste),
@@ -234,6 +241,12 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
         (")", Action::Reset),
     ] {
         bindings.insert(Chord::parse(&format!("{command}+{key}")).unwrap(), action);
+    }
+    for (key, action) in [("up", Action::LineUp), ("down", Action::LineDown)] {
+        bindings.insert(
+            Chord::parse(&format!("{command}+alt+{key}")).unwrap(),
+            action,
+        );
     }
     if macos {
         bindings.insert(
@@ -897,6 +910,32 @@ bright_white = "#fefdfc"
 
     #[test]
     fn chords_defaults_overrides_and_unbinding() {
+        for macos in [false, true] {
+            let prefix = if macos { "super" } else { "ctrl+shift" };
+            let defaults = default_bindings_for(macos);
+            for (suffix, name, action) in [
+                ("n", "new_window", Action::NewWindow),
+                ("alt+up", "scroll_line_up", Action::LineUp),
+                ("alt+down", "scroll_line_down", Action::LineDown),
+            ] {
+                let chord = Chord::parse(&format!("{prefix}+{suffix}")).unwrap();
+                assert_eq!(defaults.get(&chord), Some(&action));
+                let configured =
+                    parse_text(&format!("[keybindings]\n'ctrl+x' = '{name}'")).unwrap();
+                assert_eq!(
+                    configured.bindings[&Chord::parse("ctrl+x").unwrap()],
+                    action
+                );
+                for (replacement, expected) in [("none", Action::None), ("copy", Action::Copy)] {
+                    let configured = parse_text(&format!(
+                        "[keybindings]\n'{prefix}+{suffix}' = '{replacement}'"
+                    ))
+                    .unwrap();
+                    assert_eq!(configured.bindings[&chord], expected);
+                }
+            }
+            assert!(!defaults.contains_key(&Chord::parse(&format!("{prefix}+up")).unwrap()));
+        }
         assert_eq!(Chord::parse("CMD+option+X"), Chord::parse("super+alt+x"));
         for chord in [
             "",

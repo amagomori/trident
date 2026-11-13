@@ -1283,6 +1283,29 @@ impl App {
                     s.window.request_redraw();
                 }
             }
+            Action::NewWindow => {
+                if let Err(error) =
+                    std::thread::Builder::new()
+                        .name("new-window".into())
+                        .spawn(|| {
+                            let result = std::env::current_exe().and_then(|exe| {
+                                std::process::Command::new(exe)
+                                    .args(std::env::args_os().skip(1))
+                                    .spawn()
+                            });
+                            match result {
+                                Ok(mut child) => {
+                                    if let Err(error) = child.wait() {
+                                        eprintln!("new window: {error}");
+                                    }
+                                }
+                                Err(error) => eprintln!("new window: {error}"),
+                            }
+                        })
+                {
+                    eprintln!("new window: {error}");
+                }
+            }
             Action::None => return false,
             Action::Copy => self.copy(false),
             Action::Paste => self.paste(false),
@@ -1330,13 +1353,20 @@ impl App {
                     s.request_frame();
                 }
             }
-            Action::PageUp | Action::PageDown | Action::Top | Action::Bottom => {
+            Action::LineUp
+            | Action::LineDown
+            | Action::PageUp
+            | Action::PageDown
+            | Action::Top
+            | Action::Bottom => {
                 if let Some(s) = &mut self.session {
                     if matches!(action, Action::Top | Action::Bottom) && s.term.is_alt_screen() {
                         return false;
                     }
                     let page = s.term.rows() as isize - 1;
                     let delta = match action {
+                        Action::LineUp => 1,
+                        Action::LineDown => -1,
                         Action::PageUp => page,
                         Action::PageDown => -page,
                         Action::Top => isize::MAX / 2,
@@ -2037,6 +2067,37 @@ mod tests {
         assert!(!shell_shortcuts_available(&term));
         term.advance(b"\x1b[?1049l");
         assert!(shell_shortcuts_available(&term));
+    }
+
+    #[test]
+    fn window_and_line_scroll_defaults_dispatch() {
+        use winit::keyboard::NamedKey;
+        for macos in [false, true] {
+            let bindings = config::default_bindings_for(macos);
+            let command = if macos {
+                ModifiersState::SUPER
+            } else {
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            };
+            for (key, mods, action) in [
+                (Key::Character("n".into()), command, Action::NewWindow),
+                (
+                    Key::Named(NamedKey::ArrowUp),
+                    command | ModifiersState::ALT,
+                    Action::LineUp,
+                ),
+                (
+                    Key::Named(NamedKey::ArrowDown),
+                    command | ModifiersState::ALT,
+                    Action::LineDown,
+                ),
+            ] {
+                assert_eq!(
+                    bindings.get(&shortcut_chord(key, mods).unwrap()),
+                    Some(&action)
+                );
+            }
+        }
     }
 
     #[test]
