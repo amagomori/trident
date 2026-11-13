@@ -190,15 +190,52 @@ fn command_name(group: libc::pid_t) -> Option<String> {
 }
 
 #[cfg(unix)]
+pub struct Activity {
+    enabled: std::sync::atomic::AtomicBool,
+    sender: std::sync::mpsc::SyncSender<()>,
+    receiver: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    #[cfg(test)]
+    samples: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(unix)]
+impl Default for Activity {
+    fn default() -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        Self {
+            enabled: false.into(),
+            sender,
+            receiver: std::sync::Mutex::new(receiver),
+            #[cfg(test)]
+            samples: 0.into(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Activity {
+    pub fn kick(&self) {
+        if self.enabled.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = self.sender.try_send(());
+        }
+    }
+}
+
+#[cfg(unix)]
 pub struct Watcher {
-    stop: std::sync::mpsc::Sender<()>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    activity: std::sync::Arc<Activity>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 #[cfg(unix)]
 impl Drop for Watcher {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        self.activity
+            .enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.activity.sender.try_send(());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -338,17 +375,25 @@ pub fn watch(
     fd: std::os::fd::OwnedFd,
     shell: u32,
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    activity: std::sync::Arc<Activity>,
     finished: impl Fn(Finished) + Send + 'static,
 ) -> std::io::Result<Watcher> {
     use std::os::fd::AsRawFd;
     use std::sync::atomic::Ordering;
-    let (stop, receiver) = std::sync::mpsc::channel();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let thread_activity = activity.clone();
     let thread = std::thread::Builder::new()
         .name("command-watcher".into())
         .spawn(move || {
+            let receiver = thread_activity.receiver.lock().unwrap();
             let mut foreground = Foreground::default();
             let mut stopped_groups = StoppedGroups::default();
-            while !stopped.load(Ordering::Acquire) {
+            let mut last_kick = Instant::now();
+            let mut next_sample = Instant::now();
+            while !stopped.load(Ordering::Acquire) && !thread_stop.load(Ordering::Acquire) {
+                #[cfg(test)]
+                thread_activity.samples.fetch_add(1, Ordering::Relaxed);
                 // SAFETY: this thread owns the descriptor until it exits.
                 let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
                 let now = Instant::now();
@@ -374,15 +419,43 @@ pub fn watch(
                 for event in events {
                     finished(event);
                 }
-                if receiver.recv_timeout(Duration::from_millis(200))
-                    != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                {
-                    break;
+                next_sample += Duration::from_millis(200);
+                loop {
+                    let active = !foreground.running.is_empty()
+                        || last_kick.elapsed() < Duration::from_secs(1);
+                    let result = if active {
+                        receiver.recv_timeout(next_sample.saturating_duration_since(Instant::now()))
+                    } else {
+                        receiver
+                            .recv()
+                            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+                    };
+                    match result {
+                        Ok(()) => {
+                            last_kick = Instant::now();
+                            if stopped.load(Ordering::Acquire)
+                                || thread_stop.load(Ordering::Acquire)
+                            {
+                                return;
+                            }
+                            if !active {
+                                next_sample = Instant::now();
+                                break;
+                            }
+                            if Instant::now() >= next_sample {
+                                break;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
                 }
             }
         })?;
+    activity.enabled.store(true, Ordering::Release);
     Ok(Watcher {
         stop,
+        activity,
         thread: Some(thread),
     })
 }
@@ -732,12 +805,91 @@ mod tests {
         reader
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let watcher = watch(writer.into(), 1, Default::default(), |_| {
+        let activity = std::sync::Arc::new(Activity::default());
+        let watcher = watch(
+            writer.into(),
+            1,
+            Default::default(),
+            activity.clone(),
+            |_| panic!("no PTY group"),
+        )
+        .unwrap();
+        assert_idle(&activity);
+        let start = Instant::now();
+        drop(watcher);
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    fn assert_idle(activity: &Activity) {
+        use std::sync::atomic::Ordering;
+        std::thread::sleep(Duration::from_millis(1500));
+        let samples = activity.samples.load(Ordering::Relaxed);
+        assert!(samples > 0);
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(activity.samples.load(Ordering::Relaxed), samples);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_watcher_kick_tracks_real_foreground_command() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::io::Write;
+
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.arg("-i");
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
+            .try_clone_to_owned()
+            .unwrap();
+        let activity = std::sync::Arc::new(Activity::default());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let watcher = watch(
+            fd,
+            child.process_id().unwrap(),
+            Default::default(),
+            activity.clone(),
+            move |event| {
+                sender.send(event).unwrap();
+            },
+        )
+        .unwrap();
+        assert_idle(&activity);
+        // Kick before the shell forks, as happens on an Enter write.
+        activity.kick();
+        let mut writer = pair.master.take_writer().unwrap();
+        writer.write_all(b"sleep 1\n").unwrap();
+        writer.flush().unwrap();
+        let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(event.name.is_some_and(|name| name.starts_with("sleep")));
+        assert!(event.duration >= Duration::from_millis(400));
+        drop(watcher);
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_exit_kick_stops_idle_watcher() {
+        use std::sync::atomic::Ordering;
+        let (_reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let activity = std::sync::Arc::new(Activity::default());
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watcher = watch(writer.into(), 1, stopped.clone(), activity.clone(), |_| {
             panic!("no PTY group")
         })
         .unwrap();
-        drop(watcher);
-        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+        assert_idle(&activity);
+        stopped.store(true, Ordering::Release);
+        activity.kick();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !watcher.thread.as_ref().unwrap().is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(watcher.thread.as_ref().unwrap().is_finished());
     }
 
     #[test]
