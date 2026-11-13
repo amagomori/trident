@@ -1322,11 +1322,8 @@ impl App {
     }
 
     fn watch_appearance(&mut self) {
-        if !self.config.themes.automatic() {
-            return;
-        }
         #[cfg(target_os = "linux")]
-        if !self.appearance_started {
+        if self.config.themes.automatic() && !self.appearance_started {
             let proxy = self.proxy.clone();
             self.appearance_started = appearance::watch(move |theme| {
                 let _ = proxy.send_event(UserEvent::Appearance(theme));
