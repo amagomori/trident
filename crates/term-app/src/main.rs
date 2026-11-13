@@ -1236,6 +1236,7 @@ mod tests {
             font_size: super::DEFAULT_FONT_SIZE,
             command: Vec::new(),
             option_as_alt: true,
+            copy_on_select: false,
         };
         assert_eq!(
             options.font(&config),
