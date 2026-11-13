@@ -1773,7 +1773,6 @@ impl App {
         if !self.focused || !links::command_modifier(self.modifiers) {
             return None;
         }
-        let (row, col) = self.cell_at(self.mouse_pos)?;
         let s = self.session.as_ref()?;
         if pointer_in_search_bar(
             self.search.is_some(),
@@ -1783,6 +1782,15 @@ impl App {
         ) {
             return None;
         }
+        if !pointer_in_grid(
+            self.mouse_pos,
+            self.config.padding as f64 * s.window.scale_factor(),
+            (s.term.cols(), s.term.rows()),
+            (s.fonts.metrics.width, s.fonts.metrics.height),
+        ) {
+            return None;
+        }
+        let (row, col) = self.cell_at(self.mouse_pos)?;
         s.term.link_at(s.term.viewport_to_point_signed(row, col))
     }
 
@@ -1850,21 +1858,22 @@ impl App {
                 return;
             }
         }
-        if button == MouseButton::Left
-            && !pressed
-            && self.session.as_ref().is_some_and(|s| s.link_pressed)
-        {
-            self.session.as_mut().unwrap().link_pressed = false;
-            return;
-        }
-        if button == MouseButton::Left
-            && let Some(link) = self.hover_link()
-        {
-            if pressed {
+        match links::mouse_action(
+            button,
+            pressed,
+            self.session.as_ref().is_some_and(|s| s.link_pressed),
+            || self.hover_link(),
+        ) {
+            Some(links::MouseAction::Release) => {
+                self.session.as_mut().unwrap().link_pressed = false;
+                return;
+            }
+            Some(links::MouseAction::Open(link)) => {
                 self.session.as_mut().unwrap().link_pressed = true;
                 links::open(link.uri);
+                return;
             }
-            return;
+            None => {}
         }
         // Finish a local drag even if Shift was released while mouse reporting is on.
         if button == MouseButton::Left && !pressed && self.left_down {
@@ -2051,6 +2060,18 @@ fn pointer_in_search_bar(
         && pos.x < size.width as f64
         && pos.y >= layout.cursor_area[1] as f64
         && pos.y < size.height as f64
+}
+
+fn pointer_in_grid(
+    pos: PhysicalPosition<f64>,
+    padding: f64,
+    grid: (usize, usize),
+    cell: (f32, f32),
+) -> bool {
+    pos.x >= padding
+        && pos.x < padding + grid.0 as f64 * cell.0 as f64
+        && pos.y >= padding
+        && pos.y < padding + grid.1 as f64 * cell.1 as f64
 }
 
 fn grid_size(window: &Window, fonts: &Fonts, padding: f32) -> (usize, usize) {
@@ -2465,6 +2486,46 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_hit_test_excludes_padding_and_leftover_space() {
+        let padding = 12.0;
+        let grid = (80, 24);
+        let cell = (10.0, 20.0);
+        for (x, y) in [(12.0, 12.0), (811.9, 491.9), (400.0, 250.0)] {
+            assert!(pointer_in_grid(
+                PhysicalPosition::new(x, y),
+                padding,
+                grid,
+                cell
+            ));
+        }
+        for (x, y) in [
+            (11.9, 250.0),
+            (812.0, 250.0),
+            (400.0, 11.9),
+            (400.0, 492.0),
+            (0.0, 0.0),
+            (900.0, 600.0),
+            (f64::NAN, 250.0),
+        ] {
+            assert!(!pointer_in_grid(
+                PhysicalPosition::new(x, y),
+                padding,
+                grid,
+                cell
+            ));
+        }
+        for grid in [(0, 24), (80, 0), (0, 0)] {
+            assert!(!pointer_in_grid(
+                PhysicalPosition::new(12.0, 12.0),
+                padding,
+                grid,
+                cell
+            ));
+        }
+    }
+
     #[test]
     fn input_requests_frame_only_when_view_changes() {
         let mut term = Terminal::new(20, 3);
