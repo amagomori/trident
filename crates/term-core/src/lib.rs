@@ -266,7 +266,7 @@ impl Terminal {
             return;
         };
         let start_col = self.line(start).output_col as usize;
-        let start_col = if start_col < self.cols || self.line(start).wrapped {
+        let start_col = if start_col <= self.cols || self.line(start).wrapped {
             start_col.min(self.cols)
         } else {
             0
@@ -415,14 +415,16 @@ impl Terminal {
                     let end = used.max(self.cursor.col + usize::from(self.cursor.pending_wrap));
                     let absolute = self.history + row as u64;
                     self.shell.output_ends.retain(|end| end.line != absolute);
-                    if self.shell.output_ends.len() == 16 {
-                        self.shell.output_ends.remove(0);
+                    if self.scroll_top == 0 && self.scroll_bottom == self.rows - 1 {
+                        if self.shell.output_ends.len() == 16 {
+                            self.shell.output_ends.remove(0);
+                        }
+                        self.shell.output_ends.push(OutputEnd {
+                            line: absolute,
+                            cells: line.cells[..end.min(line.cells.len())].to_vec(),
+                            wrapped: line.wrapped,
+                        });
                     }
-                    self.shell.output_ends.push(OutputEnd {
-                        line: absolute,
-                        cells: line.cells[..end.min(line.cells.len())].to_vec(),
-                        wrapped: line.wrapped,
-                    });
                     line.flags.insert(RowFlags::OUTPUT_END);
                     line.prompt_col = u32::try_from(end).unwrap_or(u32::MAX - 1);
                     if let Some(prompt) = self.primary.lines[..=row]
@@ -1063,6 +1065,7 @@ impl Terminal {
     }
 
     fn scroll_down_region(&mut self, top: usize, bottom: usize, n: usize) {
+        self.invalidate_output_ends();
         let n = n.min(bottom - top + 1);
         if !self.screen().placements.is_empty() {
             self.scroll_placements(top, bottom, n as isize, false);
@@ -1381,6 +1384,7 @@ impl Terminal {
 
     fn delete_lines(&mut self, n: usize) {
         if (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row) {
+            self.invalidate_output_ends();
             let bottom = self.scroll_bottom;
             let row = self.cursor.row;
             let n = n.min(bottom - row + 1);
@@ -1400,6 +1404,7 @@ impl Terminal {
     fn set_scroll_region(&mut self, top: usize, bottom: usize) {
         let bottom = bottom.min(self.rows - 1);
         if top < bottom {
+            self.invalidate_output_ends();
             self.scroll_top = top;
             self.scroll_bottom = bottom;
             self.goto(0, 0);

@@ -316,6 +316,60 @@ fn shell_output_start_is_clamped_on_resize() {
 }
 
 #[test]
+fn shell_output_snapshots_do_not_follow_different_rows() {
+    for movement in [
+        "\x1b[1;1H\x1b[M",
+        "\x1b[1;2r\x1b[2;1H\n",
+        "\x1b[1;1H\x1b[T",
+        "\x1b[1;1H\x1b[L",
+        "\x1b[1;1H\x1bM",
+        "\x1b[1;2r\x1b[S",
+    ] {
+        for streamed in [false, true] {
+            let mut t = Terminal::new(20, 4);
+            let bytes = format!(
+                "\x1b]133;A\x07$ run\x1b]133;C\x07first!\x1b]133;D;0\x07\r\n\x1b]133;A\x07$ run\x1b]133;C\x07second\x1b]133;D;0\x07{movement}"
+            );
+            for chunk in bytes
+                .as_bytes()
+                .chunks(if streamed { 1 } else { bytes.len() })
+            {
+                t.advance(chunk);
+            }
+            t.select_command_output();
+            assert_eq!(t.selection_text().as_deref(), Some("second"));
+        }
+    }
+}
+
+#[test]
+fn shell_output_in_partial_regions_uses_live_rows() {
+    for streamed in [false, true] {
+        let mut t = Terminal::new(20, 4);
+        let bytes = b"\x1b[1;2r\x1b]133;A\x07$ run\x1b]133;C\x07first!\x1b]133;D;0\x07\r\n\x1b]133;A\x07$ run\x1b]133;C\x07second\x1b]133;D;0\x07\r\n\x1b[r";
+        for chunk in bytes.chunks(if streamed { 1 } else { bytes.len() }) {
+            t.advance(chunk);
+        }
+        assert!(t.shell.output_ends.is_empty());
+        t.select_command_output();
+        assert_eq!(t.selection_text().as_deref(), Some("second"));
+    }
+}
+
+#[test]
+fn shell_pending_wrap_command_before_crlf() {
+    for streamed in [false, true] {
+        let mut t = Terminal::new(20, 4);
+        let bytes = b"\x1b]133;A\x07$ 123456789012345678\x1b]133;B\x07\x1b]133;C\x07\r\nresult\x1b]133;D;0\x07";
+        for chunk in bytes.chunks(if streamed { 1 } else { bytes.len() }) {
+            t.advance(chunk);
+        }
+        t.select_command_output();
+        assert_eq!(t.selection_text().as_deref(), Some("result"));
+    }
+}
+
+#[test]
 fn shell_same_row_output_survives_prompt_erase() {
     for erase in ["\x1b[K", "\x1b[2K"] {
         for streamed in [false, true] {
