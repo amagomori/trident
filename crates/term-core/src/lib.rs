@@ -164,9 +164,6 @@ impl PrintState {
 }
 
 pub struct Terminal {
-    zone: Zone,
-    shell_integration: bool,
-    command_finished: Vec<CommandFinished>,
     pub palette: colors::Palette,
     cols: usize,
     rows: usize,
@@ -207,6 +204,8 @@ pub struct Terminal {
     parser: vte::Parser,
     /// Whether `parser` is known to be in its ground state between calls to `advance`.
     parser_ground: bool,
+    zone: Zone,
+    command_finished: Vec<CommandFinished>,
 }
 
 impl Terminal {
@@ -287,8 +286,9 @@ impl Terminal {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn shell_mark(&mut self, mark: &[u8], args: &[&[u8]]) {
-        self.shell_integration = true;
         let flag = match mark {
             b"A" => {
                 self.zone = Zone::Prompt;
@@ -351,7 +351,6 @@ impl Terminal {
         let rows = rows.max(1);
         Terminal {
             zone: Zone::None,
-            shell_integration: false,
             command_finished: Vec::new(),
             palette: colors::Palette::default(),
             cols,
@@ -924,6 +923,7 @@ impl Terminal {
         }
     }
 
+    #[inline(never)]
     fn linefeed(&mut self) {
         self.cursor.pending_wrap = false;
         if self.cursor.row == self.scroll_bottom {
