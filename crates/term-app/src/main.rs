@@ -870,14 +870,15 @@ impl App {
         let m = s.fonts.metrics;
         let area = if let Some(search) = &self.search {
             let size = s.window.inner_size();
-            term_render::search_cursor_area(
+            term_render::search_layout(
                 search.cursor_column(),
+                search.status().chars().count(),
                 size.width as f32,
                 size.height as f32,
                 m.width,
                 m.height,
             )
-            .1
+            .cursor_area
         } else {
             let (row, col) = s.term.cursor_position().unwrap_or((0, 0));
             let pad = self.config.padding * s.window.scale_factor() as f32;
@@ -1275,21 +1276,23 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
+                if let (Some(s), Some(search)) = (&mut self.session, &mut self.search)
+                    && search.dirty
+                {
+                    search.refresh(&mut s.term, false);
+                }
                 self.update_ime_cursor_area();
                 if let Some(s) = &mut self.session {
-                    if let Some(search) = &mut self.search
-                        && search.dirty
-                    {
-                        search.refresh(&mut s.term, false);
-                    }
-                    let label = self.search.as_ref().map(search::Search::label);
+                    let input = self.search.as_ref().map(search::Search::input);
+                    let status = self.search.as_ref().map(search::Search::status);
                     let search = self
                         .search
                         .as_ref()
                         .map(|search| term_render::SearchOverlay {
                             matches: &search.matches,
                             current: search.current,
-                            label: label.as_deref().unwrap_or_default(),
+                            input: input.as_deref().unwrap_or_default(),
+                            status: status.as_deref().unwrap_or_default(),
                             preedit: search.preedit_columns(),
                             cursor: search.cursor_column(),
                         });

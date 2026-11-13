@@ -481,20 +481,42 @@ impl Renderer {
         }
 
         if let Some(search) = search {
-            let chars: Vec<_> = search.label.chars().collect();
-            let capacity = ((self.config.width as f32 / cw) as usize).max(1);
-            let (start, area) = crate::search_cursor_area(
+            let layout = crate::search_layout(
                 search.cursor,
+                search.status.chars().count(),
                 self.config.width as f32,
                 self.config.height as f32,
                 cw,
                 ch,
             );
-            let visible = &chars[start.min(chars.len())..chars.len().min(start + capacity)];
-            let y = area[1];
+            let y = layout.cursor_area[1];
             overlays.push(self.rect(0.0, y, self.config.width as f32, ch, (35, 40, 65)));
-            for (i, &c) in visible.iter().enumerate() {
-                if search.preedit.contains(&(start + i)) {
+            let prefix = "Find: "
+                .chars()
+                .take(layout.prefix_columns)
+                .enumerate()
+                .map(|(i, c)| (i, c, false));
+            let input = search
+                .input
+                .chars()
+                .enumerate()
+                .skip(layout.input.start)
+                .take(layout.input.len())
+                .map(|(i, c)| {
+                    (
+                        layout.prefix_columns + i - layout.input.start,
+                        c,
+                        search.preedit.contains(&i),
+                    )
+                });
+            let status = search
+                .status
+                .chars()
+                .take(layout.status_columns)
+                .enumerate()
+                .map(|(i, c)| (layout.status_column + i, c, false));
+            for (i, c, preedit) in prefix.chain(input).chain(status) {
+                if preedit {
                     overlays.push(self.rect(i as f32 * cw, y + ch - 2.0, cw, 1.0, (255, 255, 255)));
                 }
                 let key = GlyphKey {

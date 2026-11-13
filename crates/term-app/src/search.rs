@@ -41,14 +41,14 @@ impl Search {
     }
 
     pub fn cursor_column(&self) -> usize {
-        6 + self.query.chars().count()
+        self.query.chars().count()
             + self.preedit[..self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)]
                 .chars()
                 .count()
     }
 
     pub fn preedit_columns(&self) -> std::ops::Range<usize> {
-        let start = 6 + self.query.chars().count();
+        let start = self.query.chars().count();
         start..start + self.preedit.chars().count() + usize::from(!self.preedit.is_empty())
     }
 
@@ -98,7 +98,16 @@ impl Search {
         }
     }
 
-    pub fn label(&self) -> String {
+    pub fn input(&self) -> String {
+        format!(
+            "{}{}▏{}",
+            self.query,
+            &self.preedit[..self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)],
+            &self.preedit[self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)..],
+        )
+    }
+
+    pub fn status(&self) -> String {
         let status = if self.invalid {
             "invalid regex".into()
         } else if self.matches.is_empty() {
@@ -107,10 +116,7 @@ impl Search {
             format!("{}/{}", self.current.unwrap_or(0) + 1, self.matches.len())
         };
         format!(
-            "Find: {}{}▏{}  {}  {}",
-            self.query,
-            &self.preedit[..self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)],
-            &self.preedit[self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)..],
+            "{}  {}",
             status,
             if self.regex { "[regex]" } else { "[plain]" }
         )
@@ -129,8 +135,8 @@ mod tests {
         search.insert("a", &mut term);
         let matches = search.matches.clone();
         search.set_preedit("日本".into(), Some((3, 6)));
-        assert_eq!(search.cursor_column(), 8);
-        assert!(search.label().contains("a日▏本"));
+        assert_eq!(search.cursor_column(), 2);
+        assert_eq!(search.input(), "a日▏本");
         assert_eq!(search.query, "a");
         assert_eq!(search.matches, matches);
         search.set_preedit(String::new(), None);
@@ -142,6 +148,34 @@ mod tests {
         assert_eq!(search.preedit_cursor, None);
         search.clear_preedit();
         assert!(search.preedit.is_empty());
+    }
+
+    #[test]
+    fn long_query_composition_and_status_use_separate_regions() {
+        let query = "a".repeat(75);
+        let mut term = Terminal::new(80, 2);
+        term.advance(query.as_bytes());
+        let mut search = Search::default();
+        search.insert(&query, &mut term);
+        assert_eq!(search.status(), "1/1  [plain]");
+        search.set_preedit("日本".into(), Some((3, 6)));
+        assert_eq!(search.input(), format!("{query}日▏本"));
+        let layout = term_render::search_layout(
+            search.cursor_column(),
+            search.status().chars().count(),
+            800.0,
+            600.0,
+            10.0,
+            20.0,
+        );
+        assert!(layout.input.contains(&search.cursor_column()));
+        assert!(search.preedit_columns().contains(&search.cursor_column()));
+        assert_eq!(layout.status_columns, search.status().chars().count());
+        assert!(layout.cursor_area[0] + layout.cursor_area[2] < layout.status_column as f32 * 10.0);
+        search.insert("[", &mut term);
+        search.regex = true;
+        search.refresh(&mut term, true);
+        assert_eq!(search.status(), "invalid regex  [regex]");
     }
 
     #[test]
@@ -192,12 +226,12 @@ mod tests {
         search.query = "[".into();
         search.regex = true;
         search.refresh(&mut term, true);
-        assert!(search.label().contains("invalid regex"));
+        assert_eq!(search.status(), "invalid regex  [regex]");
         search.step(&mut term, true);
         assert_eq!(search.current, None);
         search.query.clear();
         search.refresh(&mut term, true);
-        assert!(search.label().contains("no matches"));
+        assert!(search.status().contains("no matches"));
     }
 
     #[test]
