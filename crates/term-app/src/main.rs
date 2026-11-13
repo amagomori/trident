@@ -1056,14 +1056,17 @@ impl App {
         s.redraw_pending = false;
         let input = self.search.as_ref().map(search::Search::input);
         let status = self.search.as_ref().map(search::Search::status);
-        let search = self.search.as_ref().map(|search| term_render::SearchOverlay {
-            matches: &search.matches,
-            current: search.current,
-            input: input.as_deref().unwrap_or_default(),
-            status: status.as_deref().unwrap_or_default(),
-            preedit: search.preedit_columns(),
-            cursor: search.cursor_column(),
-        });
+        let search = self
+            .search
+            .as_ref()
+            .map(|search| term_render::SearchOverlay {
+                matches: &search.matches,
+                current: search.current,
+                input: input.as_deref().unwrap_or_default(),
+                status: status.as_deref().unwrap_or_default(),
+                preedit: search.preedit_columns(),
+                cursor: search.cursor_column(),
+            });
         let target = s
             .target
             .take()
