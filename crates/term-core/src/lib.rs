@@ -32,12 +32,10 @@ struct ShellState {
     command_finished: Vec<CommandFinished>,
     mark_line: Option<u64>,
     output_ends: Vec<OutputEnd>,
-    output_starts: Vec<(u64, usize)>,
 }
 
 struct OutputEnd {
     line: u64,
-    row_cells: usize,
     cells: Vec<Cell>,
     wrapped: bool,
 }
@@ -267,13 +265,12 @@ impl Terminal {
         else {
             return;
         };
-        let start_col = self
-            .shell
-            .output_starts
-            .iter()
-            .rev()
-            .find(|(line, _)| *line == start)
-            .map_or(0, |(_, col)| *col);
+        let start_col = self.line(start).output_col as usize;
+        let start_col = if start_col < self.cols || self.line(start).wrapped {
+            start_col.min(self.cols)
+        } else {
+            0
+        };
         let prompt = (start..end)
             .find(|&line| {
                 self.line(line).flags.contains(RowFlags::PROMPT_START)
@@ -299,8 +296,10 @@ impl Terminal {
         {
             stop -= 1;
         }
-        let start_col = start_col.min(self.cols);
-        let anchor = if self.line(start).cells[start_col..]
+        let start_cells = self
+            .command_output_end(start)
+            .map_or(&self.line(start).cells[..], |end| &end.cells);
+        let anchor = if start_cells[start_col.min(start_cells.len())..]
             .iter()
             .all(|cell| cell.c == ' ')
         {
@@ -344,9 +343,6 @@ impl Terminal {
             self.shell
                 .output_ends
                 .retain(|end| (first..last).contains(&end.line));
-            self.shell
-                .output_starts
-                .retain(|(line, _)| (first..last).contains(line));
             let current = self.history + self.cursor.row as u64;
             if matches!(self.shell.zone, Zone::Prompt | Zone::Input)
                 && let Some(start) = self.shell.mark_line
@@ -386,18 +382,6 @@ impl Terminal {
             b"C" => {
                 let current = self.history + self.cursor.row as u64;
                 self.shell.output_ends.retain(|end| end.line != current);
-                self.shell
-                    .output_starts
-                    .retain(|(line, _)| *line != current);
-                if !self.alt_active {
-                    if self.shell.output_starts.len() == 16 {
-                        self.shell.output_starts.remove(0);
-                    }
-                    self.shell.output_starts.push((
-                        current,
-                        self.cursor.col + usize::from(self.cursor.pending_wrap),
-                    ));
-                }
                 self.shell.zone = Zone::Output;
                 Some(RowFlags::OUTPUT_START)
             }
@@ -436,7 +420,6 @@ impl Terminal {
                     }
                     self.shell.output_ends.push(OutputEnd {
                         line: absolute,
-                        row_cells: line.cells.as_ptr() as usize,
                         cells: line.cells[..end.min(line.cells.len())].to_vec(),
                         wrapped: line.wrapped,
                     });
@@ -467,6 +450,9 @@ impl Terminal {
                             .unwrap_or(u32::MAX);
                 }
             } else if mark == b"C" {
+                line.output_col =
+                    u16::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
+                        .unwrap_or(u16::MAX);
                 line.flags.remove(RowFlags::OUTPUT_BEFORE_PROMPT);
                 line.flags.remove(RowFlags::OUTPUT_END);
             }
@@ -483,7 +469,6 @@ impl Terminal {
                 command_finished: Vec::new(),
                 mark_line: None,
                 output_ends: Vec::new(),
-                output_starts: Vec::new(),
             }),
             palette: colors::Palette::default(),
             cols,
@@ -996,10 +981,13 @@ impl Terminal {
         if self.alt_active || self.selection?.kind != SelectionKind::CommandOutput {
             return None;
         }
+        self.command_output_end(line)
+    }
+
+    fn command_output_end(&self, line: u64) -> Option<&OutputEnd> {
         let row = self.line(line);
         self.shell.output_ends.iter().rev().find(|end| {
             end.line == line
-                && end.row_cells == row.cells.as_ptr() as usize
                 && row.flags.contains(RowFlags::OUTPUT_END)
                 && row.prompt_col as usize == end.cells.len()
                 && !end.cells.is_empty()
@@ -1015,7 +1003,6 @@ impl Terminal {
     #[inline(never)]
     fn invalidate_output_ends(&mut self) {
         self.shell.output_ends.clear();
-        self.shell.output_starts.clear();
     }
 
     // ---- Primitive grid operations used by the escape sequence handlers ----

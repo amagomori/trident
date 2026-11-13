@@ -274,12 +274,10 @@ fn shell_output_snapshot_lifetime() {
         let mut t = completed();
         t.advance(invalidate);
         assert!(t.shell.output_ends.is_empty());
-        assert!(t.shell.output_starts.is_empty());
     }
     let mut t = completed();
     t.resize(10, 4);
     assert!(t.shell.output_ends.is_empty());
-    assert!(t.shell.output_starts.is_empty());
 
     let mut t = completed();
     t.set_scrollback_limit(1);
@@ -293,18 +291,16 @@ fn shell_output_snapshot_lifetime() {
         t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07\r\n");
     }
     assert_eq!(t.shell.output_ends.len(), 16);
-    assert_eq!(t.shell.output_starts.len(), 16);
     assert_eq!(std::mem::size_of::<Row>(), 40);
 }
 
 #[test]
-fn shell_output_start_is_invalidated_on_resize() {
+fn shell_output_start_is_clamped_on_resize() {
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ run\x1b]133;B\x07\x1b]133;C\x07result\x1b]133;D;0\x07");
     t.select_command_output();
     assert_eq!(t.selection_text().as_deref(), Some("result"));
     t.resize(4, 5);
-    assert!(t.shell.output_starts.is_empty());
     t.select_command_output();
     let (start, _) = t.selection_range().unwrap();
     assert_eq!(start.col, 0);
@@ -315,8 +311,55 @@ fn shell_output_start_is_invalidated_on_resize() {
     t.advance(b"\x1b]133;A\x07$ run\x1b]133;C\x07result\x1b]133;D;0\x07");
     t.resize(8, 3);
     t.select_command_output();
-    assert_eq!(t.selection_range().unwrap().0, Point { line: 0, col: 0 });
-    assert_eq!(t.selection_text().as_deref(), Some("$ runres"));
+    assert_eq!(t.selection_range().unwrap().0, Point { line: 0, col: 5 });
+    assert_eq!(t.selection_text().as_deref(), Some("res"));
+}
+
+#[test]
+fn shell_same_row_output_survives_prompt_erase() {
+    for erase in ["\x1b[K", "\x1b[2K"] {
+        for streamed in [false, true] {
+            let mut t = Terminal::new(20, 3);
+            let bytes = format!(
+                "\x1b]133;A\x07$ run\x1b]133;C\x07result\x1b]133;D;0\x07\r\x1b]133;A\x07{erase}$ "
+            );
+            let bytes = bytes.as_bytes();
+            for chunk in bytes.chunks(if streamed { 1 } else { bytes.len() }) {
+                t.advance(chunk);
+            }
+            t.select_command_output();
+            assert_eq!(t.selection_text().as_deref(), Some("result"));
+        }
+    }
+}
+
+#[test]
+fn shell_same_row_output_starts_survive_history() {
+    for streamed in [false, true] {
+        let mut t = Terminal::new(20, 1);
+        let bytes = b"\x1b]133;A\x07$ run\x1b]133;C\x07result\x1b]133;D;0\x07\r\n".repeat(25);
+        for chunk in bytes.chunks(if streamed { 1 } else { bytes.len() }) {
+            t.advance(chunk);
+        }
+        t.display_offset = t.history as usize;
+        t.select_command_output();
+        assert_eq!(t.selection_range().unwrap().0, Point { line: 0, col: 5 });
+        assert_eq!(t.selection_text().as_deref(), Some("result"));
+    }
+}
+
+#[test]
+fn shell_same_row_output_start_survives_alternate_screen() {
+    for streamed in [false, true] {
+        let mut t = Terminal::new(20, 3);
+        let bytes =
+            b"\x1b]133;A\x07$ run\x1b]133;C\x07result\x1b]133;D;0\x07\x1b[?1049hvim\x1b[?1049l";
+        for chunk in bytes.chunks(if streamed { 1 } else { bytes.len() }) {
+            t.advance(chunk);
+        }
+        t.select_command_output();
+        assert_eq!(t.selection_text().as_deref(), Some("result"));
+    }
 }
 
 #[test]
