@@ -169,6 +169,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
 
 struct Session {
     scroll: PixelScroll,
+    pty_cell: (f32, f32),
     window: Arc<Window>,
     renderer: Renderer,
     fonts: Fonts,
@@ -395,6 +396,7 @@ impl App {
         };
         Ok(Session {
             scroll: PixelScroll::default(),
+            pty_cell: cell,
             latency,
             window,
             renderer,
@@ -417,13 +419,17 @@ impl App {
         s.scroll.reset();
         s.resize.applied(Instant::now());
         let (cols, rows) = grid_size(&s.window, &s.fonts);
+        let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
+        let grid_changed = (cols, rows) != (s.term.cols(), s.term.rows());
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
-        if (cols, rows) != (s.term.cols(), s.term.rows()) {
+        if grid_changed {
             s.term.resize(cols, rows);
             release_freed_memory(&mut s.term);
-            s.pty
-                .resize(cols, rows, (s.fonts.metrics.width, s.fonts.metrics.height));
+        }
+        if pty_resize_needed(grid_changed, s.pty_cell, cell) {
+            s.pty.resize(cols, rows, cell);
+            s.pty_cell = cell;
         }
         s.window.request_redraw();
     }
@@ -752,6 +758,10 @@ fn release_freed_memory(term: &mut Terminal) -> bool {
         }
     }
     shrunk
+}
+
+fn pty_resize_needed(grid_changed: bool, previous_cell: (f32, f32), cell: (f32, f32)) -> bool {
+    grid_changed || previous_cell != cell
 }
 
 fn grid_size(window: &Window, fonts: &Fonts) -> (usize, usize) {
@@ -1100,6 +1110,17 @@ mod tests {
         update_terminal(&mut term, &mut scroll, Terminal::scroll_to_bottom);
         assert_eq!(term.display_offset(), 0);
         assert_eq!(scroll.offset, 0.0);
+    }
+
+    #[test]
+    fn pty_resize_tracks_grid_and_cell_pixels() {
+        let cell = (8.0, 19.0);
+        assert!(!pty_resize_needed(false, cell, cell));
+        assert!(pty_resize_needed(true, cell, cell));
+        assert!(pty_resize_needed(false, cell, (17.0, 37.0)));
+        assert!(pty_resize_needed(false, (17.0, 37.0), cell));
+        assert!(pty_resize_needed(false, cell, (9.0, 19.0)));
+        assert!(pty_resize_needed(false, cell, (8.0, 20.0)));
     }
 
     #[test]
