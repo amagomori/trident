@@ -31,59 +31,73 @@ impl Terminal {
             .build()
             .map_err(|e| e.to_string())?;
         let mut matches = Vec::new();
-        let mut oldest = 0;
         let mut text = String::new();
         let mut points = Vec::new();
         let last = self.history + self.rows as u64 - 1;
-        for line in self.first_line()..=last {
-            let row = self.line(line);
-            let end_of_line = !row.wrapped || line == last;
-            let cells = if end_of_line {
-                let end = row
-                    .cells
-                    .iter()
-                    .rposition(|cell| *cell != Cell::default())
-                    .map_or(0, |col| col + 1);
-                &row.cells[..end]
-            } else {
-                &row.cells[..]
-            };
-            for (col, cell) in cells.iter().enumerate() {
-                if cell.flags.contains(Flags::WIDE_SPACER)
-                    || cell.flags.contains(Flags::PAD)
-                    || cell.flags.contains(Flags::WIDE_WRAP)
-                {
-                    continue;
-                }
-                let start = Point { line, col };
-                let end = Point {
-                    line,
-                    col: col + usize::from(cell.flags.contains(Flags::WIDE)),
-                };
-                text.push(cell.c);
-                points.extend(std::iter::repeat_n((start, end), cell.c.len_utf8()));
+        let first = self.first_line();
+        let mut logical_end = last;
+        loop {
+            let mut logical_start = logical_end;
+            while logical_start > first && self.line(logical_start - 1).wrapped {
+                logical_start -= 1;
             }
-            if end_of_line {
-                for found in re.find_iter(&text) {
-                    if found.is_empty() {
+            for line in logical_start..=logical_end {
+                let row = self.line(line);
+                let end_of_line = !row.wrapped || line == last;
+                let cells = if end_of_line {
+                    let end = row
+                        .cells
+                        .iter()
+                        .rposition(|cell| *cell != Cell::default())
+                        .map_or(0, |col| col + 1);
+                    &row.cells[..end]
+                } else {
+                    &row.cells[..]
+                };
+                for (col, cell) in cells.iter().enumerate() {
+                    if cell.flags.contains(Flags::WIDE_SPACER)
+                        || cell.flags.contains(Flags::PAD)
+                        || cell.flags.contains(Flags::WIDE_WRAP)
+                    {
                         continue;
                     }
-                    let matched = Match {
-                        start: points[found.start()].0,
-                        end: points[found.end() - 1].1,
+                    let start = Point { line, col };
+                    let end = Point {
+                        line,
+                        col: col + usize::from(cell.flags.contains(Flags::WIDE)),
                     };
-                    if matches.len() < MATCH_LIMIT {
-                        matches.push(matched);
-                    } else {
-                        matches[oldest] = matched;
-                        oldest = (oldest + 1) % MATCH_LIMIT;
-                    }
+                    text.push(cell.c);
+                    points.extend(std::iter::repeat_n((start, end), cell.c.len_utf8()));
                 }
-                text.clear();
-                points.clear();
             }
+            let offset = matches.len();
+            let remaining = MATCH_LIMIT - offset;
+            let mut oldest = 0;
+            for found in re.find_iter(&text) {
+                if found.is_empty() {
+                    continue;
+                }
+                let matched = Match {
+                    start: points[found.start()].0,
+                    end: points[found.end() - 1].1,
+                };
+                if matches.len() < MATCH_LIMIT {
+                    matches.push(matched);
+                } else {
+                    matches[offset + oldest] = matched;
+                    oldest = (oldest + 1) % remaining;
+                }
+            }
+            matches[offset..].rotate_left(oldest);
+            matches[offset..].reverse();
+            if matches.len() == MATCH_LIMIT || logical_start == first {
+                break;
+            }
+            text.clear();
+            points.clear();
+            logical_end = logical_start - 1;
         }
-        matches.rotate_left(oldest);
+        matches.reverse();
         Ok(matches)
     }
 
@@ -105,6 +119,55 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capped_across_wrapped_lines_keeps_newest_in_order() {
+        let mut t = Terminal::new(4, 3);
+        t.set_scrollback_limit(MATCH_LIMIT);
+        for _ in 0..MATCH_LIMIT / 2 + 1 {
+            t.advance(b"aaaaaa\r\n");
+        }
+        for regex in [false, true] {
+            let matches = t.search("aa", regex).unwrap();
+            let all = (0..MATCH_LIMIT / 2 + 1)
+                .flat_map(|i| {
+                    [
+                        Match {
+                            start: Point {
+                                line: i as u64 * 2,
+                                col: 0,
+                            },
+                            end: Point {
+                                line: i as u64 * 2,
+                                col: 1,
+                            },
+                        },
+                        Match {
+                            start: Point {
+                                line: i as u64 * 2,
+                                col: 2,
+                            },
+                            end: Point {
+                                line: i as u64 * 2,
+                                col: 3,
+                            },
+                        },
+                        Match {
+                            start: Point {
+                                line: i as u64 * 2 + 1,
+                                col: 0,
+                            },
+                            end: Point {
+                                line: i as u64 * 2 + 1,
+                                col: 1,
+                            },
+                        },
+                    ]
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matches, all[all.len() - MATCH_LIMIT..]);
+        }
+    }
 
     #[test]
     fn plain_case_and_regex() {
