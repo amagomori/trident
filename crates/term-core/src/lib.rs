@@ -10,13 +10,26 @@ mod ghost;
 mod kitty;
 mod perform;
 
-pub use cell::{Cell, Color, Flags, Row};
+pub use cell::{Cell, Color, Flags, Row, RowFlags};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
 use std::collections::VecDeque;
 
 const DEFAULT_SCROLLBACK: usize = 10_000;
 const SYNC_RESET: &[u8] = b"\x1b[?2026l";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Zone {
+    None,
+    Prompt,
+    Input,
+    Output,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandFinished {
+    pub exit_code: Option<i32>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
@@ -150,6 +163,9 @@ impl PrintState {
 }
 
 pub struct Terminal {
+    zone: Zone,
+    shell_integration: bool,
+    command_finished: Vec<CommandFinished>,
     pub palette: colors::Palette,
     cols: usize,
     rows: usize,
@@ -193,10 +209,126 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    pub fn take_command_finished(&mut self) -> Vec<CommandFinished> {
+        std::mem::take(&mut self.command_finished)
+    }
+
+    /// Put the nearest prompt strictly above/below the viewport top at its top.
+    pub fn jump_to_prompt(&mut self, previous: bool) {
+        if self.alt_active {
+            return;
+        }
+        let top = self.history - self.display_offset as u64;
+        let end = self.history + self.rows as u64;
+        let target = if previous {
+            (self.first_line()..top)
+                .rev()
+                .find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
+        } else {
+            (top + 1..end).find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
+        };
+        if let Some(target) = target {
+            self.display_offset = self.history.saturating_sub(target) as usize;
+        } else if !previous {
+            self.display_offset = 0;
+        }
+    }
+
+    /// Select the most recent command output beginning in or above the viewport.
+    pub fn select_command_output(&mut self) {
+        self.selection = None;
+        if self.alt_active {
+            return;
+        }
+        let end = self.history + self.rows as u64;
+        let visible_end = end - self.display_offset as u64;
+        let Some(start) = (self.first_line()..visible_end)
+            .rev()
+            .find(|&line| self.line(line).flags.contains(RowFlags::OUTPUT_START))
+        else {
+            return;
+        };
+        if self.line(start).flags.contains(RowFlags::PROMPT_START) {
+            return;
+        }
+        let mut stop = (start + 1..end)
+            .find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
+            .unwrap_or(end);
+        while stop > start && self.line(stop - 1).cells.iter().all(|cell| cell.c == ' ') {
+            stop -= 1;
+        }
+        if stop > start {
+            self.selection = Some(Selection {
+                anchor: Point {
+                    line: start,
+                    col: 0,
+                },
+                head: Point {
+                    line: stop - 1,
+                    col: self.cols - 1,
+                },
+                kind: SelectionKind::Line,
+            });
+        }
+    }
+
+    fn shell_mark(&mut self, mark: &[u8], args: &[&[u8]]) {
+        self.shell_integration = true;
+        let flag = match mark {
+            b"A" => {
+                self.zone = Zone::Prompt;
+                Some(RowFlags::PROMPT_START)
+            }
+            b"B" => {
+                self.zone = Zone::Input;
+                Some(RowFlags::PROMPT)
+            }
+            b"C" => {
+                self.zone = Zone::Output;
+                Some(RowFlags::OUTPUT_START)
+            }
+            b"D" => {
+                let command_ran = self.zone == Zone::Output;
+                self.zone = Zone::None;
+                self.reset_input_modes();
+                if !command_ran {
+                    return;
+                }
+                let exit_code = args
+                    .first()
+                    .and_then(|s| std::str::from_utf8(s).ok()?.parse::<i32>().ok());
+                self.command_finished.push(CommandFinished { exit_code });
+                if !self.alt_active {
+                    let row = self.cursor.row;
+                    if let Some(prompt) = self.primary.lines[..=row]
+                        .iter_mut()
+                        .rev()
+                        .chain(self.primary.scrollback.iter_mut().rev())
+                        .find(|line| line.flags.contains(RowFlags::PROMPT_START))
+                    {
+                        prompt.flags.set_exit(exit_code);
+                    }
+                }
+                None
+            }
+            _ => None,
+        };
+        if let Some(flag) = flag.filter(|_| !self.alt_active) {
+            let line = &mut self.primary.lines[self.cursor.row];
+            line.flags.insert(flag);
+            if mark == b"A" {
+                line.flags.insert(RowFlags::PROMPT);
+            }
+        }
+    }
+
     pub fn new(cols: usize, rows: usize) -> Terminal {
         let cols = cols.max(2);
         let rows = rows.max(1);
         Terminal {
+            zone: Zone::None,
+            shell_integration: false,
+            command_finished: Vec::new(),
             palette: colors::Palette::default(),
             cols,
             rows,
@@ -774,6 +906,10 @@ impl Terminal {
         } else if self.cursor.row < self.rows - 1 {
             self.cursor.row += 1;
         }
+        if matches!(self.zone, Zone::Prompt | Zone::Input) && !self.alt_active {
+            let row = self.cursor.row;
+            self.primary.lines[row].flags.insert(RowFlags::PROMPT);
+        }
     }
 
     fn reverse_index(&mut self) {
@@ -1014,7 +1150,11 @@ impl Terminal {
                 }
             }
             1 => self.erase_cells(row, 0, col + 1),
-            2 => self.erase_row(row),
+            2 => {
+                let flags = self.screen().lines[row].flags;
+                self.erase_row(row);
+                self.lines_mut()[row].flags = flags;
+            }
             _ => {}
         }
     }

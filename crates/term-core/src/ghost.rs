@@ -22,6 +22,7 @@ impl Terminal {
             || !self.parser_ground
             || self.kitty.scan != Scan::Ground
             || self.alt_active
+            || matches!(self.zone, super::Zone::Prompt | super::Zone::Input)
             || self.scroll_top != 0
             || self.scroll_bottom != self.rows - 1
             || !self.modes.autowrap

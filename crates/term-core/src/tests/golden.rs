@@ -2,6 +2,175 @@ use super::super::*;
 use std::fmt::Write;
 use std::path::Path;
 
+#[test]
+fn shell_integration_clearing() {
+    let cases: &[(&[u8], &[&str])] = &[
+        (b"output\r\n\x1b]133;A\x07$ \x1b[2J", &["output", "$ "]),
+        (b"output\r\n$ \x1b[2J", &["output", "$ "]),
+        (
+            b"\x1b]133;A\x07$ cmd\x1b]133;C\x07\r\noutput\x1b[2J",
+            &["$ cmd", "output"],
+        ),
+        (
+            b"output\r\n\x1b]133;A\x07$ \x1b]133;B\x07clear\x1b]133;C\x07\x1b[H\x1b[2J",
+            &["output", "$ clear"],
+        ),
+        (
+            b"output\r\n\x1b]133;A\x07$ \x1b]133;B\x07clear\x1b]133;C\x07\x1b[3J\x1b[H\x1b[2J",
+            &[],
+        ),
+        (
+            b"\x1b[?1049houtput\r\n\x1b]133;A\x07$ \x1b[2J\x1b[?1049l",
+            &[],
+        ),
+    ];
+    for (input, expected) in cases {
+        let mut t = Terminal::new(20, 4);
+        t.advance(input);
+        let actual: Vec<_> = t.primary.scrollback.iter().map(Row::text).collect();
+        let expected: Vec<_> = expected.iter().map(|s| s.trim_end().to_string()).collect();
+        assert_eq!(actual, expected, "{input:?}");
+        assert!(t.primary.lines.iter().all(|line| line.text().is_empty()));
+    }
+}
+
+#[test]
+fn shell_integration_status_and_events() {
+    for (code, expected, flag) in [
+        ("0", Some(0), Some(RowFlags::SUCCEEDED)),
+        ("12", Some(12), Some(RowFlags::FAILED)),
+        ("-1", Some(-1), Some(RowFlags::FAILED)),
+        ("", None, None),
+        ("bad", None, None),
+    ] {
+        let mut t = Terminal::new(20, 2);
+        t.advance(
+            format!("\x1b]133;A;opt\x07$ cmd\r\n\x1b]133;C\x07out\r\n\x1b]133;D;{code};opt\x07")
+                .as_bytes(),
+        );
+        let prompt = &t.primary.scrollback[0];
+        assert!(prompt.flags.contains(RowFlags::PROMPT_START));
+        assert_eq!(
+            prompt.flags.contains(RowFlags::FAILED),
+            flag == Some(RowFlags::FAILED)
+        );
+        assert_eq!(
+            prompt.flags.contains(RowFlags::SUCCEEDED),
+            flag == Some(RowFlags::SUCCEEDED)
+        );
+        assert_eq!(
+            t.take_command_finished(),
+            vec![CommandFinished {
+                exit_code: expected
+            }]
+        );
+        assert!(t.take_command_finished().is_empty());
+    }
+    let mut t = Terminal::new(20, 2);
+    t.advance(b"\x1b]133;D\x07\x1b]133;Z\x07");
+    assert!(t.take_command_finished().is_empty());
+}
+
+#[test]
+fn shell_integration_spurious_completion_preserves_status() {
+    for prior_exit in [0, 1] {
+        let mut t = Terminal::new(20, 4);
+        t.advance(
+            format!("\x1b]133;A\x07$ cmd\x1b]133;C\x07\r\nout\r\n\x1b]133;D;{prior_exit}\x07")
+                .as_bytes(),
+        );
+        assert_eq!(t.take_command_finished().len(), 1);
+        let prior = t.primary.lines[0].flags;
+        for input in [
+            b"\x1b]133;D;2\x07".as_slice(),
+            b"\x1b]133;A\x07$ \x1b]133;B\x07\r\n\x1b]133;D;0\x07",
+            b"\x1b]133;A\x07$ \x1b]133;B\x07^C\r\n\x1b]133;D;130\x07",
+        ] {
+            t.modes.bracketed_paste = true;
+            t.advance(input);
+            assert!(!t.modes.bracketed_paste);
+            assert!(t.take_command_finished().is_empty());
+            let previous = t.primary.scrollback.front().unwrap_or(&t.primary.lines[0]);
+            assert_eq!(previous.flags, prior);
+            assert!(!t.primary.lines.iter().skip(1).any(|row| {
+                row.flags.contains(RowFlags::FAILED) || row.flags.contains(RowFlags::SUCCEEDED)
+            }));
+        }
+    }
+}
+
+#[test]
+fn shell_integration_prompt_redraw_and_empty_output() {
+    for erase in ["\x1b[K", "\x1b[2K"] {
+        let mut t = Terminal::new(20, 3);
+        t.advance(format!("\x1b]133;A\x07{erase}$ prompt").as_bytes());
+        assert!(t.primary.lines[0].flags.contains(RowFlags::PROMPT_START));
+    }
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]133;A\x07$ true\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    t.select_command_output();
+    assert!(t.selection.is_none());
+    assert!(t.selection_text().is_none());
+}
+
+#[test]
+fn shell_integration_navigation_selection_and_streaming() {
+    let input = b"\x1b]133;A\x07$ one\x1b]133;B\x07\r\n\x1b]133;C\x07first\r\n\r\n\x1b]133;D;1\x07\x1b]133;A\x07$ two\r\n\x1b]133;C\x07second\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ";
+    let mut t = Terminal::new(20, 2);
+    t.advance(input);
+    let mut streamed = Terminal::new(20, 2);
+    for byte in input {
+        streamed.advance(&[*byte]);
+    }
+    assert_eq!(t.primary.lines, streamed.primary.lines);
+    assert_eq!(t.primary.scrollback, streamed.primary.scrollback);
+    assert_eq!(t.take_command_finished(), streamed.take_command_finished());
+    t.select_command_output();
+    assert_eq!(t.selection_text().as_deref(), Some("second"));
+    t.jump_to_prompt(true);
+    assert_eq!(t.viewport_row(0).text(), "$ two");
+    t.jump_to_prompt(true);
+    assert_eq!(t.viewport_row(0).text(), "$ one");
+    t.select_command_output();
+    assert_eq!(t.selection_text().as_deref(), Some("first"));
+    t.jump_to_prompt(false);
+    assert_eq!(t.viewport_row(0).text(), "$ two");
+    t.jump_to_prompt(false);
+    assert_eq!(t.display_offset, 0);
+    t.advance(b"\x1b[2J");
+    assert!(
+        t.primary
+            .lines
+            .iter()
+            .all(|row| row.flags == RowFlags::default())
+    );
+    let mut empty = Terminal::new(20, 3);
+    empty.select_command_output();
+    empty.jump_to_prompt(true);
+    empty.jump_to_prompt(false);
+    assert!(empty.selection.is_none());
+    assert_eq!(empty.display_offset, 0);
+}
+
+#[test]
+fn shell_integration_multiline_resize_and_guard_reset() {
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]133;A\x07prompt\r\n\x1b]133;B\x07input\r\nmore");
+    assert!(
+        t.primary
+            .lines
+            .iter()
+            .all(|row| row.flags.contains(RowFlags::PROMPT))
+    );
+    t.resize(10, 3);
+    assert!(t.primary.lines[0].flags.contains(RowFlags::PROMPT_START));
+    t.advance(b"\x1b[3J");
+    t.advance(b"\x1b[2J");
+    assert_eq!(t.primary.scrollback.len(), 3);
+    t.advance(b"\x1b]133;C\x07\r\n\x1b]133;D\x07\x1b]133;A\x07\x1b[2J");
+    assert_eq!(t.primary.lines[t.cursor.row].flags, RowFlags::default());
+}
+
 struct Case {
     name: &'static str,
     cols: usize,

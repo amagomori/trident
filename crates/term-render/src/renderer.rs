@@ -460,6 +460,26 @@ impl Renderer {
         let layers_bg = backgrounds.len() as u32;
         let layers_text = (backgrounds.len() + glyphs.len() + overlays.len()) as u32;
         self.grid_instances = layers_text;
+        for row in -isize::from(pixel_offset > 0.0)..term.rows() as isize {
+            if term
+                .viewport_row_signed(row)
+                .flags
+                .contains(term_core::RowFlags::FAILED)
+            {
+                let y = padding + row as f32 * ch + pixel_offset;
+                let top = y.max(padding);
+                let bottom = (y + ch).min(padding + term.rows() as f32 * ch);
+                if bottom > top {
+                    overlays.push(self.rect(
+                        (padding - 3.0).max(0.0),
+                        top,
+                        2.0,
+                        bottom - top,
+                        (220, 50, 47),
+                    ));
+                }
+            }
+        }
         // Scrollback position indicator.
         if (term.display_offset() > 0 || pixel_offset > 0.0) && term.scrollback_len() > 0 {
             let total = (term.scrollback_len() + term.rows()) as f32;

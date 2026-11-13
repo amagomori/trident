@@ -201,8 +201,8 @@ impl Perform for Terminal {
         self.print_state.disarm_clear();
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
-            [b"133", b"D", ..] => {
-                self.reset_input_modes();
+            [b"133", mark, args @ ..] => {
+                self.shell_mark(mark, args);
             }
             [b"0" | b"2", rest @ ..] if !rest.is_empty() => {
                 let title = rest

@@ -1286,6 +1286,17 @@ impl App {
                     self.write_input(text.as_bytes());
                 }
             }
+            Action::JumpToPromptUp | Action::JumpToPromptDown | Action::SelectCommandOutput => {
+                if let Some(s) = &mut self.session {
+                    s.scroll.reset();
+                    if action == Action::SelectCommandOutput {
+                        s.term.select_command_output();
+                    } else {
+                        s.term.jump_to_prompt(action == Action::JumpToPromptUp);
+                    }
+                    s.request_frame();
+                }
+            }
             Action::Clear => {
                 if self.search.is_none() {
                     self.write_input(b"\x0c");
@@ -2009,14 +2020,14 @@ mod tests {
                 config::Chord::parse(&format!("ctrl+arrow{name}")).unwrap(),
                 chord
             );
-            assert!(
-                !config.bindings.contains_key(
-                    &shortcut_chord(
-                        Key::Named(key),
-                        ModifiersState::CONTROL | ModifiersState::SHIFT
-                    )
-                    .unwrap()
-                )
+            let shifted = shortcut_chord(
+                Key::Named(key),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+            )
+            .unwrap();
+            assert_eq!(
+                config.bindings.get(&shifted),
+                config::default_bindings().get(&shifted)
             );
         }
         assert!(

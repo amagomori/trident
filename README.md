@@ -131,10 +131,39 @@ bright_white = "#c0caf5"
 
 Actions: `copy`, `paste`, `paste_primary` (primary selection where supported),
 `increase_font_size`, `decrease_font_size`, `reset_font_size`, `clear_scrollback`,
-`scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `none`,
+`scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`,
+`jump_to_prompt_up`, `jump_to_prompt_down`, `select_command_output`, `none`,
 or `{ send = "..." }`. Chords use `ctrl`, `shift`, `alt` (alias `option`), and
 `super` (alias `cmd`), plus a character or named key such as `pageup`, `home`,
 `insert`, `enter`, `escape`, `space`, arrows, or `f1` through `f35`.
+
+Shell integration uses OSC 133 marks emitted by your shell. With integration enabled,
+clearing at a prompt preserves the screen in scrollback (explicit scrollback clears
+still wipe it). Failed commands have a thin red marker beside their prompt.
+Cmd+Up/Down on macOS or Ctrl+Shift+Up/Down on Linux jumps between prompts.
+Cmd+Shift+A on macOS or Ctrl+Shift+A on Linux selects the latest command output
+starting in or above the viewport. These shortcuts can be rebound with
+`jump_to_prompt_up`, `jump_to_prompt_down`, and `select_command_output`.
+
+To enable marks, source the matching optional snippet from your interactive shell
+configuration (replace `/path/to/terminal` with this checkout):
+
+```sh
+# ~/.zshrc
+source /path/to/terminal/shell-integration/terminal.zsh
+# ~/.bashrc
+source /path/to/terminal/shell-integration/terminal.bash
+# ~/.config/fish/config.fish
+source /path/to/terminal/shell-integration/terminal.fish
+```
+
+Source after setting up your prompt. The snippets retain existing prompts and
+hooks; don't source them if another integration already emits OSC 133. The fish
+snippet skips fish 4+ because it emits these marks natively.
+Bash 4.4+ is required for command-start marks via `PS0` and command completion
+tracking. Older Bash (including macOS `/bin/bash` 3.2) gets prompt marks only,
+not command C/D tracking. Existing `PROMPT_COMMAND` arrays are retained as arrays
+on Bash 5.1+; string hooks and older Bash use a prepended string hook.
 
 Changes are watched in the file's parent directory, including atomic editor saves,
 and applied after about 100 ms of quiet. If the config directory (or a symlink

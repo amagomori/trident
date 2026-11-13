@@ -84,6 +84,9 @@ pub enum Action {
     PageDown,
     Top,
     Bottom,
+    JumpToPromptUp,
+    JumpToPromptDown,
+    SelectCommandOutput,
     None,
     Send(String),
 }
@@ -105,6 +108,9 @@ impl Action {
                 "scroll_page_down" => Self::PageDown,
                 "scroll_to_top" => Self::Top,
                 "scroll_to_bottom" => Self::Bottom,
+                "jump_to_prompt_up" => Self::JumpToPromptUp,
+                "jump_to_prompt_down" => Self::JumpToPromptDown,
+                "select_command_output" => Self::SelectCommandOutput,
                 "none" => Self::None,
                 _ => return Err(format!("unknown action {name:?}")),
             },
@@ -188,6 +194,29 @@ pub fn default_bindings() -> BTreeMap<Chord, Action> {
     default_bindings_for(cfg!(target_os = "macos"))
 }
 
+#[test]
+fn shell_integration_bindings() {
+    for macos in [false, true] {
+        let defaults = default_bindings_for(macos);
+        let prefix = if macos { "super" } else { "ctrl+shift" };
+        for (key, name, action) in [
+            ("up", "jump_to_prompt_up", Action::JumpToPromptUp),
+            ("down", "jump_to_prompt_down", Action::JumpToPromptDown),
+            (
+                if macos { "shift+a" } else { "a" },
+                "select_command_output",
+                Action::SelectCommandOutput,
+            ),
+        ] {
+            assert_eq!(
+                defaults[&Chord::parse(&format!("{prefix}+{key}")).unwrap()],
+                action
+            );
+            assert_eq!(Action::parse(Binding::Name(name.into())).unwrap(), action);
+        }
+    }
+}
+
 pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
     let command = if macos { "super" } else { "ctrl+shift" };
     let mut bindings = BTreeMap::new();
@@ -195,6 +224,8 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
         ("c", Action::Copy),
         ("f", Action::Search),
         ("v", Action::Paste),
+        ("up", Action::JumpToPromptUp),
+        ("down", Action::JumpToPromptDown),
         ("=", Action::Increase),
         ("+", Action::Increase),
         ("-", Action::Decrease),
@@ -205,6 +236,10 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
         bindings.insert(Chord::parse(&format!("{command}+{key}")).unwrap(), action);
     }
     if macos {
+        bindings.insert(
+            Chord::parse("super+shift+a").unwrap(),
+            Action::SelectCommandOutput,
+        );
         bindings.insert(Chord::parse("super+k").unwrap(), Action::Clear);
         for (key, action) in [
             ("=", Action::Increase),
@@ -216,6 +251,12 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
         ] {
             bindings.insert(Chord::parse(&format!("super+shift+{key}")).unwrap(), action);
         }
+    }
+    if !macos {
+        bindings.insert(
+            Chord::parse("ctrl+shift+a").unwrap(),
+            Action::SelectCommandOutput,
+        );
     }
     for (key, action) in [
         ("pageup", Action::PageUp),
