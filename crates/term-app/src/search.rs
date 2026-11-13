@@ -5,7 +5,12 @@ pub fn accepts_text(mods: ModifiersState, option_as_alt: bool) -> bool {
     !mods.control_key() && !mods.super_key() && !(mods.alt_key() && option_as_alt)
 }
 
-pub fn toggles_regex(key: &str, mods: ModifiersState, option_as_alt: bool) -> bool {
+pub fn toggles_regex(key: &str, base: &str, mods: ModifiersState, option_as_alt: bool) -> bool {
+    let key = if mods.control_key() || (mods.alt_key() && option_as_alt) {
+        base
+    } else {
+        key
+    };
     key.eq_ignore_ascii_case("r")
         && !mods.super_key()
         && (mods.control_key() || (mods.alt_key() && option_as_alt))
@@ -104,12 +109,14 @@ mod tests {
 
     #[test]
     fn regex_command_modifiers() {
-        assert!(toggles_regex("r", ModifiersState::CONTROL, false));
-        assert!(toggles_regex("R", ModifiersState::ALT, true));
-        assert!(!toggles_regex("r", ModifiersState::ALT, false));
-        assert!(!toggles_regex("∞", ModifiersState::ALT, false));
-        assert!(!toggles_regex("", ModifiersState::CONTROL, true));
-        assert!(!toggles_regex("r", ModifiersState::empty(), true));
+        assert!(toggles_regex("r", "r", ModifiersState::CONTROL, false));
+        assert!(toggles_regex("R", "r", ModifiersState::ALT, true));
+        assert!(toggles_regex("®", "r", ModifiersState::ALT, true));
+        assert!(!toggles_regex("®", "r", ModifiersState::ALT, false));
+        assert!(!toggles_regex("r", "r", ModifiersState::ALT, false));
+        assert!(!toggles_regex("∞", "5", ModifiersState::ALT, false));
+        assert!(!toggles_regex("", "", ModifiersState::CONTROL, true));
+        assert!(!toggles_regex("r", "r", ModifiersState::empty(), true));
     }
 
     #[test]

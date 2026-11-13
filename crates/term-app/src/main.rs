@@ -815,6 +815,11 @@ impl App {
             self.search = None;
         } else if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
             let mut changed = false;
+            let base = event.key_without_modifiers();
+            let base = match &base {
+                Key::Character(c) => c.as_str(),
+                _ => "",
+            };
             match &event.logical_key {
                 Key::Named(NamedKey::Enter) => {
                     search.step(&mut s.term, !self.modifiers.shift_key())
@@ -826,7 +831,12 @@ impl App {
                     changed = true;
                 }
                 Key::Character(c)
-                    if search::toggles_regex(c, self.modifiers, self.options.option_as_alt) =>
+                    if search::toggles_regex(
+                        c,
+                        base,
+                        self.modifiers,
+                        self.options.option_as_alt,
+                    ) =>
                 {
                     search.regex = !search.regex;
                     changed = true;
