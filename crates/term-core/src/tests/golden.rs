@@ -209,6 +209,92 @@ fn shell_marks_seen_persists_for_session() {
 }
 
 #[test]
+fn shell_output_copies_real_pty_captures() {
+    fn unhex(input: &str) -> Vec<u8> {
+        input
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+    for (shell, capture) in [
+        ("zsh 5.8.1", include_str!("golden/zsh-output.hex")),
+        ("bash 5.1.16", include_str!("golden/bash-output.hex")),
+        ("fish 3.3.1", include_str!("golden/fish-output.hex")),
+    ] {
+        for streamed in [false, true] {
+            let mut t = Terminal::new(80, 24);
+            for record in capture.lines().filter(|line| !line.starts_with('#')) {
+                let mut fields = record.split('|');
+                let case = fields.next().unwrap();
+                let expected = unhex(fields.next().unwrap());
+                let bytes = unhex(fields.next().unwrap());
+                if streamed {
+                    for byte in bytes {
+                        t.advance(&[byte]);
+                    }
+                } else {
+                    t.advance(&bytes);
+                }
+                if case == "startup" {
+                    t.take_command_finished();
+                    continue;
+                }
+                t.select_command_output();
+                assert_eq!(
+                    t.selection_text().unwrap_or_default().as_bytes(),
+                    expected,
+                    "{shell} {case}, streamed={streamed}"
+                );
+                let events = t.take_command_finished();
+                assert_eq!(
+                    events,
+                    [CommandFinished {
+                        exit_code: Some(if case == "status" { 1 } else { 0 })
+                    }],
+                    "{shell} {case}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn shell_output_snapshot_lifetime() {
+    fn completed() -> Terminal {
+        let mut t = Terminal::new(20, 3);
+        t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\r\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        t.select_command_output();
+        assert_eq!(t.selection_text().as_deref(), Some("abc"));
+        t
+    }
+    for invalidate in [b"\x1b[3J".as_slice(), b"\x1b[?1049h\x1b[?1049l", b"\x1bc"] {
+        let mut t = completed();
+        t.advance(invalidate);
+        assert!(t.shell.output_ends.is_empty());
+    }
+    let mut t = completed();
+    t.resize(10, 4);
+    assert!(t.shell.output_ends.is_empty());
+
+    let mut t = completed();
+    t.set_scrollback_limit(1);
+    t.advance(b"\r\n".repeat(10).as_slice());
+    assert!(t.selection_text().is_none());
+    t.advance(b"\x1b]133;A\x07");
+    assert!(t.shell.output_ends.is_empty());
+
+    let mut t = Terminal::new(20, 40);
+    for _ in 0..40 {
+        t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07\r\n");
+    }
+    assert_eq!(t.shell.output_ends.len(), 16);
+    assert_eq!(std::mem::size_of::<Row>(), 40);
+}
+
+#[test]
 fn shell_integration_unterminated_output() {
     for (output, expected) in [
         ("foo", "foo"),

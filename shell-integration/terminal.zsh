@@ -1,6 +1,7 @@
 [[ -o interactive ]] || return
 (( ${+_terminal_integration_loaded} )) && return
 typeset -g _terminal_integration_loaded=1
+PROMPT_EOL_MARK=$'%{\e]133;D;%?\a%}'"${PROMPT_EOL_MARK-%B%S%#%s%b}"
 
 autoload -Uz add-zsh-hook
 _terminal_precmd() {

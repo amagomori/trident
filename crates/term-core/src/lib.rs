@@ -31,6 +31,14 @@ struct ShellState {
     marks_seen: bool,
     command_finished: Vec<CommandFinished>,
     mark_line: Option<u64>,
+    output_ends: Vec<OutputEnd>,
+}
+
+struct OutputEnd {
+    line: u64,
+    row_cells: usize,
+    cells: Vec<Cell>,
+    wrapped: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,27 +318,31 @@ impl Terminal {
             return;
         }
         if !self.alt_active {
+            let first = self.first_line();
+            let last = self.history + self.rows as u64;
+            self.shell
+                .output_ends
+                .retain(|end| (first..last).contains(&end.line));
             let current = self.history + self.cursor.row as u64;
-            if matches!(self.shell.zone, Zone::Prompt | Zone::Input) {
-                if let Some(start) = self.shell.mark_line {
-                    let start = if self.max_scrollback == 0 {
-                        self.primary.lines[..=self.cursor.row]
-                            .iter()
-                            .rposition(|row| row.flags.contains(RowFlags::PROMPT))
-                            .map_or(self.history, |row| self.history + row as u64)
+            if matches!(self.shell.zone, Zone::Prompt | Zone::Input)
+                && let Some(start) = self.shell.mark_line
+            {
+                let start = if self.max_scrollback == 0 {
+                    self.primary.lines[..=self.cursor.row]
+                        .iter()
+                        .rposition(|row| row.flags.contains(RowFlags::PROMPT))
+                        .map_or(self.history, |row| self.history + row as u64)
+                } else {
+                    start.max(self.first_line())
+                };
+                for line in start..=current {
+                    let row = if line < self.history {
+                        let index = self.primary.scrollback.len() - (self.history - line) as usize;
+                        &mut self.primary.scrollback[index]
                     } else {
-                        start.max(self.first_line())
+                        &mut self.primary.lines[(line - self.history) as usize]
                     };
-                    for line in start..=current {
-                        let row = if line < self.history {
-                            let index =
-                                self.primary.scrollback.len() - (self.history - line) as usize;
-                            &mut self.primary.scrollback[index]
-                        } else {
-                            &mut self.primary.lines[(line - self.history) as usize]
-                        };
-                        row.flags.insert(RowFlags::PROMPT);
-                    }
+                    row.flags.insert(RowFlags::PROMPT);
                 }
             }
             self.shell.mark_line = Some(current);
@@ -348,6 +360,8 @@ impl Terminal {
                 Some(RowFlags::PROMPT)
             }
             b"C" => {
+                let current = self.history + self.cursor.row as u64;
+                self.shell.output_ends.retain(|end| end.line != current);
                 self.shell.zone = Zone::Output;
                 Some(RowFlags::OUTPUT_START)
             }
@@ -379,6 +393,17 @@ impl Terminal {
                         .rposition(|cell| cell.c != ' ' || cell.flags.contains(Flags::WIDE_SPACER))
                         .map_or(0, |col| col + 1);
                     let end = used.max(self.cursor.col + usize::from(self.cursor.pending_wrap));
+                    let absolute = self.history + row as u64;
+                    self.shell.output_ends.retain(|end| end.line != absolute);
+                    if self.shell.output_ends.len() == 16 {
+                        self.shell.output_ends.remove(0);
+                    }
+                    self.shell.output_ends.push(OutputEnd {
+                        line: absolute,
+                        row_cells: line.cells.as_ptr() as usize,
+                        cells: line.cells[..end.min(line.cells.len())].to_vec(),
+                        wrapped: line.wrapped,
+                    });
                     line.flags.insert(RowFlags::OUTPUT_END);
                     line.prompt_col = u32::try_from(end).unwrap_or(u32::MAX - 1);
                     if let Some(prompt) = self.primary.lines[..=row]
@@ -421,6 +446,7 @@ impl Terminal {
                 marks_seen: false,
                 command_finished: Vec::new(),
                 mark_line: None,
+                output_ends: Vec::new(),
             }),
             palette: colors::Palette::default(),
             cols,
@@ -697,6 +723,7 @@ impl Terminal {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        self.invalidate_output_ends();
         self.selection = None;
         self.display_offset = 0;
         if cols < self.cols || rows < self.rows {
@@ -870,11 +897,13 @@ impl Terminal {
         };
         from = from.min(self.cols - 1);
         to = to.min(self.cols - 1);
-        let row = self.line(line);
-        if from > 0 && row.cells[from].flags.contains(Flags::WIDE_SPACER) {
+        let cells = self.selection_cells(line);
+        from = from.min(cells.len().saturating_sub(1));
+        to = to.min(cells.len().saturating_sub(1));
+        if from > 0 && cells[from].flags.contains(Flags::WIDE_SPACER) {
             from -= 1;
         }
-        if to + 1 < self.cols && row.cells[to].flags.contains(Flags::WIDE) {
+        if to + 1 < cells.len() && cells[to].flags.contains(Flags::WIDE) {
             to += 1;
         }
         Some((from, to))
@@ -908,20 +937,47 @@ impl Terminal {
         for line in start.line..=end.line {
             let row = self.line(line);
             let (from, to) = self.selection_columns((start, end), line)?;
-            let mut text: String = row.cells[from..=to]
+            let cells = self.selection_cells(line);
+            let wrapped = self.output_end(line).map_or(row.wrapped, |end| end.wrapped);
+            let mut text: String = cells[from..=to]
                 .iter()
                 .filter(|c| !c.flags.contains(Flags::WIDE_SPACER))
                 .map(|c| c.c)
                 .collect();
-            if !block && !(row.wrapped && line != end.line) {
+            if !block && !(wrapped && line != end.line) {
                 text.truncate(text.trim_end().len());
             }
             out.push_str(&text);
-            if line != end.line && (block || !row.wrapped) {
+            if line != end.line && (block || !wrapped) {
                 out.push('\n');
             }
         }
         Some(out)
+    }
+
+    fn output_end(&self, line: u64) -> Option<&OutputEnd> {
+        if self.alt_active || self.selection?.kind != SelectionKind::CommandOutput {
+            return None;
+        }
+        let row = self.line(line);
+        self.shell.output_ends.iter().rev().find(|end| {
+            end.line == line
+                && end.row_cells == row.cells.as_ptr() as usize
+                && row.flags.contains(RowFlags::OUTPUT_END)
+                && row.prompt_col as usize == end.cells.len()
+                && !end.cells.is_empty()
+        })
+    }
+
+    fn selection_cells(&self, line: u64) -> &[Cell] {
+        self.output_end(line)
+            .map_or(&self.line(line).cells, |end| &end.cells)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn invalidate_output_ends(&mut self) {
+        self.shell.output_ends.clear();
     }
 
     // ---- Primitive grid operations used by the escape sequence handlers ----
@@ -1209,6 +1265,7 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn erase_saved_lines(&mut self) {
+        self.invalidate_output_ends();
         let scrollback = &mut self.screen_mut().scrollback;
         if !scrollback.is_empty() {
             scrollback.clear();
@@ -1379,6 +1436,7 @@ impl Terminal {
         if enable == self.alt_active {
             return;
         }
+        self.invalidate_output_ends();
         if enable {
             if save_cursor {
                 self.save_cursor();
