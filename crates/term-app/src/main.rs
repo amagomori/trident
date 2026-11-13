@@ -470,6 +470,10 @@ fn wake_deadline(
     [frame, resize, probe].into_iter().flatten().min()
 }
 
+fn shell_shortcuts_available(term: &Terminal) -> bool {
+    term.has_shell_marks() && !term.is_alt_screen()
+}
+
 fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
     let modifiers = u8::from(mods.control_key())
         | (u8::from(mods.shift_key()) << 1)
@@ -1290,7 +1294,7 @@ impl App {
                 if !self
                     .session
                     .as_ref()
-                    .is_some_and(|s| s.term.has_shell_marks())
+                    .is_some_and(|s| shell_shortcuts_available(&s.term))
                 {
                     return false;
                 }
@@ -1971,6 +1975,19 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shell_shortcuts_follow_primary_screen_marks() {
+        let mut term = Terminal::new(20, 3);
+        assert!(!shell_shortcuts_available(&term));
+        term.advance(b"\x1b]133;A\x07");
+        assert!(shell_shortcuts_available(&term));
+        term.advance(b"\x1b[?1049h");
+        assert!(term.has_shell_marks());
+        assert!(!shell_shortcuts_available(&term));
+        term.advance(b"\x1b[?1049l");
+        assert!(shell_shortcuts_available(&term));
+    }
+
     #[test]
     fn clipboard_shortcuts_dispatch() {
         let bindings = config::default_bindings_for(false);
