@@ -1,14 +1,63 @@
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 use winit::window::Theme;
 
-pub fn watch(changed: impl Fn(Option<Theme>) + Send + 'static) -> std::io::Result<()> {
-    std::thread::Builder::new()
+#[derive(Default)]
+struct Stop {
+    stopped: bool,
+    waker: Option<Waker>,
+}
+
+pub struct Watch {
+    stop: Arc<Mutex<Stop>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        let mut stop = self.stop.lock().unwrap();
+        stop.stopped = true;
+        if let Some(waker) = stop.waker.take() {
+            waker.wake();
+        }
+        drop(stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn spawn(future: impl Future<Output = ()> + Send + 'static) -> std::io::Result<Watch> {
+    let stop = Arc::new(Mutex::new(Stop::default()));
+    let cancelled = stop.clone();
+    let thread = std::thread::Builder::new()
         .name("appearance-watch".into())
         .spawn(move || {
-            if let Err(error) = zbus::block_on(listen(changed)) {
-                eprintln!("terminal: OS appearance unavailable (using dark): {error}");
-            }
-        })
-        .map(|_| ())
+            zbus::block_on(futures_lite::future::race(
+                std::future::poll_fn(move |cx| {
+                    let mut stop = cancelled.lock().unwrap();
+                    if stop.stopped {
+                        Poll::Ready(())
+                    } else {
+                        stop.waker = Some(cx.waker().clone());
+                        Poll::Pending
+                    }
+                }),
+                future,
+            ));
+        })?;
+    Ok(Watch {
+        stop,
+        thread: Some(thread),
+    })
+}
+
+pub fn watch(changed: impl Fn(Option<Theme>) + Send + 'static) -> std::io::Result<Watch> {
+    spawn(async move {
+        if let Err(error) = listen(changed).await {
+            eprintln!("terminal: OS appearance unavailable (using dark): {error}");
+        }
+    })
 }
 
 const NAMESPACE: &str = "org.freedesktop.appearance";
@@ -55,6 +104,41 @@ async fn listen(changed: impl Fn(Option<Theme>)) -> zbus::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_finished_watch() {
+        let (done, finished) = std::sync::mpsc::channel();
+        let watch = spawn(async move { done.send(()).unwrap() }).unwrap();
+        finished
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(watch);
+    }
+
+    #[test]
+    fn dropping_watch_cancels_pending_work_and_allows_restart() {
+        for _ in 0..2 {
+            let (ready, started) = std::sync::mpsc::channel();
+            let (dropped, finished) = std::sync::mpsc::channel();
+            struct OnDrop(std::sync::mpsc::Sender<()>);
+            impl Drop for OnDrop {
+                fn drop(&mut self) {
+                    let _ = self.0.send(());
+                }
+            }
+            let watch = spawn(async move {
+                let _guard = OnDrop(dropped);
+                ready.send(()).unwrap();
+                std::future::pending::<()>().await;
+            })
+            .unwrap();
+            started
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            drop(watch);
+            finished.try_recv().unwrap();
+        }
+    }
 
     #[test]
     fn portal_color_scheme_values() {

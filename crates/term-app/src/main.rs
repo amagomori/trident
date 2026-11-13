@@ -116,7 +116,7 @@ impl ResizeThrottle {
 #[derive(Debug)]
 enum UserEvent {
     #[cfg(target_os = "linux")]
-    Appearance(Option<Theme>),
+    Appearance(u64, Option<Theme>),
     CommandFinished(command_notify::Finished),
     ConfigChanged,
     Output,
@@ -758,7 +758,9 @@ struct App {
     search: Option<search::Search>,
     appearance: Option<Theme>,
     #[cfg(target_os = "linux")]
-    appearance_started: bool,
+    appearance_watch: Option<appearance::Watch>,
+    #[cfg(target_os = "linux")]
+    appearance_generation: u64,
     config: config::Config,
     config_error: Option<String>,
     _watcher: Option<config::ConfigWatcher>,
@@ -821,7 +823,9 @@ impl App {
             search: None,
             appearance: None,
             #[cfg(target_os = "linux")]
-            appearance_started: false,
+            appearance_watch: None,
+            #[cfg(target_os = "linux")]
+            appearance_generation: 0,
             font_size: options.size(&config),
             config,
             config_error,
@@ -1323,13 +1327,18 @@ impl App {
 
     fn watch_appearance(&mut self) {
         #[cfg(target_os = "linux")]
-        if self.config.themes.automatic() && !self.appearance_started {
+        if !self.config.themes.automatic() {
+            self.appearance_watch = None;
+            self.appearance = None;
+        } else if self.appearance_watch.is_none() {
+            self.appearance_generation += 1;
+            let generation = self.appearance_generation;
             let proxy = self.proxy.clone();
-            self.appearance_started = appearance::watch(move |theme| {
-                let _ = proxy.send_event(UserEvent::Appearance(theme));
+            self.appearance_watch = appearance::watch(move |theme| {
+                let _ = proxy.send_event(UserEvent::Appearance(generation, theme));
             })
             .map_err(|e| eprintln!("terminal: cannot watch OS appearance: {e}"))
-            .is_ok();
+            .ok();
         }
     }
 
@@ -1893,7 +1902,11 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             #[cfg(target_os = "linux")]
-            UserEvent::Appearance(theme) => self.set_appearance(theme),
+            UserEvent::Appearance(generation, theme) => {
+                if self.appearance_watch.is_some() && generation == self.appearance_generation {
+                    self.set_appearance(theme);
+                }
+            }
             UserEvent::CommandFinished(finished) => {
                 if command_notify::should_notify(
                     self.focused,
