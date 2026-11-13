@@ -48,6 +48,11 @@ mod tests {
     fn allowlist_and_arguments() {
         for uri in [
             "https://a/;echo hi",
+            "HTTPS://Example.com/path",
+            "Https://example.com",
+            "FtP://example.com",
+            "FILE:///tmp/a",
+            "MailTo:a@b.test",
             "http://a",
             "ftp://a",
             "file:///a b",
