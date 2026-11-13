@@ -347,7 +347,10 @@ impl Terminal {
     fn sgr(&mut self, params: &Params) {
         let t = &mut self.cursor.template;
         if params.is_empty() {
-            *t = Default::default();
+            *t = super::Cell {
+                hyperlink: t.hyperlink,
+                ..Default::default()
+            };
             return;
         }
         let mut iter = params.iter();
@@ -427,5 +430,26 @@ fn extended_color<'a>(param: &[u16], iter: &mut impl Iterator<Item = &'a [u16]>)
             Some(Color::Rgb(r, g, b))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_sgr_params_preserve_hyperlink_and_reset_style() {
+        let mut term = Terminal::new(8, 2);
+        term.advance(b"\x1b]8;;https://example.com\x07\x1b[1;31ma");
+        let hyperlink = term.cursor.template.hyperlink;
+        assert_ne!(hyperlink, 0);
+        term.sgr(&Params::default());
+        assert_eq!(
+            term.cursor.template,
+            super::super::Cell {
+                hyperlink,
+                ..Default::default()
+            }
+        );
     }
 }
