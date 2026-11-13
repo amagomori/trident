@@ -20,19 +20,10 @@ pub const BUNDLED: [(&str, &str); 4] = [
     ),
 ];
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Themes {
     dark: Palette,
     light: Option<Palette>,
-}
-
-impl Default for Themes {
-    fn default() -> Self {
-        Self {
-            dark: Palette::default(),
-            light: None,
-        }
-    }
 }
 
 impl Themes {
