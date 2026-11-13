@@ -340,6 +340,7 @@ impl Terminal {
     }
 
     fn apc_end(&mut self) {
+        self.clear_armed = false;
         let apc = &self.kitty.apc;
         if apc.ignored || apc.control.is_empty() {
             return;

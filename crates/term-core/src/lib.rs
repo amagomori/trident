@@ -810,6 +810,9 @@ impl Terminal {
 
     fn erase_display(&mut self, mode: u16) {
         let (row, col) = (self.cursor.row, self.cursor.col);
+        if mode < 2 {
+            self.clear_armed = false;
+        }
         match mode {
             0 => {
                 self.erase_cells(row, col, self.cols);

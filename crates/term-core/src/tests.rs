@@ -165,6 +165,17 @@ fn erase_display_all_after_separate_ed3_keeps_screen() {
 }
 
 #[test]
+fn erase_display_all_after_ed3_and_partial_erase_keeps_screen() {
+    let t = term(10, 3, "one\r\ntwo\x1b[3J\x1b[2;1H\x1b[J\x1b[H\x1b[2J");
+    assert_eq!(t.scrollback_len(), 1);
+    assert_eq!(t.viewport_row(0).text(), "");
+    let mut t = term(10, 3, "one\r\ntwo\x1b[3J\x1b[1;2H\x1b[1J\x1b[H\x1b[2J");
+    assert_eq!(t.scrollback_len(), 2);
+    t.scroll_display(2);
+    assert_eq!(screen(&t)[..2], ["  e", "two"]);
+}
+
+#[test]
 fn erase_display_all_after_ed3_keeps_new_output() {
     let mut t = term(10, 3, "one\r\ntwo");
     t.advance(b"\x1b[3J\x1b[3;1Hthree\x1b[H\x1b[2J");
