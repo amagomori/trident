@@ -1495,6 +1495,14 @@ impl App {
 
     /// Handles terminal shortcuts; true if the key was consumed.
     fn shortcut(&mut self, event: &KeyEvent, held_at_focus: bool) -> bool {
+        // Num Lock/Shift can make keypad keys look like navigation shortcuts.
+        if self.search.is_none()
+            && self.session.as_ref().is_some_and(|s| {
+                input::is_application_keypad_key(event.physical_key, &s.term.modes)
+            })
+        {
+            return false;
+        }
         let mods = self.modifiers;
         let Some(chord) = shortcut_chord(event.key_without_modifiers(), mods) else {
             return false;

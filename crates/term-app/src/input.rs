@@ -30,6 +30,10 @@ fn keypad_letter(key: PhysicalKey) -> Option<char> {
     })
 }
 
+pub fn is_application_keypad_key(physical: PhysicalKey, modes: &Modes) -> bool {
+    modes.app_keypad && keypad_letter(physical).is_some()
+}
+
 /// xterm's modifier parameter: 1 + shift + 2*alt + 4*ctrl.
 fn modifier_param(mods: ModifiersState) -> u8 {
     1 + mods.shift_key() as u8 + 2 * mods.alt_key() as u8 + 4 * mods.control_key() as u8
@@ -313,6 +317,18 @@ mod tests {
             app_keypad: true,
             ..Modes::default()
         };
+        assert!(is_application_keypad_key(
+            PhysicalKey::Code(KeyCode::Numpad1),
+            &modes
+        ));
+        assert!(!is_application_keypad_key(
+            PhysicalKey::Code(KeyCode::End),
+            &modes
+        ));
+        assert!(!is_application_keypad_key(
+            PhysicalKey::Code(KeyCode::Numpad1),
+            &Modes::default()
+        ));
         for (physical, logical, expected) in [
             (KeyCode::Numpad0, NamedKey::Insert, b"\x1bOp".as_slice()),
             (KeyCode::Numpad2, NamedKey::ArrowDown, b"\x1bOr"),
