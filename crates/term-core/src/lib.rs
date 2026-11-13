@@ -415,16 +415,14 @@ impl Terminal {
                     let end = used.max(self.cursor.col + usize::from(self.cursor.pending_wrap));
                     let absolute = self.history + row as u64;
                     self.shell.output_ends.retain(|end| end.line != absolute);
-                    if self.scroll_top == 0 && self.scroll_bottom == self.rows - 1 {
-                        if self.shell.output_ends.len() == 16 {
-                            self.shell.output_ends.remove(0);
-                        }
-                        self.shell.output_ends.push(OutputEnd {
-                            line: absolute,
-                            cells: line.cells[..end.min(line.cells.len())].to_vec(),
-                            wrapped: line.wrapped,
-                        });
+                    if self.shell.output_ends.len() == 16 {
+                        self.shell.output_ends.remove(0);
                     }
+                    self.shell.output_ends.push(OutputEnd {
+                        line: absolute,
+                        cells: line.cells[..end.min(line.cells.len())].to_vec(),
+                        wrapped: line.wrapped,
+                    });
                     line.flags.insert(RowFlags::OUTPUT_END);
                     line.prompt_col = u32::try_from(end).unwrap_or(u32::MAX - 1);
                     if let Some(prompt) = self.primary.lines[..=row]
@@ -1007,6 +1005,30 @@ impl Terminal {
         self.shell.output_ends.clear();
     }
 
+    #[cold]
+    #[inline(never)]
+    fn invalidate_output_ends_in_region(&mut self, top: usize, bottom: usize, scrolled_up: usize) {
+        if self.alt_active {
+            return;
+        }
+        let shift = if top == 0 && self.max_scrollback > 0 {
+            scrolled_up as u64
+        } else {
+            0
+        };
+        let top = self.history + top as u64;
+        let bottom = self.history + bottom as u64;
+        self.shell.output_ends.retain_mut(|end| {
+            if (top..=bottom).contains(&end.line) {
+                return false;
+            }
+            if end.line > bottom {
+                end.line += shift;
+            }
+            true
+        });
+    }
+
     // ---- Primitive grid operations used by the escape sequence handlers ----
 
     fn blank_row(&self) -> Row {
@@ -1016,6 +1038,9 @@ impl Terminal {
     /// Scroll the region `top..=bottom` up by `n` lines.
     fn scroll_up_region(&mut self, top: usize, bottom: usize, n: usize) {
         let n = n.min(bottom - top + 1);
+        if bottom - top != self.rows - 1 {
+            self.invalidate_output_ends_in_region(top, bottom, n);
+        }
         let to_history = top == 0 && !self.alt_active;
         if !self.screen().placements.is_empty() {
             let keeps_lines = to_history && self.max_scrollback > 0;
@@ -1065,7 +1090,7 @@ impl Terminal {
     }
 
     fn scroll_down_region(&mut self, top: usize, bottom: usize, n: usize) {
-        self.invalidate_output_ends();
+        self.invalidate_output_ends_in_region(top, bottom, 0);
         let n = n.min(bottom - top + 1);
         if !self.screen().placements.is_empty() {
             self.scroll_placements(top, bottom, n as isize, false);
@@ -1384,9 +1409,9 @@ impl Terminal {
 
     fn delete_lines(&mut self, n: usize) {
         if (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row) {
-            self.invalidate_output_ends();
             let bottom = self.scroll_bottom;
             let row = self.cursor.row;
+            self.invalidate_output_ends_in_region(row, bottom, 0);
             let n = n.min(bottom - row + 1);
             if !self.screen().placements.is_empty() {
                 self.scroll_placements(row, bottom, -(n as isize), false);
@@ -1404,7 +1429,6 @@ impl Terminal {
     fn set_scroll_region(&mut self, top: usize, bottom: usize) {
         let bottom = bottom.min(self.rows - 1);
         if top < bottom {
-            self.invalidate_output_ends();
             self.scroll_top = top;
             self.scroll_bottom = bottom;
             self.goto(0, 0);

@@ -357,6 +357,53 @@ fn shell_output_in_partial_regions_uses_live_rows() {
 }
 
 #[test]
+fn shell_output_snapshots_survive_unaffected_region_operations() {
+    for (before, after, expected) in [
+        ("", "\x1b[1;2r", "abc"),
+        ("", "\x1b[3;1H\x1b[M", "abc"),
+        ("", "\x1b[3;1H\x1b[L", "abc"),
+        ("", "\x1b[3;4r\x1b[T", "abc"),
+        ("", "\x1b[3;4r\x1b[S", "abc"),
+        ("\x1b[1;2r", "", "abc"),
+        ("\x1b[3;1H", "\x1b[1;2r\x1b[S", "abc"),
+        ("\x1b[3;1H", "\x1b[1;2r\x1b[2;1H\n", "abc"),
+        ("\x1b[3;1H", "\x1b[1;2r\x1b[M", "abc"),
+    ] {
+        for streamed in [false, true] {
+            let mut t = Terminal::new(20, 4);
+            let bytes = format!(
+                "{before}\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\r\x1b]133;D;0\x07\x1b]133;A\x07$ {after}"
+            );
+            for chunk in bytes
+                .as_bytes()
+                .chunks(if streamed { 1 } else { bytes.len() })
+            {
+                t.advance(chunk);
+            }
+            t.select_command_output();
+            assert_eq!(
+                t.selection_text().as_deref(),
+                Some(expected),
+                "{before:?}, {after:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn shell_same_row_output_snapshot_in_partial_region() {
+    for streamed in [false, true] {
+        let mut t = Terminal::new(20, 4);
+        let bytes = b"\x1b[1;2r\x1b]133;A\x07$ run\x1b]133;C\x07result\x1b]133;D;0\x07\r\x1b]133;A\x07$ next prompt";
+        for chunk in bytes.chunks(if streamed { 1 } else { bytes.len() }) {
+            t.advance(chunk);
+        }
+        t.select_command_output();
+        assert_eq!(t.selection_text().as_deref(), Some("result"));
+    }
+}
+
+#[test]
 fn shell_pending_wrap_command_before_crlf() {
     for streamed in [false, true] {
         let mut t = Terminal::new(20, 4);
