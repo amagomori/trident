@@ -187,6 +187,51 @@ fn show(
     }
 }
 
+/// Small, image-only drop preview. This is deliberately separate from `show`: no text,
+/// terminal queries, tmux commands, or errors are emitted for unsupported files.
+pub(super) fn drop_preview(
+    path: &Path,
+    cols: usize,
+    rows: usize,
+    cell: (f32, f32),
+) -> Option<(Vec<u8>, usize)> {
+    use std::io::Read;
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    if rows < 2 || !path.metadata().ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return None;
+    }
+    let window = Window {
+        cols: cols as u32,
+        rows: rows as u32,
+        cell_w: cell.0,
+        cell_h: cell.1,
+        tmux: false,
+    };
+    let options = Options {
+        width: Some(cols.min(32) as u32),
+        height: Some((rows - 1).min(6) as u32),
+        ..Options::default()
+    };
+    let image = match detect(&bytes) {
+        Kind::Raster(format) => decode_raster(&bytes, format, &options, window).ok()?,
+        Kind::Svg => render_svg(&bytes, path, &options, window).ok()?,
+        _ => return None,
+    };
+    let image_rows = (image.height as f32 / cell.1).ceil() as usize;
+    let mut output = Vec::new();
+    write_kitty(&mut output, &image, window, |_| {}).ok()?;
+    Some((output, image_rows))
+}
+
 /// `io::Error`'s message without the " (os error N)" suffix.
 fn io_message(e: &io::Error) -> String {
     let message = e.to_string();

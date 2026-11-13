@@ -87,6 +87,7 @@ values, including on reload.
 font_size = 14.0            # 4..=200 points
 padding = 6.0               # 0..=1000 logical pixels
 scrollback = 10000          # retained lines; 0 disables history
+drop_preview = true         # false: file drops insert only the shell-quoted path
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
@@ -141,6 +142,22 @@ Unknown keys, invalid types/values, and malformed TOML are errors with the file,
 line, column, and entry printed to stderr and shown in a banner (alongside the
 output-paused notice when applicable). Startup errors use defaults; reload errors
 keep the last valid config. Fixing the config clears the banner.
+
+### Dropping files (prototype)
+
+Drop a local file from your file manager onto the window to insert its POSIX-shell-quoted
+path plus a space, without executing it. Images supported by `terminal show` (including
+SVG) also get a thumbnail above the current prompt, at most 32 columns by 6 rows.
+Set `drop_preview = false` in the live-reloaded config for path-only drops. Text, PDFs,
+unreadable/corrupt files, directories, and files over 16 MiB always get just the path.
+Names containing line-editor control characters are rejected. Preview decoding is
+synchronous in this prototype; previews are skipped in alternate-screen/mouse-reporting
+apps, and prompt relocation assumes a simple single-line shell prompt, not a TUI/tmux pane.
+
+Linux X11 uses winit's Xdnd file-drop event. macOS Finder uses the same `DroppedFile`
+event via AppKit; it needs a native smoke test, not a separate handler. Native Wayland
+drops are not exposed by winit 0.30: use XWayland (`env -u WAYLAND_DISPLAY terminal`)
+for now; native support needs a `wl_data_device` drag-and-drop bridge.
 
 ### Viewing files
 

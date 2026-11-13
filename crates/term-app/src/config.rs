@@ -10,6 +10,7 @@ pub struct Config {
     pub font_size: f32,
     pub padding: f32,
     pub scrollback: usize,
+    pub drop_preview: bool,
     pub shell: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub palette: Palette,
@@ -23,6 +24,7 @@ impl Default for Config {
             font_size: 14.0,
             padding: term_render::PADDING,
             scrollback: 10_000,
+            drop_preview: true,
             shell: Vec::new(),
             env: BTreeMap::new(),
             palette: Palette::default(),
@@ -38,6 +40,7 @@ struct Raw {
     font_size: Option<f32>,
     padding: Option<f32>,
     scrollback: Option<usize>,
+    drop_preview: Option<bool>,
     shell: Option<Shell>,
     env: BTreeMap<String, String>,
     colors: BTreeMap<String, String>,
@@ -283,6 +286,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     };
     let mut config = Config {
         font: raw.font,
+        drop_preview: raw.drop_preview.unwrap_or(true),
         ..Config::default()
     };
     if let Some(size) = raw.font_size {
@@ -721,6 +725,8 @@ mod tests {
 
     #[test]
     fn defaults_and_full_config() {
+        assert!(cfg("").unwrap().drop_preview);
+        assert!(!cfg("drop_preview = false").unwrap().drop_preview);
         assert_eq!(parse_text("").unwrap(), Config::default());
         let config = parse_text(
             r##"
