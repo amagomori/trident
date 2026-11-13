@@ -62,7 +62,11 @@ fn cell_span_stretches_and_offsets_shift() {
     kitty(&mut t, ",c=4,X=3,Y=5");
     let q = layout(&t, CELL, 0.0, 0.0)[0];
     assert_eq!(q.pos, [3.0, 5.0]);
-    assert_eq!(q.size, [37.0, 55.0]);
+    assert_eq!(q.size, [37.0, 40.0]);
+    t.set_cell_pixel_size(5.0, 10.0);
+    let q = layout(&t, (5.0, 10.0), 0.0, 0.0)[0];
+    assert_eq!(q.pos, [1.5, 2.5]);
+    assert_eq!(q.size, [18.5, 20.0]);
 }
 
 #[test]
@@ -76,24 +80,30 @@ fn source_rect_maps_to_uv() {
 
 #[test]
 fn scale_changes_keep_images_in_their_original_cells() {
-    for initial_cell in [(20.0, 32.0), (10.0, 16.0)] {
+    for initial_cell in [(20.0, 34.0), (10.0, 17.0)] {
         let mut t = Terminal::new(80, 24);
         t.set_cell_pixel_size(initial_cell.0, initial_cell.1);
         t.add_image(1, image(160, 96)).unwrap();
         kitty(&mut t, "");
         let placement = t.visible_placements()[0].placement;
+        assert_eq!(layout(&t, initial_cell, 0.0, 0.0)[0].size, [160.0, 96.0]);
         t.advance(b"\r\nfollowing text");
-        for cell in [(10.0, 16.0), (20.0, 32.0), (13.0, 21.0)] {
+        for cell in [(10.0, 17.0), (20.0, 34.0), (13.0, 22.1)] {
             t.set_cell_pixel_size(cell.0, cell.1);
             let q = layout(&t, cell, 0.0, 0.0)[0];
             assert_eq!(
                 q.size,
                 [
-                    placement.cols as f32 * cell.0,
-                    placement.rows as f32 * cell.1
+                    160.0 * (cell.0 / initial_cell.0),
+                    96.0 * (cell.1 / initial_cell.1)
                 ]
             );
             assert_eq!(q.uv, [0.0, 0.0, 1.0, 1.0]);
+            let current = t.visible_placements()[0].placement;
+            assert_eq!(
+                (current.cols, current.rows),
+                (placement.cols, placement.rows)
+            );
             assert!(q.pos[1] + q.size[1] <= t.cursor_position().unwrap().0 as f32 * cell.1);
         }
     }

@@ -47,7 +47,7 @@ pub struct PlaceOptions {
     pub z: i32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
     pub image_id: u32,
     pub placement_id: u32,
@@ -60,11 +60,15 @@ pub struct Placement {
     pub y_offset: u32,
     pub source: Rect,
     pub z: i32,
+    /// Cell dimensions when placed, used to scale pixel-sized axes and offsets.
+    pub cell_pixels: (f32, f32),
+    pub fixed_cols: bool,
+    pub fixed_rows: bool,
 }
 
 /// A placement that overlaps the viewport. `row` is the viewport row of its top edge and is
 /// negative when the top is scrolled above the viewport.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VisiblePlacement {
     pub placement: Placement,
     pub row: isize,
@@ -310,6 +314,9 @@ impl Terminal {
             y_offset: opts.y_offset,
             source,
             z: opts.z,
+            cell_pixels: (cell_w.max(1.0), cell_h.max(1.0)),
+            fixed_cols: opts.cols != 0,
+            fixed_rows: opts.rows != 0,
         };
         let placements = &mut self.screen_mut().placements;
         if opts.placement_id != 0 {

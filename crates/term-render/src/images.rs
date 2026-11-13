@@ -37,8 +37,8 @@ pub(crate) struct Quad {
 }
 
 /// Lays out the visible placements over a grid of `cell`-sized cells starting at
-/// `padding`, in drawing order. Placements fill their original cell spans at the current
-/// cell size.
+/// `padding`, in drawing order. Pixel-sized axes scale relative to the cell size at
+/// placement; explicitly cell-sized axes fill their spans.
 pub(crate) fn layout(
     term: &Terminal,
     cell: (f32, f32),
@@ -52,11 +52,20 @@ pub(crate) fn layout(
         let Some(image) = term.image(p.image_id) else {
             continue;
         };
-        let (x_off, y_off) = (p.x_offset as f32, p.y_offset as f32);
+        let scale = (cw / p.cell_pixels.0, ch / p.cell_pixels.1);
+        let (x_off, y_off) = (p.x_offset as f32 * scale.0, p.y_offset as f32 * scale.1);
         let x = padding + p.col as f32 * cw + x_off;
         let y = padding + v.row as f32 * ch + y_off + pixel_offset;
-        let w = p.cols as f32 * cw - x_off;
-        let h = p.rows as f32 * ch - y_off;
+        let w = if p.fixed_cols {
+            p.cols as f32 * cw - x_off
+        } else {
+            p.source.width as f32 * scale.0
+        };
+        let h = if p.fixed_rows {
+            p.rows as f32 * ch - y_off
+        } else {
+            p.source.height as f32 * scale.1
+        };
         if w <= 0.0 || h <= 0.0 || p.source.width == 0 || p.source.height == 0 {
             continue;
         }
