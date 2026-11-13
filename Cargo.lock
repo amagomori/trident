@@ -2605,6 +2605,7 @@ dependencies = [
  "flate2",
  "image",
  "libc",
+ "memchr",
  "notify",
  "notify-rust",
  "objc2 0.6.5",

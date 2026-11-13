@@ -340,26 +340,51 @@ impl PendingOutput {
     }
 }
 
+const SYNC_RESET: &[u8] = b"\x1b[?2026l";
+
+/// Applies output up to the last synchronized frame already complete in `output`, so a
+/// backlog of finished frames is drawn once instead of one presentation per frame.
 fn advance_output(term: &mut Terminal, output: &mut pty::Output) -> usize {
+    let last_reset = memchr::memmem::rfind(&output.bytes, SYNC_RESET)
+        .map_or(0, |start| start + SYNC_RESET.len());
     let mut start = 0;
     let mut applied = 0;
     let mut ended = false;
     for &offset in &output.shell_returns {
-        start += term.advance_until_sync_end(&output.bytes[start..offset]);
+        start += advance_frames(
+            term,
+            &output.bytes[start..offset],
+            last_reset.saturating_sub(start),
+        );
         if start == offset {
             term.reset_input_modes();
             applied += 1;
         }
-        ended = term.synchronized_output_ended();
+        ended = term.synchronized_output_ended() && start >= last_reset;
         if ended {
             break;
         }
     }
     output.shell_returns.drain(..applied);
     if !ended {
-        start += term.advance_until_sync_end(&output.bytes[start..]);
+        start += advance_frames(
+            term,
+            &output.bytes[start..],
+            last_reset.saturating_sub(start),
+        );
     }
     start
+}
+
+/// Advances frame by frame until the frame end at or past `last_reset`.
+fn advance_frames(term: &mut Terminal, bytes: &[u8], last_reset: usize) -> usize {
+    let mut consumed = 0;
+    loop {
+        consumed += term.advance_until_sync_end(&bytes[consumed..]);
+        if !term.synchronized_output_ended() || consumed >= last_reset || consumed == bytes.len() {
+            return consumed;
+        }
+    }
 }
 
 fn update_terminal(
@@ -463,6 +488,9 @@ fn exit_wakeup(deadline: Option<Instant>, exit: Option<Instant>) -> Option<Insta
 struct ExitPresentation {
     target: Option<usize>,
     linger: Option<Instant>,
+    /// An untimed Metal callback already reached a target, so the final frame was re-rendered.
+    #[cfg(any(target_os = "macos", test))]
+    untimed_retried: bool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
@@ -475,20 +503,31 @@ impl ExitPresentation {
         now: Instant,
         refresh: u32,
     ) -> bool {
+        // Without any nonzero presentedTime, a zero cannot tell a shown drawable from a
+        // discarded one: submit the final frame twice, then linger after the second callback.
         if presented == 0 && self.target.is_some_and(|target| skipped >= target) {
-            self.linger.get_or_insert(now);
+            if !self.untimed_retried {
+                self.untimed_retried = true;
+                self.target = None;
+                return true;
+            }
+            self.start_linger(now, refresh);
             return false;
         }
         self.update(presented, skipped, now, refresh)
     }
 
+    fn start_linger(&mut self, now: Instant, refresh: u32) {
+        self.linger.get_or_insert_with(|| {
+            let refresh = if refresh == 0 { 60_000 } else { refresh };
+            now + Duration::from_secs_f64(2000.0 / f64::from(refresh))
+        });
+    }
+
     fn update(&mut self, presented: usize, skipped: usize, now: Instant, refresh: u32) -> bool {
         if let Some(target) = self.target {
             if presented >= target {
-                self.linger.get_or_insert_with(|| {
-                    let refresh = if refresh == 0 { 60_000 } else { refresh };
-                    now + Duration::from_secs_f64(2000.0 / f64::from(refresh))
-                });
+                self.start_linger(now, refresh);
             } else if skipped >= target {
                 self.target = None;
                 return true;
@@ -1981,7 +2020,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_exit_without_real_feedback_completes_on_handler() {
+    fn metal_exit_without_real_feedback_retries_once_then_lingers() {
         let now = Instant::now();
         let mut state = ExitPresentation::default();
         assert!(!state.update_metal(0, 1, now, 60_000));
@@ -1989,9 +2028,38 @@ mod tests {
         state.target = Some(2);
         assert!(!state.update_metal(0, 1, now, 60_000));
         assert!(!state.ready(now));
+        assert!(
+            state.update_metal(0, 2, now, 60_000),
+            "one untimed drawable is not a successful final present"
+        );
+        assert_eq!(state.target, None);
+        assert!(!state.ready(now + EXIT_TIMEOUT));
+        state.target = Some(3);
         assert!(!state.update_metal(0, 2, now, 60_000));
-        assert!(state.ready(now));
-        assert!(exit_ready(Some(now + EXIT_TIMEOUT), state.ready(now), now));
+        assert!(!state.ready(now + EXIT_TIMEOUT));
+        let second = now + Duration::from_millis(16);
+        assert!(!state.update_metal(0, 3, second, 60_000));
+        let until = state.wakeup(second);
+        assert_eq!(until - second, Duration::from_secs_f64(2.0 / 60.0));
+        assert!(!state.ready(until - Duration::from_nanos(1)));
+        assert!(state.ready(until));
+        assert!(until < now + EXIT_TIMEOUT);
+        let deadline = Some(now + EXIT_TIMEOUT);
+        assert!(!exit_ready(deadline, state.ready(second), second));
+        assert!(exit_ready(deadline, state.ready(until), until));
+    }
+
+    #[test]
+    fn metal_exit_switches_to_real_feedback_after_untimed_retry() {
+        let now = Instant::now();
+        let mut state = ExitPresentation {
+            target: Some(2),
+            ..ExitPresentation::default()
+        };
+        assert!(state.update_metal(0, 2, now, 60_000));
+        state.target = Some(3);
+        assert!(!state.update_metal(3, 2, now, 60_000));
+        assert_eq!(state.wakeup(now) - now, Duration::from_secs_f64(2.0 / 60.0));
     }
 
     #[test]
@@ -1999,7 +2067,7 @@ mod tests {
         let now = Instant::now();
         let mut state = ExitPresentation {
             target: Some(2),
-            linger: None,
+            ..ExitPresentation::default()
         };
         assert!(state.update_metal(1, 2, now, 60_000));
         assert_eq!(state.target, None);
@@ -2016,7 +2084,7 @@ mod tests {
         for presented in [0, 1] {
             let mut state = ExitPresentation {
                 target: Some(2),
-                linger: None,
+                ..ExitPresentation::default()
             };
             state.update_metal(presented, 0, now, 60_000);
             if presented != 0 {
@@ -2052,7 +2120,7 @@ mod tests {
         let now = Instant::now();
         let mut state = ExitPresentation {
             target: Some(2),
-            linger: None,
+            ..ExitPresentation::default()
         };
         assert!(state.update(1, 2, now, 0));
         assert_eq!(state.target, None);
@@ -2067,7 +2135,7 @@ mod tests {
         assert_eq!(state.wakeup(now) - now, Duration::from_secs_f64(2.0 / 60.0));
         let mut fast = ExitPresentation {
             target: Some(1),
-            linger: None,
+            ..ExitPresentation::default()
         };
         fast.update(1, 0, now, 120_000);
         assert_eq!(fast.wakeup(now) - now, Duration::from_secs_f64(2.0 / 120.0));
@@ -2449,7 +2517,8 @@ mod tests {
     fn leftover_output_waits_for_presentation_and_preserves_order() {
         let mut output = PendingOutput::default();
         let mut term = Terminal::new(10, 2);
-        let mut first = batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW\x1b[?2026l");
+        let mut first =
+            batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW\x1b[?2026l\x1b[?2026h\rHAL");
         let consumed = advance_output(&mut term, &mut first);
         output.retain(
             first,
@@ -2466,7 +2535,8 @@ mod tests {
                 .map(|c| c.c)
                 .collect::<String>()
         };
-        assert_eq!(text(&term), "OLD");
+        assert_eq!(text(&term), "NEW");
+        assert!(!term.modes.synchronized_output);
         assert!(output.presented());
         assert!(output.waiting_since.is_none());
         let mut next = output.next_batch(|| panic!("leftover must precede PTY output"));
@@ -2477,9 +2547,23 @@ mod tests {
             term.synchronized_output_ended(),
             Instant::now(),
         );
-        assert_eq!(text(&term), "NEW");
+        assert!(term.modes.synchronized_output);
         assert!(!output.presented());
         assert!(output.waiting_since.is_none());
+    }
+
+    #[test]
+    fn complete_frame_backlog_is_applied_in_one_advance() {
+        let mut term = Terminal::new(10, 2);
+        let mut bytes = Vec::new();
+        for n in 0..100 {
+            bytes.extend_from_slice(format!("\x1b[?2026h\r{n:03}\x1b[?2026l").as_bytes());
+        }
+        let mut output = batch(&bytes);
+        assert_eq!(advance_output(&mut term, &mut output), bytes.len());
+        assert!(term.synchronized_output_ended());
+        assert_eq!(term.viewport_row(0).cells[2].c, '9');
+        assert_eq!(term.viewport_row(0).cells[1].c, '9');
     }
 
     #[test]
@@ -2488,20 +2572,10 @@ mod tests {
         let mut pending = PendingOutput::default();
         let mut first = batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rDONE\x1b[?2026l");
         let consumed = advance_output(&mut term, &mut first);
-        pending.retain(
-            first,
-            consumed,
-            term.synchronized_output_ended(),
-            Instant::now(),
-        );
-        pending.presented();
-        let mut retained =
-            pending.next_batch(|| panic!("retained bytes must precede queued output"));
-        let consumed = advance_output(&mut term, &mut retained);
-        assert_eq!(consumed, retained.bytes.len());
+        assert_eq!(consumed, first.bytes.len());
         assert!(term.synchronized_output_ended());
         pending.retain(
-            retained,
+            first,
             consumed,
             term.synchronized_output_ended(),
             Instant::now(),
@@ -2531,13 +2605,13 @@ mod tests {
     fn paused_retained_frames_resume_before_queued_output() {
         let mut term = Terminal::new(10, 2);
         let mut pending = PendingOutput::default();
-        let mut first = batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW\x1b[?2026l");
+        let mut first = batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW");
         let consumed = advance_output(&mut term, &mut first);
         pending.retain(first, consumed, true, Instant::now());
         pending.presented();
         let saved = pending.bytes.clone();
         let wake_pending = std::sync::atomic::AtomicBool::new(true);
-        let mut queued = Some(batch(b"\x1b[?2026h\rEND\x1b[?2026l"));
+        let mut queued = Some(batch(b"\rEND\x1b[?2026l"));
         for _ in 0..3 {
             assert!(
                 pending
@@ -2554,12 +2628,8 @@ mod tests {
                 .is_some()
         );
         assert_eq!(term.viewport_row(0).cells[0].c, 'N');
-        assert!(
-            pending
-                .advance(&mut term, false, || panic!("presentation first"))
-                .is_none()
-        );
-        pending.presented();
+        assert!(term.modes.synchronized_output);
+        assert!(pending.waiting_since.is_none());
         assert!(
             pending
                 .advance(&mut term, true, || panic!("paused queued output"))
@@ -2595,22 +2665,21 @@ mod tests {
             bytes: [first.as_slice(), second.as_slice(), prompt.as_slice()].concat(),
             shell_returns: vec![first.len(), first.len() + second.len()],
         };
-        for expected in [first.len(), second.len()] {
-            let consumed = advance_output(&mut term, &mut output);
-            assert_eq!(consumed, expected);
-            assert_eq!(term.modes.mouse, MouseMode::Off);
-            assert!(!term.modes.focus_events);
-            assert!(!term.modes.bracketed_paste);
-            pending.retain(
-                output,
-                consumed,
-                term.synchronized_output_ended(),
-                Instant::now(),
-            );
-            assert!(!pending.is_empty());
-            pending.presented();
-            output = pending.next_batch(|| panic!("retained markers must precede PTY output"));
-        }
+        let consumed = advance_output(&mut term, &mut output);
+        assert_eq!(consumed, first.len() + second.len());
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(!term.modes.bracketed_paste);
+        pending.retain(
+            output,
+            consumed,
+            term.synchronized_output_ended(),
+            Instant::now(),
+        );
+        assert!(pending.waiting_since.is_some());
+        assert!(!pending.is_empty());
+        pending.presented();
+        output = pending.next_batch(|| panic!("retained prompt must precede PTY output"));
         assert_eq!(advance_output(&mut term, &mut output), prompt.len());
         assert!(term.modes.bracketed_paste);
     }
