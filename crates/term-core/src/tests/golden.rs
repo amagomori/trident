@@ -77,7 +77,7 @@ fn shell_integration_completion_queue_is_bounded() {
     assert!(t.take_command_finished().is_empty());
     for code in 0..100 {
         t.advance(format!("\x1b]133;A\x07\x1b]133;C\x07\x1b]133;D;{code}\x07").as_bytes());
-        assert!(t.command_finished.len() <= 16);
+        assert!(t.shell.command_finished.len() <= 16);
     }
     assert_eq!(
         t.take_command_finished(),
@@ -279,7 +279,7 @@ fn shell_integration_navigation_selection_and_streaming() {
 #[test]
 fn shell_integration_multiline_resize_and_guard_reset() {
     let mut t = Terminal::new(20, 3);
-    t.advance(b"\x1b]133;A\x07prompt\r\n\x1b]133;B\x07input\r\nmore");
+    t.advance(b"\x1b]133;A\x07prompt\r\n\x1b]133;B\x07input\r\nmore\x1b]133;C\x07");
     assert!(
         t.primary
             .lines
@@ -293,6 +293,37 @@ fn shell_integration_multiline_resize_and_guard_reset() {
     assert_eq!(t.primary.scrollback.len(), 3);
     t.advance(b"\x1b]133;C\x07\r\n\x1b]133;D\x07\x1b]133;A\x07\x1b[2J");
     assert_eq!(t.primary.lines[t.cursor.row].flags, RowFlags::default());
+}
+
+#[test]
+fn shell_integration_lazy_prompt_rows() {
+    for limit in [0, 2, 100] {
+        let mut t = Terminal::new(20, 3);
+        t.set_scrollback_limit(limit);
+        t.advance(b"\x1b]133;A\x07prompt\r\n\x1b]133;B\x07");
+        let input = b"input\r\n".repeat(200);
+        t.advance(&input);
+        t.advance(b"\x1b]133;C\x07");
+        assert!(
+            t.primary
+                .scrollback
+                .iter()
+                .chain(&t.primary.lines)
+                .all(|row| { row.flags.contains(RowFlags::PROMPT) })
+        );
+    }
+
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;D\x07");
+    assert!(t.primary.lines[0].flags.contains(RowFlags::PROMPT));
+    assert!(!t.primary.lines[1].flags.contains(RowFlags::PROMPT));
+    assert!(t.take_command_finished().is_empty());
+
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]133;A\x07prompt\r\n\x1b]133;invalid\x07");
+    assert!(!t.primary.lines[1].flags.contains(RowFlags::PROMPT));
+    t.advance(b"\x1b]133;B\x07");
+    assert!(t.primary.lines[1].flags.contains(RowFlags::PROMPT));
 }
 
 struct Case {

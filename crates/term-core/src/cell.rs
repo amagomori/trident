@@ -105,6 +105,14 @@ impl Row {
             *released = true;
         }
         self.cells.resize(cols, Cell::blank(template));
+        self.flags = RowFlags::default();
+        self.prompt_col = 0;
+        self.wrapped = false;
+        self.hidden = None;
+    }
+
+    pub(crate) fn erase(&mut self, blank: Row) {
+        self.cells = blank.cells;
         self.wrapped = false;
         self.hidden = None;
     }

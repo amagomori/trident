@@ -26,6 +26,13 @@ enum Zone {
     Output,
 }
 
+struct ShellState {
+    zone: Zone,
+    marks_seen: bool,
+    command_finished: Vec<CommandFinished>,
+    mark_line: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommandFinished {
     pub exit_code: Option<i32>,
@@ -204,18 +211,16 @@ pub struct Terminal {
     parser: vte::Parser,
     /// Whether `parser` is known to be in its ground state between calls to `advance`.
     parser_ground: bool,
-    zone: Zone,
-    shell_marks_seen: bool,
-    command_finished: Vec<CommandFinished>,
+    shell: ShellState,
 }
 
 impl Terminal {
     pub fn has_shell_marks(&self) -> bool {
-        self.shell_marks_seen
+        self.shell.marks_seen
     }
 
     pub fn take_command_finished(&mut self) -> Vec<CommandFinished> {
-        std::mem::take(&mut self.command_finished)
+        std::mem::take(&mut self.shell.command_finished)
     }
 
     /// Put the nearest prompt strictly above/below the viewport top at its top.
@@ -301,25 +306,54 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn shell_mark(&mut self, mark: &[u8], args: &[&[u8]]) {
-        if matches!(mark, b"A" | b"B" | b"C" | b"D") {
-            self.shell_marks_seen = true;
+        if !matches!(mark, b"A" | b"B" | b"C" | b"D") {
+            return;
         }
+        if !self.alt_active {
+            let current = self.history + self.cursor.row as u64;
+            if matches!(self.shell.zone, Zone::Prompt | Zone::Input) {
+                if let Some(start) = self.shell.mark_line {
+                    let start = if self.max_scrollback == 0 {
+                        self.primary.lines[..=self.cursor.row]
+                            .iter()
+                            .rposition(|row| row.flags.contains(RowFlags::PROMPT))
+                            .map_or(self.history, |row| self.history + row as u64)
+                    } else {
+                        start.max(self.first_line())
+                    };
+                    for line in start..=current {
+                        let row = if line < self.history {
+                            let index =
+                                self.primary.scrollback.len() - (self.history - line) as usize;
+                            &mut self.primary.scrollback[index]
+                        } else {
+                            &mut self.primary.lines[(line - self.history) as usize]
+                        };
+                        row.flags.insert(RowFlags::PROMPT);
+                    }
+                }
+            }
+            self.shell.mark_line = Some(current);
+        } else {
+            self.shell.mark_line = None;
+        }
+        self.shell.marks_seen = true;
         let flag = match mark {
             b"A" => {
-                self.zone = Zone::Prompt;
+                self.shell.zone = Zone::Prompt;
                 Some(RowFlags::PROMPT_START)
             }
             b"B" => {
-                self.zone = Zone::Input;
+                self.shell.zone = Zone::Input;
                 Some(RowFlags::PROMPT)
             }
             b"C" => {
-                self.zone = Zone::Output;
+                self.shell.zone = Zone::Output;
                 Some(RowFlags::OUTPUT_START)
             }
             b"D" => {
-                let command_ran = self.zone == Zone::Output;
-                self.zone = Zone::None;
+                let command_ran = self.shell.zone == Zone::Output;
+                self.shell.zone = Zone::None;
                 self.reset_input_modes();
                 if !command_ran {
                     return;
@@ -327,10 +361,12 @@ impl Terminal {
                 let exit_code = args
                     .first()
                     .and_then(|s| std::str::from_utf8(s).ok()?.parse::<i32>().ok());
-                if self.command_finished.len() == 16 {
-                    self.command_finished.remove(0);
+                if self.shell.command_finished.len() == 16 {
+                    self.shell.command_finished.remove(0);
                 }
-                self.command_finished.push(CommandFinished { exit_code });
+                self.shell
+                    .command_finished
+                    .push(CommandFinished { exit_code });
                 if !self.alt_active {
                     let row = self.cursor.row;
                     let line = &mut self.primary.lines[row];
@@ -380,9 +416,12 @@ impl Terminal {
         let cols = cols.max(2);
         let rows = rows.max(1);
         Terminal {
-            zone: Zone::None,
-            shell_marks_seen: false,
-            command_finished: Vec::new(),
+            shell: ShellState {
+                zone: Zone::None,
+                marks_seen: false,
+                command_finished: Vec::new(),
+                mark_line: None,
+            },
             palette: colors::Palette::default(),
             cols,
             rows,
@@ -954,17 +993,12 @@ impl Terminal {
         }
     }
 
-    #[inline(never)]
     fn linefeed(&mut self) {
         self.cursor.pending_wrap = false;
         if self.cursor.row == self.scroll_bottom {
             self.scroll_up_region(self.scroll_top, self.scroll_bottom, 1);
         } else if self.cursor.row < self.rows - 1 {
             self.cursor.row += 1;
-        }
-        if matches!(self.zone, Zone::Prompt | Zone::Input) && !self.alt_active {
-            let row = self.cursor.row;
-            self.primary.lines[row].flags.insert(RowFlags::PROMPT);
         }
     }
 
@@ -1207,11 +1241,11 @@ impl Terminal {
             }
             1 => self.erase_cells(row, 0, col + 1),
             2 => {
-                let flags = self.screen().lines[row].flags;
-                let prompt_col = self.screen().lines[row].prompt_col;
-                self.erase_row(row);
-                self.lines_mut()[row].flags = flags;
-                self.lines_mut()[row].prompt_col = prompt_col;
+                if !self.screen().placements.is_empty() {
+                    self.erase_placements(row, row, 0, usize::MAX);
+                }
+                let blank = self.blank_row();
+                self.lines_mut()[row].erase(blank);
             }
             _ => {}
         }
