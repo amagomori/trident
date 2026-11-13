@@ -96,6 +96,10 @@ pub struct Pty {
     output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
     pub wake_pending: Arc<AtomicBool>,
+    watcher_stopped: Arc<AtomicBool>,
+    #[cfg(unix)]
+    watcher: Option<crate::command_notify::Watcher>,
+    finished: Arc<dyn Fn(crate::command_notify::Finished) + Send + Sync>,
 }
 
 struct Input {
@@ -133,6 +137,7 @@ impl Pty {
         rows: usize,
         cell: (f32, f32),
         wake: impl Fn(bool) + Send + 'static,
+        finished: impl Fn(crate::command_notify::Finished) + Send + Sync + 'static,
     ) -> Result<Pty, String> {
         let pair = native_pty_system()
             .openpty(size(cols, rows, cell.0, cell.1))
@@ -177,6 +182,7 @@ impl Pty {
             .master
             .try_clone_reader()
             .map_err(|e| format!("cannot read pty: {e}"))?;
+        let watcher_stopped = Arc::new(AtomicBool::new(false));
         let mut writer = pair
             .master
             .take_writer()
@@ -226,6 +232,7 @@ impl Pty {
         let queue = output.clone();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let pending = wake_pending.clone();
+        let reader_stopped = watcher_stopped.clone();
         std::thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
@@ -273,6 +280,7 @@ impl Pty {
                         }
                     }
                 }
+                reader_stopped.store(true, Ordering::Release);
                 wake(true);
             })
             .map_err(|e| format!("cannot start reader thread: {e}"))?;
@@ -286,7 +294,37 @@ impl Pty {
             child,
             output,
             wake_pending,
+            watcher_stopped,
+            #[cfg(unix)]
+            watcher: None,
+            finished: Arc::new(finished),
         })
+    }
+
+    pub fn set_command_notifications(&mut self, enabled: bool) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            if !enabled {
+                self.watcher = None;
+            } else if self.watcher.is_none()
+                && let (Some(fd), Some(shell)) = (self.master.as_raw_fd(), self.child.process_id())
+            {
+                let fd = unsafe { BorrowedFd::borrow_raw(fd) }
+                    .try_clone_to_owned()
+                    .map_err(|e| format!("cannot clone pty: {e}"))?;
+                let finished = self.finished.clone();
+                self.watcher = Some(
+                    crate::command_notify::watch(
+                        fd,
+                        shell,
+                        self.watcher_stopped.clone(),
+                        move |event| finished(event),
+                    )
+                    .map_err(|e| format!("cannot start command watcher: {e}"))?,
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Everything the shell wrote since the last call.
@@ -371,6 +409,7 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
+        self.watcher_stopped.store(true, Ordering::Release);
         self.output.pending.lock().unwrap().closed = true;
         self.output.room.notify_one();
         let _ = self.child.kill();
@@ -380,6 +419,47 @@ impl Drop for Pty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn notifications_start_disabled_and_can_be_reloaded() {
+        let mut pty = Pty::spawn(
+            &["/bin/sh".into()],
+            &Default::default(),
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert!(pty.watcher.is_none());
+        pty.set_command_notifications(false).unwrap();
+        assert!(pty.watcher.is_none());
+        pty.set_command_notifications(true).unwrap();
+        assert!(pty.watcher.is_some());
+        pty.set_command_notifications(true).unwrap();
+        pty.set_command_notifications(false).unwrap();
+        assert!(pty.watcher.is_none());
+        pty.set_command_notifications(true).unwrap();
+        assert!(pty.watcher.is_some());
+    }
+
+    #[test]
+    fn failed_startup_returns_without_a_watcher() {
+        assert!(
+            Pty::spawn(
+                &["/nonexistent/terminal-test-shell".into()],
+                &Default::default(),
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| panic!("failed startup"),
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn foreground_reset_requires_a_return_from_away() {

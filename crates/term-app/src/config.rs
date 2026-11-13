@@ -10,6 +10,7 @@ pub struct Config {
     pub font_size: f32,
     pub padding: f32,
     pub scrollback: usize,
+    pub notify_long_commands_after: u64,
     pub shell: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub palette: Palette,
@@ -23,6 +24,7 @@ impl Default for Config {
             font_size: 14.0,
             padding: term_render::PADDING,
             scrollback: 10_000,
+            notify_long_commands_after: 10,
             shell: Vec::new(),
             env: BTreeMap::new(),
             palette: Palette::default(),
@@ -38,6 +40,7 @@ struct Raw {
     font_size: Option<f32>,
     padding: Option<f32>,
     scrollback: Option<usize>,
+    notify_long_commands_after: Option<u64>,
     shell: Option<Shell>,
     env: BTreeMap<String, String>,
     colors: BTreeMap<String, String>,
@@ -299,6 +302,9 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     }
     if let Some(scrollback) = raw.scrollback {
         config.scrollback = scrollback;
+    }
+    if let Some(seconds) = raw.notify_long_commands_after {
+        config.notify_long_commands_after = seconds;
     }
     config.shell = match raw.shell {
         Some(Shell::Program(program)) => vec![program],
@@ -717,6 +723,17 @@ mod tests {
 
     fn parse_text(text: &str) -> Result<Config, String> {
         parse(Path::new("/config/terminal/config.toml"), text)
+    }
+
+    #[test]
+    fn notification_threshold() {
+        assert_eq!(parse_text("").unwrap().notify_long_commands_after, 10);
+        for seconds in [0, 25] {
+            let config = parse_text(&format!("notify_long_commands_after = {seconds}")).unwrap();
+            assert_eq!(config.notify_long_commands_after, seconds);
+        }
+        assert!(parse_text("notify_long_commands_after = -1").is_err());
+        assert!(parse_text("notify_long_commands_after = 'soon'").is_err());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod clipboard;
+mod command_notify;
 mod config;
 mod flow_control;
 #[cfg(any(target_os = "linux", test))]
@@ -90,6 +91,7 @@ impl ResizeThrottle {
 
 #[derive(Debug)]
 enum UserEvent {
+    CommandFinished(command_notify::Finished),
     ConfigChanged,
     Output,
     Exit,
@@ -437,7 +439,8 @@ impl App {
         );
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let proxy = self.proxy.clone();
-        let pty = Pty::spawn(
+        let command_proxy = self.proxy.clone();
+        let mut pty = Pty::spawn(
             self.options.command(&self.config),
             &self.config.env,
             spawn_cols,
@@ -450,7 +453,11 @@ impl App {
                     UserEvent::Output
                 });
             },
+            move |finished| {
+                let _ = command_proxy.send_event(UserEvent::CommandFinished(finished));
+            },
         )?;
+        pty.set_command_notifications(self.config.notify_long_commands_after != 0)?;
         let attrs = Window::default_attributes()
             .with_title("terminal")
             .with_inner_size(logical_size);
@@ -672,6 +679,8 @@ impl App {
             }
             self.config = next;
             if let Some(s) = &mut self.session {
+                s.pty
+                    .set_command_notifications(self.config.notify_long_commands_after != 0)?;
                 s.term.palette = self.config.palette.clone();
                 s.term
                     .set_scrollback_limit(self.options.scrollback(&self.config));
@@ -985,6 +994,15 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
+            UserEvent::CommandFinished(finished) => {
+                if command_notify::should_notify(
+                    self.focused,
+                    finished.duration,
+                    self.config.notify_long_commands_after,
+                ) {
+                    command_notify::notify(finished);
+                }
+            }
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Output => self.output_ready(),
             UserEvent::Exit => {
