@@ -1134,11 +1134,17 @@ mod bench {
         }
     }
 
+    #[inline(never)]
+    fn measured_search(term: &Terminal) {
+        black_box(term.search(black_box("a"), false).unwrap());
+    }
+
     enum Kind {
         /// Input fed in batches of the given size, like the app's PTY reads.
         Throughput(fn() -> Vec<u8>, usize),
         Keystrokes,
         Images,
+        Search(usize),
     }
 
     const WORKLOADS: &[(&str, Kind)] = &[
@@ -1186,6 +1192,9 @@ mod bench {
         ("unicode_linux", Kind::Throughput(unicode, LINUX_BATCH)),
         ("keystroke_latency", Kind::Keystrokes),
         ("images", Kind::Images),
+        ("search_dense_10k", Kind::Search(10_000)),
+        ("search_dense_100k", Kind::Search(100_000)),
+        ("search_dense_1m", Kind::Search(1_000_000)),
     ];
 
     fn median(secs: &mut [f64]) -> f64 {
@@ -1207,6 +1216,23 @@ mod bench {
                 continue;
             }
             let (unit, count, mut secs) = match kind {
+                Kind::Search(lines) => {
+                    let mut term = Terminal::new(80, 24);
+                    term.set_scrollback_limit(*lines);
+                    let line = [b'a'; 80];
+                    for _ in 0..lines + 23 {
+                        term.advance(&line);
+                        term.advance(b"\r\n");
+                    }
+                    let secs = (0..iters)
+                        .map(|_| {
+                            let start = Instant::now();
+                            measured_search(&term);
+                            start.elapsed().as_secs_f64()
+                        })
+                        .collect();
+                    ("keystrokes", 1, secs)
+                }
                 Kind::Throughput(generate, batch) => {
                     let input = generate();
                     let secs: Vec<f64> = (0..iters)
