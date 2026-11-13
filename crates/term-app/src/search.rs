@@ -162,6 +162,7 @@ mod tests {
         assert_eq!(search.input(), format!("{query}日▏本"));
         let layout = term_render::search_layout(
             search.cursor_column(),
+            search.preedit_columns(),
             search.status().chars().count(),
             800.0,
             600.0,
@@ -176,6 +177,36 @@ mod tests {
         search.regex = true;
         search.refresh(&mut term, true);
         assert_eq!(search.status(), "invalid regex  [regex]");
+    }
+
+    #[test]
+    fn long_query_conversion_keeps_whole_preedit_visible() {
+        let mut search = Search {
+            query: "a".repeat(85),
+            ..Search::default()
+        };
+        for (text, cursor) in [("にほ", (6, 6)), ("日本", (0, 6))] {
+            search.set_preedit(text.into(), Some(cursor));
+            let layout = term_render::search_layout(
+                search.cursor_column(),
+                search.preedit_columns(),
+                0,
+                850.0,
+                20.0,
+                10.0,
+                20.0,
+            );
+            assert_eq!(layout.input, 9..88);
+            assert!(
+                search
+                    .preedit_columns()
+                    .all(|column| layout.input.contains(&column))
+            );
+            assert_eq!(
+                layout.cursor_area[0],
+                (layout.prefix_columns + search.cursor_column() - layout.input.start) as f32 * 10.0
+            );
+        }
     }
 
     #[test]

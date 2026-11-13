@@ -34,6 +34,7 @@ pub struct SearchLayout {
 /// IME candidate placement share this layout (in physical pixels).
 pub fn search_layout(
     cursor: usize,
+    preedit: std::ops::Range<usize>,
     status_columns: usize,
     width: f32,
     height: f32,
@@ -48,7 +49,12 @@ pub fn search_layout(
     let input_end = status_column - usize::from(status_columns > 0);
     let prefix_columns = 6.min(input_end.saturating_sub(1));
     let input_columns = input_end - prefix_columns;
-    let start = (cursor + 1).saturating_sub(input_columns);
+    let end = if preedit.len() <= input_columns {
+        (cursor + 1).max(preedit.end)
+    } else {
+        cursor + 1
+    };
+    let start = end.saturating_sub(input_columns);
     SearchLayout {
         prefix_columns,
         input: start..start + input_columns,
@@ -68,15 +74,15 @@ mod search_tests {
     #[test]
     fn cursor_tracks_bottom_bar_and_horizontal_scroll_in_physical_pixels() {
         assert_eq!(
-            super::search_layout(0, 20, 800.0, 600.0, 10.0, 20.0).cursor_area,
+            super::search_layout(0, 0..0, 20, 800.0, 600.0, 10.0, 20.0).cursor_area,
             [60.0, 580.0, 10.0, 20.0]
         );
         assert_eq!(
-            super::search_layout(20, 0, 100.0, 60.0, 10.0, 20.0).cursor_area,
+            super::search_layout(20, 0..0, 0, 100.0, 60.0, 10.0, 20.0).cursor_area,
             [90.0, 40.0, 10.0, 20.0]
         );
         assert_eq!(
-            super::search_layout(0, 20, 1.0, 1.0, 10.0, 20.0).cursor_area,
+            super::search_layout(0, 0..0, 20, 1.0, 1.0, 10.0, 20.0).cursor_area,
             [0.0, 0.0, 1.0, 1.0]
         );
     }
@@ -89,7 +95,8 @@ mod search_tests {
             "invalid regex  [regex]",
         ] {
             for cursor in [0, 75, 200] {
-                let layout = super::search_layout(cursor, status.len(), 800.0, 600.0, 10.0, 20.0);
+                let layout =
+                    super::search_layout(cursor, 0..0, status.len(), 800.0, 600.0, 10.0, 20.0);
                 assert_eq!(layout.prefix_columns, 6);
                 assert_eq!(layout.status_column + layout.status_columns, 80);
                 assert_eq!(layout.status_columns, status.len());
@@ -104,11 +111,20 @@ mod search_tests {
     #[test]
     fn narrow_windows_prioritize_status_over_prefix_without_losing_cursor() {
         for capacity in 1..30 {
-            let layout = super::search_layout(75, 21, capacity as f32 * 10.0, 20.0, 10.0, 20.0);
+            let layout =
+                super::search_layout(75, 0..0, 21, capacity as f32 * 10.0, 20.0, 10.0, 20.0);
             assert!(!layout.input.is_empty());
             assert!(layout.input.contains(&75));
             assert!(layout.cursor_area[0] < capacity as f32 * 10.0);
             assert!(layout.status_column + layout.status_columns <= capacity);
+        }
+    }
+
+    #[test]
+    fn oversized_preedit_keeps_cursor_visible() {
+        for cursor in [85, 86, 184] {
+            let layout = super::search_layout(cursor, 85..185, 0, 850.0, 20.0, 10.0, 20.0);
+            assert!(layout.input.contains(&cursor));
         }
     }
 }

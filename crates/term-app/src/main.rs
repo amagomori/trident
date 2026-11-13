@@ -872,6 +872,7 @@ impl App {
             let size = s.window.inner_size();
             term_render::search_layout(
                 search.cursor_column(),
+                search.preedit_columns(),
                 search.status().chars().count(),
                 size.width as f32,
                 size.height as f32,

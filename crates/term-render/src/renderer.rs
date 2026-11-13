@@ -483,6 +483,7 @@ impl Renderer {
         if let Some(search) = search {
             let layout = crate::search_layout(
                 search.cursor,
+                search.preedit.clone(),
                 search.status.chars().count(),
                 self.config.width as f32,
                 self.config.height as f32,
