@@ -67,6 +67,7 @@ const DEFER_AFTER: usize = 64 * 1024;
 const MAX_DEFER: Duration = Duration::from_millis(16);
 const RESIZE_INTERVAL: Duration = Duration::from_millis(100);
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
+const EXIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 struct ResizeThrottle {
@@ -447,6 +448,14 @@ fn sync_expired(since: Option<Instant>, now: Instant) -> bool {
     since.is_some_and(|since| now.duration_since(since) >= SYNC_TIMEOUT)
 }
 
+fn exit_ready(deadline: Option<Instant>, presented: bool, now: Instant) -> bool {
+    deadline.is_some_and(|deadline| presented || now >= deadline)
+}
+
+fn exit_wakeup(deadline: Option<Instant>, exit: Option<Instant>) -> Option<Instant> {
+    [deadline, exit].into_iter().flatten().min()
+}
+
 fn sync_wakeup(
     deadline: Option<Instant>,
     waiting_since: Option<Instant>,
@@ -481,7 +490,7 @@ struct App {
     scroll_accum: f64,
     clipboard: clipboard::Clipboard,
     error: Option<String>,
-    exit_pending: bool,
+    exit_deadline: Option<Instant>,
 }
 
 fn select_at(term: &mut Terminal, point: Point, modifiers: ModifiersState, clicks: u8) {
@@ -536,7 +545,7 @@ impl App {
             scroll_accum: 0.0,
             clipboard: clipboard::Clipboard::default(),
             error: None,
-            exit_pending: false,
+            exit_deadline: None,
         }
     }
 
@@ -1389,7 +1398,8 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Output => self.output_ready(),
             UserEvent::Exit => {
-                self.exit_pending = true;
+                self.exit_deadline
+                    .get_or_insert_with(|| Instant::now() + EXIT_TIMEOUT);
                 if let Some(s) = &mut self.session {
                     let queued = s.pty.take_output();
                     let mut processed = 0;
@@ -1422,6 +1432,10 @@ impl ApplicationHandler<UserEvent> for App {
             let _ = feedback.clock();
         }
         let now = Instant::now();
+        if exit_ready(self.exit_deadline, false, now) {
+            event_loop.exit();
+            return;
+        }
         if let Some(log) = self.session.as_mut().and_then(|s| s.latency.as_mut()) {
             if log.finished(now) {
                 event_loop.exit();
@@ -1454,12 +1468,13 @@ impl ApplicationHandler<UserEvent> for App {
                 s.window.request_redraw();
             }
         }
-        if self.exit_pending
-            && self
-                .session
+        if exit_ready(
+            self.exit_deadline,
+            self.session
                 .as_ref()
-                .is_none_or(|s| s.output.is_empty() && s.output.waiting_since.is_none())
-        {
+                .is_none_or(|s| s.output.is_empty() && s.output.waiting_since.is_none()),
+            Instant::now(),
+        ) {
             event_loop.exit();
             return;
         }
@@ -1481,6 +1496,7 @@ impl ApplicationHandler<UserEvent> for App {
                 deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));
             }
         }
+        deadline = exit_wakeup(deadline, self.exit_deadline);
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -1789,6 +1805,32 @@ mod tests {
         assert!(output.is_empty());
         assert!(!term.modes.synchronized_output);
         assert!(output.waiting_since.is_some());
+    }
+
+    #[test]
+    fn exit_cap_survives_missing_redraws_and_failed_presentations() {
+        let start = Instant::now();
+        let deadline = Some(start + EXIT_TIMEOUT);
+        let before = start + EXIT_TIMEOUT - Duration::from_nanos(1);
+        assert!(!exit_ready(None, true, start));
+        assert!(exit_ready(deadline, true, start));
+        assert!(!exit_ready(deadline, false, before));
+        assert!(exit_ready(deadline, false, start + EXIT_TIMEOUT));
+        let mut pending = PendingOutput {
+            waiting_since: Some(start),
+            ..PendingOutput::default()
+        };
+        assert!(!pending.finish_presentation(false, before));
+        assert_eq!(pending.waiting_since, Some(before));
+        assert!(exit_ready(deadline, false, start + EXIT_TIMEOUT));
+        assert_eq!(exit_wakeup(None, deadline), deadline);
+        assert_eq!(
+            exit_wakeup(Some(start + EXIT_TIMEOUT * 2), deadline),
+            deadline
+        );
+        assert_eq!(exit_wakeup(Some(before), deadline), Some(before));
+        assert_eq!(exit_wakeup(Some(before), None), Some(before));
+        assert_eq!(exit_wakeup(None, None), None);
     }
 
     #[test]
