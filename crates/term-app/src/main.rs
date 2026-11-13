@@ -329,6 +329,18 @@ impl PendingOutput {
         self.waiting_since = (frame_ended || !self.is_empty()).then_some(now);
     }
 
+    fn coalesce(&mut self, queued: pty::Output) -> bool {
+        let offset = self.bytes.len();
+        self.bytes.extend(queued.bytes);
+        self.shell_returns
+            .extend(queued.shell_returns.into_iter().map(|at| offset + at));
+        if memchr::memmem::rfind(&self.bytes, SYNC_RESET).is_none() {
+            return false;
+        }
+        self.waiting_since = None;
+        true
+    }
+
     fn presented(&mut self) -> bool {
         self.waiting_since = None;
         !self.is_empty()
@@ -1018,6 +1030,18 @@ impl App {
     }
 
     fn render_frame(&mut self) {
+        if self.exit_deadline.is_none()
+            && let Some(s) = &mut self.session
+        {
+            s.pty.refresh_flow();
+            if s.output.waiting_since.is_some() && !s.pty.flow.paused {
+                s.pty.wake_pending.store(false, Ordering::Release);
+                let queued = s.pty.take_output();
+                if s.output.coalesce(queued) {
+                    self.process_output();
+                }
+            }
+        }
         if let (Some(s), Some(search)) = (&mut self.session, &mut self.search)
             && search.dirty
         {
@@ -2319,6 +2343,70 @@ mod tests {
         assert!(state.update(0, 3, start + Duration::from_millis(17), 60_000));
         assert!(state.needs_wayland_submission());
         assert!(!state.ready(start + Duration::from_millis(17)));
+    }
+
+    #[test]
+    fn queued_completed_frames_replace_an_unsubmitted_frame() {
+        let mut term = Terminal::new(10, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || batch(b"\x1b[?2026hOLD\x1b[?2026l"));
+        let mut queued = Vec::new();
+        for n in 0..100 {
+            queued.extend_from_slice(format!("\x1b[?2026h\r{n:03}\x1b[?2026l").as_bytes());
+        }
+        queued.extend_from_slice(b"\x1b[?2026h\rHALF");
+        assert!(output.coalesce(batch(&queued)));
+        output.advance(&mut term, false, || panic!("coalesced output first"));
+        let text: String = term.viewport_row(0).cells[..3]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        assert_eq!(text, "099");
+        assert!(!term.modes.synchronized_output);
+        assert_eq!(output.bytes, b"\x1b[?2026h\rHALF");
+        assert!(output.waiting_since.is_some());
+        assert!(!output.finish_presentation(false, Instant::now()));
+        assert_eq!(output.bytes, b"\x1b[?2026h\rHALF");
+        assert!(output.finish_presentation(true, Instant::now()));
+    }
+
+    #[test]
+    fn incomplete_queued_frame_preserves_the_pending_presentation() {
+        let mut term = Terminal::new(10, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || batch(b"\x1b[?2026hOLD\x1b[?2026l"));
+        let waiting = output.waiting_since;
+        assert!(!output.coalesce(batch(b"")));
+        assert_eq!(output.waiting_since, waiting);
+        assert!(!output.coalesce(batch(b"\x1b[?2026h\rNEW\x1b[?202")));
+        assert_eq!(output.waiting_since, waiting);
+        assert_eq!(term.viewport_row(0).cells[0].c, 'O');
+        assert!(output.coalesce(batch(b"6l")));
+        output.advance(&mut term, false, || panic!("retained split reset first"));
+        assert_eq!(term.viewport_row(0).cells[0].c, 'N');
+        assert!(!term.modes.synchronized_output);
+        assert!(output.waiting_since.is_some());
+    }
+
+    #[test]
+    fn coalesced_shell_returns_follow_retained_output() {
+        let mut term = Terminal::new(10, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || {
+            batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\x1b[?1000;2004h\rNEW")
+        });
+        assert!(!output.coalesce(pty::Output {
+            bytes: Vec::new(),
+            shell_returns: vec![0],
+        }));
+        assert_eq!(output.shell_returns, [output.bytes.len()]);
+        assert!(output.coalesce(batch(b"\x1b[?2026l")));
+        output.advance(&mut term, false, || panic!("coalesced output first"));
+        assert_eq!(term.viewport_row(0).cells[0].c, 'N');
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.bracketed_paste);
+        assert!(!term.modes.synchronized_output);
+        assert!(output.is_empty());
     }
 
     #[test]
