@@ -6,6 +6,44 @@ const GREEN: [u8; 3] = [0, 255, 0];
 const BLUE: [u8; 3] = [0, 0, 255];
 const WHITE: [u8; 3] = [255, 255, 255];
 
+#[test]
+fn dropped_files_preview_only_supported_images() {
+    for name in ["sample.png", "sample.svg", "png-named.jpg", "sample.webp"] {
+        let (bytes, rows) = drop_preview(&sample(name), 80, 24, (8.0, 16.0)).unwrap();
+        let mut term = Terminal::new(80, 24);
+        term.set_cell_pixel_size(8.0, 16.0);
+        term.advance(&bytes);
+        let placements = term.visible_placements();
+        assert_eq!(placements.len(), 1, "{name}");
+        assert!(placements[0].placement.cols <= 32, "{name}");
+        assert!((1..=6).contains(&rows), "{name}");
+    }
+    for name in [
+        "sample.txt",
+        "sample.elf",
+        "corrupt.png",
+        "corrupt.svg",
+        "missing",
+    ] {
+        assert!(
+            drop_preview(&sample(name), 80, 24, (8.0, 16.0)).is_none(),
+            "{name}"
+        );
+    }
+    assert!(drop_preview(&sample("sample.png"), 80, 1, (8.0, 16.0)).is_none());
+    assert!(drop_preview(&sample("."), 80, 24, (8.0, 16.0)).is_none());
+}
+
+#[test]
+fn oversized_dropped_image_is_path_only() {
+    let path = std::env::temp_dir().join(format!("terminal-drop-large-{}.png", std::process::id()));
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(16 * 1024 * 1024 + 1).unwrap();
+    assert!(drop_preview(&path, 80, 24, (8.0, 16.0)).is_none());
+    drop(file);
+    std::fs::remove_file(path).unwrap();
+}
+
 fn sample(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("samples")
