@@ -35,6 +35,13 @@ impl Composition {
     }
 }
 
+pub fn holds_keys(composition: &Composition, find_preedit: Option<&str>) -> bool {
+    match find_preedit {
+        Some(preedit) => !preedit.is_empty(),
+        None => composition.preedit().is_some(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +76,21 @@ mod tests {
         );
         assert!(composition.preedit().is_none());
         assert!(composition.take().is_none());
+    }
+
+    #[test]
+    fn keys_wait_for_the_composition_of_the_active_input_target() {
+        let mut composition = Composition::default();
+        assert!(!holds_keys(&composition, None));
+        composition.update(&Ime::Preedit("にほん".into(), Some((9, 9))));
+        assert!(holds_keys(&composition, None));
+
+        let (find_preedit, _) = composition.take().unwrap();
+        assert!(holds_keys(&composition, Some(&find_preedit)));
+        assert!(!holds_keys(&composition, Some("")));
+
+        composition.update(&Ime::Preedit("かな".into(), None));
+        assert!(!holds_keys(&composition, Some("")));
     }
 
     #[test]

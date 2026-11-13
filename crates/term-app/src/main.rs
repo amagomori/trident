@@ -1917,14 +1917,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed || self.shortcut(&event) {
                     return;
                 }
-                let composing = match &self.search {
-                    Some(search) => !search.preedit.is_empty(),
-                    None => self
-                        .session
-                        .as_ref()
-                        .is_some_and(|s| s.composition.preedit().is_some()),
-                };
-                if composing {
+                let find_preedit = self.search.as_ref().map(|f| f.preedit.as_str());
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| ime::holds_keys(&s.composition, find_preedit))
+                {
                     return;
                 }
                 if self.search.is_some() {
