@@ -153,11 +153,17 @@ unreadable/corrupt files, directories, and files over 16 MiB always get just the
 Names containing line-editor control characters are rejected. Preview decoding is
 synchronous; previews are skipped in alternate-screen/mouse-reporting
 apps, and prompt relocation assumes a simple single-line shell prompt, not a TUI/tmux pane.
+With a wrapped command, including Bash readline's eager wrap at the right margin, the
+preview can appear between the command's rows instead of above the whole command.
+The typed text and dropped path are preserved; use `drop_preview = false` for path-only
+drops without this layout limitation.
 
 Linux X11 uses winit's Xdnd file-drop event. macOS Finder uses the same `DroppedFile`
-event via AppKit. Native Wayland
-drops are not exposed by winit 0.30: use XWayland (`env -u WAYLAND_DISPLAY terminal`)
-as a fallback.
+event via AppKit. On a Wayland desktop, running `env -u WAYLAND_DISPLAY terminal`
+selects XWayland; drops from X11/XWayland file managers are supported there. Drops
+from native Wayland apps are not supported yet, even into an XWayland terminal
+(verified with native Wayland Dolphin under Sway). A native Wayland terminal cannot
+receive file drops through winit 0.30 either.
 
 ### Viewing files
 
