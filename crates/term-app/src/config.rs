@@ -121,6 +121,13 @@ impl Chord {
         } else {
             parts.pop().unwrap_or("")
         };
+        let key = match key {
+            "arrowup" => "up",
+            "arrowdown" => "down",
+            "arrowleft" => "left",
+            "arrowright" => "right",
+            key => key,
+        };
         if key.is_empty()
             || !(key.chars().count() == 1
                 || [
@@ -170,11 +177,11 @@ impl Chord {
 }
 
 pub fn default_bindings() -> BTreeMap<Chord, Action> {
-    let command = if cfg!(target_os = "macos") {
-        "super"
-    } else {
-        "ctrl+shift"
-    };
+    default_bindings_for(cfg!(target_os = "macos"))
+}
+
+pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
+    let command = if macos { "super" } else { "ctrl+shift" };
     let mut bindings = BTreeMap::new();
     for (key, action) in [
         ("c", Action::Copy),
@@ -188,8 +195,18 @@ pub fn default_bindings() -> BTreeMap<Chord, Action> {
     ] {
         bindings.insert(Chord::parse(&format!("{command}+{key}")).unwrap(), action);
     }
-    if cfg!(target_os = "macos") {
+    if macos {
         bindings.insert(Chord::parse("super+k").unwrap(), Action::Clear);
+        for (key, action) in [
+            ("=", Action::Increase),
+            ("+", Action::Increase),
+            ("-", Action::Decrease),
+            ("_", Action::Decrease),
+            ("0", Action::Reset),
+            (")", Action::Reset),
+        ] {
+            bindings.insert(Chord::parse(&format!("super+shift+{key}")).unwrap(), action);
+        }
     }
     for (key, action) in [
         ("pageup", Action::PageUp),
@@ -352,34 +369,63 @@ pub fn load(path: &Path) -> Result<Config, String> {
     }
 }
 
-pub fn watch(
-    path: PathBuf,
-    changed: impl Fn() + Send + 'static,
-) -> notify::Result<notify::RecommendedWatcher> {
+pub struct ConfigWatcher {
+    _watcher: std::sync::Arc<std::sync::Mutex<notify::RecommendedWatcher>>,
+}
+
+pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Result<ConfigWatcher> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let watched_path = path.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok_and(|e| {
-            !matches!(e.kind, notify::EventKind::Access(_))
-                && e.paths.iter().any(|p| p == &watched_path)
-        }) {
-            let _ = tx.send(());
+        if let Ok(event) = event
+            && !matches!(event.kind, notify::EventKind::Access(_))
+        {
+            let _ = tx.send(event);
         }
     })?;
     let parent = path.parent().unwrap_or(Path::new("."));
     watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+    let mut target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    let mut target_parent = target.parent().unwrap_or(parent).to_path_buf();
+    if target_parent != parent {
+        watcher.watch(&target_parent, notify::RecursiveMode::NonRecursive)?;
+    }
+    let watcher = std::sync::Arc::new(std::sync::Mutex::new(watcher));
+    let weak = std::sync::Arc::downgrade(&watcher);
+    let parent = parent.to_path_buf();
     std::thread::Builder::new()
         .name("config-watch".into())
         .spawn(move || {
-            while rx.recv().is_ok() {
+            while let Ok(event) = rx.recv() {
+                if !event.paths.iter().any(|p| p == &path || p == &target) {
+                    continue;
+                }
                 while rx
                     .recv_timeout(std::time::Duration::from_millis(100))
                     .is_ok()
                 {}
+                let Some(watcher) = weak.upgrade() else { break };
+                if let Ok(resolved) = std::fs::canonicalize(&path) {
+                    let new_parent = resolved.parent().unwrap_or(&parent).to_path_buf();
+                    if new_parent != target_parent {
+                        let mut watcher = watcher.lock().unwrap();
+                        if new_parent == parent
+                            || watcher
+                                .watch(&new_parent, notify::RecursiveMode::NonRecursive)
+                                .is_ok()
+                        {
+                            if target_parent != parent {
+                                let _ = watcher.unwatch(&target_parent);
+                            }
+                            target_parent = new_parent;
+                        }
+                    }
+                    target = resolved;
+                }
+                drop(watcher);
                 changed();
             }
         })?;
-    Ok(watcher)
+    Ok(ConfigWatcher { _watcher: watcher })
 }
 #[cfg(test)]
 mod tests {
@@ -571,6 +617,53 @@ bright_white = "#fefdfc"
         assert_eq!(load(&path).unwrap().font_size, 22.0);
         std::fs::write(&path, "padding = -1").unwrap();
         assert!(load(&path).unwrap_err().contains("padding"));
+        drop(watcher);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_follows_symlink_targets_and_retargeting() {
+        let dir = std::env::temp_dir().join(format!(
+            "terminal-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("first");
+        let second = dir.join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let target = first.join("target.toml");
+        std::fs::write(&target, "font_size = 17").unwrap();
+        let path = dir.join("config.toml");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watcher = watch(path.clone(), move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+        let wait = |size| {
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert_eq!(load(&path).unwrap().font_size, size);
+        };
+        std::fs::write(&target, "font_size = 18").unwrap();
+        wait(18.0);
+        let replacement = first.join("replacement");
+        std::fs::write(&replacement, "font_size = 22").unwrap();
+        std::fs::rename(replacement, &target).unwrap();
+        wait(22.0);
+        let new_target = second.join("target.toml");
+        std::fs::write(&new_target, "font_size = 23").unwrap();
+        let link = dir.join("new-link");
+        std::os::unix::fs::symlink(&new_target, &link).unwrap();
+        std::fs::rename(link, &path).unwrap();
+        wait(23.0);
+        std::fs::write(&new_target, "font_size = 24").unwrap();
+        wait(24.0);
         drop(watcher);
         std::fs::remove_dir_all(dir).unwrap();
     }
