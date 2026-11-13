@@ -97,6 +97,7 @@ font_size = 14.0            # 4..=200 points
 padding = 6.0               # 0..=1000 logical pixels
 scrollback = 10000          # retained lines; 0 disables history
 drop_preview = true         # false: file drops insert only the shell-quoted path
+paste_protection = true     # false: never confirm multi-line or control-character pastes
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
@@ -221,6 +222,14 @@ Both files in an automatic pair are validated before applying either. Referenced
 theme files are hot-reloaded, including atomic saves, missing files created later,
 and symlinks. An invalid or unreadable theme shows a diagnostic banner and keeps
 the last valid palettes, just like an invalid config.
+
+### Pasting
+
+When the running program has not enabled bracketed paste, a pasted line break acts as
+Enter and runs the command at once. Such pastes, and pastes containing other control
+characters (tab excepted), first show a banner: Enter pastes, Escape cancels, and other
+keys are ignored while it is shown. With bracketed paste on, text pastes directly with
+every ESC stripped. Set `paste_protection = false` to always paste immediately.
 
 ### Dropping files
 
