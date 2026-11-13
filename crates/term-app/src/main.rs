@@ -101,6 +101,8 @@ enum UserEvent {
     ConfigChanged,
     Output,
     Exit,
+    #[cfg(target_os = "macos")]
+    Presented,
 }
 
 struct Options {
@@ -830,7 +832,9 @@ impl App {
                     (start, Some(lines))
                 })
                 .unwrap_or_else(|| (Instant::now(), None));
-            if let Err(error) = present_macos::install(renderer.gpu_device(), start, lines) {
+            if let Err(error) =
+                present_macos::install(renderer.gpu_device(), start, lines, self.proxy.clone())
+            {
                 eprintln!("terminal: presentation feedback unavailable: {error}");
             }
         }
@@ -1653,10 +1657,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Output => self.output_ready(),
+            #[cfg(target_os = "macos")]
+            UserEvent::Presented => {}
             UserEvent::Exit => {
                 self.exit_deadline
                     .get_or_insert_with(|| Instant::now() + EXIT_TIMEOUT);
                 if let Some(s) = &mut self.session {
+                    #[cfg(target_os = "macos")]
+                    {
+                        present_macos::begin_exit();
+                        s.renderer.prepare_exit();
+                    }
                     let queued = s.pty.take_output();
                     let mut processed = 0;
                     update_terminal(&mut s.term, &mut s.scroll, |term| {

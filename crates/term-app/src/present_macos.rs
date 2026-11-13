@@ -1,5 +1,5 @@
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -14,12 +14,18 @@ struct Sink {
     epoch: f64,
     start: Instant,
     original: Imp,
+    proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>,
 }
 
 static SINK: OnceLock<Sink> = OnceLock::new();
 static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static PRESENTED: AtomicUsize = AtomicUsize::new(0);
 static SKIPPED: Mutex<[usize; 2]> = Mutex::new([0; 2]);
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+pub fn begin_exit() {
+    EXITING.store(true, Ordering::Release);
+}
 
 pub fn arm_exit() -> usize {
     SEQUENCE.load(Ordering::Acquire) + 1
@@ -66,6 +72,9 @@ unsafe extern "C-unwind" fn present_drawable(
                     .unwrap()
                     .push(format!("presented {sequence} {time} {mode}"));
             }
+            if EXITING.load(Ordering::Acquire) {
+                let _ = sink.proxy.send_event(crate::UserEvent::Presented);
+            }
         });
         // Metal copies the block and invokes it after the drawable is presented.
         unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&handler)) };
@@ -82,6 +91,7 @@ pub fn install(
     device: &wgpu::Device,
     start: Instant,
     lines: Option<Arc<Mutex<Vec<String>>>>,
+    proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>,
 ) -> Result<(), &'static str> {
     if SINK.get().is_some() {
         return Err("Metal feedback already installed");
@@ -103,6 +113,7 @@ pub fn install(
         epoch,
         start,
         original: method.implementation(),
+        proxy,
     })
     .map_err(|_| "Metal feedback already installed")?;
     // The replacement preserves the Objective-C method's ABI and calls its original IMP.

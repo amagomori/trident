@@ -589,6 +589,13 @@ impl Renderer {
         ok
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn prepare_exit(&mut self) {
+        // Keep the two final drawables in flight together without changing vsync.
+        self.config.desired_maximum_frame_latency = 2;
+        self.surface.configure(&self.device, &self.config);
+    }
+
     fn draw(&mut self, background: Rgb, pre_present: Option<&mut dyn FnMut()>) -> bool {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
