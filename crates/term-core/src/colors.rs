@@ -28,6 +28,38 @@ const ANSI: [Rgb; 16] = [
     (0xc0, 0xca, 0xf5),
 ];
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Palette {
+    pub foreground: Rgb,
+    pub background: Rgb,
+    pub cursor: Rgb,
+    pub selection: Rgb,
+    pub ansi: [Rgb; 16],
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            foreground: FOREGROUND,
+            background: BACKGROUND,
+            cursor: CURSOR,
+            selection: SELECTION,
+            ansi: ANSI,
+        }
+    }
+}
+
+impl Palette {
+    pub fn resolve(&self, color: Color) -> Rgb {
+        match color {
+            Color::DefaultFg => self.foreground,
+            Color::DefaultBg => self.background,
+            Color::Indexed(i @ 0..=15) => self.ansi[i as usize],
+            other => resolve(other),
+        }
+    }
+}
+
 pub fn indexed(i: u8) -> Rgb {
     match i {
         0..=15 => ANSI[i as usize],

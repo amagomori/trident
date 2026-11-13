@@ -1,4 +1,5 @@
 mod clipboard;
+mod config;
 mod flow_control;
 #[cfg(any(target_os = "linux", test))]
 mod frame_clock;
@@ -9,6 +10,7 @@ mod present_wayland;
 mod pty;
 mod show;
 
+use config::Action;
 use input::MouseButton as ReportButton;
 use pty::Pty;
 use std::path::PathBuf;
@@ -16,12 +18,14 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use term_core::{MouseMode, Point, SelectionKind, Terminal};
-use term_render::{Fonts, PADDING, Renderer};
+#[cfg(test)]
+use term_render::PADDING;
+use term_render::{Fonts, Renderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
@@ -60,15 +64,40 @@ impl ResizeThrottle {
 
 #[derive(Debug)]
 enum UserEvent {
+    ConfigChanged,
     Output,
     Exit,
 }
 
 struct Options {
+    config_path: PathBuf,
+    font_size_override: bool,
     font: Option<PathBuf>,
     font_size: f32,
     option_as_alt: bool,
     command: Vec<String>,
+}
+
+impl Options {
+    fn font<'a>(&'a self, config: &'a config::Config) -> Option<&'a std::path::Path> {
+        self.font.as_deref().or(config.font.as_deref())
+    }
+
+    fn size(&self, config: &config::Config) -> f32 {
+        if self.font_size_override {
+            self.font_size
+        } else {
+            config.font_size
+        }
+    }
+
+    fn command<'a>(&'a self, config: &'a config::Config) -> &'a [String] {
+        if self.command.is_empty() {
+            &config.shell
+        } else {
+            &self.command
+        }
+    }
 }
 
 fn usage() -> ! {
@@ -77,6 +106,7 @@ fn usage() -> ! {
          USAGE: terminal [OPTIONS] [-e COMMAND [ARGS...]]\n       \
          terminal show [--width N] [--height N] [--fit] FILE...\n\n\
          OPTIONS:\n  \
+           --config <PATH>     Override the TOML config file location\n  \
            --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)\n  \
            --font-size <SIZE>  Font size in points (default: {DEFAULT_FONT_SIZE})\n  \
            --option-as-alt     On macOS, make Option act as Alt/Meta\n  \
@@ -93,6 +123,8 @@ fn usage() -> ! {
 
 fn parse_args() -> Result<Options, String> {
     let mut options = Options {
+        config_path: config::default_path(),
+        font_size_override: false,
         font: None,
         font_size: DEFAULT_FONT_SIZE,
         option_as_alt: !cfg!(target_os = "macos"),
@@ -101,8 +133,10 @@ fn parse_args() -> Result<Options, String> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--config" => options.config_path = args.next().ok_or("--config needs a path")?.into(),
             "--font" => options.font = Some(args.next().ok_or("--font needs a path")?.into()),
             "--font-size" => {
+                options.font_size_override = true;
                 options.font_size = args
                     .next()
                     .and_then(|s| s.parse().ok())
@@ -193,6 +227,9 @@ fn wake_deadline(
 }
 
 struct App {
+    config: config::Config,
+    config_error: Option<String>,
+    _watcher: Option<notify::RecommendedWatcher>,
     options: Options,
     proxy: EventLoopProxy<UserEvent>,
     session: Option<Session>,
@@ -211,8 +248,25 @@ struct App {
 
 impl App {
     fn new(options: Options, proxy: EventLoopProxy<UserEvent>) -> App {
+        let (config, config_error) = match config::load(&options.config_path) {
+            Ok(config) => (config, None),
+            Err(error) => {
+                eprintln!("{error}");
+                (config::Config::default(), Some(error))
+            }
+        };
+        let path = std::path::absolute(&options.config_path).unwrap_or(options.config_path.clone());
+        let wake = proxy.clone();
+        let watcher = config::watch(path, move || {
+            let _ = wake.send_event(UserEvent::ConfigChanged);
+        })
+        .map_err(|e| eprintln!("terminal: config reload unavailable: {e}"))
+        .ok();
         App {
-            font_size: options.font_size,
+            font_size: options.size(&config),
+            config,
+            config_error,
+            _watcher: watcher,
             options,
             proxy,
             session: None,
@@ -229,11 +283,26 @@ impl App {
     }
 
     fn start(&mut self, event_loop: &ActiveEventLoop) -> Result<Session, String> {
-        let probe = Fonts::new(self.options.font.as_deref(), self.font_size)?;
+        let probe = match Fonts::new(self.options.font(&self.config), self.font_size) {
+            Ok(fonts) => fonts,
+            Err(error) if self.options.font.is_none() => {
+                let error = format!(
+                    "terminal: {}:1:1: font: {error}",
+                    self.options.config_path.display()
+                );
+                eprintln!("{error}");
+                self.config_error = Some(error);
+                self.config = config::Config::default();
+                self.font_size = self.options.size(&self.config);
+                Fonts::new(None, self.font_size)?
+            }
+            Err(error) => return Err(error),
+        };
+        let font = self.options.font(&self.config);
         let m = probe.metrics;
         let logical_size = LogicalSize::new(
-            100.0 * m.width + 2.0 * PADDING,
-            30.0 * m.height + 2.0 * PADDING,
+            100.0 * m.width + 2.0 * self.config.padding,
+            30.0 * m.height + 2.0 * self.config.padding,
         );
         let guess = event_loop
             .primary_monitor()
@@ -241,14 +310,19 @@ impl App {
         let guessed_fonts = if guess == 1.0 {
             probe
         } else {
-            Fonts::new(self.options.font.as_deref(), self.font_size * guess as f32)?
+            Fonts::new(font, self.font_size * guess as f32)?
         };
-        let (spawn_cols, spawn_rows) =
-            grid_size_for(logical_size.to_physical(guess), guess, &guessed_fonts);
+        let (spawn_cols, spawn_rows) = grid_size_for(
+            logical_size.to_physical(guess),
+            guess,
+            &guessed_fonts,
+            self.config.padding,
+        );
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let proxy = self.proxy.clone();
         let pty = Pty::spawn(
-            &self.options.command,
+            self.options.command(&self.config),
+            &self.config.env,
             spawn_cols,
             spawn_rows,
             spawn_cell,
@@ -273,14 +347,16 @@ impl App {
         let fonts = if scale == guess {
             guessed_fonts
         } else {
-            Fonts::new(self.options.font.as_deref(), self.font_size * scale as f32)?
+            Fonts::new(font, self.font_size * scale as f32)?
         };
         let size = window.inner_size();
         let renderer = Renderer::new(window.clone(), size.width, size.height)?;
         eprintln!("terminal: rendering with {}", renderer.adapter_info);
 
-        let (cols, rows) = grid_size(&window, &fonts);
+        let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
         let mut term = Terminal::new(cols, rows);
+        term.palette = self.config.palette.clone();
+        term.set_scrollback_limit(self.config.scrollback);
         term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
         let cell = (fonts.metrics.width, fonts.metrics.height);
         if (cols, rows, cell) != (spawn_cols, spawn_rows, spawn_cell) {
@@ -344,7 +420,7 @@ impl App {
     fn resize_grid(&mut self) {
         let Some(s) = &mut self.session else { return };
         s.resize.applied(Instant::now());
-        let (cols, rows) = grid_size(&s.window, &s.fonts);
+        let (cols, rows) = grid_size(&s.window, &s.fonts, self.config.padding);
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         if (cols, rows) != (s.term.cols(), s.term.rows()) {
@@ -439,61 +515,126 @@ impl App {
         }
     }
 
+    fn reload_config(&mut self) {
+        let result = config::load(&self.options.config_path).and_then(|next| {
+            let font_changed = self.options.font.is_none() && next.font != self.config.font;
+            let size_changed =
+                !self.options.font_size_override && next.font_size != self.config.font_size;
+            let size = if size_changed {
+                next.font_size
+            } else {
+                self.font_size
+            };
+            let fonts = if font_changed {
+                let scale = self
+                    .session
+                    .as_ref()
+                    .map_or(1.0, |s| s.window.scale_factor());
+                Some(
+                    Fonts::new(next.font.as_deref(), size * scale as f32).map_err(|e| {
+                        format!(
+                            "terminal: {}:1:1: font: {e}",
+                            self.options.config_path.display()
+                        )
+                    })?,
+                )
+            } else {
+                None
+            };
+            if next.shell != self.config.shell || next.env != self.config.env {
+                eprintln!("terminal: shell/env changes apply on the next launch");
+            }
+            self.config = next;
+            if let Some(s) = &mut self.session {
+                s.term.palette = self.config.palette.clone();
+                s.term.set_scrollback_limit(self.config.scrollback);
+                release_freed_memory(&mut s.term);
+                if let Some(fonts) = fonts {
+                    s.fonts = fonts;
+                    s.renderer.clear_glyph_cache();
+                }
+            }
+            if size_changed {
+                self.set_font_size(size);
+            }
+            self.resize_grid();
+            Ok(())
+        });
+        self.config_error = result.err();
+        if let Some(error) = &self.config_error {
+            eprintln!("{error}");
+        }
+        if let Some(s) = &self.session {
+            s.window.request_redraw();
+        }
+    }
+
     /// Handles terminal shortcuts; true if the key was consumed.
     fn shortcut(&mut self, event: &KeyEvent) -> bool {
         let mods = self.modifiers;
-        let command = if cfg!(target_os = "macos") {
-            mods.super_key()
-        } else {
-            mods.control_key() && mods.shift_key()
+        let modifiers = u8::from(mods.control_key())
+            | (u8::from(mods.shift_key()) << 1)
+            | (u8::from(mods.alt_key()) << 2)
+            | (u8::from(mods.super_key()) << 3);
+        let key = match event.key_without_modifiers() {
+            Key::Character(c) => {
+                if c == " " {
+                    "space".into()
+                } else {
+                    c.to_lowercase()
+                }
+            }
+            Key::Named(named) => format!("{named:?}").to_lowercase(),
+            _ => return false,
         };
-        let base = event.key_without_modifiers();
-        if command && let Key::Character(c) = &base {
-            match c.to_lowercase().as_str() {
-                "c" => self.copy(false),
-                "v" => self.paste(false),
-                "=" | "+" => self.set_font_size(self.font_size + 1.0),
-                "-" | "_" => self.set_font_size(self.font_size - 1.0),
-                "0" | ")" => self.set_font_size(self.options.font_size),
-                "k" if cfg!(target_os = "macos") => {
-                    self.write_input(b"\x0c");
-                    if let Some(s) = &mut self.session {
-                        s.term.advance(b"\x1b[3J");
-                        release_freed_memory(&mut s.term);
+        let chord = config::Chord { modifiers, key };
+        let Some(action) = self.config.bindings.get(&chord).cloned() else {
+            return cfg!(target_os = "macos") && mods.super_key();
+        };
+        match action {
+            Action::None => return false,
+            Action::Copy => self.copy(false),
+            Action::Paste => self.paste(false),
+            Action::PastePrimary => self.paste(true),
+            Action::Increase => self.set_font_size(self.font_size + 1.0),
+            Action::Decrease => self.set_font_size(self.font_size - 1.0),
+            Action::Reset => self.set_font_size(if self.options.font_size_override {
+                self.options.font_size
+            } else {
+                self.config.font_size
+            }),
+            Action::Send(text) => self.write_input(text.as_bytes()),
+            Action::Clear => {
+                self.write_input(b"\x0c");
+                if let Some(s) = &mut self.session {
+                    s.term.advance(b"\x1b[3J");
+                    release_freed_memory(&mut s.term);
+                    s.request_frame();
+                }
+            }
+            Action::PageUp | Action::PageDown | Action::Top | Action::Bottom => {
+                if let Some(s) = &mut self.session {
+                    if matches!(action, Action::Top | Action::Bottom) && s.term.is_alt_screen() {
+                        return false;
                     }
+                    let page = s.term.rows() as isize - 1;
+                    let delta = match action {
+                        Action::PageUp => page,
+                        Action::PageDown => -page,
+                        Action::Top => isize::MAX / 2,
+                        _ => -(isize::MAX / 2),
+                    };
+                    s.term.scroll_display(delta);
+                    s.request_frame();
                 }
-                _ => return cfg!(target_os = "macos"),
-            }
-            return true;
-        }
-        let Some(s) = &mut self.session else {
-            return false;
-        };
-        if mods.shift_key() && !mods.control_key() {
-            let page = s.term.rows() as isize - 1;
-            let handled = match &event.logical_key {
-                Key::Named(NamedKey::PageUp) => Some(page),
-                Key::Named(NamedKey::PageDown) => Some(-page),
-                Key::Named(NamedKey::Home) if !s.term.is_alt_screen() => Some(isize::MAX / 2),
-                Key::Named(NamedKey::End) if !s.term.is_alt_screen() => Some(-(isize::MAX / 2)),
-                Key::Named(NamedKey::Insert) => {
-                    self.paste(false);
-                    return true;
-                }
-                _ => None,
-            };
-            if let Some(delta) = handled {
-                s.term.scroll_display(delta);
-                s.request_frame();
-                return true;
             }
         }
-        false
+        true
     }
 
     fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(usize, usize)> {
         let s = self.session.as_ref()?;
-        let pad = PADDING as f64 * s.window.scale_factor();
+        let pad = self.config.padding as f64 * s.window.scale_factor();
         let m = s.fonts.metrics;
         let col = ((pos.x - pad) / m.width as f64).floor().max(0.0) as usize;
         let row = ((pos.y - pad) / m.height as f64).floor().max(0.0) as usize;
@@ -646,12 +787,17 @@ fn release_freed_memory(term: &mut Terminal) {
     }
 }
 
-fn grid_size(window: &Window, fonts: &Fonts) -> (usize, usize) {
-    grid_size_for(window.inner_size(), window.scale_factor(), fonts)
+fn grid_size(window: &Window, fonts: &Fonts, padding: f32) -> (usize, usize) {
+    grid_size_for(window.inner_size(), window.scale_factor(), fonts, padding)
 }
 
-fn grid_size_for(size: PhysicalSize<u32>, scale: f64, fonts: &Fonts) -> (usize, usize) {
-    let pad = 2.0 * PADDING * scale as f32;
+fn grid_size_for(
+    size: PhysicalSize<u32>,
+    scale: f64,
+    fonts: &Fonts,
+    padding: f32,
+) -> (usize, usize) {
+    let pad = 2.0 * padding * scale as f32;
     let cols = ((size.width as f32 - pad) / fonts.metrics.width)
         .floor()
         .max(2.0) as usize;
@@ -680,6 +826,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
+            UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Output => self.output_ready(),
             UserEvent::Exit => {
                 self.process_output();
@@ -783,8 +930,13 @@ impl ApplicationHandler<UserEvent> for App {
                         .target
                         .take()
                         .or_else(|| s.redraw_at.take().map(|(_, target)| target));
-                    let pad = PADDING * s.window.scale_factor() as f32;
+                    let pad = self.config.padding * s.window.scale_factor() as f32;
                     s.pty.refresh_flow();
+                    let banner = match (self.config_error.as_deref(), s.pty.flow.banner()) {
+                        (Some(error), Some(flow)) => Some(format!("{error} | {flow}")),
+                        (Some(error), None) => Some(error.to_owned()),
+                        (None, flow) => flow,
+                    };
                     let started = Instant::now();
                     let mut pre_present = || {
                         #[cfg(target_os = "linux")]
@@ -803,7 +955,7 @@ impl ApplicationHandler<UserEvent> for App {
                         &mut s.fonts,
                         pad,
                         self.focused,
-                        s.pty.flow.banner().as_deref(),
+                        banner.as_deref(),
                         Some(&mut pre_present),
                     ) {
                         if let Some(log) = &mut s.latency {
@@ -851,6 +1003,38 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cli_overrides_config() {
+        let config = super::config::parse(
+            std::path::Path::new("test.toml"),
+            "font = '/config.ttf'\nfont_size = 22\nshell = ['zsh', '-l']",
+        )
+        .unwrap();
+        let mut options = super::Options {
+            config_path: "test.toml".into(),
+            font_size_override: false,
+            font: None,
+            font_size: super::DEFAULT_FONT_SIZE,
+            command: Vec::new(),
+            option_as_alt: true,
+        };
+        assert_eq!(
+            options.font(&config),
+            Some(std::path::Path::new("/config.ttf"))
+        );
+        assert_eq!(options.size(&config), 22.0);
+        assert_eq!(options.command(&config), ["zsh", "-l"]);
+        options.font = Some("/cli.ttf".into());
+        options.font_size_override = true;
+        options.font_size = 18.0;
+        options.command = vec!["bash".into()];
+        assert_eq!(
+            options.font(&config),
+            Some(std::path::Path::new("/cli.ttf"))
+        );
+        assert_eq!(options.size(&config), 18.0);
+        assert_eq!(options.command(&config), ["bash"]);
+    }
 
     #[test]
     fn resize_throttle_leads_trails_and_resets() {
@@ -928,11 +1112,11 @@ mod tests {
         for (scale, expected) in [(1.0, (100, 30)), (2.0, (94, 30))] {
             let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
             assert_eq!(
-                grid_size_for(logical.to_physical(scale), scale, &fonts),
+                grid_size_for(logical.to_physical(scale), scale, &fonts, PADDING),
                 expected
             );
             assert_eq!(
-                grid_size_for(PhysicalSize::new(0, 0), scale, &fonts),
+                grid_size_for(PhysicalSize::new(0, 0), scale, &fonts, PADDING),
                 (2, 1)
             );
         }
