@@ -255,18 +255,18 @@ impl PendingOutput {
             shell_returns: std::mem::take(&mut self.shell_returns),
         };
         let mut processed = 0;
-        for mut batch in [leftover, queued] {
-            loop {
-                let consumed = advance_output(term, &mut batch);
-                processed += consumed;
-                if consumed == batch.bytes.len() && batch.shell_returns.is_empty() {
-                    break;
+        for batch in [leftover, queued] {
+            let mut start = 0;
+            for offset in batch.shell_returns {
+                while start < offset {
+                    start += term.advance_until_sync_end(&batch.bytes[start..offset]);
                 }
-                batch.bytes.drain(..consumed);
-                for offset in &mut batch.shell_returns {
-                    *offset -= consumed;
-                }
+                term.reset_input_modes();
             }
+            while start < batch.bytes.len() {
+                start += term.advance_until_sync_end(&batch.bytes[start..]);
+            }
+            processed += start;
         }
         term.modes.synchronized_output = false;
         self.waiting_since = Some(Instant::now());
@@ -1754,6 +1754,60 @@ mod tests {
         pty::Output {
             bytes: bytes.to_vec(),
             shell_returns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exit_drains_many_small_frames_with_shell_returns() {
+        let (mut term, mut output, queued) = exit_frame_batch(64_000);
+        let bytes = queued.bytes.len();
+        assert!(bytes >= 1 << 20);
+        assert_eq!(output.drain_on_exit(&mut term, queued), bytes);
+        let text: String = term
+            .viewport_row(0)
+            .cells
+            .iter()
+            .map(|cell| cell.c)
+            .collect();
+        assert!(text.starts_with("final"));
+        assert!(!term.modes.synchronized_output);
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(output.is_empty());
+    }
+
+    fn exit_frame_batch(frames: usize) -> (Terminal, PendingOutput, pty::Output) {
+        let mut bytes = Vec::new();
+        let mut shell_returns = Vec::new();
+        for _ in 0..frames {
+            bytes.extend_from_slice(b"\x1b[?2026h\rx\x1b[?2026l");
+            shell_returns.push(bytes.len());
+        }
+        bytes.extend_from_slice(b"\x1b[?1000;1004h");
+        shell_returns.push(bytes.len());
+        bytes.extend_from_slice(b"\x1b[?2026h\rfinal");
+        (
+            Terminal::new(80, 2),
+            PendingOutput::default(),
+            pty::Output {
+                bytes,
+                shell_returns,
+            },
+        )
+    }
+
+    #[test]
+    #[ignore]
+    fn time_exit_frame_drain() {
+        for frames in [64_000, 512_000] {
+            let (mut term, mut output, queued) = exit_frame_batch(frames);
+            let bytes = queued.bytes.len();
+            let start = Instant::now();
+            output.drain_on_exit(&mut term, queued);
+            eprintln!(
+                "EXIT_DRAIN_TIMING frames={frames} bytes={bytes} elapsed_ms={:.3}",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
         }
     }
 
