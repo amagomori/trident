@@ -239,6 +239,30 @@ struct PendingOutput {
 }
 
 impl PendingOutput {
+    fn drain_on_exit(&mut self, term: &mut Terminal, queued: pty::Output) -> usize {
+        let leftover = pty::Output {
+            bytes: std::mem::take(&mut self.bytes),
+            shell_returns: std::mem::take(&mut self.shell_returns),
+        };
+        let mut processed = 0;
+        for mut batch in [leftover, queued] {
+            loop {
+                let consumed = advance_output(term, &mut batch);
+                processed += consumed;
+                if consumed == batch.bytes.len() && batch.shell_returns.is_empty() {
+                    break;
+                }
+                batch.bytes.drain(..consumed);
+                for offset in &mut batch.shell_returns {
+                    *offset -= consumed;
+                }
+            }
+        }
+        term.modes.synchronized_output = false;
+        self.waiting_since = Some(Instant::now());
+        processed
+    }
+
     fn can_advance(&self, paused: bool) -> bool {
         !paused && self.waiting_since.is_none()
     }
@@ -1158,7 +1182,20 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Output => self.output_ready(),
             UserEvent::Exit => {
                 self.exit_pending = true;
-                self.process_output();
+                if let Some(s) = &mut self.session {
+                    let queued = s.pty.take_output();
+                    let mut processed = 0;
+                    update_terminal(&mut s.term, &mut s.scroll, |term| {
+                        processed = s.output.drain_on_exit(term, queued);
+                    });
+                    s.since_frame += processed;
+                    if let Some(log) = &mut s.latency {
+                        log.output(processed);
+                    }
+                    s.synchronized_since = None;
+                    s.deferred = None;
+                    s.request_frame();
+                }
             }
         }
     }
@@ -1209,16 +1246,14 @@ impl ApplicationHandler<UserEvent> for App {
                 s.window.request_redraw();
             }
         }
-        if self.exit_pending {
-            self.process_output();
-            if self
+        if self.exit_pending
+            && self
                 .session
                 .as_ref()
                 .is_none_or(|s| s.output.is_empty() && s.output.waiting_since.is_none())
-            {
-                event_loop.exit();
-                return;
-            }
+        {
+            event_loop.exit();
+            return;
         }
         let mut deadline = None;
         if let Some(s) = &mut self.session {
@@ -1428,6 +1463,67 @@ mod tests {
             bytes: bytes.to_vec(),
             shell_returns: Vec::new(),
         }
+    }
+
+    #[test]
+    fn exit_drains_open_frame_and_waits_for_successful_presentation() {
+        let mut term = Terminal::new(80, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || batch(b"\x1b[?2026h"));
+        let marker = b"EXIT-DRAIN: final open-frame output";
+        assert_eq!(output.drain_on_exit(&mut term, batch(marker)), marker.len());
+        assert!(!term.modes.synchronized_output);
+        let text: String = term
+            .viewport_row(0)
+            .cells
+            .iter()
+            .map(|cell| cell.c)
+            .collect();
+        assert!(text.starts_with(std::str::from_utf8(marker).unwrap()));
+        assert!(output.is_empty());
+        let now = Instant::now();
+        assert!(!output.finish_presentation(false, now));
+        assert_eq!(output.waiting_since, Some(now));
+        assert!(output.finish_presentation(true, now));
+        assert!(output.waiting_since.is_none());
+    }
+
+    #[test]
+    fn exit_drains_leftovers_before_queued_frames_even_when_waiting() {
+        let mut term = Terminal::new(80, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || {
+            batch(b"\x1b[?2026hfirst\x1b[?2026l\x1b[?2026hsecond")
+        });
+        assert!(output.waiting_since.is_some());
+        output.drain_on_exit(
+            &mut term,
+            pty::Output {
+                bytes: b"\x1b[?2026l\x1b[?2026hthird".to_vec(),
+                shell_returns: vec![8],
+            },
+        );
+        let text: String = term
+            .viewport_row(0)
+            .cells
+            .iter()
+            .map(|cell| cell.c)
+            .collect();
+        assert!(text.starts_with("firstsecondthird"));
+        assert!(output.is_empty());
+        assert!(!term.modes.synchronized_output);
+        assert!(output.waiting_since.is_some());
+    }
+
+    #[test]
+    fn exit_without_output_still_requires_a_final_presentation() {
+        let mut term = Terminal::new(80, 2);
+        let mut output = PendingOutput::default();
+        assert_eq!(output.drain_on_exit(&mut term, batch(b"")), 0);
+        assert!(output.is_empty());
+        assert!(output.waiting_since.is_some());
+        assert!(output.finish_presentation(true, Instant::now()));
+        assert!(output.waiting_since.is_none());
     }
 
     #[test]
