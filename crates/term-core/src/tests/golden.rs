@@ -141,7 +141,7 @@ fn shell_integration_prompt_redraw_and_empty_output() {
 fn shell_integration_output_ends_before_missing_newline_marker() {
     for marker in ["%", "⏎"] {
         let mut t = Terminal::new(20, 3);
-        t.advance(format!("\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07{marker}                \r\x1b]133;A\x07$ ").as_bytes());
+        t.advance(format!("\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07{marker}                    \r\x1b]133;A\x07$ ").as_bytes());
         t.select_command_output();
         assert_eq!(t.selection_text().as_deref(), Some("abc"));
     }
