@@ -108,6 +108,7 @@ impl Row {
         self.cells.resize(cols, Cell::blank(template));
         self.flags = RowFlags::default();
         self.prompt_col = 0;
+        self.output_col = 0;
         self.wrapped = false;
         self.hidden = None;
     }
