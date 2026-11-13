@@ -127,12 +127,13 @@ impl Terminal {
             else {
                 continue;
             };
-            let quote = text[..offset]
-                .chars()
-                .next_back()
-                .filter(|c| matches!(c, '"' | '\''));
+            let single_quoted = text[..offset].ends_with('\'');
             let mut uri = tail
-                .split(|c: char| c.is_whitespace() || matches!(c, '<' | '>') || Some(c) == quote)
+                .split(|c: char| {
+                    c.is_whitespace()
+                        || matches!(c, '"' | '<' | '>')
+                        || (single_quoted && c == '\'')
+                })
                 .next()
                 .unwrap_or("");
             while let Some(c) = uri.chars().last() {
@@ -228,19 +229,26 @@ mod tests {
 
     #[test]
     fn quoted_urls() {
-        for input in [
-            r#"{"url":"https://example.com","status":"ok"}"#,
-            "'https://example.com',next",
-            "\"https://example.com\",next",
-            "<https://example.com>next",
+        for (input, expected) in [
+            (
+                r#"{"url":"https://example.com","status":"ok"}"#,
+                "https://example.com",
+            ),
+            (
+                r#"{"message":"url=https://example.com/path","status":"ok"}"#,
+                "https://example.com/path",
+            ),
+            ("'https://example.com',next", "https://example.com"),
+            ("https://example.com\",next", "https://example.com"),
+            ("<https://example.com>next", "https://example.com"),
         ] {
             let mut t = Terminal::new(80, 2);
             t.advance(input.as_bytes());
             let start = input.find("https://").unwrap();
-            let end = start + "https://example.com".len() - 1;
+            let end = start + expected.len() - 1;
             for col in start..=end {
                 let link = t.link_at(Point { line: 0, col }).unwrap();
-                assert_eq!(link.uri, "https://example.com");
+                assert_eq!(link.uri, expected);
                 assert_eq!(link.start.col, start);
                 assert_eq!(link.end.col, end);
             }
@@ -269,7 +277,7 @@ mod tests {
             t.advance(uri.as_bytes());
             assert_eq!(t.link_at(Point { line: 0, col: 0 }).unwrap().uri, uri);
         }
-        for input in ["HTTPS://", "\"Https://\",next", "HTTp:/example.com"] {
+        for input in ["HTTPS://", "Https://\",next", "HTTp:/example.com"] {
             let mut t = Terminal::new(80, 2);
             t.advance(input.as_bytes());
             for col in 0..input.len() {
