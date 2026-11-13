@@ -1498,7 +1498,11 @@ impl App {
         // Num Lock/Shift can make keypad keys look like navigation shortcuts.
         if self.search.is_none()
             && self.session.as_ref().is_some_and(|s| {
-                input::is_application_keypad_key(event.physical_key, &s.term.modes)
+                input::application_keypad_owns_key(
+                    event.physical_key,
+                    self.modifiers,
+                    &s.term.modes,
+                )
             })
         {
             return false;
