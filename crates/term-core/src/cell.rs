@@ -197,6 +197,13 @@ impl Row {
         }
     }
 
+    pub(crate) fn hyperlinks_mut(&mut self) -> impl Iterator<Item = &mut u16> {
+        self.cells
+            .iter_mut()
+            .chain(self.hidden.iter_mut().flat_map(|h| h.cells.iter_mut()))
+            .map(|c| &mut c.hyperlink)
+    }
+
     pub(crate) fn is_blank(&self) -> bool {
         self.cells.iter().all(|c| *c == Cell::default())
             && self
