@@ -167,6 +167,38 @@ fn shell_integration_output_ends_before_missing_newline_marker() {
 }
 
 #[test]
+fn shell_integration_carriage_return_output_extent() {
+    for (output, expected) in [
+        ("abc\r", "abc"),
+        ("abc\rx", "xbc"),
+        ("abc\r\x1b[K", ""),
+        ("abc\r\n", "abc"),
+        ("abc\r\n\r", "abc"),
+        ("a界\r", "a界"),
+    ] {
+        let input = format!(
+            "\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07{output}\x1b]133;D;0\x07\r\n\x1b]133;A\x07$ "
+        );
+        for streamed in [false, true] {
+            let mut t = Terminal::new(20, 3);
+            if streamed {
+                for byte in input.bytes() {
+                    t.advance(&[byte]);
+                }
+            } else {
+                t.advance(input.as_bytes());
+            }
+            t.select_command_output();
+            assert_eq!(
+                t.selection_text().as_deref().unwrap_or(""),
+                expected,
+                "output {output:?}, streamed {streamed}"
+            );
+        }
+    }
+}
+
+#[test]
 fn shell_marks_seen_persists_for_session() {
     let mut t = Terminal::new(20, 3);
     assert!(!t.has_shell_marks());

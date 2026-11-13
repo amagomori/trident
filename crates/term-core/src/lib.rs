@@ -333,10 +333,18 @@ impl Terminal {
                 self.command_finished.push(CommandFinished { exit_code });
                 if !self.alt_active {
                     let row = self.cursor.row;
-                    self.primary.lines[row].flags.insert(RowFlags::OUTPUT_END);
-                    self.primary.lines[row].prompt_col =
-                        u32::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
-                            .unwrap_or(u32::MAX - 1);
+                    let line = &mut self.primary.lines[row];
+                    // CR and other cursor moves do not erase output to the right.
+                    // Snapshot its extent before the shell draws a prompt or a
+                    // missing-newline marker; a blank row after LF still ends at 0.
+                    let used = line
+                        .cells
+                        .iter()
+                        .rposition(|cell| cell.c != ' ' || cell.flags.contains(Flags::WIDE_SPACER))
+                        .map_or(0, |col| col + 1);
+                    let end = used.max(self.cursor.col + usize::from(self.cursor.pending_wrap));
+                    line.flags.insert(RowFlags::OUTPUT_END);
+                    line.prompt_col = u32::try_from(end).unwrap_or(u32::MAX - 1);
                     if let Some(prompt) = self.primary.lines[..=row]
                         .iter_mut()
                         .rev()
