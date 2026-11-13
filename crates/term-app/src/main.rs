@@ -1342,12 +1342,11 @@ impl App {
                             });
                             match result {
                                 Ok(mut child) => {
-                                    if let Some(stderr) = child.stderr.take() {
-                                        if let Err(error) =
+                                    if let Some(stderr) = child.stderr.take()
+                                        && let Err(error) =
                                             forward_new_window_stderr(stderr, std::io::stderr())
-                                        {
-                                            eprintln!("new window: {error}");
-                                        }
+                                    {
+                                        eprintln!("new window: {error}");
                                     }
                                     match child.wait() {
                                         Ok(status) if !status.success() => {
