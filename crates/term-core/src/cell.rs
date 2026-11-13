@@ -49,11 +49,11 @@ impl std::ops::BitOr for Flags {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
-    pub hyperlink: u16,
     pub c: char,
     pub fg: Color,
     pub bg: Color,
     pub flags: Flags,
+    pub hyperlink: u16,
 }
 
 impl Default for Cell {
