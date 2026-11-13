@@ -105,7 +105,12 @@ impl Perform for Terminal {
                 3 => self.tabs.iter_mut().for_each(|t| *t = false),
                 _ => {}
             },
-            ('h', _) | ('l', _) => self.set_modes(params, private, action == 'h'),
+            ('h', _) | ('l', _) => {
+                let enable = action == 'h';
+                for p in params.iter() {
+                    self.set_mode(p[0], private, enable);
+                }
+            }
             ('m', []) => self.sgr(params),
             ('n', []) => match arg(params, 0, 0) {
                 5 => self.responses.extend_from_slice(b"\x1b[0n"),
@@ -266,14 +271,6 @@ impl Terminal {
             _ => return,
         };
         self.responses.extend_from_slice(reply.as_bytes());
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn set_modes(&mut self, params: &Params, private: bool, enable: bool) {
-        for p in params.iter() {
-            self.set_mode(p[0], private, enable);
-        }
     }
 
     fn set_mode(&mut self, mode: u16, private: bool, enable: bool) {

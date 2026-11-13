@@ -181,8 +181,6 @@ pub struct Terminal {
     responses: Vec<u8>,
     synchronized_output_started: bool,
     synchronized_output_ended: bool,
-    #[cfg(test)]
-    ghost_advances: usize,
     pub bell: bool,
     images: images::ImageStore,
     /// Cell size in pixels, as reported by the app.
@@ -233,8 +231,6 @@ impl Terminal {
             responses: Vec::new(),
             synchronized_output_started: false,
             synchronized_output_ended: false,
-            #[cfg(test)]
-            ghost_advances: 0,
             bell: false,
             images: images::ImageStore::new(),
             cell_pixels: (8.0, 16.0),

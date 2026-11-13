@@ -19,17 +19,22 @@ struct Sink {
 static SINK: OnceLock<Sink> = OnceLock::new();
 static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static PRESENTED: AtomicUsize = AtomicUsize::new(0);
-static SKIPPED: AtomicUsize = AtomicUsize::new(0);
+static SKIPPED: Mutex<[usize; 2]> = Mutex::new([0; 2]);
 
 pub fn arm_exit() -> usize {
     SEQUENCE.load(Ordering::Acquire) + 1
 }
 
-pub fn feedback() -> (usize, usize) {
-    (
-        PRESENTED.load(Ordering::Acquire),
-        SKIPPED.load(Ordering::Acquire),
-    )
+pub fn feedback() -> (usize, [usize; 2]) {
+    (PRESENTED.load(Ordering::Acquire), *SKIPPED.lock().unwrap())
+}
+
+fn record_skip(skipped: &mut [usize; 2], sequence: usize) {
+    if sequence > skipped[1] {
+        *skipped = [skipped[1], sequence];
+    } else if sequence < skipped[1] {
+        skipped[0] = skipped[0].max(sequence);
+    }
 }
 
 unsafe extern "C-unwind" fn present_drawable(
@@ -45,7 +50,8 @@ unsafe extern "C-unwind" fn present_drawable(
         let handler = RcBlock::new(move |drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
             let time = unsafe { drawable.as_ref() }.presentedTime();
             if time == 0.0 {
-                SKIPPED.fetch_max(sequence + 1, Ordering::Release);
+                let mut skipped = SKIPPED.lock().unwrap();
+                record_skip(&mut skipped, sequence + 1);
             } else {
                 PRESENTED.fetch_max(sequence + 1, Ordering::Release);
             }
@@ -117,4 +123,20 @@ pub fn install(
         lines.lock().unwrap().push("source metal-presented".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_skip;
+
+    #[test]
+    fn skipped_feedback_keeps_two_distinct_sequences_in_any_order() {
+        for sequences in [[1, 2, 3, 3], [3, 3, 1, 2], [2, 3, 1, 3]] {
+            let mut skipped = [0; 2];
+            for sequence in sequences {
+                record_skip(&mut skipped, sequence);
+            }
+            assert_eq!(skipped, [2, 3]);
+        }
+    }
 }

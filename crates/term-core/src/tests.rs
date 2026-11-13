@@ -488,8 +488,9 @@ fn synchronized_advance_preserves_plain_flood_batching() {
     let mut t = term(10, 2, "");
     let batch = b"line\r\n".repeat(DEFAULT_SCROLLBACK + 100);
     assert!(t.ghost_split(&batch).is_some());
+    let before = crate::ghost::ADVANCES.get();
     assert_eq!(t.advance_until_sync_end(&batch), batch.len());
-    assert_eq!(t.ghost_advances, 1);
+    assert_eq!(crate::ghost::ADVANCES.get() - before, 1);
     assert_eq!(t.viewport_row(0).text(), "line");
 }
 

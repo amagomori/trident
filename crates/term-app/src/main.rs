@@ -546,22 +546,28 @@ impl ExitPresentation {
     fn update_metal(
         &mut self,
         presented: usize,
-        skipped: usize,
+        skipped: [usize; 2],
         now: Instant,
         refresh: u32,
     ) -> bool {
         // Without any nonzero presentedTime, a zero cannot tell a shown drawable from a
         // discarded one: submit the final frame twice, not just one skipped drawable.
-        if presented == 0 && self.target.is_some_and(|target| skipped >= target) {
+        if presented == 0 && self.target.is_some_and(|target| skipped[1] >= target) {
             if !self.untimed_retried {
                 self.untimed_retried = true;
                 self.retry();
                 return true;
             }
-            self.finish(now);
-            return false;
+            if self
+                .target
+                .is_some_and(|target| skipped[0] >= target.saturating_sub(1))
+            {
+                self.finish(now);
+                return false;
+            }
+            return self.missing_feedback(now, refresh);
         }
-        self.update(presented, skipped, now, refresh)
+        self.update(presented, skipped[1], now, refresh)
     }
 
     fn finish(&mut self, now: Instant) {
@@ -952,6 +958,29 @@ impl App {
     }
 
     fn present_frame(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.exit_deadline.is_some()
+            && !self
+                .exit_presentation
+                .needs_metal_submission(present_macos::feedback().0)
+        {
+            return;
+        }
+        self.render_frame();
+        #[cfg(target_os = "macos")]
+        if self.exit_deadline.is_some()
+            && self.exit_presentation.target.is_some()
+            && self
+                .exit_presentation
+                .needs_metal_submission(present_macos::feedback().0)
+        {
+            // Submit the redundant final drawable in this turn, not at the next
+            // window redraw (which can cost another refresh after shell exit).
+            self.render_frame();
+        }
+    }
+
+    fn render_frame(&mut self) {
         if let (Some(s), Some(search)) = (&mut self.session, &mut self.search)
             && search.dirty
         {
@@ -1023,14 +1052,6 @@ impl App {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             if let Some(target) = exit_target {
                 self.exit_presentation.submitted(target, Instant::now());
-                #[cfg(target_os = "macos")]
-                if self
-                    .exit_presentation
-                    .needs_metal_submission(present_macos::feedback().0)
-                {
-                    // Untimed callbacks can lag or never arrive; queue the second final drawable now.
-                    s.window.request_redraw();
-                }
             }
             if let Some(log) = &mut s.latency {
                 log.frame(Instant::now(), s.since_frame);
@@ -1594,8 +1615,17 @@ impl ApplicationHandler<UserEvent> for App {
                         self.exit_presentation
                             .submitted(present_macos::arm_exit() - 1, Instant::now());
                     } else {
+                        #[cfg(not(target_os = "macos"))]
                         s.window.request_redraw();
                     }
+                }
+                #[cfg(target_os = "macos")]
+                if self.session.as_ref().is_some_and(|s| s.since_frame > 0)
+                    || self
+                        .exit_presentation
+                        .needs_metal_submission(present_macos::feedback().0)
+                {
+                    self.present_frame();
                 }
             }
         }
@@ -2090,22 +2120,22 @@ mod tests {
     fn metal_exit_without_real_feedback_requires_two_drawables() {
         let now = Instant::now();
         let mut state = ExitPresentation::default();
-        assert!(!state.update_metal(0, 1, now, 60_000));
+        assert!(!state.update_metal(0, [0, 1], now, 60_000));
         assert!(!state.ready(now));
         state.target = Some(2);
-        assert!(!state.update_metal(0, 1, now, 60_000));
+        assert!(!state.update_metal(0, [0, 1], now, 60_000));
         assert!(!state.ready(now));
         assert!(
-            state.update_metal(0, 2, now, 60_000),
+            state.update_metal(0, [1, 2], now, 60_000),
             "one untimed drawable is not a successful final present"
         );
         assert_eq!(state.target, None);
         assert!(!state.ready(now + EXIT_TIMEOUT));
         state.target = Some(3);
-        assert!(!state.update_metal(0, 2, now, 60_000));
+        assert!(!state.update_metal(0, [1, 2], now, 60_000));
         assert!(!state.ready(now + EXIT_TIMEOUT));
         let second = now + Duration::from_millis(16);
-        assert!(!state.update_metal(0, 3, second, 60_000));
+        assert!(!state.update_metal(0, [2, 3], second, 60_000));
         let until = state.wakeup(second);
         assert_eq!(until, second);
         assert!(!state.ready(until - Duration::from_nanos(1)));
@@ -2123,9 +2153,9 @@ mod tests {
             target: Some(2),
             ..ExitPresentation::default()
         };
-        assert!(state.update_metal(0, 2, now, 60_000));
+        assert!(state.update_metal(0, [1, 2], now, 60_000));
         state.target = Some(3);
-        assert!(!state.update_metal(3, 2, now, 60_000));
+        assert!(!state.update_metal(3, [1, 2], now, 60_000));
         assert!(state.ready(now));
     }
 
@@ -2135,9 +2165,9 @@ mod tests {
         let period = Duration::from_secs_f64(1.0 / 60.0);
         let mut state = ExitPresentation::default();
         state.submitted(2, start);
-        assert!(state.update_metal(0, 2, start + period, 60_000));
+        assert!(state.update_metal(0, [1, 2], start + period, 60_000));
         state.submitted(3, start + period);
-        assert!(!state.update_metal(0, 2, start + period * 2, 60_000));
+        assert!(!state.update_metal(0, [1, 2], start + period * 2, 60_000));
         assert!(!state.missing_feedback(start + period * 2, 60_000));
         assert!(state.ready(start + period * 2));
         assert!(state.ready(state.wakeup(start + period * 2)));
@@ -2154,11 +2184,25 @@ mod tests {
         assert!(!state.needs_metal_submission(1));
         state.submitted(3, start + Duration::from_millis(1));
         assert!(!state.needs_metal_submission(0));
-        assert!(!state.update_metal(0, 2, start + Duration::from_millis(16), 60_000));
+        assert!(!state.update_metal(0, [1, 2], start + Duration::from_millis(16), 60_000));
         assert!(!state.ready(start + EXIT_TIMEOUT));
         let second = start + Duration::from_millis(32);
-        assert!(!state.update_metal(0, 3, second, 60_000));
+        assert!(!state.update_metal(0, [2, 3], second, 60_000));
         assert!(state.ready(second));
+    }
+
+    #[test]
+    fn metal_exit_proactive_retry_cannot_finish_from_one_untimed_callback() {
+        let start = Instant::now();
+        let mut state = ExitPresentation::default();
+        state.submitted(2, start);
+        state.submitted(3, start);
+        assert!(!state.update_metal(0, [1, 3], start, 60_000));
+        assert!(!state.ready(start));
+        assert!(!state.update_metal(0, [1, 3], start, 60_000));
+        assert!(!state.ready(start));
+        assert!(!state.update_metal(0, [2, 3], start, 60_000));
+        assert!(state.ready(start));
     }
 
     #[test]
@@ -2168,11 +2212,11 @@ mod tests {
             target: Some(2),
             ..ExitPresentation::default()
         };
-        assert!(state.update_metal(1, 2, now, 60_000));
+        assert!(state.update_metal(1, [1, 2], now, 60_000));
         assert_eq!(state.target, None);
         assert!(!state.ready(now));
         state.target = Some(3);
-        assert!(!state.update_metal(3, 2, now, 60_000));
+        assert!(!state.update_metal(3, [1, 2], now, 60_000));
         assert!(state.ready(now));
     }
 
@@ -2183,7 +2227,7 @@ mod tests {
             let mut state = ExitPresentation::default();
             if presented != 0 {
                 state.submitted(2, now);
-                assert!(state.update_metal(presented, 2, now, 60_000));
+                assert!(state.update_metal(presented, [1, 2], now, 60_000));
             }
             let deadline = Some(now + EXIT_TIMEOUT);
             assert!(!exit_ready(deadline, state.ready(now), now));
