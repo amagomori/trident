@@ -63,6 +63,7 @@ enum Kind {
     Raster(ImageFormat),
     Svg,
     Text,
+    DecodedText(String),
     Binary(String),
 }
 
@@ -179,6 +180,7 @@ fn show(
             write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
         }
         Kind::Text => write_text(out, &bytes).map_err(write_err),
+        Kind::DecodedText(text) => write_text(out, text.as_bytes()).map_err(write_err),
         Kind::Binary(kind) => {
             writeln!(out, "{kind}, {}", human_size(bytes.len() as u64)).map_err(write_err)
         }
@@ -221,13 +223,107 @@ fn detect(bytes: &[u8]) -> Kind {
     if bytes.ends_with(b"TRUEVISION-XFILE.\0") {
         return Kind::Raster(ImageFormat::Tga);
     }
+    let binary = binary_kind(bytes);
+    if binary != "binary data" {
+        return Kind::Binary(binary.into());
+    }
     if is_text(bytes) {
         return Kind::Text;
     }
     if looks_like_tga(bytes) {
         return Kind::Raster(ImageFormat::Tga);
     }
+    if let Some(text) = decode_text(bytes) {
+        return Kind::DecodedText(text);
+    }
     Kind::Binary(binary_kind(bytes).into())
+}
+
+fn ascii_text(b: u8) -> bool {
+    matches!(b, b'\t' | b'\n' | b'\r' | 0x20..=0x7e)
+}
+
+fn decode_text(bytes: &[u8]) -> Option<String> {
+    let bom = match bytes.get(..2) {
+        Some([0xff, 0xfe]) => Some(true),
+        Some([0xfe, 0xff]) => Some(false),
+        _ => None,
+    };
+    let endian = bom.or_else(|| {
+        if bytes.len() < 8 || !bytes.len().is_multiple_of(2) {
+            return None;
+        }
+        [true, false].into_iter().find(|&little| {
+            let ascii = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .filter(|pair| {
+                    let (low, high) = if little {
+                        (pair[0], pair[1])
+                    } else {
+                        (pair[1], pair[0])
+                    };
+                    high == 0 && ascii_text(low)
+                })
+                .count();
+            ascii * 4 >= bytes.len() / 2 * 3
+        })
+    });
+    if let Some(little) = endian {
+        let body = if bom.is_some() { &bytes[2..] } else { bytes };
+        if !body.len().is_multiple_of(2) {
+            return None;
+        }
+        let units: Vec<u16> = body
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                let pair = [pair[0], pair[1]];
+                if little {
+                    u16::from_le_bytes(pair)
+                } else {
+                    u16::from_be_bytes(pair)
+                }
+            })
+            .collect();
+        if bom.is_none()
+            && units
+                .iter()
+                .any(|&u| u == 0 || (u < 0x20 && !ascii_text(u as u8)))
+        {
+            return None;
+        }
+        return Some(String::from_utf16_lossy(&units));
+    }
+    if bytes.is_empty() || bytes.contains(&0) || std::str::from_utf8(bytes).is_ok() {
+        return None;
+    }
+    let printable = bytes
+        .iter()
+        .filter(|&&b| ascii_text(b) || b >= 0x80)
+        .count();
+    if printable * 100 < bytes.len() * 95 {
+        return None;
+    }
+    const C1: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
+        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
+        'ž', 'Ÿ',
+    ];
+    Some(
+        bytes
+            .iter()
+            .map(|&b| {
+                if (0x80..=0x9f).contains(&b) {
+                    C1[(b - 0x80) as usize]
+                } else {
+                    char::from(b)
+                }
+            })
+            .collect(),
+    )
 }
 
 fn is_svg(bytes: &[u8]) -> bool {
