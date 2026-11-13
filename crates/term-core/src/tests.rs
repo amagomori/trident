@@ -11,6 +11,22 @@ fn screen(t: &Terminal) -> Vec<String> {
 }
 
 #[test]
+fn signed_viewport_clamps_to_retained_lines() {
+    let mut t = term(10, 2, "one\r\ntwo\r\nthree");
+    assert_eq!(t.viewport_row_signed(-1).text(), "one");
+    assert_eq!(t.viewport_row_signed(isize::MIN).text(), "one");
+    assert_eq!(t.viewport_row_signed(isize::MAX).text(), "three");
+    t.scroll_display(1);
+    assert_eq!(t.viewport_row_signed(-1).text(), "one");
+    assert_eq!(t.viewport_to_point_signed(1, 3), t.viewport_to_point(1, 3));
+    t.set_scrollback_limit(0);
+    assert_eq!(t.display_offset(), 0);
+    assert_eq!(t.viewport_row_signed(-1).text(), "two");
+    let empty = Terminal::new(10, 2);
+    assert_eq!(empty.viewport_row_signed(-1).text(), "");
+}
+
+#[test]
 fn prints_and_wraps() {
     let t = term(5, 3, "hello world");
     assert_eq!(screen(&t), ["hello", " worl", "d"]);

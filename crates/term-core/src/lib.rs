@@ -318,6 +318,17 @@ impl Terminal {
         }
     }
 
+    pub fn viewport_to_point_signed(&self, row: isize, col: usize) -> Point {
+        let line = (self.history - self.display_offset as u64)
+            .saturating_add_signed(row as i64)
+            .clamp(self.first_line(), self.history + self.rows() as u64 - 1);
+        Point { line, col }
+    }
+
+    pub fn viewport_row_signed(&self, row: isize) -> &Row {
+        self.line(self.viewport_to_point_signed(row, 0).line)
+    }
+
     fn first_line(&self) -> u64 {
         self.history - self.screen().scrollback.len() as u64
     }

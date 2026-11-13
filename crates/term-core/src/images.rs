@@ -332,6 +332,10 @@ impl Terminal {
     /// Placements on the active screen that overlap the viewport, in drawing order (by `z`,
     /// then oldest first).
     pub fn visible_placements(&self) -> Vec<VisiblePlacement> {
+        self.visible_placements_above(0)
+    }
+
+    pub fn visible_placements_above(&self, extra_rows: usize) -> Vec<VisiblePlacement> {
         let base = self.placement_base(self.alt_active);
         let top = self.history as i64 - self.display_offset as i64;
         let mut visible: Vec<_> = self
@@ -341,7 +345,9 @@ impl Terminal {
             .filter_map(|p| {
                 let line = p.line + base;
                 let row = line as i64 - top;
-                let on = p.col < self.cols && row < self.rows as i64 && row + p.rows as i64 > 0;
+                let on = p.col < self.cols
+                    && row < self.rows as i64
+                    && row + p.rows as i64 > -(extra_rows as i64);
                 on.then_some(VisiblePlacement {
                     placement: Placement { line, ..*p },
                     row: row as isize,
