@@ -1,6 +1,7 @@
 mod clipboard;
 mod command_notify;
 mod config;
+mod drop_files;
 mod flow_control;
 #[cfg(any(target_os = "linux", test))]
 mod frame_clock;
@@ -641,6 +642,25 @@ impl App {
         self.write_input(bytes.as_bytes());
     }
 
+    fn dropped_file(&mut self, path: PathBuf) {
+        // Flush any deferred echo before inserting rows above the current prompt.
+        self.process_output();
+        let Some(s) = &mut self.session else { return };
+        let Some(bytes) = drop_files::quoted_path(&path) else {
+            eprintln!("terminal: cannot drop a path containing control characters");
+            return;
+        };
+        s.term.scroll_to_bottom();
+        if drop_files::preview_enabled(self.config.drop_preview, &s.term)
+            && let Some((image, rows)) =
+                show::drop_preview(&path, s.term.cols(), s.term.rows(), s.pty_cell)
+        {
+            drop_files::insert_preview(&mut s.term, &image, rows);
+        }
+        // Only the literal, quoted path goes to the shell: never a show command or Enter.
+        self.write_input(&bytes);
+    }
+
     fn copy(&mut self, primary: bool) {
         let Some(s) = &self.session else { return };
         if let Some(text) = s.term.selection_text().filter(|t| !t.is_empty()) {
@@ -1079,6 +1099,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
+            WindowEvent::DroppedFile(path) => self.dropped_file(path),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed || self.shortcut(&event) {
                     return;
