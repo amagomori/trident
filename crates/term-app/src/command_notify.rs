@@ -327,7 +327,7 @@ pub fn watch(
                             None
                         }
                     },
-                    |pid| group as u32 == shell && leader_exited(pid) && !group_has_stopped(pid),
+                    |pid| leader_exited(pid) && !group_has_stopped(pid),
                 );
                 for event in events {
                     finished(event);
@@ -418,6 +418,35 @@ mod tests {
         assert!(state.sample(None, now, || None, |_| true).is_empty());
         state.sample(Some(43), now, || None, |_| false);
         assert!(state.sample(None, now, || None, |_| true)[0].name.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_shell_command_finishes_at_nested_prompt() {
+        let mut state = Foreground::default();
+        let start = Instant::now();
+        state.sample(Some(42), start, || Some("bash".into()), |_| false);
+        state.sample(
+            Some(43),
+            start + Duration::from_secs(20),
+            || Some("sleep 12".into()),
+            |_| false,
+        );
+        let events = state.sample(
+            Some(42),
+            start + Duration::from_secs(32),
+            || panic!("nested shell already tracked"),
+            |pid| pid == 43,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name.as_deref(), Some("sleep 12"));
+        assert_eq!(events[0].duration, Duration::from_secs(12));
+        assert!(
+            state
+                .sample(Some(42), start + Duration::from_secs(100), || None, |_| false)
+                .is_empty()
+        );
+        assert_eq!(state.running.len(), 1);
     }
 
     #[cfg(unix)]
