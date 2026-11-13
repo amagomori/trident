@@ -10,7 +10,8 @@ A fast GPU-rendered terminal emulator written from scratch in Rust, for macOS an
 - **xterm-compatible**: 256 colors and truecolor, bold/italic/underline/strikethrough/dim,
   alternate screen, scroll regions, bracketed paste, focus events, mouse reporting (SGR and
   legacy), window titles, and wide (CJK) characters. Runs vim, tmux, htop, less and friends.
-- **Scrollback** of 10,000 lines, mouse selection (double-click for words, triple-click for
+- **Configurable scrollback** (10,000 lines by default), pixel-smooth trackpad scrolling,
+  mouse selection (double-click for words, triple-click for
   lines), and clipboard support, including the primary selection on Linux.
 - Bundled [JetBrains Mono](https://www.jetbrains.com/lp/mono/), with fallback to system fonts
   (found through fontconfig on Linux, Core Text on macOS) for symbols and CJK, and color emoji
@@ -43,6 +44,7 @@ terminal [OPTIONS] [-e COMMAND [ARGS...]]
   --config <PATH>     Override the TOML config file location
   --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)
   --font-size <SIZE>  Font size in points (default: 14)
+  --scrollback <LINES> History lines (default: 10000; 0 disables; maximum: 1000000)
   --option-as-alt     On macOS, make Option act as Alt/Meta
   -e, --command ...   Run this command instead of your shell
 ```
@@ -64,7 +66,8 @@ Hold Shift to select text while a program (vim, tmux, htop) is using the mouse.
 The optional config file is `$XDG_CONFIG_HOME/terminal/config.toml`, or
 `~/.config/terminal/config.toml` when XDG_CONFIG_HOME is unset (on Linux and macOS).
 `--config <PATH>` overrides this location. A missing file uses defaults.
-`--font`, `--font-size`, and `-e` override the corresponding config values.
+`--font`, `--font-size`, `--scrollback`, and `-e` override the corresponding config
+values, including on reload.
 
 ```toml
 # All entries are optional; omitted colors use Tokyo Night.

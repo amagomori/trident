@@ -30,6 +30,32 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
+
+#[derive(Default)]
+struct PixelScroll {
+    offset: f64,
+}
+
+impl PixelScroll {
+    fn reset(&mut self) {
+        self.offset = 0.0;
+    }
+
+    fn update(&mut self, delta: f64, height: f64, lines: usize, limit: usize) -> isize {
+        if !delta.is_finite() || !height.is_finite() || height <= 0.0 {
+            return 0;
+        }
+        let pixels =
+            (lines as f64 * height + self.offset + delta).clamp(0.0, limit as f64 * height);
+        let whole = (pixels / height).floor() as usize;
+        self.offset = if whole == limit {
+            0.0
+        } else {
+            pixels - whole as f64 * height
+        };
+        whole as isize - lines as isize
+    }
+}
 /// Output parsed since the last frame before more is held back, so a flood reaches
 /// `advance` in batches long enough to skip the lines it evicts. Interactive output (echo,
 /// replies to queries) never gets near it and is parsed the moment it arrives.
@@ -72,6 +98,7 @@ enum UserEvent {
 struct Options {
     config_path: PathBuf,
     font_size_override: bool,
+    scrollback: Option<usize>,
     font: Option<PathBuf>,
     font_size: f32,
     option_as_alt: bool,
@@ -79,6 +106,10 @@ struct Options {
 }
 
 impl Options {
+    fn scrollback(&self, config: &config::Config) -> usize {
+        self.scrollback.unwrap_or(config.scrollback)
+    }
+
     fn font<'a>(&'a self, config: &'a config::Config) -> Option<&'a std::path::Path> {
         self.font.as_deref().or(config.font.as_deref())
     }
@@ -110,6 +141,7 @@ fn usage() -> ! {
            --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)\n  \
            --font-size <SIZE>  Font size in points (default: {DEFAULT_FONT_SIZE})\n  \
            --option-as-alt     On macOS, make Option act as Alt/Meta\n  \
+           --scrollback <LINES> History lines (default: 10000; 0 disables; max: 1000000)\n  \
            -e, --command ...   Run this command instead of your shell\n  \
            -h, --help          Show this help\n  \
            -V, --version       Show the version\n\n\
@@ -122,18 +154,31 @@ fn usage() -> ! {
 }
 
 fn parse_args() -> Result<Options, String> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
     let mut options = Options {
         config_path: config::default_path(),
         font_size_override: false,
+        scrollback: None,
         font: None,
         font_size: DEFAULT_FONT_SIZE,
         option_as_alt: !cfg!(target_os = "macos"),
         command: Vec::new(),
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => options.config_path = args.next().ok_or("--config needs a path")?.into(),
+            "--scrollback" => {
+                options.scrollback = Some(
+                    args.next()
+                        .and_then(|s| s.parse().ok())
+                        .filter(|n: &usize| *n <= 1_000_000)
+                        .ok_or("--scrollback needs an integer between 0 and 1000000")?,
+                );
+            }
             "--font" => options.font = Some(args.next().ok_or("--font needs a path")?.into()),
             "--font-size" => {
                 options.font_size_override = true;
@@ -162,6 +207,7 @@ fn parse_args() -> Result<Options, String> {
 }
 
 struct Session {
+    scroll: PixelScroll,
     window: Arc<Window>,
     renderer: Renderer,
     fonts: Fonts,
@@ -188,6 +234,34 @@ fn advance_output(term: &mut Terminal, output: pty::Output) {
         start = offset;
     }
     term.advance(&output.bytes[start..]);
+}
+
+fn update_terminal(
+    term: &mut Terminal,
+    scroll: &mut PixelScroll,
+    update: impl FnOnce(&mut Terminal),
+) {
+    let offset = term.display_offset();
+    let history = term.viewport_to_point(0, 0).line + offset as u64;
+    let alt = term.is_alt_screen();
+    update(term);
+    let shrunk = release_freed_memory(term);
+    let new_history = term.viewport_to_point(0, 0).line + term.display_offset() as u64;
+    if shrunk || alt || term.is_alt_screen() || new_history < history {
+        scroll.reset();
+        return;
+    }
+    let added = new_history - history;
+    if offset == 0 && scroll.offset > 0.0 {
+        term.scroll_display(added.min(isize::MAX as u64) as isize);
+    } else if term.display_offset()
+        != (offset as u64 + added).min(term.scrollback_len() as u64) as usize
+    {
+        scroll.reset();
+    }
+    if term.display_offset() == term.scrollback_len() {
+        scroll.reset();
+    }
 }
 
 impl Session {
@@ -356,7 +430,7 @@ impl App {
         let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
         let mut term = Terminal::new(cols, rows);
         term.palette = self.config.palette.clone();
-        term.set_scrollback_limit(self.config.scrollback);
+        term.set_scrollback_limit(self.options.scrollback(&self.config));
         term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
         let cell = (fonts.metrics.width, fonts.metrics.height);
         if (cols, rows, cell) != (spawn_cols, spawn_rows, spawn_cell) {
@@ -400,6 +474,7 @@ impl App {
             }
         };
         Ok(Session {
+            scroll: PixelScroll::default(),
             latency,
             window,
             renderer,
@@ -419,6 +494,7 @@ impl App {
 
     fn resize_grid(&mut self) {
         let Some(s) = &mut self.session else { return };
+        s.scroll.reset();
         s.resize.applied(Instant::now());
         let (cols, rows) = grid_size(&s.window, &s.fonts, self.config.padding);
         s.term
@@ -457,8 +533,9 @@ impl App {
         let batch = s.pty.take_output();
         let processed = batch.bytes.len();
         s.since_frame += processed;
-        advance_output(&mut s.term, batch);
-        release_freed_memory(&mut s.term);
+        update_terminal(&mut s.term, &mut s.scroll, |term| {
+            advance_output(term, batch)
+        });
         if s.term.modes.mouse == MouseMode::Off {
             self.reported_button = None;
         }
@@ -486,6 +563,7 @@ impl App {
             log.input(Instant::now());
         }
         s.term.scroll_to_bottom();
+        s.scroll.reset();
         s.term.selection = None;
         s.pty.write(bytes);
         s.request_frame();
@@ -547,7 +625,8 @@ impl App {
             self.config = next;
             if let Some(s) = &mut self.session {
                 s.term.palette = self.config.palette.clone();
-                s.term.set_scrollback_limit(self.config.scrollback);
+                s.term
+                    .set_scrollback_limit(self.options.scrollback(&self.config));
                 release_freed_memory(&mut s.term);
                 if let Some(fonts) = fonts {
                     s.fonts = fonts;
@@ -624,6 +703,7 @@ impl App {
                         Action::Top => isize::MAX / 2,
                         _ => -(isize::MAX / 2),
                     };
+                    s.scroll.reset();
                     s.term.scroll_display(delta);
                     s.request_frame();
                 }
@@ -632,13 +712,19 @@ impl App {
         true
     }
 
-    fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(usize, usize)> {
+    fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(isize, usize)> {
         let s = self.session.as_ref()?;
         let pad = self.config.padding as f64 * s.window.scale_factor();
         let m = s.fonts.metrics;
         let col = ((pos.x - pad) / m.width as f64).floor().max(0.0) as usize;
-        let row = ((pos.y - pad) / m.height as f64).floor().max(0.0) as usize;
-        Some((row.min(s.term.rows() - 1), col.min(s.term.cols() - 1)))
+        let row = ((pos.y - pad - s.scroll.offset) / m.height as f64).floor() as isize;
+        Some((
+            row.clamp(
+                if s.scroll.offset > 0.0 { -1 } else { 0 },
+                s.term.rows() as isize - 1,
+            ),
+            col.min(s.term.cols() - 1),
+        ))
     }
 
     fn mouse_reporting(&self) -> bool {
@@ -654,9 +740,15 @@ impl App {
         };
         let Some(s) = &mut self.session else { return };
         let sgr = s.term.modes.sgr_mouse;
-        if let Some(bytes) =
-            input::encode_mouse(button, pressed, motion, col, row, self.modifiers, sgr)
-        {
+        if let Some(bytes) = input::encode_mouse(
+            button,
+            pressed,
+            motion,
+            col,
+            row.max(0) as usize,
+            self.modifiers,
+            sgr,
+        ) {
             s.pty.write(&bytes);
         }
     }
@@ -685,7 +777,7 @@ impl App {
                     return;
                 };
                 let Some(s) = &mut self.session else { return };
-                let point = s.term.viewport_to_point(row, col);
+                let point = s.term.viewport_to_point_signed(row, col);
                 let clicks = match self.last_click {
                     Some((at, p, n)) if p == point && at.elapsed() < Duration::from_millis(400) => {
                         n % 3 + 1
@@ -728,7 +820,7 @@ impl App {
         if self.left_down
             && let (Some((row, col)), Some(s)) = (cell, &mut self.session)
         {
-            let point = s.term.viewport_to_point(row, col);
+            let point = s.term.viewport_to_point_signed(row, col);
             s.term.update_selection(point);
             s.request_frame();
         }
@@ -736,6 +828,25 @@ impl App {
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
         let Some(s) = &self.session else { return };
+        if !self.mouse_reporting() && !(s.term.is_alt_screen() && s.term.modes.alt_scroll) {
+            let s = self.session.as_mut().unwrap();
+            match delta {
+                MouseScrollDelta::PixelDelta(p) => {
+                    let steps = s.scroll.update(
+                        p.y,
+                        s.fonts.metrics.height as f64,
+                        s.term.display_offset(),
+                        s.term.scrollback_len(),
+                    );
+                    s.term.scroll_display(steps);
+                    self.scroll_accum = 0.0;
+                    s.request_frame();
+                    return;
+                }
+                MouseScrollDelta::LineDelta(..) => s.scroll.reset(),
+            }
+        }
+        let s = self.session.as_ref().unwrap();
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => y as f64 * 3.0,
             MouseScrollDelta::PixelDelta(p) => p.y / s.fonts.metrics.height as f64,
@@ -777,14 +888,16 @@ impl App {
 
 /// After scrollback or the grid shrinks, hand the memory the dropped rows freed back to
 /// the OS: glibc keeps freed heap pages otherwise.
-fn release_freed_memory(term: &mut Terminal) {
-    if term.take_shrunk() {
+fn release_freed_memory(term: &mut Terminal) -> bool {
+    let shrunk = term.take_shrunk();
+    if shrunk {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         // SAFETY: malloc_trim only releases free heap memory; it has no preconditions.
         unsafe {
             libc::malloc_trim(0);
         }
     }
+    shrunk
 }
 
 fn grid_size(window: &Window, fonts: &Fonts, padding: f32) -> (usize, usize) {
@@ -954,6 +1067,7 @@ impl ApplicationHandler<UserEvent> for App {
                         &s.term,
                         &mut s.fonts,
                         pad,
+                        s.scroll.offset as f32,
                         self.focused,
                         banner.as_deref(),
                         Some(&mut pre_present),
@@ -1007,11 +1121,12 @@ mod tests {
     fn cli_overrides_config() {
         let config = super::config::parse(
             std::path::Path::new("test.toml"),
-            "font = '/config.ttf'\nfont_size = 22\nshell = ['zsh', '-l']",
+            "font = '/config.ttf'\nfont_size = 22\nscrollback = 42\nshell = ['zsh', '-l']",
         )
         .unwrap();
         let mut options = super::Options {
             config_path: "test.toml".into(),
+            scrollback: None,
             font_size_override: false,
             font: None,
             font_size: super::DEFAULT_FONT_SIZE,
@@ -1023,17 +1138,169 @@ mod tests {
             Some(std::path::Path::new("/config.ttf"))
         );
         assert_eq!(options.size(&config), 22.0);
+        assert_eq!(options.scrollback(&config), 42);
         assert_eq!(options.command(&config), ["zsh", "-l"]);
         options.font = Some("/cli.ttf".into());
         options.font_size_override = true;
         options.font_size = 18.0;
+        options.scrollback = Some(90);
         options.command = vec!["bash".into()];
         assert_eq!(
             options.font(&config),
             Some(std::path::Path::new("/cli.ttf"))
         );
         assert_eq!(options.size(&config), 18.0);
+        assert_eq!(options.scrollback(&config), 90);
+        let mut reloaded = config.clone();
+        reloaded.scrollback = 123;
+        assert_eq!(options.scrollback(&reloaded), 90);
         assert_eq!(options.command(&config), ["bash"]);
+    }
+
+    #[test]
+    fn scrollback_option() {
+        let parse = |args: &[&str]| parse_args_from(args.iter().map(|s| s.to_string()));
+        assert_eq!(
+            parse(&[]).unwrap().scrollback(&config::Config::default()),
+            10_000
+        );
+        for n in [0, 50, 1_000_000] {
+            assert_eq!(
+                parse(&["--scrollback", &n.to_string()])
+                    .unwrap()
+                    .scrollback(&config::Config::default()),
+                n
+            );
+        }
+        for args in [
+            vec!["--scrollback"],
+            vec!["--scrollback", "x"],
+            vec!["--scrollback", "-1"],
+            vec!["--scrollback", "1000001"],
+        ] {
+            assert!(parse(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn smooth_pixels_cross_boundaries_clamp_and_reset() {
+        let mut scroll = PixelScroll::default();
+        let mut lines = 0;
+        for (delta, expected_lines, expected_pixels) in [
+            (5.0, 0, 5.0),
+            (18.0, 2, 3.0),
+            (-8.0, 1, 5.0),
+            (-100.0, 0, 0.0),
+            (100.0, 5, 0.0),
+            (-5.0, 4, 5.0),
+        ] {
+            lines = (lines as isize + scroll.update(delta, 10.0, lines, 5)) as usize;
+            assert_eq!((lines, scroll.offset), (expected_lines, expected_pixels));
+        }
+        scroll.reset();
+        assert_eq!(scroll.offset, 0.0);
+        assert_eq!(scroll.update(5.0, 10.0, 0, 0), 0);
+        assert_eq!(scroll.offset, 0.0);
+        assert_eq!(scroll.update(f64::NAN, 10.0, 0, 5), 0);
+        assert_eq!(scroll.update(5.0, 0.0, 0, 5), 0);
+    }
+
+    fn streaming_terminal(limit: usize) -> Terminal {
+        let mut term = Terminal::new(20, 5);
+        term.set_scrollback_limit(limit);
+        for line in 0..80 {
+            term.advance(format!("line {line}\r\n").as_bytes());
+        }
+        release_freed_memory(&mut term);
+        term
+    }
+
+    fn drawn_rows(term: &Terminal) -> Vec<String> {
+        (-1..term.rows() as isize)
+            .map(|row| {
+                term.viewport_row_signed(row)
+                    .cells
+                    .iter()
+                    .map(|cell| cell.c)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_output_preserves_fraction_and_rows() {
+        for initial_lines in [0, 30] {
+            let mut term = streaming_terminal(100);
+            let mut scroll = PixelScroll::default();
+            let steps = scroll.update(
+                initial_lines as f64 * 20.0 + 9.0,
+                20.0,
+                term.display_offset(),
+                term.scrollback_len(),
+            );
+            term.scroll_display(steps);
+            let rows = drawn_rows(&term);
+            for added in 1..=3 {
+                update_terminal(&mut term, &mut scroll, |term| term.advance(b"\r\nnext"));
+                assert_eq!(term.display_offset(), initial_lines + added);
+                assert_eq!(scroll.offset, 9.0);
+                assert_eq!(drawn_rows(&term), rows);
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_bottom_anchors_a_batch_of_output_lines() {
+        let mut term = streaming_terminal(100);
+        let mut scroll = PixelScroll { offset: 9.0 };
+        let rows = drawn_rows(&term);
+        update_terminal(&mut term, &mut scroll, |term| {
+            term.advance(b"\r\na\r\nb\r\nc")
+        });
+        assert_eq!(term.display_offset(), 3);
+        assert_eq!(scroll.offset, 9.0);
+        assert_eq!(drawn_rows(&term), rows);
+    }
+
+    #[test]
+    fn streaming_output_clamps_fraction_at_history_top() {
+        for initial_lines in [0, 1] {
+            let mut term = streaming_terminal(2);
+            term.scroll_display(initial_lines);
+            let mut scroll = PixelScroll { offset: 9.0 };
+            update_terminal(&mut term, &mut scroll, |term| term.advance(b"a\r\nb\r\n"));
+            assert_eq!(term.display_offset(), term.scrollback_len());
+            assert_eq!(term.display_offset(), 2);
+            assert_eq!(scroll.offset, 0.0);
+        }
+        let mut term = streaming_terminal(0);
+        let mut scroll = PixelScroll { offset: 9.0 };
+        update_terminal(&mut term, &mut scroll, |term| term.advance(b"a\r\nb\r\n"));
+        assert_eq!(term.scrollback_len(), 0);
+        assert_eq!(term.display_offset(), 0);
+        assert_eq!(scroll.offset, 0.0);
+    }
+
+    #[test]
+    fn streaming_output_resets_fraction_on_view_jumps() {
+        for bytes in [
+            b"\x1b[3J".as_slice(),
+            b"\x1b[3Jnew\r\n",
+            b"\x1b[?1049h",
+            b"\x1bc",
+        ] {
+            let mut term = streaming_terminal(100);
+            term.scroll_display(30);
+            let mut scroll = PixelScroll { offset: 9.0 };
+            update_terminal(&mut term, &mut scroll, |term| term.advance(bytes));
+            assert_eq!(scroll.offset, 0.0);
+        }
+        let mut term = streaming_terminal(100);
+        term.scroll_display(30);
+        let mut scroll = PixelScroll { offset: 9.0 };
+        update_terminal(&mut term, &mut scroll, Terminal::scroll_to_bottom);
+        assert_eq!(term.display_offset(), 0);
+        assert_eq!(scroll.offset, 0.0);
     }
 
     #[test]

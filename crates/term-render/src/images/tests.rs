@@ -30,11 +30,20 @@ fn kitty(t: &mut Terminal, keys: &str) {
 const CELL: (f32, f32) = (10.0, 20.0);
 
 #[test]
+fn fractional_scroll_keeps_image_just_above_viewport() {
+    let mut t = term();
+    kitty(&mut t, ",c=1,r=1");
+    t.advance(b"\x1b[5;1H\r\n");
+    assert!(layout(&t, CELL, 6.0, 0.0).is_empty());
+    assert_eq!(layout(&t, CELL, 6.0, 10.0)[0].pos[1], -4.0);
+}
+
+#[test]
 fn draws_at_pixel_size_on_the_cursor_cell() {
     let mut t = term();
     t.advance(b"\x1b[2;4H");
     kitty(&mut t, "");
-    let quads = layout(&t, CELL, 6.0);
+    let quads = layout(&t, CELL, 6.0, 0.0);
     assert_eq!(
         quads,
         vec![Quad {
@@ -51,7 +60,7 @@ fn draws_at_pixel_size_on_the_cursor_cell() {
 fn cell_span_stretches_and_offsets_shift() {
     let mut t = term();
     kitty(&mut t, ",c=4,X=3,Y=5");
-    let q = layout(&t, CELL, 0.0)[0];
+    let q = layout(&t, CELL, 0.0, 0.0)[0];
     assert_eq!(q.pos, [3.0, 5.0]);
     // Four cells wide less the offset; native height on the axis not given in cells.
     assert_eq!(q.size, [37.0, 40.0]);
@@ -61,7 +70,7 @@ fn cell_span_stretches_and_offsets_shift() {
 fn source_rect_maps_to_uv() {
     let mut t = term();
     kitty(&mut t, ",x=5,y=10,w=10,h=20,r=3");
-    let q = layout(&t, CELL, 0.0)[0];
+    let q = layout(&t, CELL, 0.0, 0.0)[0];
     assert_eq!(q.uv, [0.25, 0.25, 0.75, 0.75]);
     assert_eq!(q.size, [10.0, 60.0]);
 }
@@ -72,7 +81,7 @@ fn z_picks_the_layer_in_drawing_order() {
     kitty(&mut t, ",p=1,z=5,C=1");
     kitty(&mut t, ",p=2,z=-1,C=1");
     kitty(&mut t, ",p=3,z=-1073741825,C=1");
-    let layers: Vec<_> = layout(&t, CELL, 0.0).iter().map(|q| q.layer).collect();
+    let layers: Vec<_> = layout(&t, CELL, 0.0, 0.0).iter().map(|q| q.layer).collect();
     assert_eq!(
         layers,
         [Layer::BelowBackgrounds, Layer::BelowText, Layer::AboveText]
@@ -85,12 +94,12 @@ fn moves_up_with_scrollback_and_back_down_when_scrolled_back() {
     kitty(&mut t, ",C=1");
     t.advance(b"\x1b[5;1H\n");
     // One line scrolled out: the image's top row is cut off above the grid.
-    assert_eq!(layout(&t, CELL, 0.0)[0].pos[1], -20.0);
+    assert_eq!(layout(&t, CELL, 0.0, 0.0)[0].pos[1], -20.0);
     t.scroll_display(1);
-    assert_eq!(layout(&t, CELL, 0.0)[0].pos[1], 0.0);
+    assert_eq!(layout(&t, CELL, 0.0, 0.0)[0].pos[1], 0.0);
     t.scroll_display(-1);
     t.advance(b"\n");
-    assert!(layout(&t, CELL, 0.0).is_empty());
+    assert!(layout(&t, CELL, 0.0, 0.0).is_empty());
 }
 
 #[test]

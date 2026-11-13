@@ -320,6 +320,17 @@ impl Terminal {
         }
     }
 
+    pub fn viewport_to_point_signed(&self, row: isize, col: usize) -> Point {
+        let line = (self.history - self.display_offset as u64)
+            .saturating_add_signed(row as i64)
+            .clamp(self.first_line(), self.history + self.rows() as u64 - 1);
+        Point { line, col }
+    }
+
+    pub fn viewport_row_signed(&self, row: isize) -> &Row {
+        self.line(self.viewport_to_point_signed(row, 0).line)
+    }
+
     fn first_line(&self) -> u64 {
         self.history - self.screen().scrollback.len() as u64
     }
@@ -395,7 +406,12 @@ impl Terminal {
                 for _ in 0..excess {
                     let row = screen.lines.remove(0);
                     if !alt {
-                        screen.scrollback.push_back(row);
+                        if self.max_scrollback > 0 {
+                            screen.scrollback.push_back(row);
+                            if screen.scrollback.len() > self.max_scrollback {
+                                screen.scrollback.pop_front();
+                            }
+                        }
                         self.history += 1;
                     } else {
                         shifted += 1;
@@ -424,6 +440,10 @@ impl Terminal {
             if alt {
                 alt_shifted = shifted;
             }
+        }
+        if !self.primary.placements.is_empty() {
+            let first = self.history - self.primary.scrollback.len() as u64;
+            self.drop_placements_before(first);
         }
         self.resize_placements(false, 0, rows);
         self.resize_placements(true, alt_shifted, rows);

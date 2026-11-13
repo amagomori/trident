@@ -45,6 +45,7 @@ pub struct Renderer {
     /// Instances in the frame's buffer: backgrounds end at `layers.0`, text, decorations and
     /// the cursor at `layers.1`, and the scrollbar comes last.
     layers: (u32, u32),
+    grid_instances: u32,
     /// The grid area images are clipped to: x, y, width, height in physical pixels.
     image_clip: [u32; 4],
     srgb: bool,
@@ -235,6 +236,7 @@ impl Renderer {
             atlas,
             images,
             layers: (0, 0),
+            grid_instances: 0,
             image_clip: [0; 4],
             srgb: format.is_srgb(),
             adapter_info,
@@ -283,17 +285,19 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         term: &Terminal,
         fonts: &mut Fonts,
         padding: f32,
+        pixel_offset: f32,
         focused: bool,
         banner: Option<&str>,
         pre_present: Option<&mut dyn FnMut()>,
     ) -> bool {
         for _ in 0..2 {
-            if self.build(term, fonts, padding, focused, banner) {
+            if self.build(term, fonts, padding, pixel_offset, focused, banner) {
                 break;
             }
         }
@@ -307,11 +311,11 @@ impl Renderer {
             );
         }
         let metrics = fonts.metrics;
-        let quads = images::layout(term, (metrics.width, metrics.height), padding);
+        let quads = images::layout(term, (metrics.width, metrics.height), padding, pixel_offset);
+        self.image_clip = self.grid_clip(term, &metrics, padding);
         if !quads.is_empty() || !self.images.is_empty() {
             self.images
                 .prepare(&self.device, &self.queue, &self.uniforms, term, quads);
-            self.image_clip = self.grid_clip(term, &metrics, padding);
         }
         self.draw(term.palette.background, pre_present)
     }
@@ -331,6 +335,7 @@ impl Renderer {
         term: &Terminal,
         fonts: &mut Fonts,
         padding: f32,
+        pixel_offset: f32,
         focused: bool,
         banner: Option<&str>,
     ) -> bool {
@@ -353,9 +358,9 @@ impl Renderer {
         let block_cursor = focused && term.cursor_shape == CursorShape::Block;
         let mut ok = true;
 
-        'rows: for row in 0..term.rows() {
-            let line = term.viewport_row(row);
-            let y = padding + row as f32 * ch;
+        'rows: for row in -isize::from(pixel_offset > 0.0)..term.rows() as isize {
+            let line = term.viewport_row_signed(row);
+            let y = padding + row as f32 * ch + pixel_offset;
             for (col, cell) in line.cells.iter().enumerate() {
                 if cell.flags.contains(Flags::WIDE_SPACER) {
                     continue;
@@ -375,10 +380,10 @@ impl Renderer {
                     let mix = |f: u8, b: u8| ((f as u16 * 3 + b as u16 * 2) / 5) as u8;
                     fg = (mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2));
                 }
-                if term.is_selected(selection, term.viewport_to_point(row, col)) {
+                if term.is_selected(selection, term.viewport_to_point_signed(row, col)) {
                     bg = term.palette.selection;
                 }
-                let is_cursor = cursor == Some((row, col));
+                let is_cursor = row >= 0 && cursor == Some((row as usize, col));
                 if is_cursor && block_cursor {
                     bg = term.palette.cursor;
                     fg = term.palette.background;
@@ -439,12 +444,14 @@ impl Renderer {
 
         let layers_bg = backgrounds.len() as u32;
         let layers_text = (backgrounds.len() + glyphs.len() + overlays.len()) as u32;
+        self.grid_instances = layers_text;
         // Scrollback position indicator.
-        if term.display_offset() > 0 && term.scrollback_len() > 0 {
+        if (term.display_offset() > 0 || pixel_offset > 0.0) && term.scrollback_len() > 0 {
             let total = (term.scrollback_len() + term.rows()) as f32;
             let screen_h = self.config.height as f32;
             let thumb_h = (screen_h * term.rows() as f32 / total).max(ch);
-            let progress = 1.0 - term.display_offset() as f32 / term.scrollback_len() as f32;
+            let progress = 1.0
+                - (term.display_offset() as f32 + pixel_offset / ch) / term.scrollback_len() as f32;
             let top = progress * (screen_h - thumb_h);
             let w = (stroke * 4.0).max(4.0);
             let mut bar = self.rect(
@@ -561,7 +568,12 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            let total = instances.len() as u32;
+            let total = self.grid_instances;
+            let clip = self.image_clip;
+            if clip[2] == 0 || clip[3] == 0 {
+                return false;
+            }
+            pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
             if self.images.is_empty() {
                 if total > 0 {
                     self.draw_rects(&mut pass, 0..total);
@@ -569,7 +581,7 @@ impl Renderer {
             } else {
                 let (bg, text) = self.layers;
                 let clip = self.image_clip;
-                let full = [0, 0, self.config.width, self.config.height];
+                let full = clip;
                 if clip[2] > 0 && clip[3] > 0 {
                     self.images.draw(&mut pass, Layer::BelowBackgrounds, clip);
                 }
@@ -586,6 +598,8 @@ impl Renderer {
                 pass.set_scissor_rect(full[0], full[1], full[2], full[3]);
                 self.draw_rects(&mut pass, text..total);
             }
+            pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            self.draw_rects(&mut pass, total..instances.len() as u32);
         }
         self.queue.submit([encoder.finish()]);
         if let Some(pre_present) = pre_present {
