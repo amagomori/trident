@@ -1,7 +1,11 @@
 mod clipboard;
 mod flow_control;
+#[cfg(any(target_os = "linux", test))]
+mod frame_clock;
 mod input;
 mod latency;
+#[cfg(target_os = "linux")]
+mod present_wayland;
 mod pty;
 mod show;
 
@@ -133,6 +137,11 @@ struct Session {
     since_frame: usize,
     /// When output was first held back.
     deferred: Option<Instant>,
+    redraw_at: Option<(Instant, Instant)>,
+    target: Option<Instant>,
+    sequence: usize,
+    #[cfg(target_os = "linux")]
+    presentation: Option<present_wayland::Feedback>,
     latency: Option<latency::Latency>,
     resize: ResizeThrottle,
 }
@@ -147,10 +156,40 @@ fn advance_output(term: &mut Terminal, output: pty::Output) {
     term.advance(&output.bytes[start..]);
 }
 
+impl Session {
+    fn frame_deadline(&mut self) -> Option<(Instant, Instant)> {
+        #[cfg(target_os = "linux")]
+        if let Some(feedback) = &mut self.presentation {
+            return feedback.clock()?.deadline(Instant::now());
+        }
+        None
+    }
+
+    fn request_frame(&mut self) {
+        if let Some(deadline) = self.frame_deadline() {
+            self.redraw_at = Some(self.redraw_at.map_or(deadline, |old| old.min(deadline)));
+        } else {
+            self.window.request_redraw();
+        }
+    }
+}
+
 /// Whether output that just arrived can be held back: only during a flood, and never once
 /// the reader is stalled on a full queue.
 fn defer_output(deferring: bool, since_frame: usize, queue_full: bool) -> bool {
     (deferring || since_frame >= DEFER_AFTER) && !queue_full
+}
+
+fn frame_wakeup(redraw_at: Option<Instant>, deferred: Option<Instant>) -> Option<Instant> {
+    redraw_at.or_else(|| deferred.map(|since| since + MAX_DEFER))
+}
+
+fn wake_deadline(
+    frame: Option<Instant>,
+    resize: Option<Instant>,
+    probe: Option<Instant>,
+) -> Option<Instant> {
+    [frame, resize, probe].into_iter().flatten().min()
 }
 
 struct App {
@@ -259,6 +298,31 @@ impl App {
             #[cfg(target_os = "macos")]
             log.metal_feedback(renderer.gpu_device());
         }
+        #[cfg(target_os = "linux")]
+        let presentation = {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if matches!(
+                window.window_handle().map(|h| h.as_raw()),
+                Ok(RawWindowHandle::Wayland(_))
+            ) {
+                let (start, lines) = latency
+                    .as_ref()
+                    .map(|log| {
+                        let (start, lines) = log.wayland_log();
+                        (start, Some(lines))
+                    })
+                    .unwrap_or_else(|| (Instant::now(), None));
+                match present_wayland::Feedback::new(window.clone(), start, lines) {
+                    Ok(feedback) => Some(feedback),
+                    Err(error) => {
+                        eprintln!("terminal: presentation feedback unavailable: {error}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
         Ok(Session {
             latency,
             window,
@@ -269,6 +333,11 @@ impl App {
             since_frame: 0,
             deferred: None,
             resize: ResizeThrottle::default(),
+            redraw_at: None,
+            target: None,
+            sequence: 0,
+            #[cfg(target_os = "linux")]
+            presentation,
         })
     }
 
@@ -331,7 +400,7 @@ impl App {
             if let Some(log) = &mut s.latency {
                 log.output(processed);
             }
-            s.window.request_redraw();
+            s.request_frame();
         }
     }
 
@@ -343,7 +412,7 @@ impl App {
         s.term.scroll_to_bottom();
         s.term.selection = None;
         s.pty.write(bytes);
-        s.window.request_redraw();
+        s.request_frame();
     }
 
     fn paste(&mut self, primary: bool) {
@@ -415,7 +484,7 @@ impl App {
             };
             if let Some(delta) = handled {
                 s.term.scroll_display(delta);
-                s.window.request_redraw();
+                s.request_frame();
                 return true;
             }
         }
@@ -489,7 +558,7 @@ impl App {
                     _ => SelectionKind::Simple,
                 };
                 s.term.start_selection(point, kind);
-                s.window.request_redraw();
+                s.request_frame();
             }
             MouseButton::Middle if pressed => self.paste(true),
             _ => {}
@@ -520,7 +589,7 @@ impl App {
         {
             let point = s.term.viewport_to_point(row, col);
             s.term.update_selection(point);
-            s.window.request_redraw();
+            s.request_frame();
         }
     }
 
@@ -560,7 +629,7 @@ impl App {
             s.pty.write(&bytes);
         } else {
             s.term.scroll_display(steps);
-            s.window.request_redraw();
+            s.request_frame();
         }
     }
 }
@@ -623,7 +692,11 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(s) = &mut self.session
             && std::mem::take(&mut s.pty.flow_redraw)
         {
-            s.window.request_redraw();
+            s.request_frame();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(feedback) = self.session.as_mut().and_then(|s| s.presentation.as_mut()) {
+            let _ = feedback.clock();
         }
         let now = Instant::now();
         if let Some(log) = self.session.as_mut().and_then(|s| s.latency.as_mut()) {
@@ -638,21 +711,25 @@ impl ApplicationHandler<UserEvent> for App {
         if self.session.as_ref().is_some_and(|s| s.resize.ready(now)) {
             self.resize_grid();
         }
-        if self
+        let deadline = self
             .session
             .as_ref()
-            .and_then(|s| s.deferred)
-            .is_some_and(|since| now >= since + MAX_DEFER)
-        {
+            .and_then(|s| frame_wakeup(s.redraw_at.map(|(latch, _)| latch), s.deferred));
+        if deadline.is_some_and(|deadline| now >= deadline) {
             self.process_output();
+            if let Some(s) = &mut self.session
+                && let Some((_, target)) = s.redraw_at.take()
+            {
+                s.target = Some(target);
+                s.window.request_redraw();
+            }
         }
         let deadline = self.session.as_ref().and_then(|s| {
-            s.deferred
-                .map(|since| since + MAX_DEFER)
-                .into_iter()
-                .chain(s.resize.deadline)
-                .chain(s.latency.as_ref().and_then(|l| l.wake_deadline(now)))
-                .min()
+            wake_deadline(
+                frame_wakeup(s.redraw_at.map(|(latch, _)| latch), s.deferred),
+                s.resize.deadline,
+                s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
+            )
         });
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -702,12 +779,24 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
                 if let Some(s) = &mut self.session {
+                    let target = s
+                        .target
+                        .take()
+                        .or_else(|| s.redraw_at.take().map(|(_, target)| target));
                     let pad = PADDING * s.window.scale_factor() as f32;
                     s.pty.refresh_flow();
+                    let started = Instant::now();
                     let mut pre_present = || {
-                        if let Some(log) = &mut s.latency {
-                            log.pre_present();
+                        #[cfg(target_os = "linux")]
+                        if let Some(feedback) = &mut s.presentation {
+                            let cost = started.elapsed();
+                            if let Some(clock) = feedback.clock() {
+                                clock.submitted(s.sequence, target, cost);
+                            }
+                            feedback.request(s.sequence);
                         }
+                        #[cfg(not(target_os = "linux"))]
+                        let _ = (started, target);
                     };
                     if s.renderer.render(
                         &s.term,
@@ -721,6 +810,7 @@ impl ApplicationHandler<UserEvent> for App {
                             log.frame(Instant::now(), s.since_frame);
                         }
                         s.since_frame = 0;
+                        s.sequence += 1;
                     }
                 }
             }
@@ -847,6 +937,40 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn wake_deadline_merges_frame_resize_and_probe_without_idle_timers() {
+        let now = Instant::now();
+        assert_eq!(wake_deadline(None, None, None), None);
+        for frame in [None, Some(now + Duration::from_millis(1))] {
+            for resize in [None, Some(now + Duration::from_millis(2))] {
+                for probe in [None, Some(now + Duration::from_millis(3))] {
+                    assert_eq!(
+                        wake_deadline(frame, resize, probe),
+                        frame.or(resize).or(probe)
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            wake_deadline(Some(now + MAX_DEFER), Some(now), None),
+            Some(now)
+        );
+        assert_eq!(
+            wake_deadline(Some(now + MAX_DEFER), None, Some(now)),
+            Some(now)
+        );
+    }
+
+    #[test]
+    fn frame_wakeup_is_idle_or_latch_or_fallback_timeout() {
+        let now = Instant::now();
+        let latch = now + MAX_DEFER * 2;
+        assert_eq!(frame_wakeup(None, None), None);
+        assert_eq!(frame_wakeup(None, Some(now)), Some(now + MAX_DEFER));
+        assert_eq!(frame_wakeup(Some(latch), Some(now)), Some(latch));
+        assert_eq!(frame_wakeup(Some(latch), None), Some(latch));
+    }
+
     #[test]
     fn output_is_held_back_only_during_a_flood() {
         assert!(!defer_output(false, 0, false));

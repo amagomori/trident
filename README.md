@@ -107,6 +107,11 @@ CI runs these on Linux and macOS for every pull request.
 
 ### Measuring latency
 
+On Wayland with presentation feedback and a known refresh period, redraws and flood
+parsing latch just before the predicted vblank, allowing for measured frame cost and
+adaptive compositor slack. Other platforms and missing feedback keep immediate redraws
+and the fixed flood timeout. Idle windows do not schedule frame timers.
+
 From a Linux or macOS desktop session, run `python3 .github/scripts/latency.py
 --base ../baseline --head . --runs 5`, or use
 `--app target/release/terminal`. It reports per-run p50/p99/mean input-to-present
@@ -128,6 +133,8 @@ records vsync/hardware-clock/hardware-completion/zero-copy flags. Skipped or mis
 completions count as wasted frames.
 Present-return latency is reported separately. Each run labels its timing source;
 without feedback it explicitly reports `present-return (no feedback)` instead.
+Wayland logs also include `clock_ns` with final frame cost, latch margin and refresh
+period in nanoseconds (the comparison table's refresh comes from the monitor API).
 On macOS, Metal drawable presented handlers use `presentedTime` (`metal-presented`).
 The opt-in harness hooks the concrete command-buffer `presentDrawable:` method;
 the direct drawable `present` path used with `presentsWithTransaction` is not
