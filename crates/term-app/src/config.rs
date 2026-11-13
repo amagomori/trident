@@ -477,6 +477,26 @@ pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Resu
 mod tests {
     use super::*;
 
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        loop {
+            let dir = std::env::temp_dir().join(format!(
+                "{prefix}-{}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("create {}: {e}", dir.display()),
+            }
+        }
+    }
+
     struct WatchTest {
         dir: PathBuf,
         path: PathBuf,
@@ -486,15 +506,7 @@ mod tests {
 
     impl WatchTest {
         fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "terminal-watch-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir(&dir).unwrap();
+            let dir = unique_temp_dir("terminal-watch");
             let dir = std::fs::canonicalize(dir).unwrap();
             let (_, rx) = std::sync::mpsc::channel();
             Self {
@@ -863,15 +875,7 @@ bright_white = "#fefdfc"
 
     #[test]
     fn watcher_handles_write_and_atomic_replace() {
-        let dir = std::env::temp_dir().join(format!(
-            "terminal-config-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).unwrap();
+        let dir = unique_temp_dir("terminal-config-test");
         let path = dir.join("config.toml");
         assert_eq!(load(&path).unwrap(), Config::default());
         let (tx, rx) = std::sync::mpsc::channel();
@@ -896,14 +900,7 @@ bright_white = "#fefdfc"
     #[cfg(unix)]
     #[test]
     fn watcher_follows_intermediate_symlink_retargeting() {
-        let dir = std::env::temp_dir().join(format!(
-            "terminal-intermediate-symlink-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_temp_dir("terminal-intermediate-symlink-test");
         let first = dir.join("releases/v1");
         let second = dir.join("releases/v2");
         std::fs::create_dir_all(&first).unwrap();
@@ -936,15 +933,7 @@ bright_white = "#fefdfc"
     #[cfg(unix)]
     #[test]
     fn watch_paths_handles_missing_targets_and_symlink_loops() {
-        let dir = std::env::temp_dir().join(format!(
-            "terminal-symlink-loop-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).unwrap();
+        let dir = unique_temp_dir("terminal-symlink-loop-test");
         let dir = std::fs::canonicalize(dir).unwrap();
         let path = dir.join("config.toml");
         assert_eq!(watch_paths(&path), [path.clone()].into());
@@ -961,15 +950,7 @@ bright_white = "#fefdfc"
     #[cfg(unix)]
     #[test]
     fn watcher_follows_symlink_targets_and_retargeting() {
-        let dir = std::env::temp_dir().join(format!(
-            "terminal-symlink-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).unwrap();
+        let dir = unique_temp_dir("terminal-symlink-test");
         let first = dir.join("first");
         let second = dir.join("second");
         std::fs::create_dir(&first).unwrap();
