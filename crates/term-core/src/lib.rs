@@ -3,6 +3,7 @@
 
 pub mod colors;
 pub mod images;
+pub mod search;
 
 mod cell;
 mod ghost;

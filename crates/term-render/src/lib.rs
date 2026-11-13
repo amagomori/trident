@@ -12,3 +12,9 @@ mod renderer;
 
 pub use font::{CellMetrics, FAMILY as BUNDLED_FONT_FAMILY, Fonts, REGULAR as BUNDLED_FONT, Style};
 pub use renderer::{PADDING, Renderer};
+
+pub struct SearchOverlay<'a> {
+    pub matches: &'a [term_core::search::Match],
+    pub current: Option<usize>,
+    pub label: &'a str,
+}

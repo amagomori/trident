@@ -72,6 +72,7 @@ struct SendBinding {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
+    Search,
     Copy,
     Paste,
     PastePrimary,
@@ -93,6 +94,7 @@ impl Action {
             Binding::Send(send) => Self::Send(send.send),
             Binding::Name(name) => match name.as_str() {
                 "copy" => Self::Copy,
+                "search" => Self::Search,
                 "paste" => Self::Paste,
                 "paste_primary" => Self::PastePrimary,
                 "increase_font_size" => Self::Increase,
@@ -191,6 +193,7 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
     let mut bindings = BTreeMap::new();
     for (key, action) in [
         ("c", Action::Copy),
+        ("f", Action::Search),
         ("v", Action::Paste),
         ("=", Action::Increase),
         ("+", Action::Increase),
