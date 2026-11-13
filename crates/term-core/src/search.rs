@@ -50,7 +50,10 @@ impl Terminal {
             for (col, cell) in cells.iter().enumerate() {
                 if cell.flags.contains(Flags::WIDE_SPACER)
                     || cell.flags.contains(Flags::PAD)
-                    || cell.flags.contains(Flags::WIDE_WRAP)
+                    || (cell.flags.contains(Flags::WIDE_WRAP)
+                        && cell.c == ' '
+                        && row.wrapped
+                        && col == row.cells.len() - 1)
                 {
                     continue;
                 }
@@ -127,6 +130,25 @@ mod tests {
         t.advance("abc 界".as_bytes());
         assert_eq!(t.search("c 界", false).unwrap().len(), 1);
         assert!(t.search("c界", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn shifted_wide_wrap_padding_is_text() {
+        let mut t = Terminal::new(4, 2);
+        t.advance("abc界\x1b[1;1H\x1b[P".as_bytes());
+        let matches = t.search("bc  界", false).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].start, Point { line: 0, col: 0 });
+        assert_eq!(matches[0].end, Point { line: 1, col: 1 });
+        assert!(t.search("bc 界", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn inserted_blanks_are_not_wide_wrap_padding() {
+        let mut t = Terminal::new(4, 2);
+        t.advance("abc界\x1b[1;3H\x1b[@".as_bytes());
+        assert_eq!(t.search("ab c界", false).unwrap().len(), 1);
+        assert!(t.search("abc界", false).unwrap().is_empty());
     }
 
     #[test]
