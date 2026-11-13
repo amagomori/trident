@@ -30,7 +30,8 @@ impl Terminal {
             .case_insensitive(!query.chars().any(char::is_uppercase))
             .build()
             .map_err(|e| e.to_string())?;
-        let mut matches = Vec::new();
+        let mut matches = Vec::with_capacity(MATCH_LIMIT);
+        let mut chunks = Vec::new();
         let mut text = String::new();
         let mut points = Vec::new();
         let last = self.history + self.rows as u64 - 1;
@@ -89,7 +90,9 @@ impl Terminal {
                 }
             }
             matches[offset..].rotate_left(oldest);
-            matches[offset..].reverse();
+            if matches.len() > offset {
+                chunks.push(offset..matches.len());
+            }
             if matches.len() == MATCH_LIMIT || logical_start == first {
                 break;
             }
@@ -97,8 +100,11 @@ impl Terminal {
             points.clear();
             logical_end = logical_start - 1;
         }
-        matches.reverse();
-        Ok(matches)
+        let mut ordered = Vec::with_capacity(matches.len());
+        for chunk in chunks.into_iter().rev() {
+            ordered.extend_from_slice(&matches[chunk]);
+        }
+        Ok(ordered)
     }
 
     /// Center an off-screen history line without moving an already visible line.
