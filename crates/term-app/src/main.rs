@@ -279,6 +279,10 @@ impl PendingOutput {
         !paused && self.waiting_since.is_none()
     }
 
+    fn pace_frame(&self, synchronized: bool) -> bool {
+        synchronized || self.waiting_since.is_some()
+    }
+
     fn advance(
         &mut self,
         term: &mut Terminal,
@@ -331,12 +335,13 @@ impl PendingOutput {
     }
 
     fn finish_presentation(&mut self, rendered: bool, now: Instant) -> bool {
+        let waiting = self.waiting_since.is_some();
         if rendered {
             self.presented();
         } else if self.waiting_since.is_some() {
             self.waiting_since = Some(now);
         }
-        rendered
+        rendered && waiting
     }
 }
 
@@ -500,6 +505,11 @@ struct ExitPresentation {
 impl ExitPresentation {
     fn needs_submission(&self) -> bool {
         self.target.is_none()
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn needs_wayland_submission(&self) -> bool {
+        self.needs_submission() || self.submissions == 1
     }
 
     #[cfg(any(target_os = "macos", test))]
@@ -962,7 +972,11 @@ impl App {
             if let Some(log) = &mut s.latency {
                 log.output(processed);
             }
-            s.request_frame();
+            if s.output.pace_frame(s.term.modes.synchronized_output) {
+                s.request_frame();
+            } else {
+                s.window.request_redraw();
+            }
         }
         if from_leftover && s.output.is_empty() && s.output.waiting_since.is_none() {
             self.process_output();
@@ -971,7 +985,7 @@ impl App {
 
     fn present_frame(&mut self) {
         #[cfg(target_os = "linux")]
-        if self.exit_deadline.is_some() && !self.exit_presentation.needs_submission() {
+        if self.exit_deadline.is_some() && !self.exit_presentation.needs_wayland_submission() {
             return;
         }
         #[cfg(target_os = "macos")]
@@ -983,6 +997,13 @@ impl App {
             return;
         }
         self.render_frame();
+        #[cfg(target_os = "linux")]
+        if self.exit_deadline.is_some()
+            && self.exit_presentation.target.is_some()
+            && self.exit_presentation.needs_wayland_submission()
+        {
+            self.render_frame();
+        }
         #[cfg(target_os = "macos")]
         if self.exit_deadline.is_some()
             && self.exit_presentation.target.is_some()
@@ -1033,7 +1054,7 @@ impl App {
         let started = Instant::now();
         #[cfg(target_os = "linux")]
         let exit_target = (self.exit_deadline.is_some()
-            && self.exit_presentation.needs_submission()
+            && self.exit_presentation.needs_wayland_submission()
             && s.presentation.is_some())
         .then_some(s.sequence + 1);
         let mut pre_present = || {
@@ -1636,6 +1657,13 @@ impl ApplicationHandler<UserEvent> for App {
                     .session
                     .as_ref()
                     .is_some_and(|s| s.since_frame > 0 || s.sequence == 0);
+                #[cfg(target_os = "linux")]
+                let pending_final = pending_final
+                    || self
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.presentation.is_some())
+                        && self.exit_presentation.needs_wayland_submission();
                 #[cfg(target_os = "macos")]
                 let pending_final = pending_final
                     || self
@@ -2272,6 +2300,49 @@ mod tests {
         assert_eq!(state.wakeup(second + period), until);
         assert!(state.ready(until));
         assert!(until < start + EXIT_TIMEOUT);
+    }
+
+    #[test]
+    fn wayland_exit_submits_retry_without_waiting_a_refresh() {
+        let start = Instant::now();
+        let mut state = ExitPresentation::default();
+        assert!(state.needs_wayland_submission());
+        state.submitted(2, start);
+        assert!(state.needs_wayland_submission());
+        assert!(!state.ready(start));
+        state.submitted(3, start);
+        assert!(!state.needs_wayland_submission());
+        assert!(!state.update(0, 0, start, 60_000));
+        assert!(!state.ready(start));
+        assert!(!state.update(0, 0, start + Duration::from_millis(17), 60_000));
+        assert!(state.ready(start + Duration::from_millis(17)));
+        assert!(state.update(0, 3, start + Duration::from_millis(17), 60_000));
+        assert!(state.needs_wayland_submission());
+        assert!(!state.ready(start + Duration::from_millis(17)));
+    }
+
+    #[test]
+    fn ordinary_output_does_not_drain_after_presentation() {
+        let mut term = Terminal::new(80, 2);
+        let mut output = PendingOutput::default();
+        for bytes in [b"".as_slice(), b"x", b"\x1b[31mred", b"\x1b[?2026l"] {
+            output.advance(&mut term, false, || batch(bytes));
+            assert!(output.waiting_since.is_none());
+            assert!(!output.pace_frame(term.modes.synchronized_output));
+            assert!(!output.finish_presentation(false, Instant::now()));
+            assert!(!output.finish_presentation(true, Instant::now()));
+        }
+        output.advance(&mut term, false, || batch(b"\x1b[?2026hframe"));
+        assert!(term.modes.synchronized_output);
+        assert!(output.pace_frame(term.modes.synchronized_output));
+        output.advance(&mut term, false, || batch(b"\x1b[?2026l"));
+        assert!(output.waiting_since.is_some());
+        assert!(output.pace_frame(term.modes.synchronized_output));
+        assert!(!output.finish_presentation(false, Instant::now()));
+        assert!(output.waiting_since.is_some());
+        assert!(output.finish_presentation(true, Instant::now()));
+        assert!(output.waiting_since.is_none());
+        assert!(!output.pace_frame(term.modes.synchronized_output));
     }
 
     #[test]
@@ -3039,7 +3110,7 @@ mod tests {
         let mut empty = PendingOutput::default();
         assert!(!empty.finish_presentation(false, now));
         assert_eq!(empty.waiting_since, None);
-        assert!(empty.finish_presentation(true, now));
+        assert!(!empty.finish_presentation(true, now));
         empty.waiting_since = Some(now);
         assert!(!empty.finish_presentation(false, retry));
         assert_eq!(empty.waiting_since, Some(retry));
