@@ -7,6 +7,8 @@ mod flow_control;
 mod frame_clock;
 mod input;
 mod latency;
+#[cfg(target_os = "macos")]
+mod present_macos;
 #[cfg(target_os = "linux")]
 mod present_wayland;
 mod pty;
@@ -456,6 +458,39 @@ fn exit_wakeup(deadline: Option<Instant>, exit: Option<Instant>) -> Option<Insta
     [deadline, exit].into_iter().flatten().min()
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct ExitPresentation {
+    target: Option<usize>,
+    linger: Option<Instant>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl ExitPresentation {
+    fn update(&mut self, presented: usize, skipped: usize, now: Instant, refresh: u32) -> bool {
+        if let Some(target) = self.target {
+            if presented >= target {
+                self.linger.get_or_insert_with(|| {
+                    let refresh = if refresh == 0 { 60_000 } else { refresh };
+                    now + Duration::from_secs_f64(2000.0 / f64::from(refresh))
+                });
+            } else if skipped >= target {
+                self.target = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.linger.is_some_and(|until| now >= until)
+    }
+
+    fn wakeup(&self, now: Instant) -> Instant {
+        self.linger.unwrap_or(now + Duration::from_millis(4))
+    }
+}
+
 fn sync_wakeup(
     deadline: Option<Instant>,
     waiting_since: Option<Instant>,
@@ -491,6 +526,8 @@ struct App {
     clipboard: clipboard::Clipboard,
     error: Option<String>,
     exit_deadline: Option<Instant>,
+    #[cfg(target_os = "macos")]
+    exit_presentation: ExitPresentation,
 }
 
 fn select_at(term: &mut Terminal, point: Point, modifiers: ModifiersState, clicks: u8) {
@@ -546,6 +583,8 @@ impl App {
             clipboard: clipboard::Clipboard::default(),
             error: None,
             exit_deadline: None,
+            #[cfg(target_os = "macos")]
+            exit_presentation: ExitPresentation::default(),
         }
     }
 
@@ -643,8 +682,19 @@ impl App {
         );
         if let Some(log) = &mut latency {
             log.feedback(window.clone());
-            #[cfg(target_os = "macos")]
-            log.metal_feedback(renderer.gpu_device());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let (start, lines) = latency
+                .as_ref()
+                .map(|log| {
+                    let (start, lines) = log.metal_log();
+                    (start, Some(lines))
+                })
+                .unwrap_or_else(|| (Instant::now(), None));
+            if let Err(error) = present_macos::install(renderer.gpu_device(), start, lines) {
+                eprintln!("terminal: presentation feedback unavailable: {error}");
+            }
         }
         #[cfg(target_os = "linux")]
         let presentation = {
@@ -850,6 +900,9 @@ impl App {
             #[cfg(not(target_os = "linux"))]
             let _ = (started, target);
         };
+        #[cfg(target_os = "macos")]
+        let exit_target = (self.exit_deadline.is_some() && self.exit_presentation.target.is_none())
+            .then(present_macos::arm_exit);
         let rendered = s.renderer.render(
             &s.term,
             &mut s.fonts,
@@ -861,6 +914,10 @@ impl App {
             Some(&mut pre_present),
         );
         if rendered {
+            #[cfg(target_os = "macos")]
+            if let Some(target) = exit_target {
+                self.exit_presentation.target = Some(target);
+            }
             if let Some(log) = &mut s.latency {
                 log.frame(Instant::now(), s.since_frame);
             }
@@ -1468,13 +1525,32 @@ impl ApplicationHandler<UserEvent> for App {
                 s.window.request_redraw();
             }
         }
-        if exit_ready(
-            self.exit_deadline,
-            self.session
-                .as_ref()
-                .is_none_or(|s| s.output.is_empty() && s.output.waiting_since.is_none()),
-            Instant::now(),
-        ) {
+        let output_done = self
+            .session
+            .as_ref()
+            .is_none_or(|s| s.output.is_empty() && s.output.waiting_since.is_none());
+        #[cfg(target_os = "macos")]
+        let output_done = {
+            if self.exit_deadline.is_some() {
+                let (presented, skipped) = present_macos::feedback();
+                let refresh = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.window.current_monitor())
+                    .and_then(|m| m.refresh_rate_millihertz())
+                    .filter(|rate| *rate > 0)
+                    .unwrap_or(60_000);
+                if self
+                    .exit_presentation
+                    .update(presented, skipped, Instant::now(), refresh)
+                    && let Some(s) = &mut self.session
+                {
+                    s.request_frame();
+                }
+            }
+            output_done && self.exit_presentation.ready(Instant::now())
+        };
+        if exit_ready(self.exit_deadline, output_done, Instant::now()) {
             event_loop.exit();
             return;
         }
@@ -1497,6 +1573,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         deadline = exit_wakeup(deadline, self.exit_deadline);
+        #[cfg(target_os = "macos")]
+        if self.exit_deadline.is_some() {
+            deadline = exit_wakeup(
+                deadline,
+                Some(self.exit_presentation.wakeup(Instant::now())),
+            );
+        }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -1859,6 +1942,51 @@ mod tests {
         assert!(output.is_empty());
         assert!(!term.modes.synchronized_output);
         assert!(output.waiting_since.is_some());
+    }
+
+    #[test]
+    fn exit_presentation_requires_new_drawable_and_two_refreshes() {
+        let now = Instant::now();
+        let mut state = ExitPresentation::default();
+        assert!(!state.update(10, 10, now, 60_000));
+        assert!(!state.ready(now));
+        assert_eq!(state.wakeup(now), now + Duration::from_millis(4));
+        state.target = Some(11);
+        assert!(!state.update(10, 10, now, 60_000));
+        assert!(!state.ready(now));
+        assert!(!state.update(11, 10, now, 60_000));
+        let until = state.wakeup(now);
+        assert!(!state.ready(until - Duration::from_nanos(1)));
+        assert!(state.ready(until));
+        assert_eq!(until - now, Duration::from_secs_f64(2.0 / 60.0));
+        assert!(!state.update(12, 12, until, 60_000));
+        assert_eq!(state.wakeup(until), until);
+    }
+
+    #[test]
+    fn exit_presentation_retries_skips_and_timeout_wins() {
+        let now = Instant::now();
+        let mut state = ExitPresentation {
+            target: Some(2),
+            linger: None,
+        };
+        assert!(state.update(1, 2, now, 0));
+        assert_eq!(state.target, None);
+        assert!(!state.ready(now));
+        assert!(exit_ready(
+            Some(now + EXIT_TIMEOUT),
+            state.ready(now),
+            now + EXIT_TIMEOUT
+        ));
+        state.target = Some(3);
+        assert!(!state.update(3, 2, now, 0));
+        assert_eq!(state.wakeup(now) - now, Duration::from_secs_f64(2.0 / 60.0));
+        let mut fast = ExitPresentation {
+            target: Some(1),
+            linger: None,
+        };
+        fast.update(1, 0, now, 120_000);
+        assert_eq!(fast.wakeup(now) - now, Duration::from_secs_f64(2.0 / 120.0));
     }
 
     #[test]

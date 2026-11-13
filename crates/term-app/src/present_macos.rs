@@ -1,5 +1,5 @@
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -10,7 +10,7 @@ use objc2_metal::{MTLCommandQueue, MTLDevice, MTLDrawable};
 use objc2_quartz_core::CACurrentMediaTime;
 
 struct Sink {
-    lines: Arc<Mutex<Vec<String>>>,
+    lines: Option<Arc<Mutex<Vec<String>>>>,
     epoch: f64,
     start: Instant,
     original: Imp,
@@ -18,6 +18,21 @@ struct Sink {
 
 static SINK: OnceLock<Sink> = OnceLock::new();
 static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static TRACK_EXIT: AtomicBool = AtomicBool::new(false);
+static PRESENTED: AtomicUsize = AtomicUsize::new(0);
+static SKIPPED: AtomicUsize = AtomicUsize::new(0);
+
+pub fn arm_exit() -> usize {
+    TRACK_EXIT.store(true, Ordering::Release);
+    SEQUENCE.load(Ordering::Acquire) + 1
+}
+
+pub fn feedback() -> (usize, usize) {
+    (
+        PRESENTED.load(Ordering::Acquire),
+        SKIPPED.load(Ordering::Acquire),
+    )
+}
 
 unsafe extern "C-unwind" fn present_drawable(
     buffer: *mut AnyObject,
@@ -27,19 +42,28 @@ unsafe extern "C-unwind" fn present_drawable(
     let sink = SINK
         .get()
         .expect("presentation hook installed without sink");
-    if let Some(drawable) = unsafe { drawable.as_ref() } {
+    if let Some(drawable) = unsafe { drawable.as_ref() }
+        && (sink.lines.is_some() || TRACK_EXIT.load(Ordering::Acquire))
+    {
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let handler = RcBlock::new(move |drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
             let time = unsafe { drawable.as_ref() }.presentedTime();
+            if time == 0.0 {
+                SKIPPED.fetch_max(sequence + 1, Ordering::Release);
+            } else {
+                PRESENTED.fetch_max(sequence + 1, Ordering::Release);
+            }
             let (time, mode) = if time == 0.0 {
                 (sink.start.elapsed().as_micros() as i128, "skip")
             } else {
                 (((time - sink.epoch) * 1_000_000.0).round() as i128, "vsync")
             };
-            sink.lines
-                .lock()
-                .unwrap()
-                .push(format!("presented {sequence} {time} {mode}"));
+            if let Some(lines) = &sink.lines {
+                lines
+                    .lock()
+                    .unwrap()
+                    .push(format!("presented {sequence} {time} {mode}"));
+            }
         });
         // Metal copies the block and invokes it after the drawable is presented.
         unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&handler)) };
@@ -55,7 +79,7 @@ unsafe extern "C-unwind" fn present_drawable(
 pub fn install(
     device: &wgpu::Device,
     start: Instant,
-    lines: Arc<Mutex<Vec<String>>>,
+    lines: Option<Arc<Mutex<Vec<String>>>>,
 ) -> Result<(), &'static str> {
     if SINK.get().is_some() {
         return Err("Metal feedback already installed");
@@ -93,6 +117,8 @@ pub fn install(
             >(present_drawable),
         );
     }
-    lines.lock().unwrap().push("source metal-presented".into());
+    if let Some(lines) = lines {
+        lines.lock().unwrap().push("source metal-presented".into());
+    }
     Ok(())
 }
