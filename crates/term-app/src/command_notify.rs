@@ -206,6 +206,13 @@ impl Drop for Watcher {
 }
 
 #[cfg(unix)]
+fn leader_exited(pid: i32) -> bool {
+    // SAFETY: signal zero only checks whether the leader process exists.
+    (unsafe { libc::kill(pid, 0) }) == -1
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
 pub fn watch(
     fd: std::os::fd::OwnedFd,
     shell: u32,
@@ -235,11 +242,7 @@ pub fn watch(
                             None
                         }
                     },
-                    |pid| {
-                        // SAFETY: signal zero only checks whether the process group exists.
-                        (unsafe { libc::kill(-pid, 0) }) == -1
-                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-                    },
+                    leader_exited,
                 );
                 for event in events {
                     finished(event);
@@ -330,6 +333,47 @@ mod tests {
         assert!(state.sample(None, now, || None, |_| true).is_empty());
         state.sample(Some(43), now, || None, |_| false);
         assert!(state.sample(None, now, || None, |_| true)[0].name.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_leader_finishes_with_surviving_descendant() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        struct Group(i32);
+        impl Drop for Group {
+            fn drop(&mut self) {
+                // SAFETY: this test created the isolated group.
+                unsafe { libc::kill(-self.0, libc::SIGKILL) };
+            }
+        }
+
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30 & exit"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = Group(child.id() as i32);
+        let now = Instant::now();
+        let mut state = Foreground::default();
+        assert!(
+            state
+                .sample(Some(group.0), now, || Some("sh".into()), leader_exited)
+                .is_empty()
+        );
+        assert!(child.wait().unwrap().success());
+        // SAFETY: signal zero does not change the surviving descendant.
+        assert_eq!(unsafe { libc::kill(-group.0, 0) }, 0);
+        assert!(leader_exited(group.0));
+        let events = state.sample(None, now + Duration::from_secs(12), || None, leader_exited);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name.as_deref(), Some("sh"));
+        assert_eq!(events[0].duration, Duration::from_secs(12));
+        assert!(state.sample(None, now, || None, leader_exited).is_empty());
     }
 
     #[cfg(unix)]
