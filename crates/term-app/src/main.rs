@@ -1702,16 +1702,16 @@ impl App {
 
     fn refresh_link(&mut self) {
         let link = self.hover_link();
-        if let Some(s) = &mut self.session {
+        if let Some(s) = &mut self.session
+            && s.hover != link
+        {
             s.window.set_cursor(if link.is_some() {
                 winit::window::CursorIcon::Pointer
             } else {
                 winit::window::CursorIcon::Text
             });
-            if s.hover != link {
-                s.hover = link;
-                s.request_frame();
-            }
+            s.hover = link;
+            s.request_frame();
         }
     }
 

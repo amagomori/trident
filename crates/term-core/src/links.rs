@@ -14,6 +14,53 @@ impl Link {
 }
 
 impl Terminal {
+    pub(crate) fn intern_link(&mut self, key: (String, String), limit: usize) -> u16 {
+        if let Some(&index) = self.link_indices.get(&key) {
+            return index;
+        }
+        if self.links.len() >= limit {
+            self.compact_links();
+        }
+        if self.links.len() >= limit {
+            return 0;
+        }
+        let index = (self.links.len() + 1) as u16;
+        self.links.push(key.clone());
+        self.link_indices.insert(key, index);
+        index
+    }
+
+    fn visit_hyperlinks(&mut self, mut visit: impl FnMut(&mut u16)) {
+        visit(&mut self.cursor.template.hyperlink);
+        for screen in [&mut self.primary, &mut self.alternate] {
+            if let Some(saved) = &mut screen.saved {
+                visit(&mut saved.cursor.template.hyperlink);
+            }
+            for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
+                for index in row.hyperlinks_mut() {
+                    visit(index);
+                }
+            }
+        }
+    }
+
+    fn compact_links(&mut self) {
+        let mut used = vec![false; self.links.len() + 1];
+        self.visit_hyperlinks(|index| used[*index as usize] = true);
+        let mut remap = vec![0; used.len()];
+        let old = std::mem::take(&mut self.links);
+        self.link_indices.clear();
+        for (i, key) in old.into_iter().enumerate() {
+            if used[i + 1] {
+                let index = (self.links.len() + 1) as u16;
+                remap[i + 1] = index;
+                self.links.push(key.clone());
+                self.link_indices.insert(key, index);
+            }
+        }
+        self.visit_hyperlinks(|index| *index = remap[*index as usize]);
+    }
+
     pub fn link_at(&self, point: Point) -> Option<Link> {
         if point.line < self.first_line()
             || point.line >= self.history + self.rows as u64
@@ -71,12 +118,12 @@ impl Terminal {
         }
         for (offset, _) in text.char_indices() {
             let tail = &text[offset..];
-            if !["https://", "http://", "ftp://", "file://", "mailto:"]
+            let Some(scheme) = ["https://", "http://", "ftp://", "file://", "mailto:"]
                 .iter()
-                .any(|s| tail.starts_with(s))
-            {
+                .find(|s| tail.starts_with(**s))
+            else {
                 continue;
-            }
+            };
             let mut uri = tail.split_whitespace().next().unwrap_or("");
             while let Some(c) = uri.chars().last() {
                 let trim = ".,;:!?\"'<>".contains(c)
@@ -90,7 +137,7 @@ impl Terminal {
                 }
                 uri = &uri[..uri.len() - c.len_utf8()];
             }
-            if uri.is_empty() {
+            if uri.len() <= scheme.len() {
                 continue;
             }
             let start = positions[offset];
@@ -185,16 +232,99 @@ mod tests {
     }
 
     #[test]
-    fn malformed_and_full_table() {
+    fn malformed_osc() {
         let mut t = Terminal::new(8, 2);
         t.advance(b"\x1b]8\x07x\x1b]8;id=a\x07y");
         assert!(t.link_at(Point { line: 0, col: 0 }).is_none());
-        t.links = (0..u16::MAX)
-            .map(|i| (i.to_string(), "https://a".to_owned()))
-            .collect();
-        t.advance(b"\x1b]8;id=new;https://a\x07z");
-        assert_eq!(t.cursor.template.hyperlink, 0);
-        t.advance(b"\x1b]8;id=0;https://a\x07z");
-        assert_eq!(t.cursor.template.hyperlink, 1);
+    }
+
+    fn key(id: usize) -> (String, String) {
+        (id.to_string(), format!("https://example.com/{id}"))
+    }
+
+    #[test]
+    fn compaction_preserves_all_references() {
+        let mut t = Terminal::new(8, 2);
+        for id in 0..8 {
+            assert_eq!(t.intern_link(key(id), 8), id as u16 + 1);
+        }
+        let mut history = crate::Row::new(8, &crate::Cell::default());
+        history.cells[0].hyperlink = 2;
+        t.primary.scrollback.push_back(history);
+        t.primary.lines[0].cells[0].hyperlink = 3;
+        t.alternate.lines[0].cells[0].hyperlink = 4;
+        t.cursor.template.hyperlink = 5;
+        t.save_cursor();
+        t.alternate.saved = t.primary.saved;
+        t.alternate
+            .saved
+            .as_mut()
+            .unwrap()
+            .cursor
+            .template
+            .hyperlink = 6;
+        t.cursor.template.hyperlink = 7;
+        t.primary.lines[0].cells[7].hyperlink = 8;
+        t.primary.lines[0].resize(2);
+        assert_eq!(t.intern_link(key(8), 8), 8);
+        assert_eq!(t.links.len(), 8);
+        assert!(!t.link_indices.contains_key(&key(0)));
+        assert_eq!(t.primary.scrollback[0].cells[0].hyperlink, 1);
+        assert_eq!(t.primary.lines[0].cells[0].hyperlink, 2);
+        assert_eq!(t.alternate.lines[0].cells[0].hyperlink, 3);
+        assert_eq!(t.primary.saved.unwrap().cursor.template.hyperlink, 4);
+        assert_eq!(t.alternate.saved.unwrap().cursor.template.hyperlink, 5);
+        assert_eq!(t.cursor.template.hyperlink, 6);
+        t.primary.lines[0].resize(8);
+        assert_eq!(t.primary.lines[0].cells[7].hyperlink, 7);
+        for id in 1..=8 {
+            assert_eq!(t.intern_link(key(id), 8), id as u16);
+        }
+    }
+
+    #[test]
+    fn full_live_table_rejects_new_links_but_reuses_existing() {
+        let mut t = Terminal::new(8, 2);
+        for id in 0..2 {
+            t.primary.lines[0].cells[id].hyperlink = t.intern_link(key(id), 2);
+        }
+        assert_eq!(t.intern_link(key(2), 2), 0);
+        assert_eq!(t.intern_link(key(0), 2), 1);
+        t.primary.lines[0].cells[0] = crate::Cell::default();
+        assert_eq!(t.intern_link(key(2), 2), 2);
+        assert_eq!(t.primary.lines[0].cells[1].hyperlink, 1);
+    }
+
+    #[test]
+    fn reset_clears_pen_and_saved_cursor_restores_link() {
+        for reset in [b"\x1bc".as_slice(), b"\x1b[!p"] {
+            let mut t = Terminal::new(20, 2);
+            t.advance(b"\x1b]8;id=a;https://a\x07\x1b7\x1b]8;;\x07\x1b8x");
+            assert_eq!(
+                t.link_at(Point { line: 0, col: 0 }).unwrap().uri,
+                "https://a"
+            );
+            t.advance(reset);
+            assert_eq!(t.cursor.template.hyperlink, 0);
+            t.advance(b"y");
+            let col = t.cursor.col - 1;
+            assert_eq!(t.primary.lines[0].cells[col].hyperlink, 0);
+            if reset == b"\x1bc" {
+                assert!(t.primary.saved.is_none());
+                assert!(t.links.is_empty());
+                assert!(t.link_indices.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn bare_schemes_are_not_links() {
+        for scheme in ["https://", "http://", "ftp://", "file://", "mailto:"] {
+            for suffix in ["", ".", ")"] {
+                let mut t = Terminal::new(20, 2);
+                t.advance(format!("{scheme}{suffix}").as_bytes());
+                assert!(t.link_at(Point { line: 0, col: 0 }).is_none());
+            }
+        }
     }
 }

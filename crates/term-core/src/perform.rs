@@ -215,15 +215,7 @@ impl Perform for Terminal {
                 self.cursor.template.hyperlink = if uri.is_empty() {
                     0
                 } else {
-                    let key = (id, uri);
-                    if let Some(i) = self.links.iter().position(|v| v == &key) {
-                        (i + 1) as u16
-                    } else if self.links.len() < u16::MAX as usize {
-                        self.links.push(key);
-                        self.links.len() as u16
-                    } else {
-                        0
-                    }
+                    self.intern_link((id, uri), u16::MAX as usize)
                 };
             }
             [b"133", mark, args @ ..] => {
