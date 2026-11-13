@@ -755,6 +755,7 @@ impl App {
         match action {
             Action::Search => {
                 self.search.get_or_insert_with(search::Search::default);
+                self.update_ime_cursor_area();
                 if let Some(s) = &self.session {
                     s.window.request_redraw();
                 }
@@ -859,6 +860,37 @@ impl App {
         if let Some(s) = &self.session {
             s.window.request_redraw();
         }
+        self.update_ime_cursor_area();
+    }
+
+    fn update_ime_cursor_area(&self) {
+        let Some(s) = &self.session else { return };
+        let m = s.fonts.metrics;
+        let area = if let Some(search) = &self.search {
+            let size = s.window.inner_size();
+            term_render::search_cursor_area(
+                search.cursor_column(),
+                size.width as f32,
+                size.height as f32,
+                m.width,
+                m.height,
+            )
+            .1
+        } else {
+            let (row, col) = s.term.cursor_position().unwrap_or((0, 0));
+            let pad = self.config.padding * s.window.scale_factor() as f32;
+            [
+                pad + col as f32 * m.width,
+                pad + row as f32 * m.height + s.scroll.offset as f32,
+                m.width,
+                m.height,
+            ]
+        };
+        s.window.set_ime_allowed(true);
+        s.window.set_ime_cursor_area(
+            PhysicalPosition::new(area[0] as f64, area[1] as f64),
+            PhysicalSize::new(area[2] as f64, area[3] as f64),
+        );
     }
 
     fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(isize, usize)> {
@@ -1175,6 +1207,7 @@ impl ApplicationHandler<UserEvent> for App {
                     s.resize.schedule(Instant::now());
                     s.window.request_redraw();
                 }
+                self.update_ime_cursor_area();
             }
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
@@ -1212,18 +1245,32 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
-                    search.query.push_str(&text);
-                    search.refresh(&mut s.term, true);
+                    search.insert(&text, &mut s.term);
                     s.scroll.reset();
                     s.window.request_redraw();
                 } else {
                     self.write_input(text.as_bytes());
+                }
+                self.update_ime_cursor_area();
+            }
+            WindowEvent::Ime(event) => {
+                if let Some(search) = &mut self.search {
+                    match event {
+                        Ime::Preedit(text, cursor) => search.set_preedit(text, cursor),
+                        Ime::Disabled => search.clear_preedit(),
+                        _ => {}
+                    }
+                }
+                self.update_ime_cursor_area();
+                if let Some(s) = &self.session {
+                    s.window.request_redraw();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => self.mouse_input(state, button),
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
+                self.update_ime_cursor_area();
                 if let Some(s) = &mut self.session {
                     if let Some(search) = &mut self.search
                         && search.dirty
@@ -1238,6 +1285,8 @@ impl ApplicationHandler<UserEvent> for App {
                             matches: &search.matches,
                             current: search.current,
                             label: label.as_deref().unwrap_or_default(),
+                            preedit: search.preedit_columns(),
+                            cursor: search.cursor_column(),
                         });
                     let target = s
                         .target

@@ -19,6 +19,8 @@ pub fn toggles_regex(key: &str, base: &str, mods: ModifiersState, option_as_alt:
 #[derive(Default)]
 pub struct Search {
     pub query: String,
+    pub preedit: String,
+    pub preedit_cursor: Option<(usize, usize)>,
     pub regex: bool,
     pub matches: Vec<Match>,
     pub current: Option<usize>,
@@ -27,7 +29,31 @@ pub struct Search {
 }
 
 impl Search {
+    pub fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
+        self.preedit_cursor =
+            cursor.filter(|&(a, b)| text.is_char_boundary(a) && text.is_char_boundary(b));
+        self.preedit = text;
+    }
+
+    pub fn clear_preedit(&mut self) {
+        self.preedit.clear();
+        self.preedit_cursor = None;
+    }
+
+    pub fn cursor_column(&self) -> usize {
+        6 + self.query.chars().count()
+            + self.preedit[..self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)]
+                .chars()
+                .count()
+    }
+
+    pub fn preedit_columns(&self) -> std::ops::Range<usize> {
+        let start = 6 + self.query.chars().count();
+        start..start + self.preedit.chars().count() + usize::from(!self.preedit.is_empty())
+    }
+
     pub fn insert(&mut self, text: &str, term: &mut Terminal) {
+        self.clear_preedit();
         self.query.extend(
             text.chars()
                 .filter(|c| !c.is_control() && *c != '\u{2028}' && *c != '\u{2029}'),
@@ -81,8 +107,10 @@ impl Search {
             format!("{}/{}", self.current.unwrap_or(0) + 1, self.matches.len())
         };
         format!(
-            "Find: {}▏  {}  {}",
+            "Find: {}{}▏{}  {}  {}",
             self.query,
+            &self.preedit[..self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)],
+            &self.preedit[self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)..],
             status,
             if self.regex { "[regex]" } else { "[plain]" }
         )
@@ -92,6 +120,29 @@ impl Search {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composition_is_not_a_query_and_empty_preedit_does_not_drop_commit() {
+        let mut term = Terminal::new(20, 2);
+        term.advance("a日本".as_bytes());
+        let mut search = Search::default();
+        search.insert("a", &mut term);
+        let matches = search.matches.clone();
+        search.set_preedit("日本".into(), Some((3, 6)));
+        assert_eq!(search.cursor_column(), 8);
+        assert!(search.label().contains("a日▏本"));
+        assert_eq!(search.query, "a");
+        assert_eq!(search.matches, matches);
+        search.set_preedit(String::new(), None);
+        search.insert("日本", &mut term);
+        assert_eq!(search.query, "a日本");
+        assert!(search.preedit.is_empty());
+        assert_eq!(search.preedit_cursor, None);
+        search.set_preedit("あ".into(), Some((1, 1)));
+        assert_eq!(search.preedit_cursor, None);
+        search.clear_preedit();
+        assert!(search.preedit.is_empty());
+    }
 
     #[test]
     fn text_modifiers() {

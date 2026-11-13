@@ -482,11 +482,21 @@ impl Renderer {
 
         if let Some(search) = search {
             let chars: Vec<_> = search.label.chars().collect();
-            let capacity = (self.config.width as f32 / cw) as usize;
-            let visible = &chars[chars.len().saturating_sub(capacity)..];
-            let y = self.config.height as f32 - ch;
+            let capacity = ((self.config.width as f32 / cw) as usize).max(1);
+            let (start, area) = crate::search_cursor_area(
+                search.cursor,
+                self.config.width as f32,
+                self.config.height as f32,
+                cw,
+                ch,
+            );
+            let visible = &chars[start.min(chars.len())..chars.len().min(start + capacity)];
+            let y = area[1];
             overlays.push(self.rect(0.0, y, self.config.width as f32, ch, (35, 40, 65)));
             for (i, &c) in visible.iter().enumerate() {
+                if search.preedit.contains(&(start + i)) {
+                    overlays.push(self.rect(i as f32 * cw, y + ch - 2.0, cw, 1.0, (255, 255, 255)));
+                }
                 let key = GlyphKey {
                     c,
                     style: Style::new(false, false),
