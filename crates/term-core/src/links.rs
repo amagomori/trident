@@ -269,10 +269,12 @@ mod tests {
             t.advance(uri.as_bytes());
             assert_eq!(t.link_at(Point { line: 0, col: 0 }).unwrap().uri, uri);
         }
-        for input in ["HTTPS://", "Https://\",next", "HTTp:/example.com"] {
+        for input in ["HTTPS://", "\"Https://\",next", "HTTp:/example.com"] {
             let mut t = Terminal::new(80, 2);
             t.advance(input.as_bytes());
-            assert!(t.link_at(Point { line: 0, col: 0 }).is_none());
+            for col in 0..input.len() {
+                assert!(t.link_at(Point { line: 0, col }).is_none());
+            }
         }
     }
 
