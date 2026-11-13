@@ -196,6 +196,62 @@ fn erase_display_all_after_ed3_keeps_new_output() {
 }
 
 #[test]
+fn clear_sequence_with_fragmented_ed3() {
+    for ed3 in [
+        "\x1b[3J",
+        "\x1b[03J",
+        "\x1b[3;1J",
+        "\x1b[3:1J",
+        "\x1b[\x073J",
+        "\x1b\x00[3J",
+        "\x1b[3\x7fJ",
+        "\x1b[?3J",
+    ] {
+        for between in ["", "\x1b[H", "\x1b[f", "new", "\r\n", "\x1b[J", "\x1b[1J"] {
+            let bytes = format!("{ed3}{between}\x1b[H\x1b[2J");
+            for split in 0..ed3.len() {
+                let mut fragmented = term(10, 3, "one\r\ntwo");
+                let mut whole = term(10, 3, "one\r\ntwo");
+                for chunk in [&bytes.as_bytes()[..split], &bytes.as_bytes()[split..]] {
+                    fragmented.advance(chunk);
+                }
+                whole.advance(bytes.as_bytes());
+                assert_eq!(
+                    fragmented.history, whole.history,
+                    "{bytes:?}, split {split}"
+                );
+                assert_eq!(fragmented.scrollback_len(), whole.scrollback_len());
+                assert_eq!(fragmented.cursor_position(), whole.cursor_position());
+                assert_eq!(screen(&fragmented), screen(&whole));
+                fragmented.scroll_display(isize::MAX);
+                whole.scroll_display(isize::MAX);
+                assert_eq!(screen(&fragmented), screen(&whole));
+            }
+        }
+    }
+}
+
+#[test]
+fn clear_tracking_preserves_repeat_and_disarms_on_unrendered_characters() {
+    for c in ['x', '界', '\u{10ffff}'] {
+        let mut t = Terminal::new(10, 3);
+        t.advance(format!("{c}\x1b[3J\x07\x1b[b").as_bytes());
+        assert_eq!(t.print_state.last(), Some(c));
+        assert_eq!(t.viewport_row(0).text(), format!("{c}{c}"));
+    }
+
+    let mut t = term(10, 3, "one\r\ntwo");
+    t.advance("\x1b[3J\u{301}\x1b[H\x1b[2J".as_bytes());
+    assert_eq!(t.scrollback_len(), 2);
+    assert_eq!(t.print_state.last(), Some('o'));
+
+    let mut t = term(10, 3, "one\r\ntwo");
+    t.advance("\x1b[?7l\x1b[3J\x1b[1;10H界\x1b[H\x1b[2J".as_bytes());
+    assert_eq!(t.scrollback_len(), 2);
+    assert_eq!(t.print_state.last(), Some('o'));
+}
+
+#[test]
 fn erase_display_all_retains_selection_and_scrolled_view() {
     let mut t = term(10, 3, "old\r\none\r\ntwo\r\nthree");
     t.scroll_display(1);

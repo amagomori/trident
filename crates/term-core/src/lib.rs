@@ -119,6 +119,31 @@ pub struct Selection {
     pub kind: SelectionKind,
 }
 
+// Printing already updates the last character. Packing the pending-clear bit into
+// that store avoids an extra write or branch for every character on the hot path.
+struct PrintState(u32);
+
+impl PrintState {
+    const EMPTY: Self = Self(0x110000);
+    const CLEAR_ARMED: u32 = 1 << 31;
+
+    fn last(&self) -> Option<char> {
+        char::from_u32(self.0 & !Self::CLEAR_ARMED)
+    }
+
+    fn clear_armed(&self) -> bool {
+        self.0 & Self::CLEAR_ARMED != 0
+    }
+
+    fn disarm_clear(&mut self) {
+        self.0 &= !Self::CLEAR_ARMED;
+    }
+
+    fn arm_clear(&mut self) {
+        self.0 |= Self::CLEAR_ARMED;
+    }
+}
+
 pub struct Terminal {
     pub palette: colors::Palette,
     cols: usize,
@@ -139,10 +164,9 @@ pub struct Terminal {
     max_scrollback: usize,
     /// Whether scrollback or the grid gave up rows since the last `take_shrunk`.
     shrunk: bool,
-    /// Set by ED 3 on the primary screen and cleared by anything but a cursor move, so the
-    /// ED 2 of `clear` (`ED 3; CUP; ED 2` on macOS) leaves the erased screen out of history.
-    /// Only lasts until the end of an `advance` call.
-    pub(crate) clear_armed: bool,
+    /// Last printed character and a same-batch ED 3/CUP/ED 2 guard, so `clear`
+    /// leaves the erased screen out of history. Other dispatches disarm the guard.
+    print_state: PrintState,
     /// How many lines the view is scrolled back from the bottom.
     display_offset: usize,
     pub selection: Option<Selection>,
@@ -151,7 +175,6 @@ pub struct Terminal {
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
     pub bell: bool,
-    last_printed: Option<char>,
     images: images::ImageStore,
     /// Cell size in pixels, as reported by the app.
     cell_pixels: (f32, f32),
@@ -193,14 +216,13 @@ impl Terminal {
             history: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             shrunk: false,
-            clear_armed: false,
+            print_state: PrintState::EMPTY,
             display_offset: 0,
             selection: None,
             title: None,
             title_changed: false,
             responses: Vec::new(),
             bell: false,
-            last_printed: None,
             images: images::ImageStore::new(),
             cell_pixels: (8.0, 16.0),
             kitty: kitty::Kitty::default(),
@@ -221,7 +243,7 @@ impl Terminal {
         }
         self.parser = parser;
         self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
-        self.clear_armed = false;
+        self.print_state.disarm_clear();
     }
 
     pub fn cols(&self) -> usize {
@@ -685,6 +707,7 @@ impl Terminal {
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
             // Combining marks and other zero-width characters are not rendered.
+            self.print_state.disarm_clear();
             return;
         }
 
@@ -704,6 +727,7 @@ impl Terminal {
                 self.cursor.col = 0;
                 self.linefeed();
             } else {
+                self.print_state.disarm_clear();
                 return;
             }
         }
@@ -734,7 +758,7 @@ impl Terminal {
         }
         line.cells[col] = cell;
 
-        self.last_printed = Some(c);
+        self.print_state = PrintState(c as u32);
         if col + width >= cols {
             self.cursor.col = cols - 1;
             self.cursor.pending_wrap = true;
@@ -811,7 +835,7 @@ impl Terminal {
     fn erase_display(&mut self, mode: u16) {
         let (row, col) = (self.cursor.row, self.cursor.col);
         if mode < 2 {
-            self.clear_armed = false;
+            self.print_state.disarm_clear();
         }
         match mode {
             0 => {
@@ -849,7 +873,8 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn push_screen_to_history(&mut self) {
-        if std::mem::take(&mut self.clear_armed) {
+        if self.print_state.clear_armed() {
+            self.print_state.disarm_clear();
             return;
         }
         let mut used = self
@@ -886,7 +911,11 @@ impl Terminal {
         }
         self.display_offset = 0;
         self.selection = None;
-        self.clear_armed = !self.alt_active;
+        if !self.alt_active {
+            self.print_state.arm_clear();
+        } else {
+            self.print_state.disarm_clear();
+        }
     }
 
     fn erase_line(&mut self, mode: u16) {

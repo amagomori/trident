@@ -98,7 +98,7 @@ impl Perform for Ghost<'_> {
             self.linefeed();
         }
         let t = &mut *self.term;
-        t.last_printed = Some(c);
+        t.print_state = super::PrintState(c as u32);
         if t.cursor.col + width >= cols {
             t.cursor.col = cols - 1;
             t.cursor.pending_wrap = true;
@@ -246,7 +246,7 @@ mod tests {
                 t.cursor.pending_wrap,
                 t.cursor.template,
             ),
-            t.last_printed,
+            t.print_state.last(),
             t.display_offset,
             t.alt_active,
             t.title.clone(),
