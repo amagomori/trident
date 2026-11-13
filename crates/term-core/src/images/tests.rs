@@ -552,7 +552,7 @@ fn images_past_the_right_edge_can_be_evicted() {
 }
 
 #[test]
-fn cell_size_change_respans_pixel_sized_placements() {
+fn cell_size_change_preserves_placement_spans() {
     let mut t = term();
     let native = place_at(&mut t, 0, 0);
     let fixed = t
@@ -567,15 +567,19 @@ fn cell_size_change_respans_pixel_sized_placements() {
         .unwrap();
     assert_eq!((native.cols, native.rows), (2, 2));
     let generation = t.image_generation();
-    t.set_cell_pixel_size(5.0, 10.0);
-    let spans: Vec<_> = t
-        .visible_placements()
-        .iter()
-        .map(|v| (v.placement.cols, v.placement.rows))
-        .collect();
-    assert!(spans.contains(&(4, 4)));
-    assert!(spans.contains(&(fixed.cols, fixed.rows)));
-    assert_ne!(t.image_generation(), generation);
+    for cell in [(5.0, 10.0), (20.0, 40.0), (9.6, 19.0)] {
+        t.set_cell_pixel_size(cell.0, cell.1);
+        let spans: Vec<_> = t
+            .visible_placements()
+            .iter()
+            .map(|v| (v.placement.cols, v.placement.rows))
+            .collect();
+        assert_eq!(
+            spans,
+            [(native.cols, native.rows), (fixed.cols, fixed.rows)]
+        );
+        assert_eq!(t.image_generation(), generation);
+    }
 }
 
 #[test]

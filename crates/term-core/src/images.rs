@@ -60,10 +60,6 @@ pub struct Placement {
     pub y_offset: u32,
     pub source: Rect,
     pub z: i32,
-    /// The client gave the cell span: the image is scaled to fill it on that axis instead
-    /// of being drawn at its pixel size.
-    pub fixed_cols: bool,
-    pub fixed_rows: bool,
 }
 
 /// A placement that overlaps the viewport. `row` is the viewport row of its top edge and is
@@ -314,8 +310,6 @@ impl Terminal {
             y_offset: opts.y_offset,
             source,
             z: opts.z,
-            fixed_cols: opts.cols != 0,
-            fixed_rows: opts.rows != 0,
         };
         let placements = &mut self.screen_mut().placements;
         if opts.placement_id != 0 {
@@ -374,35 +368,9 @@ impl Terminal {
     }
 
     /// The size of one cell in pixels, used to size images and for `CSI 14/16 t`.
-    /// Placements the client did not size in cells are re-spanned to keep their pixel size.
+    /// Existing placements keep their cell spans across cell size changes.
     pub fn set_cell_pixel_size(&mut self, width: f32, height: f32) {
-        if self.cell_pixels == (width, height) {
-            return;
-        }
         self.cell_pixels = (width, height);
-        let mut changed = false;
-        for p in self
-            .primary
-            .placements
-            .iter_mut()
-            .chain(self.alternate.placements.iter_mut())
-        {
-            let cols = if p.fixed_cols {
-                p.cols
-            } else {
-                span(p.source.width, p.x_offset, width)
-            };
-            let rows = if p.fixed_rows {
-                p.rows
-            } else {
-                span(p.source.height, p.y_offset, height)
-            };
-            changed |= (cols, rows) != (p.cols, p.rows);
-            (p.cols, p.rows) = (cols, rows);
-        }
-        if changed {
-            self.images.generation += 1;
-        }
     }
 
     fn placement_base(&self, alt: bool) -> u64 {

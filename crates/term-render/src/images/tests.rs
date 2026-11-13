@@ -62,8 +62,7 @@ fn cell_span_stretches_and_offsets_shift() {
     kitty(&mut t, ",c=4,X=3,Y=5");
     let q = layout(&t, CELL, 0.0, 0.0)[0];
     assert_eq!(q.pos, [3.0, 5.0]);
-    // Four cells wide less the offset; native height on the axis not given in cells.
-    assert_eq!(q.size, [37.0, 40.0]);
+    assert_eq!(q.size, [37.0, 55.0]);
 }
 
 #[test]
@@ -73,6 +72,31 @@ fn source_rect_maps_to_uv() {
     let q = layout(&t, CELL, 0.0, 0.0)[0];
     assert_eq!(q.uv, [0.25, 0.25, 0.75, 0.75]);
     assert_eq!(q.size, [10.0, 60.0]);
+}
+
+#[test]
+fn scale_changes_keep_images_in_their_original_cells() {
+    for initial_cell in [(20.0, 32.0), (10.0, 16.0)] {
+        let mut t = Terminal::new(80, 24);
+        t.set_cell_pixel_size(initial_cell.0, initial_cell.1);
+        t.add_image(1, image(160, 96)).unwrap();
+        kitty(&mut t, "");
+        let placement = t.visible_placements()[0].placement;
+        t.advance(b"\r\nfollowing text");
+        for cell in [(10.0, 16.0), (20.0, 32.0), (13.0, 21.0)] {
+            t.set_cell_pixel_size(cell.0, cell.1);
+            let q = layout(&t, cell, 0.0, 0.0)[0];
+            assert_eq!(
+                q.size,
+                [
+                    placement.cols as f32 * cell.0,
+                    placement.rows as f32 * cell.1
+                ]
+            );
+            assert_eq!(q.uv, [0.0, 0.0, 1.0, 1.0]);
+            assert!(q.pos[1] + q.size[1] <= t.cursor_position().unwrap().0 as f32 * cell.1);
+        }
+    }
 }
 
 #[test]
