@@ -487,6 +487,7 @@ fn exit_wakeup(deadline: Option<Instant>, exit: Option<Instant>) -> Option<Insta
 #[derive(Default)]
 struct ExitPresentation {
     target: Option<usize>,
+    first_target: Option<usize>,
     ready_at: Option<Instant>,
     submitted_at: Option<Instant>,
     submissions: usize,
@@ -497,13 +498,18 @@ struct ExitPresentation {
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 impl ExitPresentation {
+    fn needs_submission(&self) -> bool {
+        self.target.is_none()
+    }
+
     #[cfg(any(target_os = "macos", test))]
     fn needs_metal_submission(&self, presented: usize) -> bool {
-        self.target.is_none() || (presented == 0 && self.submissions == 1)
+        self.needs_submission() || (presented == 0 && self.submissions == 1)
     }
 
     fn submitted(&mut self, target: usize, now: Instant) {
         self.target = Some(target);
+        self.first_target.get_or_insert(target);
         self.submitted_at = Some(now);
         self.submissions += 1;
         #[cfg(any(target_os = "macos", test))]
@@ -575,13 +581,19 @@ impl ExitPresentation {
     }
 
     fn update(&mut self, presented: usize, skipped: usize, now: Instant, refresh: u32) -> bool {
-        if let Some(target) = self.target {
-            if presented >= target {
-                self.finish(now);
-            } else if skipped >= target {
-                self.retry();
-                return true;
-            }
+        if self
+            .first_target
+            .or(self.target)
+            .is_some_and(|target| presented >= target)
+        {
+            self.finish(now);
+            return false;
+        }
+        if let Some(target) = self.target
+            && skipped >= target
+        {
+            self.retry();
+            return true;
         }
         self.missing_feedback(now, refresh)
     }
@@ -958,6 +970,10 @@ impl App {
     }
 
     fn present_frame(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.exit_deadline.is_some() && !self.exit_presentation.needs_submission() {
+            return;
+        }
         #[cfg(target_os = "macos")]
         if self.exit_deadline.is_some()
             && !self
@@ -1017,7 +1033,7 @@ impl App {
         let started = Instant::now();
         #[cfg(target_os = "linux")]
         let exit_target = (self.exit_deadline.is_some()
-            && self.exit_presentation.target.is_none()
+            && self.exit_presentation.needs_submission()
             && s.presentation.is_some())
         .then_some(s.sequence + 1);
         let mut pre_present = || {
@@ -1614,17 +1630,18 @@ impl ApplicationHandler<UserEvent> for App {
                         #[cfg(target_os = "macos")]
                         self.exit_presentation
                             .submitted(present_macos::arm_exit() - 1, Instant::now());
-                    } else {
-                        #[cfg(not(target_os = "macos"))]
-                        s.window.request_redraw();
                     }
                 }
+                let pending_final = self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.since_frame > 0 || s.sequence == 0);
                 #[cfg(target_os = "macos")]
-                if self.session.as_ref().is_some_and(|s| s.since_frame > 0)
+                let pending_final = pending_final
                     || self
                         .exit_presentation
-                        .needs_metal_submission(present_macos::feedback().0)
-                {
+                        .needs_metal_submission(present_macos::feedback().0);
+                if pending_final {
                     self.present_frame();
                 }
             }
@@ -1716,8 +1733,8 @@ impl ApplicationHandler<UserEvent> for App {
                 let retry =
                     self.exit_presentation
                         .update(presented, skipped, Instant::now(), refresh);
-                if retry && let Some(s) = &mut self.session {
-                    s.window.request_redraw();
+                if retry {
+                    self.present_frame();
                 }
             }
             output_done && (feedback.is_none() || self.exit_presentation.ready(Instant::now()))
@@ -2272,6 +2289,38 @@ mod tests {
         state.submitted(4, start + period * 3);
         assert!(!state.update(4, 3, start + period * 4, 60_000));
         assert!(state.ready(state.wakeup(start + period * 4)));
+    }
+
+    #[test]
+    fn late_final_feedback_finishes_without_waiting_for_redundant_retry() {
+        let start = Instant::now();
+        let period = Duration::from_secs_f64(1.0 / 60.0);
+        let mut state = ExitPresentation::default();
+        state.submitted(4, start);
+        assert!(state.missing_feedback(start + period, 60_000));
+        state.submitted(5, start + period);
+        assert!(!state.update(3, 0, start + period, 60_000));
+        assert!(!state.ready(start + period));
+        assert!(!state.update(4, 0, start + period, 60_000));
+        assert!(state.ready(start + period));
+    }
+
+    #[test]
+    fn exit_redraws_wait_until_presentation_requests_a_retry() {
+        let start = Instant::now();
+        let mut state = ExitPresentation::default();
+        assert!(state.needs_submission());
+        state.submitted(4, start);
+        assert!(!state.needs_submission());
+        assert!(!state.update(3, 0, start, 60_000));
+        assert!(!state.needs_submission());
+        assert!(state.update(3, 4, start, 60_000));
+        assert!(state.needs_submission());
+        state.submitted(5, start);
+        assert!(!state.needs_submission());
+        assert!(!state.update(5, 4, start, 60_000));
+        assert!(state.ready(start));
+        assert!(!state.needs_submission());
     }
 
     #[test]
