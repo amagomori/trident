@@ -613,7 +613,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn stopped_member_survives_leader_and_defers_completion() {
-        use std::io::BufRead;
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
 
@@ -625,19 +624,30 @@ mod tests {
             }
         }
         let mut leader = Command::new("sh")
-            .args(["-c", "sleep 30 & kill -STOP $!; echo $!; exit"])
+            .args(["-c", "read ready"])
             .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdin(Stdio::piped())
             .spawn()
             .unwrap();
         let group = Group(leader.id() as i32);
-        let mut line = String::new();
-        std::io::BufReader::new(leader.stdout.take().unwrap())
-            .read_line(&mut line)
+        // Keep a parent outside the group so leader exit does not orphan it
+        // and deliver SIGHUP/SIGCONT to the stopped member.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(group.0)
+            .stdin(Stdio::null())
+            .spawn()
             .unwrap();
-        let member: i32 = line.trim().parse().unwrap();
-        assert!(leader.wait().unwrap().success());
+        let member = child.id() as i32;
+        // SAFETY: member is the child created in this test's isolated group.
+        assert_eq!(unsafe { libc::kill(member, libc::SIGSTOP) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !group_has_stopped(group.0) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(group_has_stopped(group.0));
+        drop(leader.stdin.take());
+        leader.wait().unwrap();
         assert!(leader_exited(group.0));
         let deadline = Instant::now() + Duration::from_secs(2);
         while !group_has_stopped(group.0) && Instant::now() < deadline {
@@ -675,6 +685,7 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(member_exited);
+        child.wait().unwrap();
         assert!(!group_has_stopped(group.0));
         let events = state.sample(
             None,
