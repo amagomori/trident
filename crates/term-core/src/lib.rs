@@ -379,6 +379,9 @@ impl Terminal {
                     .output_starts
                     .retain(|(line, _)| *line != current);
                 if !self.alt_active {
+                    if self.shell.output_starts.len() == 16 {
+                        self.shell.output_starts.remove(0);
+                    }
                     self.shell.output_starts.push((
                         current,
                         self.cursor.col + usize::from(self.cursor.pending_wrap),
@@ -1001,6 +1004,7 @@ impl Terminal {
     #[inline(never)]
     fn invalidate_output_ends(&mut self) {
         self.shell.output_ends.clear();
+        self.shell.output_starts.clear();
     }
 
     // ---- Primitive grid operations used by the escape sequence handlers ----

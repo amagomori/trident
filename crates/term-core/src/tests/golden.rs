@@ -274,10 +274,12 @@ fn shell_output_snapshot_lifetime() {
         let mut t = completed();
         t.advance(invalidate);
         assert!(t.shell.output_ends.is_empty());
+        assert!(t.shell.output_starts.is_empty());
     }
     let mut t = completed();
     t.resize(10, 4);
     assert!(t.shell.output_ends.is_empty());
+    assert!(t.shell.output_starts.is_empty());
 
     let mut t = completed();
     t.set_scrollback_limit(1);
@@ -291,7 +293,23 @@ fn shell_output_snapshot_lifetime() {
         t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07\r\n");
     }
     assert_eq!(t.shell.output_ends.len(), 16);
+    assert_eq!(t.shell.output_starts.len(), 16);
     assert_eq!(std::mem::size_of::<Row>(), 40);
+}
+
+#[test]
+fn shell_output_start_is_invalidated_on_resize() {
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]133;A\x07$ run\x1b]133;B\x07\x1b]133;C\x07result\x1b]133;D;0\x07");
+    t.select_command_output();
+    assert_eq!(t.selection_text().as_deref(), Some("result"));
+    t.resize(4, 5);
+    assert!(t.shell.output_starts.is_empty());
+    t.select_command_output();
+    let (start, _) = t.selection_range().unwrap();
+    assert_eq!(start.col, 0);
+    assert_eq!(start.line, t.first_line());
+    assert_eq!(t.selection_text().as_deref(), Some("$ ru"));
 }
 
 #[test]
