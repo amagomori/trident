@@ -31,6 +31,7 @@ impl Terminal {
             .build()
             .map_err(|e| e.to_string())?;
         let mut matches = Vec::new();
+        let mut oldest = 0;
         let mut text = String::new();
         let mut points = Vec::new();
         let last = self.history + self.rows as u64 - 1;
@@ -67,18 +68,22 @@ impl Terminal {
                     if found.is_empty() {
                         continue;
                     }
-                    matches.push(Match {
+                    let matched = Match {
                         start: points[found.start()].0,
                         end: points[found.end() - 1].1,
-                    });
-                    if matches.len() == MATCH_LIMIT {
-                        return Ok(matches);
+                    };
+                    if matches.len() < MATCH_LIMIT {
+                        matches.push(matched);
+                    } else {
+                        matches[oldest] = matched;
+                        oldest = (oldest + 1) % MATCH_LIMIT;
                     }
                 }
                 text.clear();
                 points.clear();
             }
         }
+        matches.rotate_left(oldest);
         Ok(matches)
     }
 
@@ -282,7 +287,19 @@ mod tests {
     fn capped_and_zero_width() {
         let mut t = Terminal::new(MATCH_LIMIT + 2, 1);
         t.advance("a".repeat(MATCH_LIMIT + 1).as_bytes());
-        assert_eq!(t.search("a", false).unwrap().len(), MATCH_LIMIT);
+        for regex in [false, true] {
+            let matches = t.search("a", regex).unwrap();
+            assert_eq!(matches.len(), MATCH_LIMIT);
+            assert_eq!(matches[0].start, Point { line: 0, col: 1 });
+            assert_eq!(
+                matches.last().unwrap().end,
+                Point {
+                    line: 0,
+                    col: MATCH_LIMIT
+                }
+            );
+            assert!(matches.windows(2).all(|pair| pair[0].start < pair[1].start));
+        }
         assert!(t.search("^", true).unwrap().is_empty());
     }
 }
