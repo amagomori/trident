@@ -136,7 +136,9 @@ impl PrintState {
     }
 
     fn disarm_clear(&mut self) {
-        self.0 &= !Self::CLEAR_ARMED;
+        if self.clear_armed() {
+            self.0 &= !Self::CLEAR_ARMED;
+        }
     }
 
     fn arm_clear(&mut self) {
@@ -164,6 +166,9 @@ pub struct Terminal {
     max_scrollback: usize,
     /// Whether scrollback or the grid gave up rows since the last `take_shrunk`.
     shrunk: bool,
+    /// Last printed character and a same-batch ED 3/CUP/ED 2 guard, so `clear`
+    /// leaves the erased screen out of history. Other dispatches disarm the guard.
+    print_state: PrintState,
     /// How many lines the view is scrolled back from the bottom.
     display_offset: usize,
     pub selection: Option<Selection>,
@@ -172,9 +177,6 @@ pub struct Terminal {
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
     pub bell: bool,
-    /// Last printed character and a same-batch ED 3/CUP/ED 2 guard, so `clear`
-    /// leaves the erased screen out of history. Other dispatches disarm the guard.
-    print_state: PrintState,
     images: images::ImageStore,
     /// Cell size in pixels, as reported by the app.
     cell_pixels: (f32, f32),
@@ -216,13 +218,13 @@ impl Terminal {
             history: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             shrunk: false,
+            print_state: PrintState::EMPTY,
             display_offset: 0,
             selection: None,
             title: None,
             title_changed: false,
             responses: Vec::new(),
             bell: false,
-            print_state: PrintState::EMPTY,
             images: images::ImageStore::new(),
             cell_pixels: (8.0, 16.0),
             kitty: kitty::Kitty::default(),
