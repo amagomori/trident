@@ -132,6 +132,38 @@ fn erase_display_all_obeys_history_limit_and_ed3() {
 }
 
 #[test]
+fn clear_leaves_history_empty_in_either_order() {
+    // macOS `clear` sends ED 3 before ED 2; ncurses on Linux sends ED 2 first.
+    for clear in [&b"\x1b[3J\x1b[H\x1b[2J"[..], b"\x1b[H\x1b[2J\x1b[3J"] {
+        let mut t = filled_history(50);
+        t.advance(b"\r\nlast");
+        t.advance(clear);
+        assert_eq!(t.scrollback_len(), 0);
+        assert_eq!(t.display_offset(), 0);
+        assert!(screen(&t).iter().all(|r| r.is_empty()));
+
+        // Later output is still kept by the next Ctrl+L.
+        t.advance(b"after");
+        t.advance(b"\x1b[H\x1b[2J");
+        assert_eq!(t.scrollback_len(), 1);
+        t.scroll_display(1);
+        assert_eq!(t.viewport_row(0).text(), "after");
+    }
+}
+
+#[test]
+fn erase_display_all_after_ed3_keeps_new_output() {
+    let mut t = term(10, 3, "one\r\ntwo");
+    t.advance(b"\x1b[3J\x1b[3;1Hthree\x1b[H\x1b[2J");
+    assert_eq!(t.scrollback_len(), 3);
+    t.scroll_display(3);
+    assert_eq!(screen(&t), ["one", "two", "three"]);
+
+    let t = term(10, 3, "one\r\ntwo\x1b[3J\x1b[?1049h\x1b[?1049l\x1b[2J");
+    assert_eq!(t.scrollback_len(), 2);
+}
+
+#[test]
 fn erase_display_all_retains_selection_and_scrolled_view() {
     let mut t = term(10, 3, "old\r\none\r\ntwo\r\nthree");
     t.scroll_display(1);

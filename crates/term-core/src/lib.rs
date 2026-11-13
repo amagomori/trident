@@ -139,6 +139,9 @@ pub struct Terminal {
     max_scrollback: usize,
     /// Whether scrollback or the grid gave up rows since the last `take_shrunk`.
     shrunk: bool,
+    /// Fingerprint of the primary screen when ED 3 last erased the scrollback, so an ED 2
+    /// that follows it (`clear` sends `ED 3; ED 2` on macOS) leaves that screen out of history.
+    erased_screen: Option<u64>,
     /// How many lines the view is scrolled back from the bottom.
     display_offset: usize,
     pub selection: Option<Selection>,
@@ -189,6 +192,7 @@ impl Terminal {
             history: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             shrunk: false,
+            erased_screen: None,
             display_offset: 0,
             selection: None,
             title: None,
@@ -824,44 +828,70 @@ impl Terminal {
             }
             2 => {
                 if !self.alt_active {
-                    let mut used = self
-                        .primary
-                        .lines
-                        .iter()
-                        .rposition(|r| !r.is_blank())
-                        .map_or(0, |r| r + 1);
-                    for p in &self.primary.placements {
-                        let end = p.line.saturating_add(p.visible_rows() as u64);
-                        used = used
-                            .max(end.saturating_sub(self.history).min(self.rows as u64) as usize);
-                    }
-                    if used > 0 {
-                        // A bottom-clipped image must not overlap the fresh screen after
-                        // scrolling, or erase_row below would delete it from history too.
-                        self.clip_primary_placements(self.history + self.rows as u64);
-                        self.scroll_up_region(0, self.rows - 1, used);
-                    }
+                    self.push_screen_to_history();
                 }
                 for r in 0..self.rows {
                     self.erase_row(r);
                 }
             }
-            3 => {
-                let scrollback = &mut self.screen_mut().scrollback;
-                if !scrollback.is_empty() {
-                    scrollback.clear();
-                    scrollback.shrink_to_fit();
-                    self.shrunk = true;
-                }
-                if !self.alt_active {
-                    let history = self.history;
-                    self.drop_placements_before(history);
-                }
-                self.display_offset = 0;
-                self.selection = None;
-            }
+            3 => self.erase_saved_lines(),
             _ => {}
         }
+    }
+
+    /// ED 2 on the primary screen: scroll the used rows into scrollback before they are
+    /// cleared, so earlier output stays reachable after Ctrl+L.
+    #[cold]
+    #[inline(never)]
+    fn push_screen_to_history(&mut self) {
+        if self.erased_screen.take() == Some(self.screen_fingerprint()) {
+            return;
+        }
+        let mut used = self
+            .primary
+            .lines
+            .iter()
+            .rposition(|r| !r.is_blank())
+            .map_or(0, |r| r + 1);
+        for p in &self.primary.placements {
+            let end = p.line.saturating_add(p.visible_rows() as u64);
+            used = used.max(end.saturating_sub(self.history).min(self.rows as u64) as usize);
+        }
+        if used > 0 {
+            // A bottom-clipped image must not overlap the fresh screen after
+            // scrolling, or erase_row below would delete it from history too.
+            self.clip_primary_placements(self.history + self.rows as u64);
+            self.scroll_up_region(0, self.rows - 1, used);
+        }
+    }
+
+    /// ED 3: drop the scrollback.
+    #[cold]
+    #[inline(never)]
+    fn erase_saved_lines(&mut self) {
+        let scrollback = &mut self.screen_mut().scrollback;
+        if !scrollback.is_empty() {
+            scrollback.clear();
+            scrollback.shrink_to_fit();
+            self.shrunk = true;
+        }
+        if !self.alt_active {
+            let history = self.history;
+            self.drop_placements_before(history);
+        }
+        self.display_offset = 0;
+        self.selection = None;
+        self.erased_screen = (!self.alt_active).then(|| self.screen_fingerprint());
+    }
+
+    /// Changes whenever the primary screen's content, size, images or history change.
+    fn screen_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.cols, self.rows, self.history).hash(&mut h);
+        (self.primary.placements.len(), self.images.generation).hash(&mut h);
+        self.primary.lines.hash(&mut h);
+        h.finish()
     }
 
     fn erase_line(&mut self, mode: u16) {
