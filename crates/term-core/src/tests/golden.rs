@@ -72,6 +72,30 @@ fn shell_integration_status_and_events() {
 }
 
 #[test]
+fn shell_integration_completion_queue_is_bounded() {
+    let mut t = Terminal::new(20, 3);
+    assert!(t.take_command_finished().is_empty());
+    for code in 0..100 {
+        t.advance(format!("\x1b]133;A\x07\x1b]133;C\x07\x1b]133;D;{code}\x07").as_bytes());
+        assert!(t.command_finished.len() <= 16);
+    }
+    assert_eq!(
+        t.take_command_finished(),
+        (84..100)
+            .map(|code| CommandFinished {
+                exit_code: Some(code),
+            })
+            .collect::<Vec<_>>()
+    );
+    assert!(t.take_command_finished().is_empty());
+    t.advance(b"\x1b]133;A\x07\x1b]133;C\x07\x1b]133;D;bad\x07");
+    assert_eq!(
+        t.take_command_finished(),
+        vec![CommandFinished { exit_code: None }]
+    );
+}
+
+#[test]
 fn shell_integration_spurious_completion_preserves_status() {
     for prior_exit in [0, 1] {
         let mut t = Terminal::new(20, 4);

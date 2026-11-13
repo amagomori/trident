@@ -312,6 +312,9 @@ impl Terminal {
                 let exit_code = args
                     .first()
                     .and_then(|s| std::str::from_utf8(s).ok()?.parse::<i32>().ok());
+                if self.command_finished.len() == 16 {
+                    self.command_finished.remove(0);
+                }
                 self.command_finished.push(CommandFinished { exit_code });
                 if !self.alt_active {
                     let row = self.cursor.row;
