@@ -248,6 +248,31 @@ struct PendingOutput {
 }
 
 impl PendingOutput {
+    fn can_advance(&self, paused: bool) -> bool {
+        !paused && self.waiting_since.is_none()
+    }
+
+    fn advance(
+        &mut self,
+        term: &mut Terminal,
+        paused: bool,
+        take_pty: impl FnOnce() -> pty::Output,
+    ) -> Option<(usize, bool)> {
+        if !self.can_advance(paused) {
+            return None;
+        }
+        let from_leftover = !self.is_empty();
+        let mut batch = self.next_batch(take_pty);
+        let processed = advance_output(term, &mut batch);
+        self.retain(
+            batch,
+            processed,
+            term.synchronized_output_ended(),
+            Instant::now(),
+        );
+        Some((processed, from_leftover))
+    }
+
     fn is_empty(&self) -> bool {
         self.bytes.is_empty() && self.shell_returns.is_empty()
     }
@@ -671,7 +696,11 @@ impl App {
 
     fn output_ready(&mut self) {
         let Some(s) = &mut self.session else { return };
-        if s.output.waiting_since.is_some() {
+        s.pty.refresh_flow();
+        if s.pty.flow.paused {
+            s.deferred = None;
+        }
+        if !s.output.can_advance(s.pty.flow.paused) {
             return;
         }
         if defer_output(s.deferred.is_some(), s.since_frame, s.pty.output_full()) {
@@ -686,27 +715,26 @@ impl App {
             search.dirty = true;
         }
         let Some(s) = &mut self.session else { return };
-        if s.output.waiting_since.is_some() {
+        s.pty.refresh_flow();
+        if s.pty.flow.paused {
+            s.deferred = None;
+        }
+        if !s.output.can_advance(s.pty.flow.paused) {
             return;
         }
         s.deferred = None;
-        let from_leftover = !s.output.is_empty();
-        let mut batch = s.output.next_batch(|| {
-            s.pty.wake_pending.store(false, Ordering::Release);
-            s.pty.take_output()
-        });
         let was_synchronized = s.term.modes.synchronized_output;
-        let mut processed = 0;
+        let mut advanced = None;
         update_terminal(&mut s.term, &mut s.scroll, |term| {
-            processed = advance_output(term, &mut batch);
+            advanced = s.output.advance(term, s.pty.flow.paused, || {
+                s.pty.wake_pending.store(false, Ordering::Release);
+                s.pty.take_output()
+            });
         });
+        let Some((processed, from_leftover)) = advanced else {
+            return;
+        };
         s.since_frame += processed;
-        s.output.retain(
-            batch,
-            processed,
-            s.term.synchronized_output_ended(),
-            Instant::now(),
-        );
         let synchronized_started = s.term.take_synchronized_output_started();
         if s.term.modes.mouse == MouseMode::Off {
             self.reported_button = None;
@@ -1344,6 +1372,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(s) = &mut self.session {
+            s.pty.refresh_flow();
+        }
         if let Some(s) = &mut self.session
             && std::mem::take(&mut s.pty.flow_redraw)
         {
@@ -1410,6 +1441,10 @@ impl ApplicationHandler<UserEvent> for App {
                 s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
             );
             deadline = sync_wakeup(deadline, s.output.waiting_since, s.synchronized_since);
+            if s.pty.flow.paused {
+                let poll = now + Duration::from_millis(100);
+                deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));
+            }
         }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -2086,6 +2121,63 @@ mod tests {
         assert!(term.modes.synchronized_output);
         assert!(!wake_pending.load(Ordering::Acquire));
         assert!(queued.is_none());
+    }
+
+    #[test]
+    fn paused_retained_frames_resume_before_queued_output() {
+        let mut term = Terminal::new(10, 2);
+        let mut pending = PendingOutput::default();
+        let mut first = batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW\x1b[?2026l");
+        let consumed = advance_output(&mut term, &mut first);
+        pending.retain(first, consumed, true, Instant::now());
+        pending.presented();
+        let saved = pending.bytes.clone();
+        let wake_pending = std::sync::atomic::AtomicBool::new(true);
+        let mut queued = Some(batch(b"\x1b[?2026h\rEND\x1b[?2026l"));
+        for _ in 0..3 {
+            assert!(
+                pending
+                    .advance(&mut term, true, || panic!("paused PTY drain"))
+                    .is_none()
+            );
+            assert_eq!(term.viewport_row(0).cells[0].c, 'O');
+            assert_eq!(pending.bytes, saved);
+            assert!(wake_pending.load(Ordering::Acquire));
+        }
+        assert!(
+            pending
+                .advance(&mut term, false, || panic!("retained output first"))
+                .is_some()
+        );
+        assert_eq!(term.viewport_row(0).cells[0].c, 'N');
+        assert!(
+            pending
+                .advance(&mut term, false, || panic!("presentation first"))
+                .is_none()
+        );
+        pending.presented();
+        assert!(
+            pending
+                .advance(&mut term, true, || panic!("paused queued output"))
+                .is_none()
+        );
+        assert!(wake_pending.load(Ordering::Acquire));
+        assert!(
+            pending
+                .advance(&mut term, false, || {
+                    wake_pending.store(false, Ordering::Release);
+                    queued.take().unwrap()
+                })
+                .is_some()
+        );
+        assert_eq!(term.viewport_row(0).cells[0].c, 'E');
+        assert!(!wake_pending.load(Ordering::Acquire));
+        assert!(queued.is_none());
+        pending.presented();
+        assert_eq!(
+            pending.advance(&mut term, false, || batch(b"")),
+            Some((0, false))
+        );
     }
 
     #[test]

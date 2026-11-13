@@ -399,7 +399,17 @@ impl Pty {
     }
 
     pub fn refresh_flow(&mut self) {
+        let was_paused = self.flow.paused;
         self.flow.flags(self.flow_flags().unwrap_or_default());
+        if let Some(boundary) = &self.pause_boundary {
+            self.flow
+                .protect_output_until(boundary.load(Ordering::Acquire));
+        }
+        self.flow.output(
+            self.output.read_sequence.load(Ordering::SeqCst),
+            self.output.read_bytes.load(Ordering::SeqCst),
+        );
+        self.flow_redraw |= self.flow.paused != was_paused;
     }
 
     pub fn resize(&self, cols: usize, rows: usize, cell: (f32, f32)) {
