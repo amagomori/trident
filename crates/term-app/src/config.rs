@@ -413,15 +413,36 @@ pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Resu
         }
     })?;
     let mut paths = watch_paths(&path);
-    let parents = |paths: &std::collections::BTreeSet<PathBuf>| {
-        paths
-            .iter()
-            .filter_map(|p| p.parent().map(Path::to_path_buf))
-            .collect::<std::collections::BTreeSet<_>>()
+    let rebuild = |watcher: &mut notify::RecommendedWatcher,
+                   watched: &mut std::collections::BTreeSet<PathBuf>,
+                   paths: &std::collections::BTreeSet<PathBuf>| {
+        for parent in std::mem::take(watched) {
+            let _ = watcher.unwatch(&parent);
+        }
+        for path in paths {
+            let mut parent = path.parent();
+            while let Some(dir) = parent {
+                if watched.contains(dir) {
+                    break;
+                }
+                if dir.is_dir()
+                    && watcher
+                        .watch(dir, notify::RecursiveMode::NonRecursive)
+                        .is_ok()
+                {
+                    watched.insert(dir.to_path_buf());
+                    break;
+                }
+                parent = dir.parent();
+            }
+        }
     };
-    let mut watched = parents(&paths);
-    for parent in &watched {
-        watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+    let mut watched = std::collections::BTreeSet::new();
+    rebuild(&mut watcher, &mut watched, &paths);
+    if watched.is_empty() {
+        return Err(notify::Error::generic(
+            "no config directory could be watched",
+        ));
     }
     let watcher = std::sync::Arc::new(std::sync::Mutex::new(watcher));
     let weak = std::sync::Arc::downgrade(&watcher);
@@ -429,7 +450,11 @@ pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Resu
         .name("config-watch".into())
         .spawn(move || {
             while let Ok(event) = rx.recv() {
-                if !event.paths.iter().any(|p| paths.contains(p)) {
+                if !event
+                    .paths
+                    .iter()
+                    .any(|p| paths.iter().any(|tracked| tracked.starts_with(p)))
+                {
                     continue;
                 }
                 while rx
@@ -438,26 +463,9 @@ pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Resu
                 {}
                 let Some(watcher) = weak.upgrade() else { break };
                 paths = watch_paths(&path);
-                let new_parents = parents(&paths);
                 {
                     let mut watcher = watcher.lock().unwrap();
-                    for parent in &new_parents {
-                        if !watched.contains(parent)
-                            && watcher
-                                .watch(parent, notify::RecursiveMode::NonRecursive)
-                                .is_ok()
-                        {
-                            watched.insert(parent.clone());
-                        }
-                    }
-                    watched.retain(|parent| {
-                        if new_parents.contains(parent) {
-                            true
-                        } else {
-                            let _ = watcher.unwatch(parent);
-                            false
-                        }
-                    });
+                    rebuild(&mut watcher, &mut watched, &paths);
                 }
                 drop(watcher);
                 changed();
@@ -468,6 +476,232 @@ pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct WatchTest {
+        dir: PathBuf,
+        path: PathBuf,
+        watcher: Option<ConfigWatcher>,
+        rx: std::sync::mpsc::Receiver<Option<f32>>,
+    }
+
+    impl WatchTest {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "terminal-watch-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let dir = std::fs::canonicalize(dir).unwrap();
+            let (_, rx) = std::sync::mpsc::channel();
+            Self {
+                path: dir.join("config.toml"),
+                dir,
+                watcher: None,
+                rx,
+            }
+        }
+
+        fn start(&mut self) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = self.path.clone();
+            self.watcher = Some(
+                watch(self.path.clone(), move || {
+                    let _ = tx.send(load(&path).ok().map(|config| config.font_size));
+                })
+                .unwrap(),
+            );
+            self.rx = rx;
+        }
+
+        fn wait(&self, size: f32) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let observed = self
+                    .rx
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .expect("config watcher did not reload expected contents");
+                if observed == Some(size) {
+                    break;
+                }
+            }
+        }
+
+        fn edit(&self, path: &Path, size: f32) {
+            std::fs::write(path, format!("font_size = {size}")).unwrap();
+            self.wait(size);
+        }
+    }
+
+    impl Drop for WatchTest {
+        fn drop(&mut self) {
+            self.watcher.take();
+            std::fs::remove_dir_all(&self.dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn watcher_starts_with_missing_parent_directories() {
+        let mut test = WatchTest::new();
+        test.path = test.dir.join("missing/nested/config.toml");
+        test.start();
+        std::fs::create_dir_all(test.path.parent().unwrap()).unwrap();
+        test.edit(&test.path, 21.0);
+        test.edit(&test.path, 22.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_dangling_missing_directory_created_later() {
+        let mut test = WatchTest::new();
+        let target = test.dir.join("profiles/not-created/config.toml");
+        std::os::unix::fs::symlink(&target, &test.path).unwrap();
+        test.start();
+        std::fs::create_dir(test.dir.join("profiles")).unwrap();
+        test.wait(Config::default().font_size);
+        std::fs::create_dir(target.parent().unwrap()).unwrap();
+        test.edit(&target, 21.0);
+        test.edit(&target, 22.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_dangling_link_replaced_with_valid_link() {
+        let mut test = WatchTest::new();
+        std::os::unix::fs::symlink("missing/directory/config.toml", &test.path).unwrap();
+        let target = test.dir.join("target.toml");
+        std::fs::write(&target, "font_size = 21").unwrap();
+        test.start();
+        let replacement = test.dir.join("replacement");
+        std::os::unix::fs::symlink(&target, &replacement).unwrap();
+        std::fs::rename(replacement, &test.path).unwrap();
+        test.wait(21.0);
+        test.edit(&target, 22.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_link_appears_later() {
+        let mut test = WatchTest::new();
+        let target = test.dir.join("target.toml");
+        std::fs::write(&target, "font_size = 21").unwrap();
+        test.start();
+        std::os::unix::fs::symlink("target.toml", &test.path).unwrap();
+        test.wait(21.0);
+        test.edit(&target, 22.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_link_removed_then_regular_file_written() {
+        let mut test = WatchTest::new();
+        std::os::unix::fs::symlink("target.toml", &test.path).unwrap();
+        std::fs::write(test.dir.join("target.toml"), "font_size = 21").unwrap();
+        test.start();
+        std::fs::remove_file(&test.path).unwrap();
+        test.wait(Config::default().font_size);
+        test.edit(&test.path, 22.0);
+        test.edit(&test.path, 23.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_chain_middle_link_retargeted() {
+        let mut test = WatchTest::new();
+        let middle = test.dir.join("middle");
+        let target = test.dir.join("new/config.toml");
+        std::fs::create_dir(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "font_size = 22").unwrap();
+        std::fs::write(test.dir.join("old.toml"), "font_size = 21").unwrap();
+        std::os::unix::fs::symlink("middle", &test.path).unwrap();
+        std::os::unix::fs::symlink("old.toml", &middle).unwrap();
+        test.start();
+        let replacement = test.dir.join("replacement");
+        std::os::unix::fs::symlink("new/config.toml", &replacement).unwrap();
+        std::fs::rename(replacement, middle).unwrap();
+        test.wait(22.0);
+        test.edit(&target, 23.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_loop_broken() {
+        let mut test = WatchTest::new();
+        let middle = test.dir.join("middle");
+        std::os::unix::fs::symlink("middle", &test.path).unwrap();
+        std::os::unix::fs::symlink("config.toml", &middle).unwrap();
+        test.start();
+        std::fs::remove_file(&middle).unwrap();
+        test.edit(&middle, 21.0);
+        test.edit(&middle, 22.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_excessive_symlink_hops_recovered() {
+        let mut test = WatchTest::new();
+        for index in 0..45 {
+            std::os::unix::fs::symlink(
+                format!("link{}", index + 1),
+                test.dir.join(format!("link{index}")),
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink("link0", &test.path).unwrap();
+        test.start();
+        let middle = test.dir.join("link20");
+        std::fs::remove_file(&middle).unwrap();
+        test.edit(&middle, 21.0);
+        test.edit(&middle, 22.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_dangling_file_created_later() {
+        let mut test = WatchTest::new();
+        let target = test.dir.join("target.toml");
+        std::os::unix::fs::symlink("target.toml", &test.path).unwrap();
+        test.start();
+        test.edit(&target, 21.0);
+        test.edit(&target, 22.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_target_directory_deleted_and_recreated() {
+        let mut test = WatchTest::new();
+        let target = test.dir.join("target/config.toml");
+        std::fs::create_dir(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "font_size = 21").unwrap();
+        std::os::unix::fs::symlink(&target, &test.path).unwrap();
+        test.start();
+        std::fs::remove_dir_all(target.parent().unwrap()).unwrap();
+        test.wait(Config::default().font_size);
+        std::fs::create_dir(target.parent().unwrap()).unwrap();
+        test.edit(&target, 22.0);
+        test.edit(&target, 23.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_target_directory_replaced_by_rename() {
+        let mut test = WatchTest::new();
+        let target = test.dir.join("target/config.toml");
+        std::fs::create_dir(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "font_size = 21").unwrap();
+        std::os::unix::fs::symlink(&target, &test.path).unwrap();
+        test.start();
+        let replacement = test.dir.join("replacement");
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(replacement.join("config.toml"), "font_size = 22").unwrap();
+        std::fs::rename(target.parent().unwrap(), test.dir.join("old")).unwrap();
+        std::fs::rename(replacement, target.parent().unwrap()).unwrap();
+        test.wait(22.0);
+        test.edit(&target, 23.0);
+    }
 
     fn parse_text(text: &str) -> Result<Config, String> {
         parse(Path::new("/config/terminal/config.toml"), text)
