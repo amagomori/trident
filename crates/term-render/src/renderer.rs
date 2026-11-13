@@ -6,7 +6,7 @@ use crate::atlas::{Atlas, GlyphKey};
 use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
 use std::sync::Arc;
-use term_core::colors::{self, Rgb};
+use term_core::colors::Rgb;
 use term_core::{CursorShape, Flags, Terminal};
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
@@ -317,7 +317,7 @@ impl Renderer {
             self.images
                 .prepare(&self.device, &self.queue, &self.uniforms, term, quads);
         }
-        self.draw(pre_present)
+        self.draw(term.palette.background, pre_present)
     }
 
     fn grid_clip(&self, term: &Terminal, metrics: &CellMetrics, padding: f32) -> [u32; 4] {
@@ -371,8 +371,8 @@ impl Renderer {
                 } else {
                     1
                 };
-                let mut fg = colors::resolve(cell.fg);
-                let mut bg = colors::resolve(cell.bg);
+                let mut fg = term.palette.resolve(cell.fg);
+                let mut bg = term.palette.resolve(cell.bg);
                 if cell.flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
@@ -381,14 +381,14 @@ impl Renderer {
                     fg = (mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2));
                 }
                 if term.is_selected(selection, term.viewport_to_point_signed(row, col)) {
-                    bg = colors::SELECTION;
+                    bg = term.palette.selection;
                 }
                 let is_cursor = row >= 0 && cursor == Some((row as usize, col));
                 if is_cursor && block_cursor {
-                    bg = colors::CURSOR;
-                    fg = colors::BACKGROUND;
+                    bg = term.palette.cursor;
+                    fg = term.palette.background;
                 }
-                if bg != colors::BACKGROUND {
+                if bg != term.palette.background {
                     backgrounds.push(self.rect(x, y, cw * cells as f32, ch, bg));
                 }
 
@@ -426,7 +426,7 @@ impl Renderer {
                 }
                 if is_cursor && !block_cursor {
                     let w = cw * cells as f32;
-                    let c = colors::CURSOR;
+                    let c = term.palette.cursor;
                     let thick = (stroke * 2.0).max(2.0);
                     match (focused, term.cursor_shape) {
                         (true, CursorShape::Bar) => overlays.push(self.rect(x, y, thick, ch, c)),
@@ -459,7 +459,7 @@ impl Renderer {
                 top,
                 w,
                 thumb_h,
-                colors::FOREGROUND,
+                term.palette.foreground,
             );
             bar.color[3] = 0.35;
             overlays.push(bar);
@@ -476,7 +476,7 @@ impl Renderer {
             let scale = layout.scale;
             let x = (self.config.width as f32 - layout.width) / 2.0;
             let y = (self.config.height as f32 - layout.height) / 2.0;
-            overlays.push(self.rect(x, y, layout.width, layout.height, colors::FOREGROUND));
+            overlays.push(self.rect(x, y, layout.width, layout.height, term.palette.foreground));
             'banner: for (row, line) in layout.lines.iter().enumerate() {
                 for (i, c) in line.chars().enumerate() {
                     let key = GlyphKey {
@@ -492,7 +492,7 @@ impl Renderer {
                             ],
                             size: [g.width * scale, g.height * scale],
                             uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
-                            color: self.color(colors::BACKGROUND, 1.0),
+                            color: self.color(term.palette.background, 1.0),
                         }),
                         Ok(None) => {}
                         Err(_) => {
@@ -513,7 +513,7 @@ impl Renderer {
         ok
     }
 
-    fn draw(&mut self, pre_present: Option<&mut dyn FnMut()>) -> bool {
+    fn draw(&mut self, background: Rgb, pre_present: Option<&mut dyn FnMut()>) -> bool {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -546,7 +546,7 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
-            let bg = self.color(colors::BACKGROUND, 1.0);
+            let bg = self.color(background, 1.0);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

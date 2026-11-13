@@ -41,6 +41,7 @@ driver, and an X11 or Wayland session).
 ```
 terminal [OPTIONS] [-e COMMAND [ARGS...]]
 
+  --config <PATH>     Override the TOML config file location
   --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)
   --font-size <SIZE>  Font size in points (default: 14)
   --scrollback <LINES> History lines (default: 10000; 0 disables; maximum: 1000000)
@@ -59,6 +60,75 @@ It starts your login shell (`$SHELL`) with `TERM=xterm-256color`.
 | Clear scrollback | Cmd+K | — |
 
 Hold Shift to select text while a program (vim, tmux, htop) is using the mouse.
+
+### Configuration
+
+The optional config file is `$XDG_CONFIG_HOME/terminal/config.toml`, or
+`~/.config/terminal/config.toml` when XDG_CONFIG_HOME is unset (on Linux and macOS).
+`--config <PATH>` overrides this location. A missing file uses defaults.
+`--font`, `--font-size`, `--scrollback`, and `-e` override the corresponding config
+values, including on reload.
+
+```toml
+# All entries are optional; omitted colors use Tokyo Night.
+# font = "/path/to/mono.ttf" # default: bundled JetBrains Mono
+font_size = 14.0            # 4..=200 points
+padding = 6.0               # 0..=1000 logical pixels
+scrollback = 10000          # retained lines; 0 disables history
+shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
+
+[env]                      # applied after TERM/COLORTERM; overrides inherited values
+EDITOR = "vim"
+
+[colors]                   # exactly "#rrggbb"
+foreground = "#c0caf5"
+background = "#1a1b26"
+cursor = "#c0caf5"
+selection = "#33467c"
+black = "#15161e"
+red = "#f7768e"
+green = "#9ece6a"
+yellow = "#e0af68"
+blue = "#7aa2f7"
+magenta = "#bb9af7"
+cyan = "#7dcfff"
+white = "#a9b1d6"
+bright_black = "#414868"
+bright_red = "#ff899d"
+bright_green = "#9fe044"
+bright_yellow = "#faba4a"
+bright_blue = "#8db0ff"
+bright_magenta = "#c7a9ff"
+bright_cyan = "#a4daff"
+bright_white = "#c0caf5"
+
+[keybindings]              # layered over the platform defaults listed above
+"ctrl+shift+c" = "copy"
+"super+k" = "clear_scrollback"
+"ctrl+shift+t" = { send = "\u001b[1;5T" }
+"ctrl+shift+v" = "none"     # remove a default shortcut; pass key to the shell
+```
+
+Actions: `copy`, `paste`, `paste_primary` (primary selection where supported),
+`increase_font_size`, `decrease_font_size`, `reset_font_size`, `clear_scrollback`,
+`scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `none`,
+or `{ send = "..." }`. Chords use `ctrl`, `shift`, `alt` (alias `option`), and
+`super` (alias `cmd`), plus a character or named key such as `pageup`, `home`,
+`insert`, `enter`, `escape`, `space`, arrows, or `f1` through `f35`.
+
+Changes are watched in the file's parent directory, including atomic editor saves,
+and applied after about 100 ms of quiet. If the config directory (or a symlink
+target's directory) doesn't exist yet, the nearest existing ancestor is watched
+instead, so creating it and the file later is picked up without a restart.
+Symlinked configs are followed through every hop, including retargeted links.
+Fonts, padding, colors, scrollback, and bindings apply live. An unrelated edit
+preserves interactive font-size adjustments. Shell and env changes take effect at
+the next launch, with a note on stderr.
+
+Unknown keys, invalid types/values, and malformed TOML are errors with the file,
+line, column, and entry printed to stderr and shown in a banner (alongside the
+output-paused notice when applicable). Startup errors use defaults; reload errors
+keep the last valid config. Fixing the config clears the banner.
 
 ### Viewing files
 

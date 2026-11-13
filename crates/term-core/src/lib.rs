@@ -118,6 +118,7 @@ pub struct Selection {
 }
 
 pub struct Terminal {
+    pub palette: colors::Palette,
     cols: usize,
     rows: usize,
     primary: Screen,
@@ -159,6 +160,7 @@ impl Terminal {
         let cols = cols.max(2);
         let rows = rows.max(1);
         Terminal {
+            palette: colors::Palette::default(),
             cols,
             rows,
             primary: Screen::new(cols, rows),
@@ -981,6 +983,7 @@ impl Terminal {
         fresh.max_scrollback = max_scrollback;
         fresh.shrunk = self.shrunk || !self.primary.scrollback.is_empty();
         fresh.cell_pixels = self.cell_pixels;
+        fresh.palette = self.palette.clone();
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
         *self = fresh;

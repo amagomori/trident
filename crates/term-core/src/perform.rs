@@ -204,8 +204,9 @@ impl Perform for Terminal {
             }
             [code @ (b"10" | b"11" | b"12"), b"?"] => {
                 let (r, g, b) = match *code {
-                    b"11" => crate::colors::BACKGROUND,
-                    _ => crate::colors::FOREGROUND,
+                    b"11" => self.palette.background,
+                    b"12" => self.palette.cursor,
+                    _ => self.palette.foreground,
                 };
                 let reply = format!(
                     "\x1b]{};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}",
