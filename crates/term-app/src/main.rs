@@ -2281,8 +2281,9 @@ impl ApplicationHandler<UserEvent> for App {
                     &event.logical_key,
                     &base,
                     event.text.as_deref(),
+                    event.physical_key,
                     self.modifiers,
-                    s.term.modes.app_cursor,
+                    &s.term.modes,
                     self.options.option_as_alt,
                 );
                 if let Some(bytes) = bytes {

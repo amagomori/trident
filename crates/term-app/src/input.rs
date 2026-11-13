@@ -1,6 +1,34 @@
 //! Encoding of keyboard and mouse input into the byte sequences terminal programs expect.
 
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use term_core::Modes;
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+
+fn keypad_letter(key: PhysicalKey) -> Option<char> {
+    Some(match key {
+        PhysicalKey::Code(code) => match code {
+            KeyCode::Numpad0 => 'p',
+            KeyCode::Numpad1 => 'q',
+            KeyCode::Numpad2 => 'r',
+            KeyCode::Numpad3 => 's',
+            KeyCode::Numpad4 => 't',
+            KeyCode::Numpad5 => 'u',
+            KeyCode::Numpad6 => 'v',
+            KeyCode::Numpad7 => 'w',
+            KeyCode::Numpad8 => 'x',
+            KeyCode::Numpad9 => 'y',
+            KeyCode::NumpadMultiply => 'j',
+            KeyCode::NumpadAdd => 'k',
+            KeyCode::NumpadComma => 'l',
+            KeyCode::NumpadSubtract => 'm',
+            KeyCode::NumpadDecimal => 'n',
+            KeyCode::NumpadDivide => 'o',
+            KeyCode::NumpadEnter => 'M',
+            KeyCode::NumpadEqual => 'X',
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
 
 /// xterm's modifier parameter: 1 + shift + 2*alt + 4*ctrl.
 fn modifier_param(mods: ModifiersState) -> u8 {
@@ -44,16 +72,28 @@ fn control_byte(c: char) -> Option<u8> {
 /// Encodes a key press.
 ///
 /// `key` is the logical key, `base` the same key ignoring modifiers (for Ctrl/Alt
-/// combinations) and `text` the text the key produced. Alt prefixes ESC when
+/// combinations) and `text` the text the key produced. `physical` identifies the
+/// keypad independently of Num Lock and the logical key. Alt prefixes ESC when
 /// `alt_sends_esc` is set (on macOS Option normally composes characters instead).
 pub fn encode_key(
     key: &Key,
     base: &Key,
     text: Option<&str>,
+    physical: PhysicalKey,
     mods: ModifiersState,
-    app_cursor: bool,
+    modes: &Modes,
     alt_sends_esc: bool,
 ) -> Option<Vec<u8>> {
+    if modes.app_keypad
+        && let Some(letter) = keypad_letter(physical)
+    {
+        let m = modifier_param(mods);
+        return Some(if m > 1 {
+            format!("\x1bO{m}{letter}").into_bytes()
+        } else {
+            vec![0x1b, b'O', letter as u8]
+        });
+    }
     let alt = mods.alt_key() && alt_sends_esc;
     let with_alt = |mut bytes: Vec<u8>| {
         if alt {
@@ -61,7 +101,7 @@ pub fn encode_key(
         }
         bytes
     };
-    let cursor = |letter| Some(csi_letter(letter, mods, app_cursor));
+    let cursor = |letter| Some(csi_letter(letter, mods, modes.app_cursor));
 
     if let Key::Named(named) = key {
         return match named {
@@ -185,11 +225,152 @@ mod tests {
     use super::*;
 
     fn key(k: Key, text: Option<&str>, mods: ModifiersState) -> Option<Vec<u8>> {
-        encode_key(&k, &k, text, mods, false, true)
+        encode_key(
+            &k,
+            &k,
+            text,
+            PhysicalKey::Code(KeyCode::KeyA),
+            mods,
+            &Modes::default(),
+            true,
+        )
     }
 
     fn ch(s: &str) -> Key {
         Key::Character(s.into())
+    }
+
+    #[test]
+    fn application_keypad_sequences() {
+        let mut term = term_core::Terminal::new(10, 2);
+        term.advance(b"\x1b=");
+        let cases = [
+            (KeyCode::Numpad0, ch("0"), "0", b'p'),
+            (KeyCode::Numpad1, ch("1"), "1", b'q'),
+            (KeyCode::Numpad2, ch("2"), "2", b'r'),
+            (KeyCode::Numpad3, ch("3"), "3", b's'),
+            (KeyCode::Numpad4, ch("4"), "4", b't'),
+            (KeyCode::Numpad5, ch("5"), "5", b'u'),
+            (KeyCode::Numpad6, ch("6"), "6", b'v'),
+            (KeyCode::Numpad7, ch("7"), "7", b'w'),
+            (KeyCode::Numpad8, ch("8"), "8", b'x'),
+            (KeyCode::Numpad9, ch("9"), "9", b'y'),
+            (KeyCode::NumpadMultiply, ch("*"), "*", b'j'),
+            (KeyCode::NumpadAdd, ch("+"), "+", b'k'),
+            (KeyCode::NumpadComma, ch(","), ",", b'l'),
+            (KeyCode::NumpadSubtract, ch("-"), "-", b'm'),
+            (KeyCode::NumpadDecimal, ch("."), ".", b'n'),
+            (KeyCode::NumpadDivide, ch("/"), "/", b'o'),
+            (
+                KeyCode::NumpadEnter,
+                Key::Named(NamedKey::Enter),
+                "\r",
+                b'M',
+            ),
+            (KeyCode::NumpadEqual, ch("="), "=", b'X'),
+        ];
+        for (physical, logical, text, suffix) in cases {
+            let encode = |modes: &Modes| {
+                encode_key(
+                    &logical,
+                    &logical,
+                    Some(text),
+                    PhysicalKey::Code(physical),
+                    ModifiersState::empty(),
+                    modes,
+                    true,
+                )
+            };
+            assert_eq!(
+                encode(&term.modes),
+                Some(vec![0x1b, b'O', suffix]),
+                "{physical:?}"
+            );
+            assert_eq!(
+                encode(&Modes::default()),
+                Some(text.as_bytes().to_vec()),
+                "{physical:?}"
+            );
+        }
+        term.advance(b"\x1b>");
+        assert_eq!(
+            encode_key(
+                &ch("1"),
+                &ch("1"),
+                Some("1"),
+                PhysicalKey::Code(KeyCode::Numpad1),
+                ModifiersState::empty(),
+                &term.modes,
+                true
+            ),
+            Some(b"1".to_vec())
+        );
+    }
+
+    #[test]
+    fn application_keypad_uses_physical_keys_and_modifiers() {
+        let modes = Modes {
+            app_keypad: true,
+            ..Modes::default()
+        };
+        for (physical, logical, expected) in [
+            (KeyCode::Numpad0, NamedKey::Insert, b"\x1bOp".as_slice()),
+            (KeyCode::Numpad2, NamedKey::ArrowDown, b"\x1bOr"),
+            (KeyCode::NumpadDecimal, NamedKey::Delete, b"\x1bOn"),
+            (KeyCode::ArrowDown, NamedKey::ArrowDown, b"\x1b[B"),
+            (KeyCode::Enter, NamedKey::Enter, b"\r"),
+        ] {
+            let key = Key::Named(logical);
+            assert_eq!(
+                encode_key(
+                    &key,
+                    &key,
+                    None,
+                    PhysicalKey::Code(physical),
+                    ModifiersState::empty(),
+                    &modes,
+                    true
+                ),
+                Some(expected.to_vec())
+            );
+        }
+        assert_eq!(
+            encode_key(
+                &ch("1"),
+                &ch("1"),
+                Some("1"),
+                PhysicalKey::Code(KeyCode::Digit1),
+                ModifiersState::empty(),
+                &modes,
+                true
+            ),
+            Some(b"1".to_vec())
+        );
+        for bits in 0..8 {
+            let mut mods = ModifiersState::empty();
+            mods.set(ModifiersState::SHIFT, bits & 1 != 0);
+            mods.set(ModifiersState::ALT, bits & 2 != 0);
+            mods.set(ModifiersState::CONTROL, bits & 4 != 0);
+            let expected = if bits == 0 {
+                "\x1bOq".into()
+            } else {
+                format!("\x1bO{}q", bits + 1)
+            };
+            for alt_sends_esc in [false, true] {
+                assert_eq!(
+                    encode_key(
+                        &ch("1"),
+                        &ch("1"),
+                        Some("1"),
+                        PhysicalKey::Code(KeyCode::Numpad1),
+                        mods,
+                        &modes,
+                        alt_sends_esc
+                    ),
+                    Some(expected.as_bytes().to_vec())
+                );
+            }
+        }
     }
 
     #[test]
@@ -208,7 +389,15 @@ mod tests {
         assert_eq!(key(ch("é"), Some("é"), none), Some("é".as_bytes().to_vec()));
         let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
         assert_eq!(
-            encode_key(&ch(">"), &ch("."), Some(">"), alt_shift, false, true),
+            encode_key(
+                &ch(">"),
+                &ch("."),
+                Some(">"),
+                PhysicalKey::Code(KeyCode::Period),
+                alt_shift,
+                &Modes::default(),
+                true
+            ),
             Some(b"\x1b>".to_vec())
         );
     }
@@ -234,8 +423,12 @@ mod tests {
                 &named(NamedKey::ArrowUp),
                 &named(NamedKey::ArrowUp),
                 None,
+                PhysicalKey::Code(KeyCode::ArrowUp),
                 none,
-                true,
+                &Modes {
+                    app_cursor: true,
+                    ..Modes::default()
+                },
                 true
             ),
             Some(b"\x1bOA".to_vec())
