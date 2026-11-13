@@ -300,10 +300,30 @@ fn wake_deadline(
     [frame, resize, probe].into_iter().flatten().min()
 }
 
+fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
+    let modifiers = u8::from(mods.control_key())
+        | (u8::from(mods.shift_key()) << 1)
+        | (u8::from(mods.alt_key()) << 2)
+        | (u8::from(mods.super_key()) << 3);
+    let key = match key {
+        Key::Character(c) if c == " " => "space".into(),
+        Key::Character(c) => c.to_lowercase(),
+        Key::Named(named) => match named {
+            winit::keyboard::NamedKey::ArrowUp => "up".into(),
+            winit::keyboard::NamedKey::ArrowDown => "down".into(),
+            winit::keyboard::NamedKey::ArrowLeft => "left".into(),
+            winit::keyboard::NamedKey::ArrowRight => "right".into(),
+            _ => format!("{named:?}").to_lowercase(),
+        },
+        _ => return None,
+    };
+    Some(config::Chord { modifiers, key })
+}
+
 struct App {
     config: config::Config,
     config_error: Option<String>,
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Option<config::ConfigWatcher>,
     options: Options,
     proxy: EventLoopProxy<UserEvent>,
     session: Option<Session>,
@@ -651,22 +671,9 @@ impl App {
     /// Handles terminal shortcuts; true if the key was consumed.
     fn shortcut(&mut self, event: &KeyEvent) -> bool {
         let mods = self.modifiers;
-        let modifiers = u8::from(mods.control_key())
-            | (u8::from(mods.shift_key()) << 1)
-            | (u8::from(mods.alt_key()) << 2)
-            | (u8::from(mods.super_key()) << 3);
-        let key = match event.key_without_modifiers() {
-            Key::Character(c) => {
-                if c == " " {
-                    "space".into()
-                } else {
-                    c.to_lowercase()
-                }
-            }
-            Key::Named(named) => format!("{named:?}").to_lowercase(),
-            _ => return false,
+        let Some(chord) = shortcut_chord(event.key_without_modifiers(), mods) else {
+            return false;
         };
-        let chord = config::Chord { modifiers, key };
         let Some(action) = self.config.bindings.get(&chord).cloned() else {
             return cfg!(target_os = "macos") && mods.super_key();
         };
@@ -1117,6 +1124,65 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn configured_arrows_dispatch_with_named_keys() {
+        use winit::keyboard::NamedKey;
+        for (name, key) in [
+            ("up", NamedKey::ArrowUp),
+            ("down", NamedKey::ArrowDown),
+            ("left", NamedKey::ArrowLeft),
+            ("right", NamedKey::ArrowRight),
+        ] {
+            let config = config::parse(
+                std::path::Path::new("test.toml"),
+                &format!("[keybindings]\n'ctrl+{name}' = 'scroll_to_top'"),
+            )
+            .unwrap();
+            let chord = shortcut_chord(Key::Named(key), ModifiersState::CONTROL).unwrap();
+            assert_eq!(config.bindings.get(&chord), Some(&Action::Top));
+            assert_eq!(
+                config::Chord::parse(&format!("ctrl+arrow{name}")).unwrap(),
+                chord
+            );
+            assert!(
+                !config.bindings.contains_key(
+                    &shortcut_chord(
+                        Key::Named(key),
+                        ModifiersState::CONTROL | ModifiersState::SHIFT
+                    )
+                    .unwrap()
+                )
+            );
+        }
+        assert!(
+            shortcut_chord(
+                Key::Unidentified(winit::keyboard::NativeKey::Unidentified),
+                ModifiersState::empty()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn mac_font_shortcuts_dispatch_with_exact_modifiers() {
+        let bindings = config::default_bindings_for(true);
+        for (key, action) in [
+            ("=", Action::Increase),
+            ("-", Action::Decrease),
+            ("0", Action::Reset),
+        ] {
+            for mods in [
+                ModifiersState::SUPER,
+                ModifiersState::SUPER | ModifiersState::SHIFT,
+            ] {
+                let chord = shortcut_chord(Key::Character(key.into()), mods).unwrap();
+                assert_eq!(bindings.get(&chord), Some(&action));
+                let extra =
+                    shortcut_chord(Key::Character(key.into()), mods | ModifiersState::ALT).unwrap();
+                assert!(!bindings.contains_key(&extra));
+            }
+        }
+    }
     #[test]
     fn cli_overrides_config() {
         let config = super::config::parse(

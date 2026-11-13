@@ -7,6 +7,10 @@ fn configured_palette_resolves_colors_and_osc_queries() {
     term.palette.foreground = (4, 5, 6);
     term.palette.cursor = (7, 8, 9);
     term.palette.ansi[1] = (10, 11, 12);
+    term.palette.selection = (13, 14, 15);
+    let palette = term.palette.clone();
+    term.advance(b"\x1bc");
+    assert_eq!(term.palette, palette);
     assert_eq!(term.palette.resolve(crate::Color::DefaultBg), (1, 2, 3));
     assert_eq!(term.palette.resolve(crate::Color::Indexed(1)), (10, 11, 12));
     assert_eq!(

@@ -983,6 +983,7 @@ impl Terminal {
         fresh.max_scrollback = max_scrollback;
         fresh.shrunk = self.shrunk || !self.primary.scrollback.is_empty();
         fresh.cell_pixels = self.cell_pixels;
+        fresh.palette = self.palette.clone();
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
         *self = fresh;
