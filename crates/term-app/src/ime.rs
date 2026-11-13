@@ -23,6 +23,10 @@ impl Composition {
         self.cursor = None;
     }
 
+    pub fn take(&mut self) -> Option<(String, Option<(usize, usize)>)> {
+        (!self.text.is_empty()).then(|| (std::mem::take(&mut self.text), self.cursor.take()))
+    }
+
     pub fn preedit(&self) -> Option<Preedit<'_>> {
         (!self.text.is_empty()).then_some(Preedit {
             text: &self.text,
@@ -52,6 +56,19 @@ mod tests {
             composition.update(&clear);
             assert!(composition.preedit().is_none());
         }
+    }
+
+    #[test]
+    fn take_hands_the_preedit_over_and_leaves_nothing_behind() {
+        let mut composition = Composition::default();
+        assert!(composition.take().is_none());
+        composition.update(&Ime::Preedit("にほん".into(), Some((3, 6))));
+        assert_eq!(
+            composition.take(),
+            Some(("にほん".to_owned(), Some((3, 6))))
+        );
+        assert!(composition.preedit().is_none());
+        assert!(composition.take().is_none());
     }
 
     #[test]

@@ -1272,7 +1272,12 @@ impl App {
         };
         match action {
             Action::Search => {
-                self.search.get_or_insert_with(search::Search::default);
+                let search = self.search.get_or_insert_with(search::Search::default);
+                if let Some((text, cursor)) =
+                    self.session.as_mut().and_then(|s| s.composition.take())
+                {
+                    search.set_preedit(text, cursor);
+                }
                 self.update_ime_cursor_area();
                 if let Some(s) = &self.session {
                     s.window.request_redraw();
@@ -1909,10 +1914,11 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed || self.shortcut(&event) {
                     return;
                 }
-                if self
-                    .session
-                    .as_ref()
-                    .is_some_and(|s| s.composition.preedit().is_some())
+                if self.search.is_none()
+                    && self
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.composition.preedit().is_some())
                 {
                     return;
                 }
