@@ -211,7 +211,7 @@ pub struct Terminal {
     parser: vte::Parser,
     /// Whether `parser` is known to be in its ground state between calls to `advance`.
     parser_ground: bool,
-    shell: ShellState,
+    shell: Box<ShellState>,
 }
 
 impl Terminal {
@@ -416,12 +416,12 @@ impl Terminal {
         let cols = cols.max(2);
         let rows = rows.max(1);
         Terminal {
-            shell: ShellState {
+            shell: Box::new(ShellState {
                 zone: Zone::None,
                 marks_seen: false,
                 command_finished: Vec::new(),
                 mark_line: None,
-            },
+            }),
             palette: colors::Palette::default(),
             cols,
             rows,
