@@ -346,7 +346,7 @@ struct App {
 }
 
 fn select_at(term: &mut Terminal, point: Point, modifiers: ModifiersState, clicks: u8) {
-    if modifiers.shift_key() && term.selection.is_some() {
+    if modifiers.shift_key() && clicks == 1 && term.selection.is_some() {
         // Keep the original anchor and selection shape, including rectangular selections.
         term.update_selection(point);
     } else {
@@ -821,7 +821,9 @@ impl App {
                 };
                 let Some(s) = &mut self.session else { return };
                 let point = s.term.viewport_to_point_signed(row, col);
-                let modified = self.modifiers.shift_key() || self.modifiers.alt_key();
+                // Shift is also the local-selection override in mouse-tracking apps,
+                // where double/triple clicks must still select words/lines.
+                let modified = self.modifiers.alt_key();
                 let clicks = match self.last_click.filter(|_| !modified) {
                     Some((at, p, n)) if p == point && at.elapsed() < Duration::from_millis(400) => {
                         n % 3 + 1
@@ -1430,7 +1432,7 @@ mod tests {
         ] {
             term.start_selection(anchor, kind);
             term.update_selection(term.viewport_to_point(2, 8));
-            select_at(&mut term, head, ModifiersState::SHIFT, 2);
+            select_at(&mut term, head, ModifiersState::SHIFT, 1);
             let selection = term.selection.unwrap();
             assert_eq!(selection.anchor, anchor);
             assert_eq!(selection.head, head);
@@ -1459,6 +1461,19 @@ mod tests {
             1,
         );
         assert_eq!(term.selection.unwrap().kind, SelectionKind::Block);
+    }
+
+    #[test]
+    fn shift_multiclick_keeps_word_and_line_selection_in_mouse_apps() {
+        let mut term = Terminal::new(20, 2);
+        term.advance(b"hello world\x1b[?1000h");
+        let point = term.viewport_to_point(0, 2);
+        select_at(&mut term, point, ModifiersState::SHIFT, 1);
+        assert_eq!(term.selection_text(), None);
+        select_at(&mut term, point, ModifiersState::SHIFT, 2);
+        assert_eq!(term.selection_text().as_deref(), Some("hello"));
+        select_at(&mut term, point, ModifiersState::SHIFT, 3);
+        assert_eq!(term.selection_text().as_deref(), Some("hello world"));
     }
 
     #[test]
