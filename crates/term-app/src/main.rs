@@ -20,7 +20,10 @@ use config::Action;
 use input::MouseButton as ReportButton;
 use pty::Pty;
 use std::collections::HashSet;
-use std::io::{Read, Write};
+use std::fs::{File, FileType};
+use std::io::Write;
+use std::os::fd::AsFd;
+use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -501,17 +504,21 @@ fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) 
     (repeat || held_at_focus) && matches!(action, Action::NewWindow)
 }
 
-fn forward_new_window_stderr(mut reader: impl Read, mut writer: impl Write) -> std::io::Result<()> {
-    let mut chunk = [0; 4096];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => return Ok(()),
-            Ok(len) => {
-                let _ = writer.write_all(&chunk[..len]);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
+fn inherit_new_window_stderr(kind: Option<FileType>) -> bool {
+    kind.is_some_and(|kind| kind.is_file() || kind.is_char_device())
+}
+
+fn new_window_stderr() -> Stdio {
+    let kind = std::io::stderr()
+        .as_fd()
+        .try_clone_to_owned()
+        .and_then(|fd| File::from(fd).metadata())
+        .map(|metadata| metadata.file_type())
+        .ok();
+    if inherit_new_window_stderr(kind) {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
     }
 }
 
@@ -1337,33 +1344,29 @@ impl App {
                                     .args(std::env::args_os().skip(1))
                                     .stdin(Stdio::null())
                                     .stdout(Stdio::null())
-                                    .stderr(Stdio::piped())
+                                    .stderr(new_window_stderr())
                                     .spawn()
                             });
                             match result {
-                                Ok(mut child) => {
-                                    if let Some(stderr) = child.stderr.take()
-                                        && let Err(error) =
-                                            forward_new_window_stderr(stderr, std::io::stderr())
-                                    {
-                                        eprintln!("new window: {error}");
+                                Ok(mut child) => match child.wait() {
+                                    Ok(status) if !status.success() => {
+                                        let _ = writeln!(
+                                            std::io::stderr(),
+                                            "terminal: new window exited with {status}"
+                                        );
                                     }
-                                    match child.wait() {
-                                        Ok(status) if !status.success() => {
-                                            let _ = writeln!(
-                                                std::io::stderr(),
-                                                "terminal: new window exited with {status}"
-                                            );
-                                        }
-                                        Err(error) => eprintln!("new window: {error}"),
-                                        Ok(_) => {}
+                                    Err(error) => {
+                                        let _ = writeln!(std::io::stderr(), "new window: {error}");
                                     }
+                                    Ok(_) => {}
+                                },
+                                Err(error) => {
+                                    let _ = writeln!(std::io::stderr(), "new window: {error}");
                                 }
-                                Err(error) => eprintln!("new window: {error}"),
                             }
                         })
                 {
-                    eprintln!("new window: {error}");
+                    let _ = writeln!(std::io::stderr(), "new window: {error}");
                 }
             }
             Action::None => return false,
@@ -2137,54 +2140,27 @@ mod tests {
     }
 
     #[test]
-    fn new_window_stderr_streams_without_retaining_output() {
-        for input in [
-            Vec::new(),
-            b"startup failed\n".to_vec(),
-            vec![b'x'; 100_000],
+    fn new_window_stderr_inherits_only_files_and_character_devices() {
+        use std::os::unix::net::UnixStream;
+        let file = File::open(std::env::current_exe().unwrap()).unwrap();
+        let null = File::open("/dev/null").unwrap();
+        let directory = File::open(".").unwrap();
+        let (_, pipe) = std::io::pipe().unwrap();
+        let (socket, _) = UnixStream::pair().unwrap();
+        for (fd, expected) in [
+            (file.as_fd(), true),
+            (null.as_fd(), true),
+            (directory.as_fd(), false),
+            (pipe.as_fd(), false),
+            (socket.as_fd(), false),
         ] {
-            let mut output = Vec::new();
-            forward_new_window_stderr(input.as_slice(), &mut output).unwrap();
-            assert_eq!(output, input);
+            let kind = File::from(fd.try_clone_to_owned().unwrap())
+                .metadata()
+                .unwrap()
+                .file_type();
+            assert_eq!(inherit_new_window_stderr(Some(kind)), expected);
         }
-    }
-
-    #[test]
-    fn new_window_stderr_drains_after_writer_closes() {
-        struct Closed;
-        impl Write for Closed {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::ErrorKind::BrokenPipe.into())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut input = std::io::Cursor::new(vec![b'x'; 100_000]);
-        forward_new_window_stderr(&mut input, Closed).unwrap();
-        assert_eq!(input.position(), 100_000);
-    }
-
-    #[test]
-    fn new_window_stderr_retries_interrupted_reads_and_reports_read_errors() {
-        struct Errors(bool);
-        impl Read for Errors {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                let kind = if self.0 {
-                    self.0 = false;
-                    std::io::ErrorKind::Interrupted
-                } else {
-                    std::io::ErrorKind::Other
-                };
-                Err(kind.into())
-            }
-        }
-        assert_eq!(
-            forward_new_window_stderr(Errors(true), Vec::new())
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::Other
-        );
+        assert!(!inherit_new_window_stderr(None));
     }
 
     #[test]
