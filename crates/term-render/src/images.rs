@@ -83,7 +83,7 @@ pub(crate) fn layout(
                 s.x as f32 / iw,
                 s.y as f32 / ih,
                 (s.x + s.width) as f32 / iw,
-                (s.y as f32 + s.height as f32 * clipped_h / h) / ih,
+                (s.y as f32 + s.height as f32 * (clipped_h / h)) / ih,
             ],
         });
     }
