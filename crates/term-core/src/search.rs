@@ -173,12 +173,38 @@ mod tests {
         t.advance(b"abcde");
         t.resize(6, 2);
         assert_eq!(
-            t.search("d  e", false).unwrap(),
+            t.search("de", false).unwrap(),
             vec![Match {
                 start: Point { line: 0, col: 3 },
                 end: Point { line: 1, col: 0 },
             }]
         );
+        assert!(t.search("d  e", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resized_soft_wraps_preserve_search_text() {
+        for (cols, text, query, history) in [
+            (10, "zzzzzFRESHWRAPTARGET", "FRESHWRAPTARGET", false),
+            (4, "abCDEFGHIJKLMN", "CDEFGHIJKLMN", false),
+            (4, "abCDEFGHIJKLMN\r\nnext\r\nlast", "CDEFGHIJKLMN", true),
+            (4, "ab  cd", "b  c", false),
+        ] {
+            let mut t = Terminal::new(cols, 3);
+            t.advance(text.as_bytes());
+            let expected = t.search(query, false).unwrap();
+            assert_eq!(expected.len(), 1);
+            if history {
+                assert!(expected[0].start.line < t.history);
+            }
+            for width in [cols + 4, cols, cols + 8, cols] {
+                t.resize(width, 3);
+                assert_eq!(t.search(query, false).unwrap(), expected);
+                assert_eq!(t.search(&regex::escape(query), true).unwrap(), expected);
+                assert!(t.search("absent", false).unwrap().is_empty());
+                assert!(t.search("[", true).is_err());
+            }
+        }
     }
 
     #[test]

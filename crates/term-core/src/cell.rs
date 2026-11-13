@@ -24,7 +24,7 @@ impl Flags {
     pub const WIDE_SPACER: Flags = Flags(1 << 8);
     /// Blank standing in for a wide character cut off at the right edge; any write replaces it.
     pub const PAD: Flags = Flags(1 << 9);
-    /// Unprinted column before a wide character that soft-wrapped.
+    /// Unprinted padding before a soft wrap, from a wide character or widening the row.
     pub const WIDE_WRAP: Flags = Flags(1 << 10);
 
     pub fn contains(self, other: Flags) -> bool {
@@ -145,10 +145,7 @@ impl Row {
             }
         } else {
             let mut blank = Cell::default();
-            if cells
-                .last()
-                .is_some_and(|c| c.flags.contains(Flags::WIDE_WRAP))
-            {
+            if self.wrapped {
                 blank.flags.insert(Flags::WIDE_WRAP);
             }
             cells.resize(cols, blank);
