@@ -198,6 +198,22 @@ mod tests {
     }
 
     #[test]
+    fn sgr_resets_preserve_osc_links() {
+        for reset in ["\x1b[m", "\x1b[0m"] {
+            let mut t = Terminal::new(8, 2);
+            t.advance(format!("\x1b]8;;https://example.com\x07a{reset}b\x1b]8;;\x07c").as_bytes());
+            for col in 0..2 {
+                let link = t.link_at(Point { line: 0, col }).unwrap();
+                assert_eq!(link.uri, "https://example.com");
+                assert_eq!(link.start, Point { line: 0, col: 0 });
+                assert_eq!(link.end, Point { line: 0, col: 1 });
+            }
+            assert!(t.link_at(Point { line: 0, col: 2 }).is_none());
+            assert_eq!(t.cursor.template.hyperlink, 0);
+        }
+    }
+
+    #[test]
     fn detection() {
         for (input, expected) in [
             (
