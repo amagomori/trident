@@ -212,6 +212,91 @@ fn leader_exited(pid: i32) -> bool {
         && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
+#[cfg(target_os = "linux")]
+fn stopped_stat(stat: &str, group: i32) -> bool {
+    let Some((_, fields)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    let mut fields = fields.split_whitespace();
+    let state = fields.next();
+    let pgrp = fields.nth(1).and_then(|value| value.parse::<i32>().ok());
+    matches!(state, Some("T" | "t")) && pgrp == Some(group)
+}
+
+#[cfg(target_os = "linux")]
+fn group_has_stopped(group: i32) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .as_encoded_bytes()
+            .iter()
+            .all(u8::is_ascii_digit)
+            && std::fs::read_to_string(entry.path().join("stat"))
+                .is_ok_and(|stat| stopped_stat(&stat, group))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn group_has_stopped(group: i32) -> bool {
+    const PROC_PGRP_ONLY: u32 = 2;
+    // SAFETY: a null buffer requests the size in bytes.
+    let bytes =
+        unsafe { libc::proc_listpids(PROC_PGRP_ONLY, group as u32, std::ptr::null_mut(), 0) };
+    if bytes <= 0 {
+        return bytes < 0;
+    }
+    let mut pids = vec![0i32; bytes as usize / size_of::<i32>() + 32];
+    loop {
+        let Ok(capacity) = i32::try_from(pids.len() * size_of::<i32>()) else {
+            return true;
+        };
+        // SAFETY: pids is writable for capacity bytes.
+        let used = unsafe {
+            libc::proc_listpids(
+                PROC_PGRP_ONLY,
+                group as u32,
+                pids.as_mut_ptr().cast(),
+                capacity,
+            )
+        };
+        if used < 0 {
+            return true;
+        }
+        if used == capacity {
+            pids.resize(pids.len() * 2, 0);
+            continue;
+        }
+        return pids[..used as usize / size_of::<i32>()].iter().any(|&pid| {
+            let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+            let size = size_of::<libc::proc_bsdshortinfo>() as i32;
+            // SAFETY: info is writable for size bytes; read only after a full result.
+            let read = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDT_SHORTBSDINFO,
+                    0,
+                    info.as_mut_ptr().cast(),
+                    size,
+                )
+            };
+            if read != size {
+                return !leader_exited(pid);
+            }
+            // SAFETY: proc_pidinfo initialized the complete structure.
+            let info = unsafe { info.assume_init() };
+            info.pbsi_pgid == group as u32 && info.pbsi_status == libc::SSTOP
+        });
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn group_has_stopped(_: i32) -> bool {
+    false
+}
+
 #[cfg(unix)]
 pub fn watch(
     fd: std::os::fd::OwnedFd,
@@ -242,7 +327,7 @@ pub fn watch(
                             None
                         }
                     },
-                    leader_exited,
+                    |pid| group as u32 == shell && leader_exited(pid) && !group_has_stopped(pid),
                 );
                 for event in events {
                     finished(event);
@@ -369,11 +454,148 @@ mod tests {
         // SAFETY: signal zero does not change the surviving descendant.
         assert_eq!(unsafe { libc::kill(-group.0, 0) }, 0);
         assert!(leader_exited(group.0));
-        let events = state.sample(None, now + Duration::from_secs(12), || None, leader_exited);
+        let events = state.sample(
+            None,
+            now + Duration::from_secs(12),
+            || None,
+            |pid| leader_exited(pid) && !group_has_stopped(pid),
+        );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name.as_deref(), Some("sh"));
         assert_eq!(events[0].duration, Duration::from_secs(12));
         assert!(state.sample(None, now, || None, leader_exited).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopped_pipeline_retains_start_after_leader_exit() {
+        let mut state = Foreground::default();
+        let start = Instant::now();
+        state.sample(Some(42), start, || Some("pipeline".into()), |_| false);
+        let leader_gone = true;
+        let stopped = true;
+        assert!(
+            state
+                .sample(
+                    None,
+                    start + Duration::from_secs(12),
+                    || None,
+                    |_| leader_gone && !stopped
+                )
+                .is_empty()
+        );
+        assert!(
+            state
+                .sample(
+                    Some(42),
+                    start + Duration::from_secs(20),
+                    || None,
+                    |_| panic!("do not check foreground group")
+                )
+                .is_empty()
+        );
+        let stopped = false;
+        let events = state.sample(
+            None,
+            start + Duration::from_secs(30),
+            || None,
+            |_| leader_gone && !stopped,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name.as_deref(), Some("pipeline"));
+        assert_eq!(events[0].duration, Duration::from_secs(30));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_stat_stopped_members() {
+        for state in ["T", "t"] {
+            assert!(stopped_stat(
+                &format!("10 (name with ) parens) {state} 1 42 0"),
+                42
+            ));
+        }
+        assert!(!stopped_stat("10 (sleep) S 1 42 0", 42));
+        assert!(!stopped_stat("10 (sleep) T 1 43 0", 42));
+        assert!(!stopped_stat("", 42));
+        assert!(!stopped_stat("10 (sleep) T", 42));
+        assert!(!stopped_stat("10 (sleep) T 1 invalid", 42));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopped_member_survives_leader_and_defers_completion() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        struct Group(i32);
+        impl Drop for Group {
+            fn drop(&mut self) {
+                // SAFETY: this test created the isolated group.
+                unsafe { libc::kill(-self.0, libc::SIGKILL) };
+            }
+        }
+        let mut leader = Command::new("sh")
+            .args(["-c", "sleep 30 & kill -STOP $!; echo $!; exit"])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let group = Group(leader.id() as i32);
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let member: i32 = line.trim().parse().unwrap();
+        assert!(leader.wait().unwrap().success());
+        assert!(leader_exited(group.0));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !group_has_stopped(group.0) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(group_has_stopped(group.0));
+        let mut state = Foreground::default();
+        let now = Instant::now();
+        state.sample(Some(group.0), now, || None, |_| false);
+        assert!(
+            state
+                .sample(
+                    None,
+                    now + Duration::from_secs(12),
+                    || None,
+                    |pid| leader_exited(pid) && !group_has_stopped(pid)
+                )
+                .is_empty()
+        );
+        // SAFETY: member is the stopped child created by this test.
+        assert_eq!(unsafe { libc::kill(member, libc::SIGCONT) }, 0);
+        assert_eq!(unsafe { libc::kill(member, libc::SIGTERM) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut member_exited = false;
+        while Instant::now() < deadline {
+            let exited =
+                std::fs::read_to_string(format!("/proc/{member}/stat")).map_or(true, |stat| {
+                    stat.rsplit_once(')')
+                        .is_some_and(|(_, fields)| fields.trim_start().starts_with('Z'))
+                });
+            if exited {
+                member_exited = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(member_exited);
+        assert!(!group_has_stopped(group.0));
+        let events = state.sample(
+            None,
+            now + Duration::from_secs(15),
+            || None,
+            |pid| leader_exited(pid) && !group_has_stopped(pid),
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].duration, Duration::from_secs(15));
     }
 
     #[cfg(unix)]
