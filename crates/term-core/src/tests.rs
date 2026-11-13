@@ -372,6 +372,147 @@ fn device_status_reports() {
 }
 
 #[test]
+fn synchronized_output() {
+    let mut t = term(10, 5, "\x1b[?2026$p");
+    assert!(!t.modes.synchronized_output);
+    assert_eq!(t.take_responses(), b"\x1b[?2026;2$y");
+    t.advance(b"\x1b[?2026h\x1b[?2026$p");
+    assert!(t.modes.synchronized_output);
+    assert_eq!(t.take_responses(), b"\x1b[?2026;1$y");
+    t.advance(b"\x1b[?2026l\x1b[?2026$p\x1b[?9999$p");
+    assert!(!t.modes.synchronized_output);
+    assert_eq!(t.take_responses(), b"\x1b[?2026;2$y\x1b[?9999;0$y");
+    t.advance(b"\x1b[?2026h\x1bc");
+    assert!(!t.modes.synchronized_output);
+}
+
+#[test]
+fn private_mode_reports() {
+    for mode in [
+        1, 6, 7, 25, 47, 1047, 1049, 1000, 1002, 1003, 1004, 1006, 1007, 2004,
+    ] {
+        let mut t = term(10, 5, "");
+        for (action, status) in [('h', 1), ('l', 2)] {
+            t.advance(format!("\x1b[?{mode}{action}\x1b[?{mode}$p").as_bytes());
+            assert_eq!(
+                t.take_responses(),
+                format!("\x1b[?{mode};{status}$y").as_bytes()
+            );
+        }
+    }
+    let mut t = term(10, 5, "\x1b[?1000h\x1b[?1002$p\x1b[?1003$p");
+    assert_eq!(t.take_responses(), b"\x1b[?1002;2$y\x1b[?1003;2$y");
+}
+
+#[test]
+fn synchronized_frame_starts_within_batch() {
+    let mut t = term(10, 5, "");
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026h");
+    assert!(t.take_synchronized_output_started());
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026h");
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026l\x1b[?2026h");
+    assert!(t.modes.synchronized_output);
+    assert!(t.take_synchronized_output_started());
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026l");
+    assert!(!t.take_synchronized_output_started());
+    t.advance(b"\x1b[?2026h\x1bc");
+    assert!(!t.take_synchronized_output_started());
+}
+
+#[test]
+fn synchronized_frame_end_stops_before_next_frame() {
+    let mut t = term(10, 2, "\x1b[?2026hOLD");
+    let batch = b"\x1b[?2026l\x1b[?2026h\rNEW";
+    let consumed = t.advance_until_sync_end(batch);
+    assert_eq!(consumed, b"\x1b[?2026l".len());
+    assert!(!t.modes.synchronized_output);
+    assert_eq!(t.viewport_row(0).text(), "OLD");
+    assert_eq!(
+        t.advance_until_sync_end(&batch[consumed..]),
+        batch.len() - consumed
+    );
+    assert!(t.modes.synchronized_output);
+    assert_eq!(t.viewport_row(0).text(), "NEW");
+    t.advance(b"\x1b[?2026");
+    assert_eq!(t.advance_until_sync_end(b"lignored"), 1);
+    assert_eq!(t.advance_until_sync_end(b""), 0);
+    assert_eq!(t.advance_until_sync_end(b"\x1b[?2026lplain"), 13);
+}
+
+#[test]
+fn synchronized_reset_after_split_unrelated_escape() {
+    let mut t = term(10, 2, "\x1b[?2026hOLD\x1b[3");
+    let batch = b"1mX\x1b[?2026l\x1b[?2026h\rNEW";
+    assert_eq!(t.advance_until_sync_end(batch), b"1mX\x1b[?2026l".len());
+    assert_eq!(t.viewport_row(0).text(), "OLDX");
+    assert!(!t.modes.synchronized_output);
+}
+
+#[test]
+fn synchronized_reset_split_across_multiple_reads() {
+    let mut t = term(10, 2, "\x1b[?2026hOLD");
+    for byte in b"\x1b[?2026" {
+        assert_eq!(t.advance_until_sync_end(&[*byte]), 1);
+        assert!(t.modes.synchronized_output);
+    }
+    assert_eq!(t.advance_until_sync_end(b"l\x1b[?2026h\rNEW"), 1);
+    assert!(!t.modes.synchronized_output);
+    assert_eq!(t.viewport_row(0).text(), "OLD");
+}
+
+#[test]
+fn synchronized_split_reset_allows_embedded_controls() {
+    for control in [0x00, 0x07, 0x08, 0x0d, 0x19, 0x1f, 0x7f] {
+        for split in 1..b"\x1b[?2026l".len() {
+            let mut t = term(10, 2, "\x1b[?2026hOLD");
+            t.advance(&b"\x1b[?2026l"[..split]);
+            // Padding itself may arrive in a separate read.
+            assert_eq!(t.advance_until_sync_end(&[control]), 1);
+            let mut batch = vec![control];
+            batch.extend_from_slice(&b"\x1b[?2026l"[split..]);
+            let end = batch.len();
+            batch.extend_from_slice(b"\x1b[?2026h\rNEW\x1b[?2026l");
+            assert_eq!(t.advance_until_sync_end(&batch), end);
+            assert!(!t.modes.synchronized_output);
+            assert_eq!(t.viewport_row(0).text(), "OLD");
+        }
+    }
+}
+
+#[test]
+fn synchronized_advance_preserves_plain_flood_batching() {
+    let mut t = term(10, 2, "");
+    let batch = b"line\r\n".repeat(DEFAULT_SCROLLBACK + 100);
+    assert!(t.ghost_split(&batch).is_some());
+    let before = crate::ghost::ADVANCES.get();
+    assert_eq!(t.advance_until_sync_end(&batch), batch.len());
+    assert_eq!(crate::ghost::ADVANCES.get() - before, 1);
+    assert_eq!(t.viewport_row(0).text(), "line");
+}
+
+#[test]
+fn synchronized_end_uses_parser_boundaries() {
+    let mut t = term(10, 2, "\x1b[?2026h");
+    let title = b"\x1b]2;literal ?2026l\x07";
+    assert_eq!(t.advance_until_sync_end(title), title.len());
+    assert!(t.modes.synchronized_output);
+    let reset = b"\x1b[?2026;2004lplain";
+    assert_eq!(t.advance_until_sync_end(reset), reset.len());
+    assert!(!t.modes.synchronized_output);
+    for split in 1..b"\x1b[?2026l".len() {
+        let mut t = term(10, 2, "\x1b[?2026h");
+        let bytes = b"\x1b[?2026l\x1b[?2026h";
+        assert_eq!(t.advance_until_sync_end(&bytes[..split]), split);
+        assert_eq!(t.advance_until_sync_end(&bytes[split..]), 8 - split);
+        assert!(!t.modes.synchronized_output);
+    }
+}
+
+#[test]
 fn title_and_modes() {
     let mut t = term(
         10,
@@ -560,6 +701,32 @@ fn reset_clears_everything() {
 fn backspace_after_last_column_moves_left() {
     let t = term(5, 2, "abcde\x08X");
     assert_eq!(screen(&t), ["abcXe", ""]);
+}
+
+#[test]
+fn printing_in_insert_mode_preserves_width_colors_and_wrap() {
+    let t = term(6, 2, "abcde\x1b[1;2H\x1b[4h\x1b[31;44mX");
+    assert_eq!(screen(&t), ["aXbcde", ""]);
+    let row = t.viewport_row(0);
+    assert_eq!(row.cells.len(), 6);
+    assert_eq!(row.cells[1].fg, Color::Indexed(1));
+    assert_eq!(row.cells[1].bg, Color::Indexed(4));
+    assert_eq!(row.cells[2].fg, Color::DefaultFg);
+
+    let t = term(6, 2, "ab你cd\x1b[1;2H\x1b[4h好");
+    assert_eq!(screen(&t), ["a好b你", ""]);
+    let row = t.viewport_row(0);
+    assert_eq!(row.cells.len(), 6);
+    for col in [1, 4] {
+        assert!(row.cells[col].flags.contains(Flags::WIDE));
+        assert!(row.cells[col + 1].flags.contains(Flags::WIDE_SPACER));
+    }
+
+    let t = term(6, 2, "abcde\x1b[4hZQ");
+    assert_eq!(screen(&t), ["abcdeZ", "Q"]);
+    assert_eq!(t.cursor_position(), Some((1, 1)));
+    assert!(t.viewport_row(0).wrapped);
+    assert_eq!(t.viewport_row(1).cells.len(), 6);
 }
 
 #[test]

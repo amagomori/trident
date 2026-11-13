@@ -16,6 +16,7 @@ pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacem
 use std::collections::VecDeque;
 
 const DEFAULT_SCROLLBACK: usize = 10_000;
+const SYNC_RESET: &[u8] = b"\x1b[?2026l";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
@@ -94,6 +95,7 @@ pub struct Modes {
     pub sgr_mouse: bool,
     pub focus_events: bool,
     pub alt_scroll: bool,
+    pub synchronized_output: bool,
 }
 
 /// A point in the terminal's history: `line` counts every line ever scrolled into
@@ -177,6 +179,8 @@ pub struct Terminal {
     title_changed: bool,
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
+    synchronized_output_started: bool,
+    synchronized_output_ended: bool,
     pub bell: bool,
     images: images::ImageStore,
     /// Cell size in pixels, as reported by the app.
@@ -225,6 +229,8 @@ impl Terminal {
             title: None,
             title_changed: false,
             responses: Vec::new(),
+            synchronized_output_started: false,
+            synchronized_output_ended: false,
             bell: false,
             images: images::ImageStore::new(),
             cell_pixels: (8.0, 16.0),
@@ -260,12 +266,60 @@ impl Terminal {
         self.cols
     }
 
+    /// Advance through the first synchronized-frame end, leaving the next frame unread.
+    pub fn advance_until_sync_end(&mut self, bytes: &[u8]) -> usize {
+        self.synchronized_output_ended = false;
+        let mut consumed = 0;
+        if !self.parser_ground {
+            // A prior read may have stopped inside a reset, including one with
+            // embedded controls or multiple parameters. Check each possible final
+            // `l` before the next escape; only vte decides whether it ends a frame.
+            // Ordinary `advance` needs no sync-specific prefix bookkeeping.
+            let continuation = memchr::memchr(0x1b, bytes).unwrap_or(bytes.len());
+            for final_byte in memchr::memchr_iter(b'l', &bytes[..continuation]) {
+                let end = final_byte + 1;
+                self.advance(&bytes[consumed..end]);
+                consumed = end;
+                if self.synchronized_output_ended {
+                    return consumed;
+                }
+                if consumed == bytes.len() {
+                    return consumed;
+                }
+            }
+        }
+        // Combined-parameter resets use ordinary whole-batch parsing.
+        for start in memchr::memmem::find_iter(bytes, SYNC_RESET) {
+            let end = start + SYNC_RESET.len();
+            if end <= consumed {
+                continue;
+            }
+            self.advance(&bytes[consumed..end]);
+            consumed = end;
+            if self.synchronized_output_ended {
+                return consumed;
+            }
+        }
+        self.advance(&bytes[consumed..]);
+        bytes.len()
+    }
+
     pub fn rows(&self) -> usize {
         self.rows
     }
 
     pub fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.responses)
+    }
+
+    /// Whether a synchronized frame began since the last call.
+    pub fn take_synchronized_output_started(&mut self) -> bool {
+        std::mem::take(&mut self.synchronized_output_started)
+    }
+
+    /// Whether the last synchronized advance ended a frame.
+    pub fn synchronized_output_ended(&self) -> bool {
+        self.synchronized_output_ended
     }
 
     /// Whether scrollback was erased or the grid or history limit shrank since the last
@@ -748,11 +802,7 @@ impl Terminal {
         let insert = self.modes.insert;
         let line = &mut self.lines_mut()[row];
         if insert {
-            line.materialize_wrap_padding(col);
-            for _ in 0..width {
-                line.cells.insert(col, Cell::blank(&template));
-            }
-            line.cells.truncate(cols);
+            insert_printed_cells(line, col, cols, width, &template);
         }
         clear_wide_pair(&mut line.cells, col);
         if width == 2 {
@@ -1113,6 +1163,18 @@ impl Terminal {
 
 fn default_tabs(cols: usize) -> Vec<bool> {
     (0..cols).map(|c| c % 8 == 0 && c != 0).collect()
+}
+
+// Keep the allocating/shifting insert-mode path out of ordinary printing. Inlining
+// it here spills the hot character writer's state even when insert mode is off.
+#[cold]
+#[inline(never)]
+fn insert_printed_cells(line: &mut Row, col: usize, cols: usize, width: usize, template: &Cell) {
+    line.materialize_wrap_padding(col);
+    for _ in 0..width {
+        line.cells.insert(col, Cell::blank(template));
+    }
+    line.cells.truncate(cols);
 }
 
 /// Overwriting one half of a wide character must blank the other half.

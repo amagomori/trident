@@ -7,6 +7,8 @@ mod flow_control;
 mod frame_clock;
 mod input;
 mod latency;
+#[cfg(target_os = "macos")]
+mod present_macos;
 #[cfg(target_os = "linux")]
 mod present_wayland;
 mod pty;
@@ -66,6 +68,8 @@ const DEFER_AFTER: usize = 64 * 1024;
 /// How long held-back output waits, unless the queue fills first: about one 60 Hz frame.
 const MAX_DEFER: Duration = Duration::from_millis(16);
 const RESIZE_INTERVAL: Duration = Duration::from_millis(100);
+const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
+const EXIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 struct ResizeThrottle {
@@ -234,16 +238,170 @@ struct Session {
     presentation: Option<present_wayland::Feedback>,
     latency: Option<latency::Latency>,
     resize: ResizeThrottle,
+    synchronized_since: Option<Instant>,
+    redraw_pending: bool,
+    output: PendingOutput,
 }
 
-fn advance_output(term: &mut Terminal, output: pty::Output) {
-    let mut start = 0;
-    for offset in output.shell_returns {
-        term.advance(&output.bytes[start..offset]);
-        term.reset_input_modes();
-        start = offset;
+#[derive(Default)]
+struct PendingOutput {
+    bytes: Vec<u8>,
+    shell_returns: Vec<usize>,
+    waiting_since: Option<Instant>,
+}
+
+impl PendingOutput {
+    fn drain_on_exit(&mut self, term: &mut Terminal, queued: pty::Output) -> usize {
+        let leftover = pty::Output {
+            bytes: std::mem::take(&mut self.bytes),
+            shell_returns: std::mem::take(&mut self.shell_returns),
+        };
+        let mut processed = 0;
+        for batch in [leftover, queued] {
+            let mut start = 0;
+            for offset in batch.shell_returns {
+                while start < offset {
+                    start += term.advance_until_sync_end(&batch.bytes[start..offset]);
+                }
+                term.reset_input_modes();
+            }
+            while start < batch.bytes.len() {
+                start += term.advance_until_sync_end(&batch.bytes[start..]);
+            }
+            processed += start;
+        }
+        term.modes.synchronized_output = false;
+        self.waiting_since = Some(Instant::now());
+        processed
     }
-    term.advance(&output.bytes[start..]);
+
+    fn can_advance(&self, paused: bool) -> bool {
+        !paused && self.waiting_since.is_none()
+    }
+
+    fn pace_frame(&self, synchronized: bool) -> bool {
+        synchronized || self.waiting_since.is_some()
+    }
+
+    fn advance(
+        &mut self,
+        term: &mut Terminal,
+        paused: bool,
+        take_pty: impl FnOnce() -> pty::Output,
+    ) -> Option<(usize, bool)> {
+        if !self.can_advance(paused) {
+            return None;
+        }
+        let from_leftover = !self.is_empty();
+        let mut batch = self.next_batch(take_pty);
+        let processed = advance_output(term, &mut batch);
+        self.retain(
+            batch,
+            processed,
+            term.synchronized_output_ended(),
+            Instant::now(),
+        );
+        Some((processed, from_leftover))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty() && self.shell_returns.is_empty()
+    }
+
+    fn next_batch(&mut self, take_pty: impl FnOnce() -> pty::Output) -> pty::Output {
+        if self.is_empty() {
+            take_pty()
+        } else {
+            pty::Output {
+                bytes: std::mem::take(&mut self.bytes),
+                shell_returns: std::mem::take(&mut self.shell_returns),
+            }
+        }
+    }
+
+    fn retain(&mut self, mut batch: pty::Output, consumed: usize, frame_ended: bool, now: Instant) {
+        self.bytes = batch.bytes.split_off(consumed);
+        self.shell_returns = batch
+            .shell_returns
+            .into_iter()
+            .map(|offset| offset - consumed)
+            .collect();
+        self.waiting_since = (frame_ended || !self.is_empty()).then_some(now);
+    }
+
+    fn coalesce(&mut self, queued: pty::Output) -> bool {
+        let offset = self.bytes.len();
+        self.bytes.extend(queued.bytes);
+        self.shell_returns
+            .extend(queued.shell_returns.into_iter().map(|at| offset + at));
+        if memchr::memmem::rfind(&self.bytes, SYNC_RESET).is_none() {
+            return false;
+        }
+        self.waiting_since = None;
+        true
+    }
+
+    fn presented(&mut self) -> bool {
+        self.waiting_since = None;
+        !self.is_empty()
+    }
+
+    fn finish_presentation(&mut self, rendered: bool, now: Instant) -> bool {
+        let waiting = self.waiting_since.is_some();
+        if rendered {
+            self.presented();
+        } else if self.waiting_since.is_some() {
+            self.waiting_since = Some(now);
+        }
+        rendered && waiting
+    }
+}
+
+const SYNC_RESET: &[u8] = b"\x1b[?2026l";
+
+/// Applies output up to the last synchronized frame already complete in `output`, so a
+/// backlog of finished frames is drawn once instead of one presentation per frame.
+fn advance_output(term: &mut Terminal, output: &mut pty::Output) -> usize {
+    let last_reset = memchr::memmem::rfind(&output.bytes, SYNC_RESET)
+        .map_or(0, |start| start + SYNC_RESET.len());
+    let mut start = 0;
+    let mut applied = 0;
+    let mut ended = false;
+    for &offset in &output.shell_returns {
+        start += advance_frames(
+            term,
+            &output.bytes[start..offset],
+            last_reset.saturating_sub(start),
+        );
+        if start == offset {
+            term.reset_input_modes();
+            applied += 1;
+        }
+        ended = term.synchronized_output_ended() && start >= last_reset;
+        if ended {
+            break;
+        }
+    }
+    output.shell_returns.drain(..applied);
+    if !ended {
+        start += advance_frames(
+            term,
+            &output.bytes[start..],
+            last_reset.saturating_sub(start),
+        );
+    }
+    start
+}
+
+/// Advances frame by frame until the frame end at or past `last_reset`.
+fn advance_frames(term: &mut Terminal, bytes: &[u8], last_reset: usize) -> usize {
+    let mut consumed = 0;
+    loop {
+        consumed += term.advance_until_sync_end(&bytes[consumed..]);
+        if !term.synchronized_output_ended() || consumed >= last_reset || consumed == bytes.len() {
+            return consumed;
+        }
+    }
 }
 
 fn update_terminal(
@@ -330,6 +488,162 @@ fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
     Some(config::Chord { modifiers, key })
 }
 
+fn sync_expired(since: Option<Instant>, now: Instant) -> bool {
+    since.is_some_and(|since| now.duration_since(since) >= SYNC_TIMEOUT)
+}
+
+fn exit_ready(deadline: Option<Instant>, presented: bool, now: Instant) -> bool {
+    deadline.is_some_and(|deadline| presented || now >= deadline)
+}
+
+fn exit_wakeup(deadline: Option<Instant>, exit: Option<Instant>) -> Option<Instant> {
+    [deadline, exit].into_iter().flatten().min()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+#[derive(Default)]
+struct ExitPresentation {
+    target: Option<usize>,
+    first_target: Option<usize>,
+    ready_at: Option<Instant>,
+    submitted_at: Option<Instant>,
+    submissions: usize,
+    /// A second final drawable has been requested after an untimed Metal callback or proactively.
+    #[cfg(any(target_os = "macos", test))]
+    untimed_retried: bool,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+impl ExitPresentation {
+    fn needs_submission(&self) -> bool {
+        self.target.is_none()
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn needs_wayland_submission(&self) -> bool {
+        self.needs_submission() || self.submissions == 1
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn needs_metal_submission(&self, presented: usize) -> bool {
+        self.needs_submission() || (presented == 0 && self.submissions == 1)
+    }
+
+    fn submitted(&mut self, target: usize, now: Instant) {
+        self.target = Some(target);
+        self.first_target.get_or_insert(target);
+        self.submitted_at = Some(now);
+        self.submissions += 1;
+        #[cfg(any(target_os = "macos", test))]
+        if self.submissions > 1 {
+            self.untimed_retried = true;
+        }
+    }
+
+    fn retry(&mut self) {
+        self.target = None;
+        self.submitted_at = None;
+        self.ready_at = None;
+    }
+
+    fn missing_feedback(&mut self, now: Instant, refresh: u32) -> bool {
+        let Some(submitted) = self.submitted_at else {
+            return false;
+        };
+        let period = Duration::from_secs_f64(
+            1000.0 / f64::from(if refresh == 0 { 60_000 } else { refresh }),
+        );
+        if self.ready_at.is_some() || now < submitted + period {
+            return false;
+        }
+        // Feedback can be absent even for visible frames. Retry once, then allow one
+        // refresh for the retry instead of waiting for a callback that may never arrive.
+        if self.submissions == 1 {
+            #[cfg(any(target_os = "macos", test))]
+            {
+                self.untimed_retried = true;
+            }
+            self.retry();
+            return true;
+        }
+        self.finish(now);
+        false
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn update_metal(
+        &mut self,
+        presented: usize,
+        skipped: [usize; 2],
+        now: Instant,
+        refresh: u32,
+    ) -> bool {
+        // Without any nonzero presentedTime, a zero cannot tell a shown drawable from a
+        // discarded one: submit the final frame twice, not just one skipped drawable.
+        if presented == 0 && self.target.is_some_and(|target| skipped[1] >= target) {
+            if !self.untimed_retried {
+                self.untimed_retried = true;
+                self.retry();
+                return true;
+            }
+            if self
+                .target
+                .is_some_and(|target| skipped[0] >= target.saturating_sub(1))
+            {
+                self.finish(now);
+                return false;
+            }
+            return self.missing_feedback(now, refresh);
+        }
+        self.update(presented, skipped[1], now, refresh)
+    }
+
+    fn finish(&mut self, now: Instant) {
+        self.ready_at.get_or_insert(now);
+    }
+
+    fn update(&mut self, presented: usize, skipped: usize, now: Instant, refresh: u32) -> bool {
+        if self
+            .first_target
+            .or(self.target)
+            .is_some_and(|target| presented >= target)
+        {
+            self.finish(now);
+            return false;
+        }
+        if let Some(target) = self.target
+            && skipped >= target
+        {
+            self.retry();
+            return true;
+        }
+        self.missing_feedback(now, refresh)
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.ready_at.is_some_and(|until| now >= until)
+    }
+
+    fn wakeup(&self, now: Instant) -> Instant {
+        self.ready_at.unwrap_or(now + Duration::from_millis(4))
+    }
+}
+
+fn sync_wakeup(
+    deadline: Option<Instant>,
+    waiting_since: Option<Instant>,
+    synchronized_since: Option<Instant>,
+) -> Option<Instant> {
+    [
+        deadline,
+        waiting_since.map(|since| since + MAX_DEFER),
+        synchronized_since.map(|since| since + SYNC_TIMEOUT),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+}
+
 struct App {
     search: Option<search::Search>,
     config: config::Config,
@@ -349,6 +663,9 @@ struct App {
     scroll_accum: f64,
     clipboard: clipboard::Clipboard,
     error: Option<String>,
+    exit_deadline: Option<Instant>,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    exit_presentation: ExitPresentation,
 }
 
 fn select_at(term: &mut Terminal, point: Point, modifiers: ModifiersState, clicks: u8) {
@@ -403,6 +720,9 @@ impl App {
             scroll_accum: 0.0,
             clipboard: clipboard::Clipboard::default(),
             error: None,
+            exit_deadline: None,
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            exit_presentation: ExitPresentation::default(),
         }
     }
 
@@ -500,8 +820,19 @@ impl App {
         );
         if let Some(log) = &mut latency {
             log.feedback(window.clone());
-            #[cfg(target_os = "macos")]
-            log.metal_feedback(renderer.gpu_device());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let (start, lines) = latency
+                .as_ref()
+                .map(|log| {
+                    let (start, lines) = log.metal_log();
+                    (start, Some(lines))
+                })
+                .unwrap_or_else(|| (Instant::now(), None));
+            if let Err(error) = present_macos::install(renderer.gpu_device(), start, lines) {
+                eprintln!("terminal: presentation feedback unavailable: {error}");
+            }
         }
         #[cfg(target_os = "linux")]
         let presentation = {
@@ -546,6 +877,9 @@ impl App {
             sequence: 0,
             #[cfg(target_os = "linux")]
             presentation,
+            synchronized_since: None,
+            redraw_pending: false,
+            output: PendingOutput::default(),
         })
     }
 
@@ -583,6 +917,13 @@ impl App {
 
     fn output_ready(&mut self) {
         let Some(s) = &mut self.session else { return };
+        s.pty.refresh_flow();
+        if s.pty.flow.paused {
+            s.deferred = None;
+        }
+        if !s.output.can_advance(s.pty.flow.paused) {
+            return;
+        }
         if defer_output(s.deferred.is_some(), s.since_frame, s.pty.output_full()) {
             s.deferred.get_or_insert_with(Instant::now);
         } else {
@@ -595,16 +936,39 @@ impl App {
             search.dirty = true;
         }
         let Some(s) = &mut self.session else { return };
-        s.pty.wake_pending.store(false, Ordering::Release);
+        s.pty.refresh_flow();
+        if s.pty.flow.paused {
+            s.deferred = None;
+        }
+        if !s.output.can_advance(s.pty.flow.paused) {
+            return;
+        }
         s.deferred = None;
-        let batch = s.pty.take_output();
-        let processed = batch.bytes.len();
-        s.since_frame += processed;
+        let was_synchronized = s.term.modes.synchronized_output;
+        let mut advanced = None;
         update_terminal(&mut s.term, &mut s.scroll, |term| {
-            advance_output(term, batch)
+            advanced = s.output.advance(term, s.pty.flow.paused, || {
+                s.pty.wake_pending.store(false, Ordering::Release);
+                s.pty.take_output()
+            });
         });
+        let Some((processed, from_leftover)) = advanced else {
+            return;
+        };
+        s.since_frame += processed;
+        let synchronized_started = s.term.take_synchronized_output_started();
         if s.term.modes.mouse == MouseMode::Off {
             self.reported_button = None;
+        }
+        if s.term.modes.synchronized_output {
+            if synchronized_started {
+                s.synchronized_since = Some(Instant::now());
+            }
+        } else {
+            s.synchronized_since = None;
+            if was_synchronized || s.redraw_pending {
+                s.request_frame();
+            }
         }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
@@ -620,7 +984,147 @@ impl App {
             if let Some(log) = &mut s.latency {
                 log.output(processed);
             }
-            s.request_frame();
+            if s.output.pace_frame(s.term.modes.synchronized_output) {
+                s.request_frame();
+            } else {
+                s.window.request_redraw();
+            }
+        }
+        if from_leftover && s.output.is_empty() && s.output.waiting_since.is_none() {
+            self.process_output();
+        }
+    }
+
+    fn present_frame(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.exit_deadline.is_some() && !self.exit_presentation.needs_wayland_submission() {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if self.exit_deadline.is_some()
+            && !self
+                .exit_presentation
+                .needs_metal_submission(present_macos::feedback().0)
+        {
+            return;
+        }
+        self.render_frame();
+        #[cfg(target_os = "linux")]
+        if self.exit_deadline.is_some()
+            && self.exit_presentation.target.is_some()
+            && self.exit_presentation.needs_wayland_submission()
+        {
+            self.render_frame();
+        }
+        #[cfg(target_os = "macos")]
+        if self.exit_deadline.is_some()
+            && self.exit_presentation.target.is_some()
+            && self
+                .exit_presentation
+                .needs_metal_submission(present_macos::feedback().0)
+        {
+            // Submit the redundant final drawable in this turn, not at the next
+            // window redraw (which can cost another refresh after shell exit).
+            self.render_frame();
+        }
+    }
+
+    fn render_frame(&mut self) {
+        if self.exit_deadline.is_none()
+            && let Some(s) = &mut self.session
+        {
+            s.pty.refresh_flow();
+            if s.output.waiting_since.is_some() && !s.pty.flow.paused {
+                s.pty.wake_pending.store(false, Ordering::Release);
+                let queued = s.pty.take_output();
+                if s.output.coalesce(queued) {
+                    self.process_output();
+                }
+            }
+        }
+        if let (Some(s), Some(search)) = (&mut self.session, &mut self.search)
+            && search.dirty
+        {
+            search.refresh(&mut s.term, false);
+        }
+        self.update_ime_cursor_area();
+        let Some(s) = &mut self.session else { return };
+        if s.term.modes.synchronized_output {
+            s.redraw_pending = true;
+            return;
+        }
+        s.redraw_pending = false;
+        let input = self.search.as_ref().map(search::Search::input);
+        let status = self.search.as_ref().map(search::Search::status);
+        let search = self
+            .search
+            .as_ref()
+            .map(|search| term_render::SearchOverlay {
+                matches: &search.matches,
+                current: search.current,
+                input: input.as_deref().unwrap_or_default(),
+                status: status.as_deref().unwrap_or_default(),
+                preedit: search.preedit_columns(),
+                cursor: search.cursor_column(),
+            });
+        let target = s
+            .target
+            .take()
+            .or_else(|| s.redraw_at.take().map(|(_, target)| target));
+        let pad = self.config.padding * s.window.scale_factor() as f32;
+        s.pty.refresh_flow();
+        let banner = match (self.config_error.as_deref(), s.pty.flow.banner()) {
+            (Some(error), Some(flow)) => Some(format!("{error} | {flow}")),
+            (Some(error), None) => Some(error.to_owned()),
+            (None, flow) => flow,
+        };
+        let started = Instant::now();
+        #[cfg(target_os = "linux")]
+        let exit_target = (self.exit_deadline.is_some()
+            && self.exit_presentation.needs_wayland_submission()
+            && s.presentation.is_some())
+        .then_some(s.sequence + 1);
+        let mut pre_present = || {
+            #[cfg(target_os = "linux")]
+            if let Some(feedback) = &mut s.presentation {
+                let cost = started.elapsed();
+                if let Some(clock) = feedback.clock() {
+                    clock.submitted(s.sequence, target, cost);
+                }
+                feedback.request(s.sequence);
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = (started, target);
+        };
+        #[cfg(target_os = "macos")]
+        let exit_target = (self.exit_deadline.is_some()
+            && self
+                .exit_presentation
+                .needs_metal_submission(present_macos::feedback().0))
+        .then(present_macos::arm_exit);
+        let rendered = s.renderer.render(
+            &s.term,
+            &mut s.fonts,
+            pad,
+            s.scroll.offset as f32,
+            self.focused,
+            banner.as_deref(),
+            search.as_ref(),
+            Some(&mut pre_present),
+        );
+        if rendered {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            if let Some(target) = exit_target {
+                self.exit_presentation.submitted(target, Instant::now());
+            }
+            if let Some(log) = &mut s.latency {
+                log.frame(Instant::now(), s.since_frame);
+            }
+            s.since_frame = 0;
+            s.sequence += 1;
+        }
+        if s.output.finish_presentation(rendered, Instant::now()) {
+            self.process_output();
         }
     }
 
@@ -1136,7 +1640,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::CommandFinished(finished) => {
                 if command_notify::should_notify(
@@ -1150,13 +1654,59 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Output => self.output_ready(),
             UserEvent::Exit => {
-                self.process_output();
-                event_loop.exit();
+                self.exit_deadline
+                    .get_or_insert_with(|| Instant::now() + EXIT_TIMEOUT);
+                if let Some(s) = &mut self.session {
+                    let queued = s.pty.take_output();
+                    let mut processed = 0;
+                    update_terminal(&mut s.term, &mut s.scroll, |term| {
+                        processed = s.output.drain_on_exit(term, queued);
+                    });
+                    s.since_frame += processed;
+                    if let Some(log) = &mut s.latency {
+                        log.output(processed);
+                    }
+                    s.synchronized_since = None;
+                    s.deferred = None;
+                    if s.since_frame == 0 && s.sequence > 0 {
+                        // Do not replace an already submitted final frame with an unchanged commit.
+                        s.output.presented();
+                        #[cfg(target_os = "linux")]
+                        if s.presentation.is_some() {
+                            self.exit_presentation.submitted(s.sequence, Instant::now());
+                        }
+                        #[cfg(target_os = "macos")]
+                        self.exit_presentation
+                            .submitted(present_macos::arm_exit() - 1, Instant::now());
+                    }
+                }
+                let pending_final = self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.since_frame > 0 || s.sequence == 0);
+                #[cfg(target_os = "linux")]
+                let pending_final = pending_final
+                    || self
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.presentation.is_some())
+                        && self.exit_presentation.needs_wayland_submission();
+                #[cfg(target_os = "macos")]
+                let pending_final = pending_final
+                    || self
+                        .exit_presentation
+                        .needs_metal_submission(present_macos::feedback().0);
+                if pending_final {
+                    self.present_frame();
+                }
             }
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(s) = &mut self.session {
+            s.pty.refresh_flow();
+        }
         if let Some(s) = &mut self.session
             && std::mem::take(&mut s.pty.flow_redraw)
         {
@@ -1167,6 +1717,10 @@ impl ApplicationHandler<UserEvent> for App {
             let _ = feedback.clock();
         }
         let now = Instant::now();
+        if exit_ready(self.exit_deadline, false, now) {
+            event_loop.exit();
+            return;
+        }
         if let Some(log) = self.session.as_mut().and_then(|s| s.latency.as_mut()) {
             if log.finished(now) {
                 event_loop.exit();
@@ -1178,6 +1732,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if self.session.as_ref().is_some_and(|s| s.resize.ready(now)) {
             self.resize_grid();
+        }
+        if self.session.as_ref().is_some_and(|s| {
+            s.output
+                .waiting_since
+                .is_some_and(|since| since.elapsed() >= MAX_DEFER)
+        }) {
+            self.present_frame();
         }
         let deadline = self
             .session
@@ -1192,13 +1753,77 @@ impl ApplicationHandler<UserEvent> for App {
                 s.window.request_redraw();
             }
         }
-        let deadline = self.session.as_ref().and_then(|s| {
-            wake_deadline(
+        let output_done = self
+            .session
+            .as_ref()
+            .is_none_or(|s| s.output.is_empty() && s.output.waiting_since.is_none());
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let output_done = {
+            #[cfg(target_os = "macos")]
+            let feedback = Some(present_macos::feedback());
+            #[cfg(target_os = "linux")]
+            let feedback = self
+                .session
+                .as_ref()
+                .and_then(|s| s.presentation.as_ref())
+                .map(|feedback| feedback.exit_feedback());
+            if self.exit_deadline.is_some()
+                && let Some((presented, skipped)) = feedback
+            {
+                let refresh = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.window.current_monitor())
+                    .and_then(|m| m.refresh_rate_millihertz())
+                    .filter(|rate| *rate > 0)
+                    .unwrap_or(60_000);
+                #[cfg(target_os = "macos")]
+                let retry = self.exit_presentation.update_metal(
+                    presented,
+                    skipped,
+                    Instant::now(),
+                    refresh,
+                );
+                #[cfg(target_os = "linux")]
+                let retry =
+                    self.exit_presentation
+                        .update(presented, skipped, Instant::now(), refresh);
+                if retry {
+                    self.present_frame();
+                }
+            }
+            output_done && (feedback.is_none() || self.exit_presentation.ready(Instant::now()))
+        };
+        if exit_ready(self.exit_deadline, output_done, Instant::now()) {
+            event_loop.exit();
+            return;
+        }
+        let mut deadline = None;
+        if let Some(s) = &mut self.session {
+            if sync_expired(s.synchronized_since, Instant::now()) {
+                s.term.modes.synchronized_output = false;
+                s.synchronized_since = None;
+                s.window.request_redraw();
+            }
+            deadline = wake_deadline(
                 frame_wakeup(s.redraw_at.map(|(latch, _)| latch), s.deferred),
                 s.resize.deadline,
                 s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
-            )
-        });
+            );
+            deadline = sync_wakeup(deadline, s.output.waiting_since, s.synchronized_since);
+            if s.pty.flow.paused {
+                let poll = now + Duration::from_millis(100);
+                deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));
+            }
+        }
+        deadline = exit_wakeup(deadline, self.exit_deadline);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if self.exit_deadline.is_some() && self.exit_presentation.target.is_some() {
+            deadline = exit_wakeup(
+                deadline,
+                Some(self.exit_presentation.wakeup(Instant::now())),
+            );
+        }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -1277,67 +1902,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
-                if let (Some(s), Some(search)) = (&mut self.session, &mut self.search)
-                    && search.dirty
-                {
-                    search.refresh(&mut s.term, false);
-                }
-                self.update_ime_cursor_area();
-                if let Some(s) = &mut self.session {
-                    let input = self.search.as_ref().map(search::Search::input);
-                    let status = self.search.as_ref().map(search::Search::status);
-                    let search = self
-                        .search
-                        .as_ref()
-                        .map(|search| term_render::SearchOverlay {
-                            matches: &search.matches,
-                            current: search.current,
-                            input: input.as_deref().unwrap_or_default(),
-                            status: status.as_deref().unwrap_or_default(),
-                            preedit: search.preedit_columns(),
-                            cursor: search.cursor_column(),
-                        });
-                    let target = s
-                        .target
-                        .take()
-                        .or_else(|| s.redraw_at.take().map(|(_, target)| target));
-                    let pad = self.config.padding * s.window.scale_factor() as f32;
-                    s.pty.refresh_flow();
-                    let banner = match (self.config_error.as_deref(), s.pty.flow.banner()) {
-                        (Some(error), Some(flow)) => Some(format!("{error} | {flow}")),
-                        (Some(error), None) => Some(error.to_owned()),
-                        (None, flow) => flow,
-                    };
-                    let started = Instant::now();
-                    let mut pre_present = || {
-                        #[cfg(target_os = "linux")]
-                        if let Some(feedback) = &mut s.presentation {
-                            let cost = started.elapsed();
-                            if let Some(clock) = feedback.clock() {
-                                clock.submitted(s.sequence, target, cost);
-                            }
-                            feedback.request(s.sequence);
-                        }
-                        #[cfg(not(target_os = "linux"))]
-                        let _ = (started, target);
-                    };
-                    if s.renderer.render(
-                        &s.term,
-                        &mut s.fonts,
-                        pad,
-                        s.scroll.offset as f32,
-                        self.focused,
-                        banner.as_deref(),
-                        search.as_ref(),
-                        Some(&mut pre_present),
-                    ) {
-                        if let Some(log) = &mut s.latency {
-                            log.frame(Instant::now(), s.since_frame);
-                        }
-                        s.since_frame = 0;
-                        s.sequence += 1;
-                    }
-                }
+                self.present_frame();
             }
             _ => {}
         }
@@ -1510,6 +2075,496 @@ mod tests {
         reloaded.scrollback = 123;
         assert_eq!(options.scrollback(&reloaded), 90);
         assert_eq!(options.command(&config), ["bash"]);
+    }
+
+    fn batch(bytes: &[u8]) -> pty::Output {
+        pty::Output {
+            bytes: bytes.to_vec(),
+            shell_returns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exit_drains_many_small_frames_with_shell_returns() {
+        let (mut term, mut output, queued) = exit_frame_batch(64_000);
+        let bytes = queued.bytes.len();
+        assert!(bytes >= 1 << 20);
+        assert_eq!(output.drain_on_exit(&mut term, queued), bytes);
+        let text: String = term
+            .viewport_row(0)
+            .cells
+            .iter()
+            .map(|cell| cell.c)
+            .collect();
+        assert!(text.starts_with("final"));
+        assert!(!term.modes.synchronized_output);
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(output.is_empty());
+    }
+
+    fn exit_frame_batch(frames: usize) -> (Terminal, PendingOutput, pty::Output) {
+        let mut bytes = Vec::new();
+        let mut shell_returns = Vec::new();
+        for _ in 0..frames {
+            bytes.extend_from_slice(b"\x1b[?2026h\rx\x1b[?2026l");
+            shell_returns.push(bytes.len());
+        }
+        bytes.extend_from_slice(b"\x1b[?1000;1004h");
+        shell_returns.push(bytes.len());
+        bytes.extend_from_slice(b"\x1b[?2026h\rfinal");
+        (
+            Terminal::new(80, 2),
+            PendingOutput::default(),
+            pty::Output {
+                bytes,
+                shell_returns,
+            },
+        )
+    }
+
+    #[test]
+    #[ignore]
+    fn time_exit_frame_drain() {
+        for frames in [64_000, 512_000] {
+            let (mut term, mut output, queued) = exit_frame_batch(frames);
+            let bytes = queued.bytes.len();
+            let start = Instant::now();
+            output.drain_on_exit(&mut term, queued);
+            eprintln!(
+                "EXIT_DRAIN_TIMING frames={frames} bytes={bytes} elapsed_ms={:.3}",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    #[test]
+    fn exit_drains_open_frame_and_waits_for_successful_presentation() {
+        let mut term = Terminal::new(80, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || batch(b"\x1b[?2026h"));
+        let marker = b"EXIT-DRAIN: final open-frame output";
+        assert_eq!(output.drain_on_exit(&mut term, batch(marker)), marker.len());
+        assert!(!term.modes.synchronized_output);
+        let text: String = term
+            .viewport_row(0)
+            .cells
+            .iter()
+            .map(|cell| cell.c)
+            .collect();
+        assert!(text.starts_with(std::str::from_utf8(marker).unwrap()));
+        assert!(output.is_empty());
+        let now = Instant::now();
+        assert!(!output.finish_presentation(false, now));
+        assert_eq!(output.waiting_since, Some(now));
+        assert!(output.finish_presentation(true, now));
+        assert!(output.waiting_since.is_none());
+    }
+
+    #[test]
+    fn exit_drains_leftovers_before_queued_frames_even_when_waiting() {
+        let mut term = Terminal::new(80, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || {
+            batch(b"\x1b[?2026hfirst\x1b[?2026l\x1b[?2026hsecond")
+        });
+        assert!(output.waiting_since.is_some());
+        output.drain_on_exit(
+            &mut term,
+            pty::Output {
+                bytes: b"\x1b[?2026l\x1b[?2026hthird".to_vec(),
+                shell_returns: vec![8],
+            },
+        );
+        let text: String = term
+            .viewport_row(0)
+            .cells
+            .iter()
+            .map(|cell| cell.c)
+            .collect();
+        assert!(text.starts_with("firstsecondthird"));
+        assert!(output.is_empty());
+        assert!(!term.modes.synchronized_output);
+        assert!(output.waiting_since.is_some());
+    }
+
+    #[test]
+    fn metal_exit_without_real_feedback_requires_two_drawables() {
+        let now = Instant::now();
+        let mut state = ExitPresentation::default();
+        assert!(!state.update_metal(0, [0, 1], now, 60_000));
+        assert!(!state.ready(now));
+        state.target = Some(2);
+        assert!(!state.update_metal(0, [0, 1], now, 60_000));
+        assert!(!state.ready(now));
+        assert!(
+            state.update_metal(0, [1, 2], now, 60_000),
+            "one untimed drawable is not a successful final present"
+        );
+        assert_eq!(state.target, None);
+        assert!(!state.ready(now + EXIT_TIMEOUT));
+        state.target = Some(3);
+        assert!(!state.update_metal(0, [1, 2], now, 60_000));
+        assert!(!state.ready(now + EXIT_TIMEOUT));
+        let second = now + Duration::from_millis(16);
+        assert!(!state.update_metal(0, [2, 3], second, 60_000));
+        let until = state.wakeup(second);
+        assert_eq!(until, second);
+        assert!(!state.ready(until - Duration::from_nanos(1)));
+        assert!(state.ready(until));
+        assert!(until < now + EXIT_TIMEOUT);
+        let deadline = Some(now + EXIT_TIMEOUT);
+        assert!(exit_ready(deadline, state.ready(second), second));
+        assert!(exit_ready(deadline, state.ready(until), until));
+    }
+
+    #[test]
+    fn metal_exit_switches_to_real_feedback_after_untimed_retry() {
+        let now = Instant::now();
+        let mut state = ExitPresentation {
+            target: Some(2),
+            ..ExitPresentation::default()
+        };
+        assert!(state.update_metal(0, [1, 2], now, 60_000));
+        state.target = Some(3);
+        assert!(!state.update_metal(3, [1, 2], now, 60_000));
+        assert!(state.ready(now));
+    }
+
+    #[test]
+    fn metal_exit_missing_second_callback_finishes_after_one_refresh() {
+        let start = Instant::now();
+        let period = Duration::from_secs_f64(1.0 / 60.0);
+        let mut state = ExitPresentation::default();
+        state.submitted(2, start);
+        assert!(state.update_metal(0, [1, 2], start + period, 60_000));
+        state.submitted(3, start + period);
+        assert!(!state.update_metal(0, [1, 2], start + period * 2, 60_000));
+        assert!(!state.missing_feedback(start + period * 2, 60_000));
+        assert!(state.ready(start + period * 2));
+        assert!(state.ready(state.wakeup(start + period * 2)));
+        assert!(state.wakeup(start + period * 2) < start + EXIT_TIMEOUT);
+    }
+
+    #[test]
+    fn metal_exit_proactive_retry_needs_second_drawable_feedback() {
+        let start = Instant::now();
+        let mut state = ExitPresentation::default();
+        assert!(state.needs_metal_submission(0));
+        state.submitted(2, start);
+        assert!(state.needs_metal_submission(0));
+        assert!(!state.needs_metal_submission(1));
+        state.submitted(3, start + Duration::from_millis(1));
+        assert!(!state.needs_metal_submission(0));
+        assert!(!state.update_metal(0, [1, 2], start + Duration::from_millis(16), 60_000));
+        assert!(!state.ready(start + EXIT_TIMEOUT));
+        let second = start + Duration::from_millis(32);
+        assert!(!state.update_metal(0, [2, 3], second, 60_000));
+        assert!(state.ready(second));
+    }
+
+    #[test]
+    fn metal_exit_proactive_retry_cannot_finish_from_one_untimed_callback() {
+        let start = Instant::now();
+        let mut state = ExitPresentation::default();
+        state.submitted(2, start);
+        state.submitted(3, start);
+        assert!(!state.update_metal(0, [1, 3], start, 60_000));
+        assert!(!state.ready(start));
+        assert!(!state.update_metal(0, [1, 3], start, 60_000));
+        assert!(!state.ready(start));
+        assert!(!state.update_metal(0, [2, 3], start, 60_000));
+        assert!(state.ready(start));
+    }
+
+    #[test]
+    fn metal_exit_with_real_feedback_retries_skip_without_extra_delay() {
+        let now = Instant::now();
+        let mut state = ExitPresentation {
+            target: Some(2),
+            ..ExitPresentation::default()
+        };
+        assert!(state.update_metal(1, [1, 2], now, 60_000));
+        assert_eq!(state.target, None);
+        assert!(!state.ready(now));
+        state.target = Some(3);
+        assert!(!state.update_metal(3, [1, 2], now, 60_000));
+        assert!(state.ready(now));
+    }
+
+    #[test]
+    fn metal_exit_cap_applies_without_submission_or_after_unrendered_retry() {
+        let now = Instant::now();
+        for presented in [0, 1] {
+            let mut state = ExitPresentation::default();
+            if presented != 0 {
+                state.submitted(2, now);
+                assert!(state.update_metal(presented, [1, 2], now, 60_000));
+            }
+            let deadline = Some(now + EXIT_TIMEOUT);
+            assert!(!exit_ready(deadline, state.ready(now), now));
+            assert!(exit_ready(deadline, state.ready(now), now + EXIT_TIMEOUT));
+        }
+    }
+
+    #[test]
+    fn exit_missing_feedback_requires_two_submissions_and_refreshes() {
+        let start = Instant::now();
+        let period = Duration::from_secs_f64(1.0 / 60.0);
+        let mut state = ExitPresentation::default();
+        state.submitted(2, start);
+        assert!(!state.missing_feedback(start + period - Duration::from_nanos(1), 60_000));
+        assert!(state.missing_feedback(start + period, 60_000));
+        assert_eq!(state.target, None);
+        assert!(!state.ready(start + period));
+
+        let second = start + period;
+        state.submitted(3, second);
+        assert!(!state.missing_feedback(second + period - Duration::from_nanos(1), 60_000));
+        assert!(!state.missing_feedback(second + period, 60_000));
+        assert!(state.ready(second + period));
+        let until = second + period;
+        assert_eq!(state.wakeup(second + period), until);
+        assert!(state.ready(until));
+        assert!(until < start + EXIT_TIMEOUT);
+    }
+
+    #[test]
+    fn wayland_exit_submits_retry_without_waiting_a_refresh() {
+        let start = Instant::now();
+        let mut state = ExitPresentation::default();
+        assert!(state.needs_wayland_submission());
+        state.submitted(2, start);
+        assert!(state.needs_wayland_submission());
+        assert!(!state.ready(start));
+        state.submitted(3, start);
+        assert!(!state.needs_wayland_submission());
+        assert!(!state.update(0, 0, start, 60_000));
+        assert!(!state.ready(start));
+        assert!(!state.update(0, 0, start + Duration::from_millis(17), 60_000));
+        assert!(state.ready(start + Duration::from_millis(17)));
+        assert!(state.update(0, 3, start + Duration::from_millis(17), 60_000));
+        assert!(state.needs_wayland_submission());
+        assert!(!state.ready(start + Duration::from_millis(17)));
+    }
+
+    #[test]
+    fn queued_completed_frames_replace_an_unsubmitted_frame() {
+        let mut term = Terminal::new(10, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || batch(b"\x1b[?2026hOLD\x1b[?2026l"));
+        let mut queued = Vec::new();
+        for n in 0..100 {
+            queued.extend_from_slice(format!("\x1b[?2026h\r{n:03}\x1b[?2026l").as_bytes());
+        }
+        queued.extend_from_slice(b"\x1b[?2026h\rHALF");
+        assert!(output.coalesce(batch(&queued)));
+        output.advance(&mut term, false, || panic!("coalesced output first"));
+        let text: String = term.viewport_row(0).cells[..3]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        assert_eq!(text, "099");
+        assert!(!term.modes.synchronized_output);
+        assert_eq!(output.bytes, b"\x1b[?2026h\rHALF");
+        assert!(output.waiting_since.is_some());
+        assert!(!output.finish_presentation(false, Instant::now()));
+        assert_eq!(output.bytes, b"\x1b[?2026h\rHALF");
+        assert!(output.finish_presentation(true, Instant::now()));
+    }
+
+    #[test]
+    fn incomplete_queued_frame_preserves_the_pending_presentation() {
+        let mut term = Terminal::new(10, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || batch(b"\x1b[?2026hOLD\x1b[?2026l"));
+        let waiting = output.waiting_since;
+        assert!(!output.coalesce(batch(b"")));
+        assert_eq!(output.waiting_since, waiting);
+        assert!(!output.coalesce(batch(b"\x1b[?2026h\rNEW\x1b[?202")));
+        assert_eq!(output.waiting_since, waiting);
+        assert_eq!(term.viewport_row(0).cells[0].c, 'O');
+        assert!(output.coalesce(batch(b"6l")));
+        output.advance(&mut term, false, || panic!("retained split reset first"));
+        assert_eq!(term.viewport_row(0).cells[0].c, 'N');
+        assert!(!term.modes.synchronized_output);
+        assert!(output.waiting_since.is_some());
+    }
+
+    #[test]
+    fn coalesced_shell_returns_follow_retained_output() {
+        let mut term = Terminal::new(10, 2);
+        let mut output = PendingOutput::default();
+        output.advance(&mut term, false, || {
+            batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\x1b[?1000;2004h\rNEW")
+        });
+        assert!(!output.coalesce(pty::Output {
+            bytes: Vec::new(),
+            shell_returns: vec![0],
+        }));
+        assert_eq!(output.shell_returns, [output.bytes.len()]);
+        assert!(output.coalesce(batch(b"\x1b[?2026l")));
+        output.advance(&mut term, false, || panic!("coalesced output first"));
+        assert_eq!(term.viewport_row(0).cells[0].c, 'N');
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.bracketed_paste);
+        assert!(!term.modes.synchronized_output);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn ordinary_output_does_not_drain_after_presentation() {
+        let mut term = Terminal::new(80, 2);
+        let mut output = PendingOutput::default();
+        for bytes in [b"".as_slice(), b"x", b"\x1b[31mred", b"\x1b[?2026l"] {
+            output.advance(&mut term, false, || batch(bytes));
+            assert!(output.waiting_since.is_none());
+            assert!(!output.pace_frame(term.modes.synchronized_output));
+            assert!(!output.finish_presentation(false, Instant::now()));
+            assert!(!output.finish_presentation(true, Instant::now()));
+        }
+        output.advance(&mut term, false, || batch(b"\x1b[?2026hframe"));
+        assert!(term.modes.synchronized_output);
+        assert!(output.pace_frame(term.modes.synchronized_output));
+        output.advance(&mut term, false, || batch(b"\x1b[?2026l"));
+        assert!(output.waiting_since.is_some());
+        assert!(output.pace_frame(term.modes.synchronized_output));
+        assert!(!output.finish_presentation(false, Instant::now()));
+        assert!(output.waiting_since.is_some());
+        assert!(output.finish_presentation(true, Instant::now()));
+        assert!(output.waiting_since.is_none());
+        assert!(!output.pace_frame(term.modes.synchronized_output));
+    }
+
+    #[test]
+    fn late_discard_retries_even_after_missing_feedback_fallback() {
+        let start = Instant::now();
+        let period = Duration::from_secs_f64(1.0 / 60.0);
+        let mut state = ExitPresentation::default();
+        state.submitted(2, start);
+        assert!(state.missing_feedback(start + period, 60_000));
+        state.submitted(3, start + period);
+        assert!(!state.missing_feedback(start + period * 2, 60_000));
+        assert!(state.update(0, 3, start + period * 2, 60_000));
+        assert_eq!(state.target, None);
+        assert!(!state.ready(start + period * 4));
+        state.submitted(4, start + period * 3);
+        assert!(!state.update(4, 3, start + period * 4, 60_000));
+        assert!(state.ready(state.wakeup(start + period * 4)));
+    }
+
+    #[test]
+    fn late_final_feedback_finishes_without_waiting_for_redundant_retry() {
+        let start = Instant::now();
+        let period = Duration::from_secs_f64(1.0 / 60.0);
+        let mut state = ExitPresentation::default();
+        state.submitted(4, start);
+        assert!(state.missing_feedback(start + period, 60_000));
+        state.submitted(5, start + period);
+        assert!(!state.update(3, 0, start + period, 60_000));
+        assert!(!state.ready(start + period));
+        assert!(!state.update(4, 0, start + period, 60_000));
+        assert!(state.ready(start + period));
+    }
+
+    #[test]
+    fn exit_redraws_wait_until_presentation_requests_a_retry() {
+        let start = Instant::now();
+        let mut state = ExitPresentation::default();
+        assert!(state.needs_submission());
+        state.submitted(4, start);
+        assert!(!state.needs_submission());
+        assert!(!state.update(3, 0, start, 60_000));
+        assert!(!state.needs_submission());
+        assert!(state.update(3, 4, start, 60_000));
+        assert!(state.needs_submission());
+        state.submitted(5, start);
+        assert!(!state.needs_submission());
+        assert!(!state.update(5, 4, start, 60_000));
+        assert!(state.ready(start));
+        assert!(!state.needs_submission());
+    }
+
+    #[test]
+    fn exit_presentation_requires_target_feedback_without_extra_delay() {
+        let now = Instant::now();
+        let mut state = ExitPresentation::default();
+        assert!(!state.update(10, 10, now, 60_000));
+        assert!(!state.ready(now));
+        assert_eq!(state.wakeup(now), now + Duration::from_millis(4));
+        state.target = Some(11);
+        assert!(!state.update(10, 10, now, 60_000));
+        assert!(!state.ready(now));
+        assert!(!state.update(11, 10, now, 60_000));
+        let until = state.wakeup(now);
+        assert!(!state.ready(until - Duration::from_nanos(1)));
+        assert!(state.ready(until));
+        assert_eq!(until, now);
+        assert!(!state.update(12, 12, until, 60_000));
+        assert_eq!(state.wakeup(until), until);
+    }
+
+    #[test]
+    fn exit_presentation_retries_skips_and_timeout_wins() {
+        let now = Instant::now();
+        let mut state = ExitPresentation {
+            target: Some(2),
+            ..ExitPresentation::default()
+        };
+        assert!(state.update(1, 2, now, 0));
+        assert_eq!(state.target, None);
+        assert!(!state.ready(now));
+        assert!(exit_ready(
+            Some(now + EXIT_TIMEOUT),
+            state.ready(now),
+            now + EXIT_TIMEOUT
+        ));
+        state.target = Some(3);
+        assert!(!state.update(3, 2, now, 0));
+        assert!(state.ready(now));
+        let mut fast = ExitPresentation {
+            target: Some(1),
+            ..ExitPresentation::default()
+        };
+        fast.update(1, 0, now, 120_000);
+        assert!(fast.ready(now));
+    }
+
+    #[test]
+    fn exit_cap_survives_missing_redraws_and_failed_presentations() {
+        let start = Instant::now();
+        let deadline = Some(start + EXIT_TIMEOUT);
+        let before = start + EXIT_TIMEOUT - Duration::from_nanos(1);
+        assert!(!exit_ready(None, true, start));
+        assert!(exit_ready(deadline, true, start));
+        assert!(!exit_ready(deadline, false, before));
+        assert!(exit_ready(deadline, false, start + EXIT_TIMEOUT));
+        let mut pending = PendingOutput {
+            waiting_since: Some(start),
+            ..PendingOutput::default()
+        };
+        assert!(!pending.finish_presentation(false, before));
+        assert_eq!(pending.waiting_since, Some(before));
+        assert!(exit_ready(deadline, false, start + EXIT_TIMEOUT));
+        assert_eq!(exit_wakeup(None, deadline), deadline);
+        assert_eq!(
+            exit_wakeup(Some(start + EXIT_TIMEOUT * 2), deadline),
+            deadline
+        );
+        assert_eq!(exit_wakeup(Some(before), deadline), Some(before));
+        assert_eq!(exit_wakeup(Some(before), None), Some(before));
+        assert_eq!(exit_wakeup(None, None), None);
+    }
+
+    #[test]
+    fn exit_without_output_still_requires_a_final_presentation() {
+        let mut term = Terminal::new(80, 2);
+        let mut output = PendingOutput::default();
+        assert_eq!(output.drain_on_exit(&mut term, batch(b"")), 0);
+        assert!(output.is_empty());
+        assert!(output.waiting_since.is_some());
+        assert!(output.finish_presentation(true, Instant::now()));
+        assert!(output.waiting_since.is_none());
     }
 
     #[test]
@@ -1784,7 +2839,7 @@ mod tests {
         let prompt = b"\x1b[?2004h$ ";
         advance_output(
             &mut term,
-            pty::Output {
+            &mut pty::Output {
                 bytes: [
                     setup.as_slice(),
                     prompt.as_slice(),
@@ -1800,12 +2855,247 @@ mod tests {
         assert!(term.modes.bracketed_paste);
         advance_output(
             &mut term,
-            pty::Output {
+            &mut pty::Output {
                 bytes: Vec::new(),
                 shell_returns: Vec::new(),
             },
         );
         assert!(term.modes.bracketed_paste);
+    }
+
+    #[test]
+    fn leftover_does_not_acknowledge_queued_pty_output() {
+        let mut output = PendingOutput::default();
+        let mut term = Terminal::new(10, 2);
+        let mut first = batch(b"\x1b[?2026h028\x1b[?2026l\x1b[?2026h\x1b[?1000;1004;2004h");
+        let consumed = advance_output(&mut term, &mut first);
+        output.retain(
+            first,
+            consumed,
+            term.synchronized_output_ended(),
+            Instant::now(),
+        );
+        let wake_pending = std::sync::atomic::AtomicBool::new(false);
+        let mut queued = Some(pty::Output {
+            bytes: b"\r099\x1b[?2026l".to_vec(),
+            shell_returns: vec![0],
+        });
+        assert!(!wake_pending.swap(true, Ordering::AcqRel));
+        output.presented();
+        let mut next = output.next_batch(|| panic!("leftover must precede PTY output"));
+        advance_output(&mut term, &mut next);
+        assert!(term.modes.synchronized_output);
+        assert!(wake_pending.load(Ordering::Acquire));
+        let mut next = output.next_batch(|| {
+            wake_pending.store(false, Ordering::Release);
+            queued.take().unwrap()
+        });
+        advance_output(&mut term, &mut next);
+        assert!(!term.modes.synchronized_output);
+        assert_eq!(term.viewport_row(0).cells[0].c, '0');
+        assert_eq!(term.viewport_row(0).cells[1].c, '9');
+        assert_eq!(term.viewport_row(0).cells[2].c, '9');
+        assert!(queued.is_none());
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(!term.modes.bracketed_paste);
+        assert!(!wake_pending.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn leftover_output_waits_for_presentation_and_preserves_order() {
+        let mut output = PendingOutput::default();
+        let mut term = Terminal::new(10, 2);
+        let mut first =
+            batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW\x1b[?2026l\x1b[?2026h\rHAL");
+        let consumed = advance_output(&mut term, &mut first);
+        output.retain(
+            first,
+            consumed,
+            term.synchronized_output_ended(),
+            Instant::now(),
+        );
+        assert!(output.waiting_since.is_some());
+        let text = |term: &Terminal| {
+            term.viewport_row(0)
+                .cells
+                .iter()
+                .take(3)
+                .map(|c| c.c)
+                .collect::<String>()
+        };
+        assert_eq!(text(&term), "NEW");
+        assert!(!term.modes.synchronized_output);
+        assert!(output.presented());
+        assert!(output.waiting_since.is_none());
+        let mut next = output.next_batch(|| panic!("leftover must precede PTY output"));
+        let consumed = advance_output(&mut term, &mut next);
+        output.retain(
+            next,
+            consumed,
+            term.synchronized_output_ended(),
+            Instant::now(),
+        );
+        assert!(term.modes.synchronized_output);
+        assert!(!output.presented());
+        assert!(output.waiting_since.is_none());
+    }
+
+    #[test]
+    fn complete_frame_backlog_is_applied_in_one_advance() {
+        let mut term = Terminal::new(10, 2);
+        let mut bytes = Vec::new();
+        for n in 0..100 {
+            bytes.extend_from_slice(format!("\x1b[?2026h\r{n:03}\x1b[?2026l").as_bytes());
+        }
+        let mut output = batch(&bytes);
+        assert_eq!(advance_output(&mut term, &mut output), bytes.len());
+        assert!(term.synchronized_output_ended());
+        assert_eq!(term.viewport_row(0).cells[2].c, '9');
+        assert_eq!(term.viewport_row(0).cells[1].c, '9');
+    }
+
+    #[test]
+    fn retained_frame_end_waits_before_queued_unfinished_frame() {
+        let mut term = Terminal::new(10, 2);
+        let mut pending = PendingOutput::default();
+        let mut first = batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rDONE\x1b[?2026l");
+        let consumed = advance_output(&mut term, &mut first);
+        assert_eq!(consumed, first.bytes.len());
+        assert!(term.synchronized_output_ended());
+        pending.retain(
+            first,
+            consumed,
+            term.synchronized_output_ended(),
+            Instant::now(),
+        );
+        assert!(
+            pending.waiting_since.is_some(),
+            "completed frame must wait for presentation"
+        );
+        assert_eq!(term.viewport_row(0).cells[0].c, 'D');
+        assert!(!term.modes.synchronized_output);
+        let wake_pending = std::sync::atomic::AtomicBool::new(true);
+        let mut queued = Some(batch(b"\x1b[?2026h\rHALF"));
+        assert!(wake_pending.load(Ordering::Acquire));
+        assert!(queued.is_some());
+        pending.presented();
+        let mut next = pending.next_batch(|| {
+            wake_pending.store(false, Ordering::Release);
+            queued.take().unwrap()
+        });
+        advance_output(&mut term, &mut next);
+        assert!(term.modes.synchronized_output);
+        assert!(!wake_pending.load(Ordering::Acquire));
+        assert!(queued.is_none());
+    }
+
+    #[test]
+    fn paused_retained_frames_resume_before_queued_output() {
+        let mut term = Terminal::new(10, 2);
+        let mut pending = PendingOutput::default();
+        let mut first = batch(b"\x1b[?2026hOLD\x1b[?2026l\x1b[?2026h\rNEW");
+        let consumed = advance_output(&mut term, &mut first);
+        pending.retain(first, consumed, true, Instant::now());
+        pending.presented();
+        let saved = pending.bytes.clone();
+        let wake_pending = std::sync::atomic::AtomicBool::new(true);
+        let mut queued = Some(batch(b"\rEND\x1b[?2026l"));
+        for _ in 0..3 {
+            assert!(
+                pending
+                    .advance(&mut term, true, || panic!("paused PTY drain"))
+                    .is_none()
+            );
+            assert_eq!(term.viewport_row(0).cells[0].c, 'O');
+            assert_eq!(pending.bytes, saved);
+            assert!(wake_pending.load(Ordering::Acquire));
+        }
+        assert!(
+            pending
+                .advance(&mut term, false, || panic!("retained output first"))
+                .is_some()
+        );
+        assert_eq!(term.viewport_row(0).cells[0].c, 'N');
+        assert!(term.modes.synchronized_output);
+        assert!(pending.waiting_since.is_none());
+        assert!(
+            pending
+                .advance(&mut term, true, || panic!("paused queued output"))
+                .is_none()
+        );
+        assert!(wake_pending.load(Ordering::Acquire));
+        assert!(
+            pending
+                .advance(&mut term, false, || {
+                    wake_pending.store(false, Ordering::Release);
+                    queued.take().unwrap()
+                })
+                .is_some()
+        );
+        assert_eq!(term.viewport_row(0).cells[0].c, 'E');
+        assert!(!wake_pending.load(Ordering::Acquire));
+        assert!(queued.is_none());
+        pending.presented();
+        assert_eq!(
+            pending.advance(&mut term, false, || batch(b"")),
+            Some((0, false))
+        );
+    }
+
+    #[test]
+    fn shell_return_markers_follow_retained_frames() {
+        let mut term = Terminal::new(10, 2);
+        let mut pending = PendingOutput::default();
+        let first = b"\x1b[?1000;1004;2004h\x1b[?2026hOLD\x1b[?2026l";
+        let second = b"\x1b[?2026h\x1b[?1000;1004;2004h\rNEW\x1b[?2026l";
+        let prompt = b"\x1b[?2004h$ ";
+        let mut output = pty::Output {
+            bytes: [first.as_slice(), second.as_slice(), prompt.as_slice()].concat(),
+            shell_returns: vec![first.len(), first.len() + second.len()],
+        };
+        let consumed = advance_output(&mut term, &mut output);
+        assert_eq!(consumed, first.len() + second.len());
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(!term.modes.bracketed_paste);
+        pending.retain(
+            output,
+            consumed,
+            term.synchronized_output_ended(),
+            Instant::now(),
+        );
+        assert!(pending.waiting_since.is_some());
+        assert!(!pending.is_empty());
+        pending.presented();
+        output = pending.next_batch(|| panic!("retained prompt must precede PTY output"));
+        assert_eq!(advance_output(&mut term, &mut output), prompt.len());
+        assert!(term.modes.bracketed_paste);
+    }
+
+    #[test]
+    fn marker_only_output_is_not_empty_or_lost() {
+        let mut term = Terminal::new(10, 2);
+        term.advance(b"\x1b[?1000;1004;2004h");
+        let mut pending = PendingOutput::default();
+        pending.retain(
+            pty::Output {
+                bytes: Vec::new(),
+                shell_returns: vec![0],
+            },
+            0,
+            false,
+            Instant::now(),
+        );
+        assert!(!pending.is_empty());
+        assert!(pending.presented());
+        let mut output = pending.next_batch(|| panic!("marker must precede PTY output"));
+        assert_eq!(advance_output(&mut term, &mut output), 0);
+        pending.retain(output, 0, term.synchronized_output_ended(), Instant::now());
+        assert!(pending.is_empty());
+        assert_eq!(term.modes.mouse, MouseMode::Off);
+        assert!(!term.modes.focus_events);
+        assert!(!term.modes.bracketed_paste);
     }
 
     #[test]
@@ -1859,6 +3149,62 @@ mod tests {
         assert_eq!(frame_wakeup(None, Some(now)), Some(now + MAX_DEFER));
         assert_eq!(frame_wakeup(Some(latch), Some(now)), Some(latch));
         assert_eq!(frame_wakeup(Some(latch), None), Some(latch));
+    }
+
+    #[test]
+    fn synchronized_output_timeout() {
+        let start = Instant::now();
+        assert!(!sync_expired(None, start + SYNC_TIMEOUT));
+        assert!(!sync_expired(Some(start), start));
+        assert!(!sync_expired(
+            Some(start),
+            start + SYNC_TIMEOUT - Duration::from_nanos(1)
+        ));
+        assert!(sync_expired(Some(start), start + SYNC_TIMEOUT));
+        assert!(sync_expired(
+            Some(start),
+            start + Duration::from_millis(300)
+        ));
+    }
+
+    #[test]
+    fn sync_deadlines_bound_vblank_waits_without_idle_timers() {
+        let now = Instant::now();
+        assert_eq!(sync_wakeup(None, None, None), None);
+        assert_eq!(sync_wakeup(Some(now), None, None), Some(now));
+        assert_eq!(
+            sync_wakeup(Some(now + SYNC_TIMEOUT * 2), None, Some(now)),
+            Some(now + SYNC_TIMEOUT)
+        );
+        assert_eq!(
+            sync_wakeup(Some(now + SYNC_TIMEOUT), Some(now), Some(now)),
+            Some(now + MAX_DEFER)
+        );
+        assert_eq!(sync_wakeup(Some(now), Some(now), Some(now)), Some(now));
+    }
+
+    #[test]
+    fn failed_presentation_retains_frame_and_retries_without_draining() {
+        let now = Instant::now();
+        let mut pending = PendingOutput {
+            bytes: b"next frame".to_vec(),
+            waiting_since: Some(now),
+            ..PendingOutput::default()
+        };
+        let retry = now + MAX_DEFER;
+        assert!(!pending.finish_presentation(false, retry));
+        assert_eq!(pending.waiting_since, Some(retry));
+        assert_eq!(pending.bytes, b"next frame");
+        assert!(pending.finish_presentation(true, retry));
+        assert_eq!(pending.waiting_since, None);
+        assert_eq!(pending.bytes, b"next frame");
+        let mut empty = PendingOutput::default();
+        assert!(!empty.finish_presentation(false, now));
+        assert_eq!(empty.waiting_since, None);
+        assert!(!empty.finish_presentation(true, now));
+        empty.waiting_since = Some(now);
+        assert!(!empty.finish_presentation(false, retry));
+        assert_eq!(empty.waiting_since, Some(retry));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use objc2_metal::{MTLCommandQueue, MTLDevice, MTLDrawable};
 use objc2_quartz_core::CACurrentMediaTime;
 
 struct Sink {
-    lines: Arc<Mutex<Vec<String>>>,
+    lines: Option<Arc<Mutex<Vec<String>>>>,
     epoch: f64,
     start: Instant,
     original: Imp,
@@ -18,6 +18,24 @@ struct Sink {
 
 static SINK: OnceLock<Sink> = OnceLock::new();
 static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static PRESENTED: AtomicUsize = AtomicUsize::new(0);
+static SKIPPED: Mutex<[usize; 2]> = Mutex::new([0; 2]);
+
+pub fn arm_exit() -> usize {
+    SEQUENCE.load(Ordering::Acquire) + 1
+}
+
+pub fn feedback() -> (usize, [usize; 2]) {
+    (PRESENTED.load(Ordering::Acquire), *SKIPPED.lock().unwrap())
+}
+
+fn record_skip(skipped: &mut [usize; 2], sequence: usize) {
+    if sequence > skipped[1] {
+        *skipped = [skipped[1], sequence];
+    } else if sequence < skipped[1] {
+        skipped[0] = skipped[0].max(sequence);
+    }
+}
 
 unsafe extern "C-unwind" fn present_drawable(
     buffer: *mut AnyObject,
@@ -31,15 +49,23 @@ unsafe extern "C-unwind" fn present_drawable(
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let handler = RcBlock::new(move |drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
             let time = unsafe { drawable.as_ref() }.presentedTime();
+            if time == 0.0 {
+                let mut skipped = SKIPPED.lock().unwrap();
+                record_skip(&mut skipped, sequence + 1);
+            } else {
+                PRESENTED.fetch_max(sequence + 1, Ordering::Release);
+            }
             let (time, mode) = if time == 0.0 {
                 (sink.start.elapsed().as_micros() as i128, "skip")
             } else {
                 (((time - sink.epoch) * 1_000_000.0).round() as i128, "vsync")
             };
-            sink.lines
-                .lock()
-                .unwrap()
-                .push(format!("presented {sequence} {time} {mode}"));
+            if let Some(lines) = &sink.lines {
+                lines
+                    .lock()
+                    .unwrap()
+                    .push(format!("presented {sequence} {time} {mode}"));
+            }
         });
         // Metal copies the block and invokes it after the drawable is presented.
         unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&handler)) };
@@ -55,7 +81,7 @@ unsafe extern "C-unwind" fn present_drawable(
 pub fn install(
     device: &wgpu::Device,
     start: Instant,
-    lines: Arc<Mutex<Vec<String>>>,
+    lines: Option<Arc<Mutex<Vec<String>>>>,
 ) -> Result<(), &'static str> {
     if SINK.get().is_some() {
         return Err("Metal feedback already installed");
@@ -93,6 +119,24 @@ pub fn install(
             >(present_drawable),
         );
     }
-    lines.lock().unwrap().push("source metal-presented".into());
+    if let Some(lines) = lines {
+        lines.lock().unwrap().push("source metal-presented".into());
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_skip;
+
+    #[test]
+    fn skipped_feedback_keeps_two_distinct_sequences_in_any_order() {
+        for sequences in [[1, 2, 3, 3], [3, 3, 1, 2], [2, 3, 1, 3]] {
+            let mut skipped = [0; 2];
+            for sequence in sequences {
+                record_skip(&mut skipped, sequence);
+            }
+            assert_eq!(skipped, [2, 3]);
+        }
+    }
 }

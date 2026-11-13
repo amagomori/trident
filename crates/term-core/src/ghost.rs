@@ -8,6 +8,11 @@ use vte::{Params, Perform};
 
 const ESC: u8 = 0x1b;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ADVANCES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Terminal {
     /// Where the part of `bytes` that has to be built starts, when everything before it
     /// can be skipped.
@@ -35,6 +40,8 @@ impl Terminal {
 
     /// Parse `bytes` (from [`Terminal::ghost_split`]) without writing any row.
     pub(crate) fn advance_ghost(&mut self, parser: &mut vte::Parser, bytes: &[u8]) {
+        #[cfg(test)]
+        ADVANCES.update(|count| count + 1);
         let mut ghost = Ghost {
             term: self,
             scrolls: 0,

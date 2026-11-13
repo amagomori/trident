@@ -2,9 +2,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
-#[path = "present_macos.rs"]
-mod macos;
 #[cfg(unix)]
 #[path = "latency_signals.rs"]
 mod signals;
@@ -97,10 +94,8 @@ impl Latency {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn metal_feedback(&self, device: &wgpu::Device) {
-        if let Err(error) = macos::install(device, self.start, self.feedback.clone()) {
-            eprintln!("terminal: presentation feedback unavailable: {error}");
-        }
+    pub fn metal_log(&self) -> (Instant, Arc<Mutex<Vec<String>>>) {
+        (self.start, self.feedback.clone())
     }
 
     pub fn output(&mut self, bytes: usize) {
