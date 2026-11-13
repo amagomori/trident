@@ -437,6 +437,36 @@ impl Terminal {
         self.images.generation += 1;
     }
 
+    /// Crops primary placements at an absolute line before ED 2 saves the visible screen.
+    /// Crop the source as well as the span, so fixed-row images are not squashed to fit.
+    pub(crate) fn clip_primary_placements(&mut self, end: u64) {
+        let mut changed = false;
+        self.primary.placements.retain_mut(|p| {
+            if p.line.saturating_add(p.rows as u64) <= end {
+                return true;
+            }
+            changed = true;
+            let rows = end.saturating_sub(p.line) as usize;
+            let cell_height = p.cell_pixels.1 as f64;
+            let available = (rows as f64 * cell_height - p.y_offset as f64).max(0.0);
+            let height = if p.fixed_rows {
+                p.rows as f64 * cell_height - p.y_offset as f64
+            } else {
+                p.source.height as f64
+            };
+            p.source.height = if height > 0.0 {
+                (p.source.height as f64 * (available / height).min(1.0)) as u32
+            } else {
+                0
+            };
+            p.rows = rows;
+            rows > 0 && p.source.height > 0
+        });
+        if changed {
+            self.images.generation += 1;
+        }
+    }
+
     /// Drops placements on the active screen that cover any cell of rows `top..=bottom`,
     /// columns `from..to` (screen coordinates).
     pub(crate) fn erase_placements(&mut self, top: usize, bottom: usize, from: usize, to: usize) {

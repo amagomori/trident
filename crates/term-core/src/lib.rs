@@ -836,6 +836,9 @@ impl Terminal {
                             .max(end.saturating_sub(self.history).min(self.rows as u64) as usize);
                     }
                     if used > 0 {
+                        // A bottom-clipped image must not overlap the fresh screen after
+                        // scrolling, or erase_row below would delete it from history too.
+                        self.clip_primary_placements(self.history + self.rows as u64);
                         self.scroll_up_region(0, self.rows - 1, used);
                     }
                 }

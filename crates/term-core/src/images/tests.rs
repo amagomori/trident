@@ -194,6 +194,45 @@ fn dropped_when_its_line_leaves_scrollback() {
 }
 
 #[test]
+fn erase_display_preserves_bottom_clipped_images_in_history() {
+    for limit in [0, 1, 10] {
+        for explicit_rows in [0, 2, 10] {
+            let mut t = term();
+            t.set_scrollback_limit(limit);
+            t.advance(b"\x1b[5;1H");
+            let p = t
+                .place_image(
+                    1,
+                    PlaceOptions {
+                        rows: explicit_rows,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            t.advance(b"\x1b[2J");
+            assert_eq!(t.scrollback_len(), limit.min(5));
+            assert!(t.visible_placements().is_empty());
+            t.scroll_display(5);
+            if limit == 0 {
+                assert!(t.visible_placements().is_empty());
+            } else {
+                let visible = t.visible_placements();
+                assert_eq!(visible.len(), 1);
+                assert_eq!(visible[0].row, limit.min(5) as isize - 1);
+                assert_eq!(visible[0].placement.line, p.line);
+                assert_eq!(visible[0].placement.rows, 1);
+                assert_eq!(visible[0].placement.source.height, 40 / p.rows as u32);
+                // Repeated clears must not erase a placement already in history.
+                t.advance(b"\x1b[2J");
+                assert_eq!(t.visible_placements(), visible);
+            }
+            t.advance(b"\x1b[3J");
+            assert!(t.visible_placements().is_empty());
+        }
+    }
+}
+
+#[test]
 fn moves_with_scroll_regions() {
     let mut t = term();
     place_at(&mut t, 2, 0);
