@@ -411,7 +411,7 @@ fn shell_integration_multiline_resize_and_guard_reset() {
 
 #[test]
 fn shell_prompt_rows_survive_ghost_batches() {
-    for mark in [b'A', b'B'] {
+    for mark in *b"AB" {
         for limit in [0, 2, 100] {
             let mut batched = Terminal::new(20, 3);
             let mut streamed = Terminal::new(20, 3);
