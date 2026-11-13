@@ -373,7 +373,37 @@ pub struct ConfigWatcher {
     _watcher: std::sync::Arc<std::sync::Mutex<notify::RecommendedWatcher>>,
 }
 
+fn watch_paths(path: &Path) -> std::collections::BTreeSet<PathBuf> {
+    let mut paths = std::collections::BTreeSet::from([path.to_path_buf()]);
+    let mut pending = path.to_path_buf();
+    let mut hops = 0;
+    'resolve: loop {
+        let mut resolved = PathBuf::new();
+        let mut components = pending.components();
+        while let Some(component) = components.next() {
+            if component == std::path::Component::ParentDir {
+                resolved.pop();
+                continue;
+            }
+            resolved.push(component);
+            if let Ok(target) = std::fs::read_link(&resolved) {
+                paths.insert(resolved.clone());
+                hops += 1;
+                if hops > 40 {
+                    return paths;
+                }
+                resolved.pop();
+                pending = resolved.join(target).join(components.as_path());
+                continue 'resolve;
+            }
+        }
+        paths.insert(resolved);
+        return paths;
+    }
+}
+
 pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Result<ConfigWatcher> {
+    let path = std::path::absolute(path)?;
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if let Ok(event) = event
@@ -382,21 +412,24 @@ pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Resu
             let _ = tx.send(event);
         }
     })?;
-    let parent = path.parent().unwrap_or(Path::new("."));
-    watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
-    let mut target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-    let mut target_parent = target.parent().unwrap_or(parent).to_path_buf();
-    if target_parent != parent {
-        watcher.watch(&target_parent, notify::RecursiveMode::NonRecursive)?;
+    let mut paths = watch_paths(&path);
+    let parents = |paths: &std::collections::BTreeSet<PathBuf>| {
+        paths
+            .iter()
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let mut watched = parents(&paths);
+    for parent in &watched {
+        watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
     }
     let watcher = std::sync::Arc::new(std::sync::Mutex::new(watcher));
     let weak = std::sync::Arc::downgrade(&watcher);
-    let parent = parent.to_path_buf();
     std::thread::Builder::new()
         .name("config-watch".into())
         .spawn(move || {
             while let Ok(event) = rx.recv() {
-                if !event.paths.iter().any(|p| p == &path || p == &target) {
+                if !event.paths.iter().any(|p| paths.contains(p)) {
                     continue;
                 }
                 while rx
@@ -404,22 +437,27 @@ pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Resu
                     .is_ok()
                 {}
                 let Some(watcher) = weak.upgrade() else { break };
-                if let Ok(resolved) = std::fs::canonicalize(&path) {
-                    let new_parent = resolved.parent().unwrap_or(&parent).to_path_buf();
-                    if new_parent != target_parent {
-                        let mut watcher = watcher.lock().unwrap();
-                        if new_parent == parent
-                            || watcher
-                                .watch(&new_parent, notify::RecursiveMode::NonRecursive)
+                paths = watch_paths(&path);
+                let new_parents = parents(&paths);
+                {
+                    let mut watcher = watcher.lock().unwrap();
+                    for parent in &new_parents {
+                        if !watched.contains(parent)
+                            && watcher
+                                .watch(parent, notify::RecursiveMode::NonRecursive)
                                 .is_ok()
                         {
-                            if target_parent != parent {
-                                let _ = watcher.unwatch(&target_parent);
-                            }
-                            target_parent = new_parent;
+                            watched.insert(parent.clone());
                         }
                     }
-                    target = resolved;
+                    watched.retain(|parent| {
+                        if new_parents.contains(parent) {
+                            true
+                        } else {
+                            let _ = watcher.unwatch(parent);
+                            false
+                        }
+                    });
                 }
                 drop(watcher);
                 changed();
@@ -618,6 +656,71 @@ bright_white = "#fefdfc"
         std::fs::write(&path, "padding = -1").unwrap();
         assert!(load(&path).unwrap_err().contains("padding"));
         drop(watcher);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_follows_intermediate_symlink_retargeting() {
+        let dir = std::env::temp_dir().join(format!(
+            "terminal-intermediate-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = dir.join("releases/v1");
+        let second = dir.join("releases/v2");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("config.toml"), "font_size = 17").unwrap();
+        let target = second.join("config.toml");
+        std::fs::write(&target, "font_size = 22").unwrap();
+        let current = dir.join("current");
+        let path = dir.join("config.toml");
+        std::os::unix::fs::symlink("releases/v1", &current).unwrap();
+        std::os::unix::fs::symlink("current/config.toml", &path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watcher = watch(path.clone(), move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+        assert_eq!(load(&path).unwrap().font_size, 17.0);
+        let replacement = dir.join("new-current");
+        std::os::unix::fs::symlink("releases/v2", &replacement).unwrap();
+        std::fs::rename(&replacement, &current).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(load(&path).unwrap().font_size, 22.0);
+        std::fs::write(&target, "font_size = 24").unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(load(&path).unwrap().font_size, 24.0);
+        drop(watcher);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_paths_handles_missing_targets_and_symlink_loops() {
+        let dir = std::env::temp_dir().join(format!(
+            "terminal-symlink-loop-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let path = dir.join("config.toml");
+        assert_eq!(watch_paths(&path), [path.clone()].into());
+        std::os::unix::fs::symlink("missing.toml", &path).unwrap();
+        assert_eq!(
+            watch_paths(&path),
+            [path.clone(), dir.join("missing.toml")].into()
+        );
+        std::os::unix::fs::symlink("config.toml", dir.join("missing.toml")).unwrap();
+        assert_eq!(watch_paths(&path), [path, dir.join("missing.toml")].into());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
