@@ -17,7 +17,7 @@ impl Foreground {
         group: Option<i32>,
         now: Instant,
         name: impl FnOnce() -> Option<String>,
-        exited: impl Fn(i32) -> bool,
+        mut exited: impl FnMut(i32) -> bool,
     ) -> Vec<Finished> {
         let mut finished = Vec::new();
         self.running.retain(|&pid, (start, name)| {
@@ -236,8 +236,7 @@ fn group_has_stopped(group: i32) -> bool {
             .as_encoded_bytes()
             .iter()
             .all(u8::is_ascii_digit)
-            && std::fs::read(entry.path().join("stat"))
-                .is_ok_and(|stat| stopped_stat(&stat, group))
+            && std::fs::read(entry.path().join("stat")).is_ok_and(|stat| stopped_stat(&stat, group))
     })
 }
 
@@ -300,6 +299,30 @@ fn group_has_stopped(_: i32) -> bool {
 }
 
 #[cfg(unix)]
+#[derive(Default)]
+struct StoppedGroups(std::collections::BTreeMap<i32, Instant>);
+
+#[cfg(unix)]
+impl StoppedGroups {
+    fn has_stopped(&mut self, group: i32, now: Instant, scan: impl FnOnce(i32) -> bool) -> bool {
+        if self
+            .0
+            .get(&group)
+            .is_some_and(|checked| now.duration_since(*checked) < Duration::from_secs(5))
+        {
+            return true;
+        }
+        if scan(group) {
+            self.0.insert(group, now);
+            true
+        } else {
+            self.0.remove(&group);
+            false
+        }
+    }
+}
+
+#[cfg(unix)]
 pub fn watch(
     fd: std::os::fd::OwnedFd,
     shell: u32,
@@ -313,12 +336,15 @@ pub fn watch(
         .name("command-watcher".into())
         .spawn(move || {
             let mut foreground = Foreground::default();
+            let mut stopped_groups = StoppedGroups::default();
             while !stopped.load(Ordering::Acquire) {
                 // SAFETY: this thread owns the descriptor until it exits.
                 let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+                let now = Instant::now();
+                stopped_groups.0.remove(&group);
                 let events = foreground.sample(
                     (group > 0 && group as u32 != shell).then_some(group),
-                    Instant::now(),
+                    now,
                     || {
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
                         {
@@ -329,8 +355,14 @@ pub fn watch(
                             None
                         }
                     },
-                    |pid| leader_exited(pid) && !group_has_stopped(pid),
+                    |pid| {
+                        leader_exited(pid)
+                            && !stopped_groups.has_stopped(pid, now, group_has_stopped)
+                    },
                 );
+                stopped_groups
+                    .0
+                    .retain(|pid, _| foreground.running.contains_key(pid));
                 for event in events {
                     finished(event);
                 }
@@ -424,6 +456,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stopped_groups_cache_only_stopped_verdicts() {
+        let mut groups = StoppedGroups::default();
+        let now = Instant::now();
+        assert!(!groups.has_stopped(42, now, |_| false));
+        assert!(groups.has_stopped(42, now, |_| true));
+        assert!(
+            groups.has_stopped(42, now + Duration::from_millis(4800), |_| {
+                panic!("cached stopped group must not scan")
+            })
+        );
+        assert!(!groups.has_stopped(42, now + Duration::from_secs(5), |_| false));
+        assert!(groups.0.is_empty());
+        assert!(groups.has_stopped(43, now, |_| true));
+        groups.0.remove(&43);
+        assert!(!groups.has_stopped(43, now, |_| false));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn nested_shell_command_finishes_at_nested_prompt() {
         let mut state = Foreground::default();
         let start = Instant::now();
@@ -445,7 +496,12 @@ mod tests {
         assert_eq!(events[0].duration, Duration::from_secs(12));
         assert!(
             state
-                .sample(Some(42), start + Duration::from_secs(100), || None, |_| false)
+                .sample(
+                    Some(42),
+                    start + Duration::from_secs(100),
+                    || None,
+                    |_| false
+                )
                 .is_empty()
         );
         assert_eq!(state.running.len(), 1);
