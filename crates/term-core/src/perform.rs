@@ -99,12 +99,7 @@ impl Perform for Terminal {
                 3 => self.tabs.iter_mut().for_each(|t| *t = false),
                 _ => {}
             },
-            ('h', _) | ('l', _) => {
-                let enable = action == 'h';
-                for p in params.iter() {
-                    self.set_mode(p[0], private, enable);
-                }
-            }
+            ('h', _) | ('l', _) => self.set_modes(params, private, action == 'h'),
             ('m', []) => self.sgr(params),
             ('n', []) => match arg(params, 0, 0) {
                 5 => self.responses.extend_from_slice(b"\x1b[0n"),
@@ -120,26 +115,7 @@ impl Perform for Terminal {
                 _ => {}
             },
             ('p', [b'?', b'$']) => {
-                let mode = arg(params, 0, 0);
-                let enabled = match mode {
-                    1 => Some(self.modes.app_cursor),
-                    6 => Some(self.modes.origin),
-                    7 => Some(self.modes.autowrap),
-                    25 => Some(self.modes.show_cursor),
-                    47 | 1047 | 1049 => Some(self.is_alt_screen()),
-                    1000 => Some(self.modes.mouse == MouseMode::Click),
-                    1002 => Some(self.modes.mouse == MouseMode::Drag),
-                    1003 => Some(self.modes.mouse == MouseMode::Motion),
-                    1004 => Some(self.modes.focus_events),
-                    1006 => Some(self.modes.sgr_mouse),
-                    1007 => Some(self.modes.alt_scroll),
-                    2004 => Some(self.modes.bracketed_paste),
-                    2026 => Some(self.modes.synchronized_output),
-                    _ => None,
-                };
-                let status = enabled.map_or(0, |set| if set { 1 } else { 2 });
-                let reply = format!("\x1b[?{mode};{status}$y");
-                self.responses.extend_from_slice(reply.as_bytes());
+                self.report_private_mode(arg(params, 0, 0));
             }
             ('q', [b' ']) => {
                 self.cursor_shape = match arg(params, 0, 0) {
@@ -243,6 +219,30 @@ impl Perform for Terminal {
 }
 
 impl Terminal {
+    #[cold]
+    #[inline(never)]
+    fn report_private_mode(&mut self, mode: u16) {
+        let enabled = match mode {
+            1 => Some(self.modes.app_cursor),
+            6 => Some(self.modes.origin),
+            7 => Some(self.modes.autowrap),
+            25 => Some(self.modes.show_cursor),
+            47 | 1047 | 1049 => Some(self.is_alt_screen()),
+            1000 => Some(self.modes.mouse == MouseMode::Click),
+            1002 => Some(self.modes.mouse == MouseMode::Drag),
+            1003 => Some(self.modes.mouse == MouseMode::Motion),
+            1004 => Some(self.modes.focus_events),
+            1006 => Some(self.modes.sgr_mouse),
+            1007 => Some(self.modes.alt_scroll),
+            2004 => Some(self.modes.bracketed_paste),
+            2026 => Some(self.modes.synchronized_output),
+            _ => None,
+        };
+        let status = enabled.map_or(0, |set| if set { 1 } else { 2 });
+        let reply = format!("\x1b[?{mode};{status}$y");
+        self.responses.extend_from_slice(reply.as_bytes());
+    }
+
     /// XTWINOPS size reports: text area in pixels (14), cell size in pixels (16) and text
     /// area in cells (18).
     fn window_report(&mut self, op: u16) {
@@ -258,6 +258,14 @@ impl Terminal {
             _ => return,
         };
         self.responses.extend_from_slice(reply.as_bytes());
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn set_modes(&mut self, params: &Params, private: bool, enable: bool) {
+        for p in params.iter() {
+            self.set_mode(p[0], private, enable);
+        }
     }
 
     fn set_mode(&mut self, mode: u16, private: bool, enable: bool) {
