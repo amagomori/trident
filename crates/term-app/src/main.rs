@@ -20,6 +20,7 @@ use config::Action;
 use input::MouseButton as ReportButton;
 use pty::Pty;
 use std::collections::HashSet;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -498,6 +499,20 @@ impl HeldAtFocus {
 
 fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) -> bool {
     (repeat || held_at_focus) && matches!(action, Action::NewWindow)
+}
+
+fn forward_new_window_stderr(mut reader: impl Read, mut writer: impl Write) -> std::io::Result<()> {
+    let mut chunk = [0; 4096];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(len) => {
+                let _ = writer.write_all(&chunk[..len]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
@@ -1322,13 +1337,27 @@ impl App {
                                     .args(std::env::args_os().skip(1))
                                     .stdin(Stdio::null())
                                     .stdout(Stdio::null())
-                                    .stderr(Stdio::null())
+                                    .stderr(Stdio::piped())
                                     .spawn()
                             });
                             match result {
                                 Ok(mut child) => {
-                                    if let Err(error) = child.wait() {
-                                        eprintln!("new window: {error}");
+                                    if let Some(stderr) = child.stderr.take() {
+                                        if let Err(error) =
+                                            forward_new_window_stderr(stderr, std::io::stderr())
+                                        {
+                                            eprintln!("new window: {error}");
+                                        }
+                                    }
+                                    match child.wait() {
+                                        Ok(status) if !status.success() => {
+                                            let _ = writeln!(
+                                                std::io::stderr(),
+                                                "terminal: new window exited with {status}"
+                                            );
+                                        }
+                                        Err(error) => eprintln!("new window: {error}"),
+                                        Ok(_) => {}
                                     }
                                 }
                                 Err(error) => eprintln!("new window: {error}"),
@@ -2106,6 +2135,57 @@ mod tests {
         assert!(!shell_shortcuts_available(&term));
         term.advance(b"\x1b[?1049l");
         assert!(shell_shortcuts_available(&term));
+    }
+
+    #[test]
+    fn new_window_stderr_streams_without_retaining_output() {
+        for input in [
+            Vec::new(),
+            b"startup failed\n".to_vec(),
+            vec![b'x'; 100_000],
+        ] {
+            let mut output = Vec::new();
+            forward_new_window_stderr(input.as_slice(), &mut output).unwrap();
+            assert_eq!(output, input);
+        }
+    }
+
+    #[test]
+    fn new_window_stderr_drains_after_writer_closes() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut input = std::io::Cursor::new(vec![b'x'; 100_000]);
+        forward_new_window_stderr(&mut input, Closed).unwrap();
+        assert_eq!(input.position(), 100_000);
+    }
+
+    #[test]
+    fn new_window_stderr_retries_interrupted_reads_and_reports_read_errors() {
+        struct Errors(bool);
+        impl Read for Errors {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                let kind = if self.0 {
+                    self.0 = false;
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    std::io::ErrorKind::Other
+                };
+                Err(kind.into())
+            }
+        }
+        assert_eq!(
+            forward_new_window_stderr(Errors(true), Vec::new())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Other
+        );
     }
 
     #[test]
