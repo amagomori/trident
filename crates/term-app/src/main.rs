@@ -216,6 +216,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
 
 struct Session {
     scroll: PixelScroll,
+    ime_cursor_area: Option<[f32; 4]>,
     pty_cell: (f32, f32),
     window: Arc<Window>,
     renderer: Renderer,
@@ -529,6 +530,7 @@ impl App {
         };
         Ok(Session {
             scroll: PixelScroll::default(),
+            ime_cursor_area: None,
             pty_cell: cell,
             latency,
             window,
@@ -863,8 +865,8 @@ impl App {
         self.update_ime_cursor_area();
     }
 
-    fn update_ime_cursor_area(&self) {
-        let Some(s) = &self.session else { return };
+    fn update_ime_cursor_area(&mut self) {
+        let Some(s) = &mut self.session else { return };
         let m = s.fonts.metrics;
         let area = if let Some(search) = &self.search {
             let size = s.window.inner_size();
@@ -886,11 +888,14 @@ impl App {
                 m.height,
             ]
         };
-        s.window.set_ime_allowed(true);
+        if s.ime_cursor_area == Some(area) {
+            return;
+        }
         s.window.set_ime_cursor_area(
             PhysicalPosition::new(area[0] as f64, area[1] as f64),
             PhysicalSize::new(area[2] as f64, area[3] as f64),
         );
+        s.ime_cursor_area = Some(area);
     }
 
     fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(isize, usize)> {
