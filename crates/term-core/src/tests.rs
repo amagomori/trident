@@ -34,6 +34,7 @@ fn scrolling_recycles_rows_as_fresh_blanks() {
             fg: Color::Indexed(2),
             bg: Color::Indexed(3),
             flags: Flags::BOLD | Flags::WIDE,
+            hyperlink: 7,
         });
         dirty.wrapped = true;
         dirty.flags = RowFlags::PROMPT_START;

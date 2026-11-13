@@ -9,6 +9,8 @@ mod ascii;
 mod cell;
 mod ghost;
 mod kitty;
+mod links;
+pub use links::Link;
 mod perform;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags};
@@ -219,6 +221,7 @@ impl PrintState {
 }
 
 pub struct Terminal {
+    links: Vec<(String, String)>,
     pub palette: colors::Palette,
     cols: usize,
     rows: usize,
@@ -684,6 +687,7 @@ impl Terminal {
                 input_start: None,
                 commands: VecDeque::new(),
             }),
+            links: Vec::new(),
             palette: colors::Palette::default(),
             cols,
             rows,
@@ -1368,6 +1372,7 @@ impl Terminal {
                 blank.flags.insert(Flags::WIDE_WRAP);
                 let line = &mut self.lines_mut()[row];
                 line.cells[col] = blank;
+                line.cells[col].flags.insert(Flags::WIDE_WRAP);
                 line.wrapped = true;
                 self.cursor.col = 0;
                 self.linefeed();

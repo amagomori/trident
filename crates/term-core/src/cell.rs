@@ -49,6 +49,7 @@ impl std::ops::BitOr for Flags {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
+    pub hyperlink: u16,
     pub c: char,
     pub fg: Color,
     pub bg: Color,
@@ -58,6 +59,7 @@ pub struct Cell {
 impl Default for Cell {
     fn default() -> Self {
         Cell {
+            hyperlink: 0,
             c: ' ',
             fg: Color::DefaultFg,
             bg: Color::DefaultBg,

@@ -201,6 +201,31 @@ impl Perform for Terminal {
         self.print_state.disarm_clear();
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
+            [b"8", attributes, rest @ ..] if !rest.is_empty() => {
+                let uri = rest
+                    .iter()
+                    .map(|p| String::from_utf8_lossy(p))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                let id = String::from_utf8_lossy(attributes)
+                    .split(':')
+                    .find_map(|p| p.strip_prefix("id="))
+                    .unwrap_or("")
+                    .to_owned();
+                self.cursor.template.hyperlink = if uri.is_empty() {
+                    0
+                } else {
+                    let key = (id, uri);
+                    if let Some(i) = self.links.iter().position(|v| v == &key) {
+                        (i + 1) as u16
+                    } else if self.links.len() < u16::MAX as usize {
+                        self.links.push(key);
+                        self.links.len() as u16
+                    } else {
+                        0
+                    }
+                };
+            }
             [b"133", mark, args @ ..] => {
                 self.shell_mark(mark, args);
             }
@@ -337,7 +362,12 @@ impl Terminal {
         let mut iter = params.iter();
         while let Some(param) = iter.next() {
             match param[0] {
-                0 => *t = Default::default(),
+                0 => {
+                    *t = super::Cell {
+                        hyperlink: t.hyperlink,
+                        ..Default::default()
+                    }
+                }
                 1 => t.flags.insert(Flags::BOLD),
                 2 => t.flags.insert(Flags::DIM),
                 3 => t.flags.insert(Flags::ITALIC),
