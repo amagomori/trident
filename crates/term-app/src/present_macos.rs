@@ -1,5 +1,5 @@
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -18,12 +18,10 @@ struct Sink {
 
 static SINK: OnceLock<Sink> = OnceLock::new();
 static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-static TRACK_EXIT: AtomicBool = AtomicBool::new(false);
 static PRESENTED: AtomicUsize = AtomicUsize::new(0);
 static SKIPPED: AtomicUsize = AtomicUsize::new(0);
 
 pub fn arm_exit() -> usize {
-    TRACK_EXIT.store(true, Ordering::Release);
     SEQUENCE.load(Ordering::Acquire) + 1
 }
 
@@ -42,9 +40,7 @@ unsafe extern "C-unwind" fn present_drawable(
     let sink = SINK
         .get()
         .expect("presentation hook installed without sink");
-    if let Some(drawable) = unsafe { drawable.as_ref() }
-        && (sink.lines.is_some() || TRACK_EXIT.load(Ordering::Acquire))
-    {
+    if let Some(drawable) = unsafe { drawable.as_ref() } {
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let handler = RcBlock::new(move |drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
             let time = unsafe { drawable.as_ref() }.presentedTime();

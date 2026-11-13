@@ -467,6 +467,21 @@ struct ExitPresentation {
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 impl ExitPresentation {
+    #[cfg(any(target_os = "macos", test))]
+    fn update_metal(
+        &mut self,
+        presented: usize,
+        skipped: usize,
+        now: Instant,
+        refresh: u32,
+    ) -> bool {
+        if presented == 0 && self.target.is_some_and(|target| skipped >= target) {
+            self.linger.get_or_insert(now);
+            return false;
+        }
+        self.update(presented, skipped, now, refresh)
+    }
+
     fn update(&mut self, presented: usize, skipped: usize, now: Instant, refresh: u32) -> bool {
         if let Some(target) = self.target {
             if presented >= target {
@@ -1554,11 +1569,18 @@ impl ApplicationHandler<UserEvent> for App {
                     .and_then(|m| m.refresh_rate_millihertz())
                     .filter(|rate| *rate > 0)
                     .unwrap_or(60_000);
-                if self
-                    .exit_presentation
-                    .update(presented, skipped, Instant::now(), refresh)
-                    && let Some(s) = &mut self.session
-                {
+                #[cfg(target_os = "macos")]
+                let retry = self.exit_presentation.update_metal(
+                    presented,
+                    skipped,
+                    Instant::now(),
+                    refresh,
+                );
+                #[cfg(target_os = "linux")]
+                let retry =
+                    self.exit_presentation
+                        .update(presented, skipped, Instant::now(), refresh);
+                if retry && let Some(s) = &mut self.session {
                     s.request_frame();
                 }
             }
@@ -1956,6 +1978,54 @@ mod tests {
         assert!(output.is_empty());
         assert!(!term.modes.synchronized_output);
         assert!(output.waiting_since.is_some());
+    }
+
+    #[test]
+    fn metal_exit_without_real_feedback_completes_on_handler() {
+        let now = Instant::now();
+        let mut state = ExitPresentation::default();
+        assert!(!state.update_metal(0, 1, now, 60_000));
+        assert!(!state.ready(now));
+        state.target = Some(2);
+        assert!(!state.update_metal(0, 1, now, 60_000));
+        assert!(!state.ready(now));
+        assert!(!state.update_metal(0, 2, now, 60_000));
+        assert!(state.ready(now));
+        assert!(exit_ready(Some(now + EXIT_TIMEOUT), state.ready(now), now));
+    }
+
+    #[test]
+    fn metal_exit_with_real_feedback_retries_skip_and_lingers() {
+        let now = Instant::now();
+        let mut state = ExitPresentation {
+            target: Some(2),
+            linger: None,
+        };
+        assert!(state.update_metal(1, 2, now, 60_000));
+        assert_eq!(state.target, None);
+        assert!(!state.ready(now));
+        state.target = Some(3);
+        assert!(!state.update_metal(3, 2, now, 60_000));
+        assert!(!state.ready(now));
+        assert!(state.ready(now + Duration::from_secs_f64(2.0 / 60.0)));
+    }
+
+    #[test]
+    fn metal_exit_cap_applies_without_handlers_or_after_real_feedback_skip() {
+        let now = Instant::now();
+        for presented in [0, 1] {
+            let mut state = ExitPresentation {
+                target: Some(2),
+                linger: None,
+            };
+            state.update_metal(presented, 0, now, 60_000);
+            if presented != 0 {
+                assert!(state.update_metal(presented, 2, now, 60_000));
+            }
+            let deadline = Some(now + EXIT_TIMEOUT);
+            assert!(!exit_ready(deadline, state.ready(now), now));
+            assert!(exit_ready(deadline, state.ready(now), now + EXIT_TIMEOUT));
+        }
     }
 
     #[test]
