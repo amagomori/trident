@@ -831,7 +831,7 @@ impl Terminal {
                         .rposition(|r| !r.is_blank())
                         .map_or(0, |r| r + 1);
                     for p in &self.primary.placements {
-                        let end = p.line.saturating_add(p.rows as u64);
+                        let end = p.line.saturating_add(p.visible_rows() as u64);
                         used = used
                             .max(end.saturating_sub(self.history).min(self.rows as u64) as usize);
                     }

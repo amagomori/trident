@@ -148,8 +148,17 @@ fn fit_shrinks_to_the_texture_limit_keeping_aspect() {
 
 #[test]
 fn erase_display_crops_bottom_clipped_images_without_squashing() {
-    for (rows, y_offset) in [(0, 0), (2, 0), (4, 0), (0, 10), (3, 10)] {
+    for (image_height, rows, y_offset) in [
+        (40, 0, 0),
+        (40, 2, 0),
+        (40, 4, 0),
+        (40, 0, 10),
+        (40, 3, 10),
+        (1, 2, 0),
+        (1, 3, 10),
+    ] {
         let mut t = term();
+        t.add_image(1, image(20, image_height)).unwrap();
         t.advance(b"\x1b[5;1H");
         t.place_image(
             1,

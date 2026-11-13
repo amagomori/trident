@@ -220,8 +220,9 @@ fn erase_display_preserves_bottom_clipped_images_in_history() {
                 assert_eq!(visible.len(), 1);
                 assert_eq!(visible[0].row, limit.min(5) as isize - 1);
                 assert_eq!(visible[0].placement.line, p.line);
-                assert_eq!(visible[0].placement.rows, 1);
-                assert_eq!(visible[0].placement.source.height, 40 / p.rows as u32);
+                assert_eq!(visible[0].placement.visible_rows(), 1);
+                assert_eq!(visible[0].placement.rows, p.rows);
+                assert_eq!(visible[0].placement.source, p.source);
                 // Repeated clears must not erase a placement already in history.
                 t.advance(b"\x1b[2J");
                 assert_eq!(t.visible_placements(), visible);

@@ -514,8 +514,9 @@ impl Terminal {
         // 1-based cell coordinates, as the protocol sends them.
         let (x, y) = (c.source.x as usize, c.source.y as i64);
         let covers_col = |p: &crate::Placement, col: usize| p.col < col && col <= p.col + p.cols;
-        let covers_row =
-            |p: &crate::Placement, top: i64, row: i64| top < row && row <= top + p.rows as i64;
+        let covers_row = |p: &crate::Placement, top: i64, row: i64| {
+            top < row && row <= top + p.visible_rows() as i64
+        };
         let (cursor_row, cursor_col) = (self.cursor.row as i64 + 1, self.cursor.col + 1);
         let target = match c.delete.to_ascii_lowercase() {
             b'i' | b'n' => match self.resolve_image(c) {
@@ -525,7 +526,7 @@ impl Terminal {
             _ => None,
         };
         let removed = self.delete_placements_where(|p, top| match c.delete.to_ascii_lowercase() {
-            b'a' => top < rows && top + p.rows as i64 > 0,
+            b'a' => top < rows && top + p.visible_rows() as i64 > 0,
             b'i' | b'n' => {
                 Some(p.image_id) == target && (c.placement == 0 || p.placement_id == c.placement)
             }
