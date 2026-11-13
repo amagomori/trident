@@ -290,7 +290,7 @@ impl Pty {
                 }
                 reader_stopped.store(true, Ordering::Release);
                 #[cfg(unix)]
-                reader_activity.kick();
+                reader_activity.wake_for_shutdown();
                 wake(true);
             })
             .map_err(|e| format!("cannot start reader thread: {e}"))?;
@@ -436,7 +436,7 @@ impl Drop for Pty {
     fn drop(&mut self) {
         self.watcher_stopped.store(true, Ordering::Release);
         #[cfg(unix)]
-        self.watcher_activity.kick();
+        self.watcher_activity.wake_for_shutdown();
         self.output.pending.lock().unwrap().closed = true;
         self.output.room.notify_one();
         let _ = self.child.kill();

@@ -192,10 +192,14 @@ fn command_name(group: libc::pid_t) -> Option<String> {
 #[cfg(unix)]
 pub struct Activity {
     enabled: std::sync::atomic::AtomicBool,
+    kicked: std::sync::atomic::AtomicBool,
+    idle: std::sync::atomic::AtomicBool,
     sender: std::sync::mpsc::SyncSender<()>,
     receiver: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     #[cfg(test)]
     samples: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    wakeups: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(unix)]
@@ -204,10 +208,14 @@ impl Default for Activity {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         Self {
             enabled: false.into(),
+            kicked: false.into(),
+            idle: false.into(),
             sender,
             receiver: std::sync::Mutex::new(receiver),
             #[cfg(test)]
             samples: 0.into(),
+            #[cfg(test)]
+            wakeups: 0.into(),
         }
     }
 }
@@ -215,9 +223,17 @@ impl Default for Activity {
 #[cfg(unix)]
 impl Activity {
     pub fn kick(&self) {
-        if self.enabled.load(std::sync::atomic::Ordering::Acquire) {
-            let _ = self.sender.try_send(());
+        use std::sync::atomic::Ordering;
+        if self.enabled.load(Ordering::Acquire)
+            && !self.kicked.swap(true, Ordering::SeqCst)
+            && self.idle.load(Ordering::SeqCst)
+        {
+            self.wake_for_shutdown();
         }
+    }
+
+    pub fn wake_for_shutdown(&self) {
+        let _ = self.sender.try_send(());
     }
 }
 
@@ -235,7 +251,7 @@ impl Drop for Watcher {
             .enabled
             .store(false, std::sync::atomic::Ordering::Release);
         self.stop.store(true, std::sync::atomic::Ordering::Release);
-        let _ = self.activity.sender.try_send(());
+        self.activity.wake_for_shutdown();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -392,6 +408,9 @@ pub fn watch(
             let mut last_kick = Instant::now();
             let mut next_sample = Instant::now();
             while !stopped.load(Ordering::Acquire) && !thread_stop.load(Ordering::Acquire) {
+                if thread_activity.kicked.swap(false, Ordering::SeqCst) {
+                    last_kick = Instant::now();
+                }
                 #[cfg(test)]
                 thread_activity.samples.fetch_add(1, Ordering::Relaxed);
                 // SAFETY: this thread owns the descriptor until it exits.
@@ -426,23 +445,30 @@ pub fn watch(
                     let result = if active {
                         receiver.recv_timeout(next_sample.saturating_duration_since(Instant::now()))
                     } else {
-                        receiver
+                        thread_activity.idle.store(true, Ordering::SeqCst);
+                        if thread_activity.kicked.swap(false, Ordering::SeqCst) {
+                            thread_activity.idle.store(false, Ordering::SeqCst);
+                            last_kick = Instant::now();
+                            continue;
+                        }
+                        let result = receiver
                             .recv()
-                            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+                            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected);
+                        thread_activity.idle.store(false, Ordering::SeqCst);
+                        result
                     };
                     match result {
                         Ok(()) => {
-                            last_kick = Instant::now();
+                            #[cfg(test)]
+                            thread_activity.wakeups.fetch_add(1, Ordering::Relaxed);
                             if stopped.load(Ordering::Acquire)
                                 || thread_stop.load(Ordering::Acquire)
                             {
                                 return;
                             }
                             if !active {
+                                last_kick = Instant::now();
                                 next_sample = Instant::now();
-                                break;
-                            }
-                            if Instant::now() >= next_sample {
                                 break;
                             }
                         }
@@ -873,6 +899,42 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn active_kicks_do_not_wake_watcher_or_increase_sample_rate() {
+        use std::sync::atomic::Ordering;
+        let (_reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let activity = std::sync::Arc::new(Activity::default());
+        let watcher = watch(
+            writer.into(),
+            1,
+            Default::default(),
+            activity.clone(),
+            |_| panic!("no PTY group"),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while activity.samples.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let samples = activity.samples.load(Ordering::Relaxed);
+        assert!(samples > 0);
+        let start = Instant::now();
+        let mut kicks = 0;
+        while start.elapsed() < Duration::from_secs(1) {
+            for _ in 0..100 {
+                activity.kick();
+                kicks += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(kicks > 1000);
+        let samples = activity.samples.load(Ordering::Relaxed) - samples;
+        assert!((4..=6).contains(&samples), "{samples} samples");
+        assert_eq!(activity.wakeups.load(Ordering::Relaxed), 0);
+        drop(watcher);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn shell_exit_kick_stops_idle_watcher() {
         use std::sync::atomic::Ordering;
         let (_reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -884,7 +946,7 @@ mod tests {
         .unwrap();
         assert_idle(&activity);
         stopped.store(true, Ordering::Release);
-        activity.kick();
+        activity.wake_for_shutdown();
         let deadline = Instant::now() + Duration::from_millis(500);
         while !watcher.thread.as_ref().unwrap().is_finished() && Instant::now() < deadline {
             std::thread::yield_now();
