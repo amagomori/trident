@@ -120,11 +120,17 @@ impl Terminal {
             let tail = &text[offset..];
             let Some(scheme) = ["https://", "http://", "ftp://", "file://", "mailto:"]
                 .iter()
-                .find(|s| tail.starts_with(**s))
+                .find(|s| {
+                    tail.get(..s.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(s))
+                })
             else {
                 continue;
             };
-            let mut uri = tail.split_whitespace().next().unwrap_or("");
+            let mut uri = tail
+                .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
+                .next()
+                .unwrap_or("");
             while let Some(c) = uri.chars().last() {
                 let trim = ".,;:!?\"'<>".contains(c)
                     || [(')', '('), (']', '['), ('}', '{')]
@@ -214,6 +220,55 @@ mod tests {
                 .link_at(Point { line: 0, col: 0 })
                 .is_none()
         );
+    }
+
+    #[test]
+    fn quoted_urls() {
+        for input in [
+            r#"{"url":"https://example.com","status":"ok"}"#,
+            "'https://example.com',next",
+            "https://example.com\",next",
+            "<https://example.com>next",
+        ] {
+            let mut t = Terminal::new(80, 2);
+            t.advance(input.as_bytes());
+            let start = input.find("https://").unwrap();
+            let end = start + "https://example.com".len() - 1;
+            for col in start..=end {
+                let link = t.link_at(Point { line: 0, col }).unwrap();
+                assert_eq!(link.uri, "https://example.com");
+                assert_eq!(link.start.col, start);
+                assert_eq!(link.end.col, end);
+            }
+            assert!(
+                t.link_at(Point {
+                    line: 0,
+                    col: end + 1
+                })
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn case_insensitive_schemes() {
+        for uri in [
+            "HTTPS://Example.com/path",
+            "Https://example.com",
+            "HTTP://example.com",
+            "FtP://example.com",
+            "FILE:///tmp/a",
+            "MailTo:a@b.test",
+        ] {
+            let mut t = Terminal::new(80, 2);
+            t.advance(uri.as_bytes());
+            assert_eq!(t.link_at(Point { line: 0, col: 0 }).unwrap().uri, uri);
+        }
+        for input in ["HTTPS://", "Https://\",next", "HTTp:/example.com"] {
+            let mut t = Terminal::new(80, 2);
+            t.advance(input.as_bytes());
+            assert!(t.link_at(Point { line: 0, col: 0 }).is_none());
+        }
     }
 
     #[test]
