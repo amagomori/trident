@@ -410,6 +410,44 @@ fn shell_integration_multiline_resize_and_guard_reset() {
 }
 
 #[test]
+fn shell_prompt_rows_survive_ghost_batches() {
+    for mark in [b'A', b'B'] {
+        for limit in [0, 2, 100] {
+            let mut batched = Terminal::new(20, 3);
+            let mut streamed = Terminal::new(20, 3);
+            for term in [&mut batched, &mut streamed] {
+                term.set_scrollback_limit(limit);
+                term.advance(b"\x1b]133;A\x07");
+                if mark == b'B' {
+                    term.advance(b"\x1b]133;B\x07");
+                }
+            }
+            let bytes = b"prompt or input\r\n".repeat(400);
+            crate::ghost::ADVANCES.set(0);
+            batched.advance(&bytes);
+            assert!(crate::ghost::ADVANCES.get() > 0);
+            for byte in &bytes {
+                streamed.advance(&[*byte]);
+            }
+            for term in [&mut batched, &mut streamed] {
+                term.advance(b"\x1b]133;C\x07");
+            }
+            assert_eq!(batched.primary.lines, streamed.primary.lines);
+            assert_eq!(batched.primary.scrollback, streamed.primary.scrollback);
+            assert!(
+                batched
+                    .primary
+                    .scrollback
+                    .iter()
+                    .chain(&batched.primary.lines)
+                    .all(|row| row.flags.contains(RowFlags::PROMPT))
+            );
+            assert!(batched.primary.scrollback.len() == limit);
+        }
+    }
+}
+
+#[test]
 fn shell_integration_lazy_prompt_rows() {
     for limit in [0, 2, 100] {
         let mut t = Terminal::new(20, 3);
