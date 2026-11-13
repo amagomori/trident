@@ -225,19 +225,9 @@ fn stopped_stat(stat: &[u8], group: i32) -> bool {
     matches!(state, Some(b"T" | b"t")) && pgrp == Some(group.to_string().as_bytes())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn group_has_stopped(group: i32) -> bool {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return true;
-    };
-    entries.flatten().any(|entry| {
-        entry
-            .file_name()
-            .as_encoded_bytes()
-            .iter()
-            .all(u8::is_ascii_digit)
-            && std::fs::read(entry.path().join("stat")).is_ok_and(|stat| stopped_stat(&stat, group))
-    })
+    StoppedGroups::default().has_stopped(group)
 }
 
 #[cfg(target_os = "macos")]
@@ -300,25 +290,46 @@ fn group_has_stopped(_: i32) -> bool {
 
 #[cfg(unix)]
 #[derive(Default)]
-struct StoppedGroups(std::collections::BTreeMap<i32, Instant>);
+struct StoppedGroups(std::collections::BTreeMap<i32, Vec<i32>>);
 
 #[cfg(unix)]
 impl StoppedGroups {
-    fn has_stopped(&mut self, group: i32, now: Instant, scan: impl FnOnce(i32) -> bool) -> bool {
-        if self
-            .0
-            .get(&group)
-            .is_some_and(|checked| now.duration_since(*checked) < Duration::from_secs(5))
-        {
+    #[cfg(target_os = "linux")]
+    fn has_stopped(&mut self, group: i32) -> bool {
+        let members = self.0.entry(group).or_default();
+        members.retain(|pid| {
+            std::fs::read(format!("/proc/{pid}/stat")).is_ok_and(|stat| stopped_stat(&stat, group))
+        });
+        if !members.is_empty() {
             return true;
         }
-        if scan(group) {
-            self.0.insert(group, now);
-            true
-        } else {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return true;
+        };
+        for entry in entries.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            if std::fs::read(entry.path().join("stat")).is_ok_and(|stat| stopped_stat(&stat, group))
+            {
+                members.push(pid);
+            }
+        }
+        if members.is_empty() {
             self.0.remove(&group);
             false
+        } else {
+            true
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn has_stopped(&mut self, group: i32) -> bool {
+        group_has_stopped(group)
     }
 }
 
@@ -355,10 +366,7 @@ pub fn watch(
                             None
                         }
                     },
-                    |pid| {
-                        leader_exited(pid)
-                            && !stopped_groups.has_stopped(pid, now, group_has_stopped)
-                    },
+                    |pid| leader_exited(pid) && !stopped_groups.has_stopped(pid),
                 );
                 stopped_groups
                     .0
@@ -452,25 +460,6 @@ mod tests {
         assert!(state.sample(None, now, || None, |_| true).is_empty());
         state.sample(Some(43), now, || None, |_| false);
         assert!(state.sample(None, now, || None, |_| true)[0].name.is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stopped_groups_cache_only_stopped_verdicts() {
-        let mut groups = StoppedGroups::default();
-        let now = Instant::now();
-        assert!(!groups.has_stopped(42, now, |_| false));
-        assert!(groups.has_stopped(42, now, |_| true));
-        assert!(
-            groups.has_stopped(42, now + Duration::from_millis(4800), |_| {
-                panic!("cached stopped group must not scan")
-            })
-        );
-        assert!(!groups.has_stopped(42, now + Duration::from_secs(5), |_| false));
-        assert!(groups.0.is_empty());
-        assert!(groups.has_stopped(43, now, |_| true));
-        groups.0.remove(&43);
-        assert!(!groups.has_stopped(43, now, |_| false));
     }
 
     #[cfg(unix)]
@@ -613,6 +602,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn stopped_member_survives_leader_and_defers_completion() {
+        check_stopped_member(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopped_member_resumed_in_background_is_rechecked() {
+        check_stopped_member(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn check_stopped_member(resume_in_background: bool) {
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
 
@@ -654,6 +654,10 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(group_has_stopped(group.0));
+        let mut groups = StoppedGroups::default();
+        assert!(groups.has_stopped(group.0));
+        assert_eq!(groups.0.get(&group.0), Some(&vec![member]));
+        assert!(groups.has_stopped(group.0));
         let mut state = Foreground::default();
         let now = Instant::now();
         state.sample(Some(group.0), now, || None, |_| false);
@@ -663,12 +667,30 @@ mod tests {
                     None,
                     now + Duration::from_secs(12),
                     || None,
-                    |pid| leader_exited(pid) && !group_has_stopped(pid)
+                    |pid| leader_exited(pid) && !groups.has_stopped(pid)
                 )
                 .is_empty()
         );
         // SAFETY: member is the stopped child created by this test.
         assert_eq!(unsafe { libc::kill(member, libc::SIGCONT) }, 0);
+        if resume_in_background {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while group_has_stopped(group.0) && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(!group_has_stopped(group.0));
+            assert!(!leader_exited(member));
+            assert!(!groups.has_stopped(group.0));
+            assert!(groups.0.is_empty());
+            let events = state.sample(
+                None,
+                now + Duration::from_secs(12),
+                || None,
+                |pid| leader_exited(pid) && !groups.has_stopped(pid),
+            );
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].duration, Duration::from_secs(12));
+        }
         assert_eq!(unsafe { libc::kill(member, libc::SIGTERM) }, 0);
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut member_exited = false;
@@ -691,10 +713,14 @@ mod tests {
             None,
             now + Duration::from_secs(15),
             || None,
-            |pid| leader_exited(pid) && !group_has_stopped(pid),
+            |pid| leader_exited(pid) && !groups.has_stopped(pid),
         );
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].duration, Duration::from_secs(15));
+        if resume_in_background {
+            assert!(events.is_empty());
+        } else {
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].duration, Duration::from_secs(15));
+        }
     }
 
     #[cfg(unix)]
