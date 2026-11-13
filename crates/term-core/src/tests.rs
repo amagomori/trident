@@ -1,5 +1,7 @@
 use super::*;
 
+mod golden;
+
 fn term(cols: usize, rows: usize, input: &str) -> Terminal {
     let mut t = Terminal::new(cols, rows);
     t.advance(input.as_bytes());
