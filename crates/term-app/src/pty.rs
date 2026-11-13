@@ -96,6 +96,7 @@ pub struct Pty {
     output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
     pub wake_pending: Arc<AtomicBool>,
+    watcher_stopped: Arc<AtomicBool>,
 }
 
 struct Input {
@@ -133,6 +134,7 @@ impl Pty {
         rows: usize,
         cell: (f32, f32),
         wake: impl Fn(bool) + Send + 'static,
+        finished: impl Fn(crate::command_notify::Finished) + Send + 'static,
     ) -> Result<Pty, String> {
         let pair = native_pty_system()
             .openpty(size(cols, rows, cell.0, cell.1))
@@ -177,6 +179,20 @@ impl Pty {
             .master
             .try_clone_reader()
             .map_err(|e| format!("cannot read pty: {e}"))?;
+        let watcher_stopped = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        if let (Some(fd), Some(shell)) = (&foreground_fd, shell_pid) {
+            crate::command_notify::watch(
+                fd.try_clone()
+                    .map_err(|e| format!("cannot clone pty: {e}"))?,
+                shell,
+                watcher_stopped.clone(),
+                finished,
+            )
+            .map_err(|e| format!("cannot start command watcher: {e}"))?;
+        }
+        #[cfg(not(unix))]
+        let _ = finished;
         let mut writer = pair
             .master
             .take_writer()
@@ -226,6 +242,7 @@ impl Pty {
         let queue = output.clone();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let pending = wake_pending.clone();
+        let reader_stopped = watcher_stopped.clone();
         std::thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
@@ -273,6 +290,7 @@ impl Pty {
                         }
                     }
                 }
+                reader_stopped.store(true, Ordering::Release);
                 wake(true);
             })
             .map_err(|e| format!("cannot start reader thread: {e}"))?;
@@ -286,6 +304,7 @@ impl Pty {
             child,
             output,
             wake_pending,
+            watcher_stopped,
         })
     }
 
@@ -371,6 +390,7 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
+        self.watcher_stopped.store(true, Ordering::Release);
         self.output.pending.lock().unwrap().closed = true;
         self.output.room.notify_one();
         let _ = self.child.kill();

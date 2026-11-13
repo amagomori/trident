@@ -1,4 +1,5 @@
 mod clipboard;
+mod command_notify;
 mod config;
 mod flow_control;
 #[cfg(any(target_os = "linux", test))]
@@ -90,6 +91,7 @@ impl ResizeThrottle {
 
 #[derive(Debug)]
 enum UserEvent {
+    CommandFinished(command_notify::Finished),
     ConfigChanged,
     Output,
     Exit,
@@ -437,6 +439,7 @@ impl App {
         );
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let proxy = self.proxy.clone();
+        let command_proxy = self.proxy.clone();
         let pty = Pty::spawn(
             self.options.command(&self.config),
             &self.config.env,
@@ -449,6 +452,9 @@ impl App {
                 } else {
                     UserEvent::Output
                 });
+            },
+            move |finished| {
+                let _ = command_proxy.send_event(UserEvent::CommandFinished(finished));
             },
         )?;
         let attrs = Window::default_attributes()
@@ -985,6 +991,15 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
+            UserEvent::CommandFinished(finished) => {
+                if command_notify::should_notify(
+                    self.focused,
+                    finished.duration,
+                    self.config.notify_long_commands_after,
+                ) {
+                    command_notify::notify(finished);
+                }
+            }
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Output => self.output_ready(),
             UserEvent::Exit => {
