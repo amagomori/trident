@@ -726,12 +726,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn dropping_watcher_joins_thread_and_closes_descriptor() {
-        use std::os::fd::{AsRawFd, OwnedFd};
-        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
-        let raw = fd.as_raw_fd();
-        let watcher = watch(fd, 1, Default::default(), |_| panic!("no PTY group")).unwrap();
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let watcher = watch(writer.into(), 1, Default::default(), |_| {
+            panic!("no PTY group")
+        })
+        .unwrap();
         drop(watcher);
-        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
+        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
     }
 
     #[test]
