@@ -682,6 +682,26 @@ fn cases() -> Vec<Case> {
         ("erase_line_end", 6, 2, b"abcdef\x1b[1;3H\x1b[K"),
         ("erase_line_start", 6, 2, b"abcdef\x1b[1;3H\x1b[1K"),
         ("erase_line_all_background", 6, 2, b"abcdef\x1b[44m\x1b[2K"),
+        ("erase_characters_default", 6, 2, b"abcdef\x1b[1;3H\x1b[X"),
+        ("erase_characters_zero", 6, 2, b"abcdef\x1b[1;3H\x1b[0X"),
+        (
+            "erase_characters_background",
+            8,
+            2,
+            b"abcdefgh\x1b[1;3H\x1b[1;31;44m\x1b[3X",
+        ),
+        (
+            "erase_characters_clamped",
+            6,
+            2,
+            b"abcdef\r\nghijkl\x1b[1;5H\x1b[99X",
+        ),
+        (
+            "erase_characters_wide",
+            8,
+            2,
+            "a你b好cd\x1b[1;3H\x1b[3X".as_bytes(),
+        ),
         (
             "erase_display_end",
             4,
@@ -730,6 +750,41 @@ fn cases() -> Vec<Case> {
             2,
             b"shell\x1b[?1049h\x1b[Hvim\x1b[?1049l!",
         ),
+        ("alternate_47_active", 8, 2, b"shell\x1b[?47h\x1b[Halt"),
+        (
+            "alternate_47_restored",
+            8,
+            2,
+            // Unlike 1049, neither 47 nor 1047 saves/restores the cursor or SGR.
+            b"shell\x1b7\x1b[?47h\x1b[2;3H\x1b[32mALT\x1b[?47l!",
+        ),
+        (
+            "alternate_47_reentered",
+            8,
+            2,
+            b"shell\x1b[?47h\x1b[Halt\x1b[?47l\x1b[?47h",
+        ),
+        (
+            "alternate_1047_active",
+            8,
+            2,
+            // 1047 preserves existing alternate contents on entry, like 47.
+            b"shell\x1b[?47h\x1b[Halt\x1b[?47l\x1b[?1047h",
+        ),
+        (
+            "alternate_1047_restored",
+            8,
+            2,
+            b"shell\x1b7\x1b[?1047h\x1b[Halt\x1b[2;3H\x1b[32m\x1b[?1047l!",
+        ),
+        (
+            "alternate_1047_cleared",
+            8,
+            2,
+            // Reenter via 47 so a misplaced clear-on-entry cannot hide a bad reset.
+            b"shell\x1b[?1047h\x1b[Halt\x1b[?1047l\x1b[?47h",
+        ),
+        ("alternate_1047_reset_primary", 8, 2, b"shell\x1b[?1047l"),
         (
             "scroll_region_forward",
             4,
@@ -741,6 +796,43 @@ fn cases() -> Vec<Case> {
             4,
             4,
             b"1\r\n2\r\n3\r\n4\x1b[2;3r\x1b[2;1H\x1bM",
+        ),
+        ("origin_mode_home", 6, 5, b"\x1b[2;4r\x1b[5;6H\x1b[?6h"),
+        (
+            "origin_mode_cup",
+            6,
+            5,
+            b"1\r\n2\r\n3\r\n4\r\n5\x1b[2;4r\x1b[?6h\x1b[2;3HX\x1b[99;99HY",
+        ),
+        (
+            "origin_mode_vpa",
+            6,
+            5,
+            b"\x1b[2;4r\x1b[?6h\x1b[2;3HX\x1b[1dY\x1b[99dZ",
+        ),
+        (
+            "origin_mode_relative_clamped",
+            6,
+            5,
+            b"\x1b[2;4r\x1b[?6h\x1b[99Bv\x1b[99A^",
+        ),
+        (
+            "origin_mode_reset_home",
+            6,
+            5,
+            b"\x1b[2;4r\x1b[?6h\x1b[2;3HX\x1b[?6l",
+        ),
+        (
+            "origin_mode_reset_absolute",
+            6,
+            5,
+            b"\x1b[2;4r\x1b[?6h\x1b[2;3HX\x1b[?6l\x1b[5;2HY",
+        ),
+        (
+            "origin_mode_region_home",
+            6,
+            5,
+            b"\x1b[2;5r\x1b[?6h\x1b[4;3HX\x1b[3;4r",
         ),
         (
             "insert_delete_lines",

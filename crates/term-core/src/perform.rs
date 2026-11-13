@@ -290,7 +290,16 @@ impl Terminal {
             }
             7 => self.modes.autowrap = enable,
             25 => self.modes.show_cursor = enable,
-            47 | 1047 => self.set_alt_screen(enable, false, mode == 1047 && enable),
+            47 => self.set_alt_screen(enable, false, false),
+            1047 => {
+                // Unlike 1049, 1047 clears the alternate buffer on exit, not entry.
+                if !enable && self.alt_active {
+                    for row in 0..self.rows {
+                        self.erase_row(row);
+                    }
+                }
+                self.set_alt_screen(enable, false, false);
+            }
             1048 => {
                 if enable {
                     self.save_cursor()
