@@ -861,6 +861,13 @@ mod tests {
         wait(None);
         std::fs::write(&theme, "[colors]\nbackground = '#778899'").unwrap();
         wait(Some((0x77, 0x88, 0x99)));
+        std::fs::write(&path, "theme = { light = 'auto', dark = 'tokyo-night' }").unwrap();
+        wait(None);
+        let named_auto = dir.join("auto");
+        std::fs::write(&named_auto, "[colors]\nbackground = '#010203'").unwrap();
+        wait(Some((1, 2, 3)));
+        std::fs::write(&named_auto, "[colors]\nbackground = '#040506'").unwrap();
+        wait(Some((4, 5, 6)));
         drop(watcher);
         std::fs::remove_dir_all(dir).unwrap();
     }

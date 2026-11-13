@@ -180,19 +180,18 @@ pub fn files(config: &Path) -> Vec<PathBuf> {
     let selection = std::fs::read_to_string(config)
         .ok()
         .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
-        .and_then(|table| table.get("theme").cloned());
-    let names: Vec<&str> = match &selection {
-        Some(toml::Value::String(name)) => vec![name],
-        Some(toml::Value::Table(table)) => ["light", "dark"]
-            .iter()
-            .filter_map(|key| table.get(*key).and_then(toml::Value::as_str))
-            .collect(),
+        .and_then(|table| table.get("theme").cloned())
+        .and_then(|value| value.try_into::<Selection>().ok());
+    let names = match selection {
+        Some(Selection::Name(name)) if name == "auto" => vec![],
+        Some(Selection::Name(name)) => vec![name],
+        Some(Selection::Auto(pair)) => vec![pair.light, pair.dark],
         _ => vec![],
     };
     names
         .into_iter()
-        .filter(|name| *name != "auto" && !BUNDLED.iter().any(|(n, _)| n == name))
-        .map(|name| file_path(config, name))
+        .filter(|name| !BUNDLED.iter().any(|(n, _)| n == name))
+        .map(|name| file_path(config, &name))
         .collect()
 }
 
