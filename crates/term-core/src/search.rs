@@ -50,10 +50,7 @@ impl Terminal {
             for (col, cell) in cells.iter().enumerate() {
                 if cell.flags.contains(Flags::WIDE_SPACER)
                     || cell.flags.contains(Flags::PAD)
-                    || (cell.flags.contains(Flags::WIDE_WRAP)
-                        && cell.c == ' '
-                        && row.wrapped
-                        && col == row.cells.len() - 1)
+                    || cell.flags.contains(Flags::WIDE_WRAP)
                 {
                     continue;
                 }
@@ -147,8 +144,63 @@ mod tests {
     fn inserted_blanks_are_not_wide_wrap_padding() {
         let mut t = Terminal::new(4, 2);
         t.advance("abc界\x1b[1;3H\x1b[@".as_bytes());
-        assert_eq!(t.search("ab c界", false).unwrap().len(), 1);
+        assert_eq!(
+            t.search("ab c界", false).unwrap(),
+            vec![Match {
+                start: Point { line: 0, col: 0 },
+                end: Point { line: 1, col: 1 },
+            }]
+        );
         assert!(t.search("abc界", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resized_wide_wrap_padding_stays_synthetic() {
+        let mut t = Terminal::new(4, 2);
+        t.advance("abc界".as_bytes());
+        for cols in [6, 4, 3, 6] {
+            t.resize(cols, 2);
+            assert_eq!(
+                t.search("c界", false).unwrap(),
+                vec![Match {
+                    start: Point { line: 0, col: 2 },
+                    end: Point { line: 1, col: 1 },
+                }]
+            );
+            assert!(t.search("c 界", false).unwrap().is_empty());
+        }
+        let mut t = Terminal::new(4, 2);
+        t.advance(b"abcde");
+        t.resize(6, 2);
+        assert_eq!(
+            t.search("d  e", false).unwrap(),
+            vec![Match {
+                start: Point { line: 0, col: 3 },
+                end: Point { line: 1, col: 0 },
+            }]
+        );
+    }
+
+    #[test]
+    fn shifts_materialize_resized_padding() {
+        for (edit, query) in [
+            ("\x1b[P", "bc    界"),
+            ("\x1b[@", " abc  界"),
+            ("\x1b[4hX", "Xabc  界"),
+        ] {
+            let mut t = Terminal::new(4, 2);
+            t.advance("abc界".as_bytes());
+            t.resize(6, 2);
+            t.advance(b"\x1b[1;1H");
+            t.advance(edit.as_bytes());
+            assert_eq!(
+                t.search(query, false).unwrap(),
+                vec![Match {
+                    start: Point { line: 0, col: 0 },
+                    end: Point { line: 1, col: 1 },
+                }]
+            );
+        }
     }
 
     #[test]

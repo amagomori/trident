@@ -144,7 +144,14 @@ impl Row {
                 }));
             }
         } else {
-            cells.resize(cols, Cell::default());
+            let mut blank = Cell::default();
+            if cells
+                .last()
+                .is_some_and(|c| c.flags.contains(Flags::WIDE_WRAP))
+            {
+                blank.flags.insert(Flags::WIDE_WRAP);
+            }
+            cells.resize(cols, blank);
         }
         self.cells = cells;
     }
@@ -152,6 +159,14 @@ impl Row {
     /// Forgets the cells past the right edge, for when the line is erased to its end.
     pub fn clear_hidden(&mut self) {
         self.hidden = None;
+    }
+
+    pub fn materialize_wrap_padding(&mut self, from: usize) {
+        if self.wrapped {
+            for cell in &mut self.cells[from..] {
+                cell.flags.remove(Flags::WIDE_WRAP);
+            }
+        }
     }
 
     pub(crate) fn is_blank(&self) -> bool {

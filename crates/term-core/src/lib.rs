@@ -748,6 +748,7 @@ impl Terminal {
         let insert = self.modes.insert;
         let line = &mut self.lines_mut()[row];
         if insert {
+            line.materialize_wrap_padding(col);
             for _ in 0..width {
                 line.cells.insert(col, Cell::blank(&template));
             }
@@ -953,6 +954,7 @@ impl Terminal {
         }
         let blank = Cell::blank(&self.cursor.template);
         let line = &mut self.lines_mut()[row];
+        line.materialize_wrap_padding(col);
         let n = n.min(cols - col);
         if line.cells[col].flags.contains(Flags::WIDE_SPACER) {
             clear_wide_pair(&mut line.cells, col);
@@ -974,6 +976,7 @@ impl Terminal {
         }
         let blank = Cell::blank(&self.cursor.template);
         let line = &mut self.lines_mut()[row];
+        line.materialize_wrap_padding(col);
         let n = n.min(cols - col);
         clear_wide_pair(&mut line.cells, col);
         clear_wide_pair(&mut line.cells, col + n - 1);
