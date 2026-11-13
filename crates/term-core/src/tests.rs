@@ -11,6 +11,22 @@ fn screen(t: &Terminal) -> Vec<String> {
 }
 
 #[test]
+fn signed_viewport_clamps_to_retained_lines() {
+    let mut t = term(10, 2, "one\r\ntwo\r\nthree");
+    assert_eq!(t.viewport_row_signed(-1).text(), "one");
+    assert_eq!(t.viewport_row_signed(isize::MIN).text(), "one");
+    assert_eq!(t.viewport_row_signed(isize::MAX).text(), "three");
+    t.scroll_display(1);
+    assert_eq!(t.viewport_row_signed(-1).text(), "one");
+    assert_eq!(t.viewport_to_point_signed(1, 3), t.viewport_to_point(1, 3));
+    t.set_scrollback_limit(0);
+    assert_eq!(t.display_offset(), 0);
+    assert_eq!(t.viewport_row_signed(-1).text(), "two");
+    let empty = Terminal::new(10, 2);
+    assert_eq!(empty.viewport_row_signed(-1).text(), "");
+}
+
+#[test]
 fn prints_and_wraps() {
     let t = term(5, 3, "hello world");
     assert_eq!(screen(&t), ["hello", " worl", "d"]);
@@ -700,6 +716,40 @@ fn shrinking_resize_signals_shrink() {
     assert!(t.take_shrunk());
     t.resize(10, 4);
     assert!(!t.take_shrunk());
+}
+
+#[test]
+fn shrinking_resize_obeys_scrollback_limit() {
+    for limit in [0, 2, 10] {
+        let mut t = Terminal::new(20, 5);
+        t.set_scrollback_limit(limit);
+        t.advance(b"zero\r\none\r\ntwo\r\nthree\r\nfour");
+        assert_eq!(t.cursor.row, 4);
+        t.take_shrunk();
+        t.resize(20, 2);
+        assert_eq!(t.scrollback_len(), limit.min(3));
+        assert_eq!(t.history, 3);
+        assert_eq!(t.first_line(), 3 - limit.min(3) as u64);
+        assert_eq!(screen(&t), ["three", "four"]);
+        assert_eq!(t.display_offset(), 0);
+        assert!(t.take_shrunk());
+        t.scroll_display(100);
+        t.resize(20, 1);
+        assert_eq!(t.scrollback_len(), limit.min(4));
+        assert_eq!(t.history, 4);
+        assert_eq!(t.first_line(), 4 - limit.min(4) as u64);
+        assert_eq!(t.display_offset(), 0);
+        t.scroll_display(100);
+        assert_eq!(t.display_offset(), limit.min(4));
+        assert_eq!(
+            t.viewport_row(0).text(),
+            match limit {
+                0 => "four",
+                2 => "two",
+                _ => "zero",
+            }
+        );
+    }
 }
 
 #[test]
