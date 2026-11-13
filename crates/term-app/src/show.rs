@@ -223,20 +223,20 @@ fn detect(bytes: &[u8]) -> Kind {
     if bytes.ends_with(b"TRUEVISION-XFILE.\0") {
         return Kind::Raster(ImageFormat::Tga);
     }
-    let binary = binary_kind(bytes);
-    if binary != "binary data" {
-        return Kind::Binary(binary.into());
-    }
     if is_text(bytes) {
         return Kind::Text;
     }
     if looks_like_tga(bytes) {
         return Kind::Raster(ImageFormat::Tga);
     }
+    let binary = binary_kind(bytes);
+    if binary != "binary data" {
+        return Kind::Binary(binary.into());
+    }
     if let Some(text) = decode_text(bytes) {
         return Kind::DecodedText(text);
     }
-    Kind::Binary(binary_kind(bytes).into())
+    Kind::Binary(binary.into())
 }
 
 fn ascii_text(b: u8) -> bool {

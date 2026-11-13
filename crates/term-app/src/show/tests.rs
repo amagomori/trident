@@ -340,6 +340,13 @@ fn utf16_endianness_and_boms() {
 #[test]
 fn encoding_heuristics_preserve_binaries() {
     for bytes in [
+        &b"MZ is a text file\n"[..],
+        &b"PK\x03\x04 is a text file\n"[..],
+        &b"%PDF-1.7 is a text file\n"[..],
+    ] {
+        assert_eq!(detect(bytes), Kind::Text);
+    }
+    for bytes in [
         &b"a\0b\0"[..],
         &b"\0a\0b"[..],
         &b"a\0b\0c\0\x01\0"[..],
@@ -364,6 +371,20 @@ fn encoding_heuristics_preserve_binaries() {
     );
     assert_eq!(detect(b""), Kind::Text);
     assert_eq!(detect("café".as_bytes()), Kind::Text);
+}
+
+#[test]
+fn text_detection_checks_the_whole_file() {
+    let mut bytes = vec![b'a'; 8192];
+    bytes.push(0xff);
+    assert!(!is_text(&bytes));
+    assert!(matches!(detect(&bytes), Kind::DecodedText(_)));
+    bytes.push(0);
+    assert_eq!(detect(&bytes), Kind::Binary("binary data".into()));
+
+    let mut utf16 = b"a\0".repeat(4096);
+    utf16.extend(b"\x01\0");
+    assert_eq!(detect(&utf16), Kind::Binary("binary data".into()));
 }
 
 #[test]
