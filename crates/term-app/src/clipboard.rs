@@ -66,8 +66,8 @@ impl Clipboard {
     }
 
     pub fn get(&mut self, primary: bool) -> Option<String> {
+        #[cfg(target_os = "linux")]
         let clipboard = match self.inner.as_mut()? {
-            #[cfg(target_os = "linux")]
             Backend::Wayland(clipboard) => {
                 return if primary {
                     clipboard.load_primary()
@@ -78,6 +78,8 @@ impl Clipboard {
             }
             Backend::Arboard(clipboard) => clipboard,
         };
+        #[cfg(not(target_os = "linux"))]
+        let Backend::Arboard(clipboard) = self.inner.as_mut()?;
         #[cfg(all(unix, not(target_os = "macos")))]
         if primary {
             return clipboard
@@ -94,8 +96,8 @@ impl Clipboard {
         let Some(backend) = self.inner.as_mut() else {
             return;
         };
+        #[cfg(target_os = "linux")]
         let clipboard = match backend {
-            #[cfg(target_os = "linux")]
             Backend::Wayland(clipboard) => {
                 if primary {
                     clipboard.store_primary(text);
@@ -106,6 +108,8 @@ impl Clipboard {
             }
             Backend::Arboard(clipboard) => clipboard,
         };
+        #[cfg(not(target_os = "linux"))]
+        let Backend::Arboard(clipboard) = backend;
         #[cfg(all(unix, not(target_os = "macos")))]
         if primary {
             let _ = clipboard
