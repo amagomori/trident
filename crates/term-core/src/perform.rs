@@ -38,7 +38,7 @@ impl Perform for Terminal {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        if !matches!((action, intermediates), ('H' | 'f' | 'J', [])) {
+        if self.clear_armed && !matches!((action, intermediates), ('H' | 'f' | 'J', [])) {
             self.clear_armed = false;
         }
         if ignore {
