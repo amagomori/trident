@@ -1900,6 +1900,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(s) = &mut self.session {
                     if !focused {
                         s.composition.clear();
+                        if let Some(search) = &mut self.search {
+                            search.clear_preedit();
+                        }
                         s.ime_cursor_area = None;
                     }
                     if s.term.modes.focus_events {
@@ -1914,12 +1917,14 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed || self.shortcut(&event) {
                     return;
                 }
-                if self.search.is_none()
-                    && self
+                let composing = match &self.search {
+                    Some(search) => !search.preedit.is_empty(),
+                    None => self
                         .session
                         .as_ref()
-                        .is_some_and(|s| s.composition.preedit().is_some())
-                {
+                        .is_some_and(|s| s.composition.preedit().is_some()),
+                };
+                if composing {
                     return;
                 }
                 if self.search.is_some() {
