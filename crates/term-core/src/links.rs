@@ -127,8 +127,12 @@ impl Terminal {
             else {
                 continue;
             };
+            let quote = text[..offset]
+                .chars()
+                .next_back()
+                .filter(|c| matches!(c, '"' | '\''));
             let mut uri = tail
-                .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
+                .split(|c: char| c.is_whitespace() || matches!(c, '<' | '>') || Some(c) == quote)
                 .next()
                 .unwrap_or("");
             while let Some(c) = uri.chars().last() {
@@ -227,7 +231,7 @@ mod tests {
         for input in [
             r#"{"url":"https://example.com","status":"ok"}"#,
             "'https://example.com',next",
-            "https://example.com\",next",
+            "\"https://example.com\",next",
             "<https://example.com>next",
         ] {
             let mut t = Terminal::new(80, 2);
@@ -259,6 +263,7 @@ mod tests {
             "FtP://example.com",
             "FILE:///tmp/a",
             "MailTo:a@b.test",
+            "https://example.com/Don't_Stop",
         ] {
             let mut t = Terminal::new(80, 2);
             t.advance(uri.as_bytes());
