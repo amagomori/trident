@@ -114,6 +114,35 @@ fn shell_integration_prompt_redraw_and_empty_output() {
 }
 
 #[test]
+fn shell_integration_unterminated_output() {
+    for (output, expected) in [
+        ("foo", "foo"),
+        ("first\r\nlast", "first\nlast"),
+        ("x", "x"),
+        ("", ""),
+        ("12345678901234567890", "12345678901234567890"),
+    ] {
+        let mut t = Terminal::new(20, 3);
+        t.advance(
+            format!(
+                "\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07{output}\x1b]133;D;0\x07\x1b]133;A\x07$ "
+            )
+            .as_bytes(),
+        );
+        t.select_command_output();
+        assert_eq!(t.selection_text().as_deref().unwrap_or(""), expected);
+        if expected.is_empty() {
+            assert!(t.selection.is_none());
+        }
+        t.resize(10, 3);
+        t.resize(20, 3);
+        t.advance(b"\x1b[2J");
+        t.select_command_output();
+        assert_eq!(t.selection_text().as_deref().unwrap_or(""), expected);
+    }
+}
+
+#[test]
 fn shell_integration_navigation_selection_and_streaming() {
     let input = b"\x1b]133;A\x07$ one\x1b]133;B\x07\r\n\x1b]133;C\x07first\r\n\r\n\x1b]133;D;1\x07\x1b]133;A\x07$ two\r\n\x1b]133;C\x07second\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ";
     let mut t = Terminal::new(20, 2);

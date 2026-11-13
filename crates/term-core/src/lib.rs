@@ -124,6 +124,7 @@ pub enum SelectionKind {
     Simple,
     Word,
     Line,
+    CommandOutput,
     /// A rectangle in screen columns, keeping each physical row separate.
     Block,
 }
@@ -248,26 +249,40 @@ impl Terminal {
         else {
             return;
         };
-        if self.line(start).flags.contains(RowFlags::PROMPT_START) {
+        if self.line(start).flags.contains(RowFlags::PROMPT_START)
+            && !self
+                .line(start)
+                .flags
+                .contains(RowFlags::OUTPUT_BEFORE_PROMPT)
+        {
             return;
         }
-        let mut stop = (start + 1..end)
+        let prompt = (start..end)
             .find(|&line| self.line(line).flags.contains(RowFlags::PROMPT_START))
-            .unwrap_or(end);
-        while stop > start && self.line(stop - 1).cells.iter().all(|cell| cell.c == ' ') {
+            .map(|line| (line, self.line(line).prompt_col as usize));
+        let mut stop = prompt.map_or(end, |(line, _)| line);
+        let partial = prompt.filter(|(_, col)| *col > 0);
+        while partial.is_none()
+            && stop > start
+            && self.line(stop - 1).cells.iter().all(|cell| cell.c == ' ')
+        {
             stop -= 1;
         }
-        if stop > start {
+        if stop > start || partial.is_some() {
             self.selection = Some(Selection {
                 anchor: Point {
                     line: start,
                     col: 0,
                 },
                 head: Point {
-                    line: stop - 1,
-                    col: self.cols - 1,
+                    line: partial.map_or_else(|| stop - 1, |(line, _)| line),
+                    col: partial.map_or(self.cols - 1, |(_, col)| col - 1),
                 },
-                kind: SelectionKind::Line,
+                kind: if partial.is_some() {
+                    SelectionKind::CommandOutput
+                } else {
+                    SelectionKind::Line
+                },
             });
         }
     }
@@ -318,6 +333,12 @@ impl Terminal {
             line.flags.insert(flag);
             if mark == b"A" {
                 line.flags.insert(RowFlags::PROMPT);
+                line.flags.insert(RowFlags::OUTPUT_BEFORE_PROMPT);
+                line.prompt_col =
+                    u32::try_from(self.cursor.col + usize::from(self.cursor.pending_wrap))
+                        .unwrap_or(u32::MAX);
+            } else if mark == b"C" {
+                line.flags.remove(RowFlags::OUTPUT_BEFORE_PROMPT);
             }
         }
     }
@@ -747,6 +768,7 @@ impl Terminal {
                 start.col = 0;
                 end.col = self.cols - 1;
             }
+            SelectionKind::CommandOutput => {}
         }
         Some((start, end))
     }
@@ -1152,8 +1174,10 @@ impl Terminal {
             1 => self.erase_cells(row, 0, col + 1),
             2 => {
                 let flags = self.screen().lines[row].flags;
+                let prompt_col = self.screen().lines[row].prompt_col;
                 self.erase_row(row);
                 self.lines_mut()[row].flags = flags;
+                self.lines_mut()[row].prompt_col = prompt_col;
             }
             _ => {}
         }

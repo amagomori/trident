@@ -80,6 +80,7 @@ impl Cell {
 pub struct Row {
     pub cells: Vec<Cell>,
     pub flags: RowFlags,
+    pub(crate) prompt_col: u32,
     /// The line continues on the next row because it soft-wrapped.
     pub wrapped: bool,
     /// Cells past the right edge, kept when the window narrows so widening brings them back.
@@ -113,6 +114,7 @@ impl Row {
             cells: vec![Cell::blank(template); cols],
             wrapped: false,
             flags: RowFlags::default(),
+            prompt_col: 0,
             hidden: None,
         }
     }
@@ -212,6 +214,7 @@ impl RowFlags {
     pub const OUTPUT_START: Self = Self(4);
     pub const FAILED: Self = Self(8);
     pub const SUCCEEDED: Self = Self(16);
+    pub(crate) const OUTPUT_BEFORE_PROMPT: Self = Self(32);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -219,6 +222,10 @@ impl RowFlags {
 
     pub fn insert(&mut self, other: Self) {
         self.0 |= other.0;
+    }
+
+    pub(crate) fn remove(&mut self, other: Self) {
+        self.0 &= !other.0;
     }
 
     pub(crate) fn set_exit(&mut self, exit: Option<i32>) {
