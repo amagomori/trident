@@ -213,14 +213,16 @@ fn leader_exited(pid: i32) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn stopped_stat(stat: &str, group: i32) -> bool {
-    let Some((_, fields)) = stat.rsplit_once(')') else {
+fn stopped_stat(stat: &[u8], group: i32) -> bool {
+    let Some(end) = stat.iter().rposition(|&byte| byte == b')') else {
         return false;
     };
-    let mut fields = fields.split_whitespace();
+    let mut fields = stat[end + 1..]
+        .split(u8::is_ascii_whitespace)
+        .filter(|field| !field.is_empty());
     let state = fields.next();
-    let pgrp = fields.nth(1).and_then(|value| value.parse::<i32>().ok());
-    matches!(state, Some("T" | "t")) && pgrp == Some(group)
+    let pgrp = fields.nth(1);
+    matches!(state, Some(b"T" | b"t")) && pgrp == Some(group.to_string().as_bytes())
 }
 
 #[cfg(target_os = "linux")]
@@ -234,7 +236,7 @@ fn group_has_stopped(group: i32) -> bool {
             .as_encoded_bytes()
             .iter()
             .all(u8::is_ascii_digit)
-            && std::fs::read_to_string(entry.path().join("stat"))
+            && std::fs::read(entry.path().join("stat"))
                 .is_ok_and(|stat| stopped_stat(&stat, group))
     })
 }
@@ -540,15 +542,16 @@ mod tests {
     fn proc_stat_stopped_members() {
         for state in ["T", "t"] {
             assert!(stopped_stat(
-                &format!("10 (name with ) parens) {state} 1 42 0"),
+                format!("10 (name with ) parens) {state} 1 42 0").as_bytes(),
                 42
             ));
         }
-        assert!(!stopped_stat("10 (sleep) S 1 42 0", 42));
-        assert!(!stopped_stat("10 (sleep) T 1 43 0", 42));
-        assert!(!stopped_stat("", 42));
-        assert!(!stopped_stat("10 (sleep) T", 42));
-        assert!(!stopped_stat("10 (sleep) T 1 invalid", 42));
+        assert!(stopped_stat(b"10 (name \xff with ) parens) T 1 42 0", 42));
+        assert!(!stopped_stat(b"10 (sleep) S 1 42 0", 42));
+        assert!(!stopped_stat(b"10 (sleep) T 1 43 0", 42));
+        assert!(!stopped_stat(b"", 42));
+        assert!(!stopped_stat(b"10 (sleep) T", 42));
+        assert!(!stopped_stat(b"10 (sleep) T 1 invalid", 42));
     }
 
     #[cfg(target_os = "linux")]
