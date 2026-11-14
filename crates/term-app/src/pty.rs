@@ -61,7 +61,8 @@ impl Probe {
             let shell = self.shell?;
             let running = group as u32 != shell
                 || (self.command
-                    && !crate::close_confirm::process_name(group).is_some_and(|n| is_shell(&n)));
+                    && !crate::close_confirm::process_args(group)
+                        .is_some_and(|args| is_idle_shell(&args)));
             (group > 0 && running).then_some(group)
         }
         #[cfg(not(unix))]
@@ -233,7 +234,27 @@ fn size(cols: usize, rows: usize, cell_w: f32, cell_h: f32) -> PtySize {
     }
 }
 
-/// Whether `program` names an interactive shell, which sitting at its prompt runs nothing.
+/// Whether `args` (argv) is a shell started for its prompt: no `-c` command (alone or in a
+/// short option cluster such as `-lc`, or `--command`) and no script or other operand. Such a
+/// shell holding the foreground sits at its prompt; `sh -c make` or `bash build.sh` runs a
+/// command.
+fn is_idle_shell(args: &[String]) -> bool {
+    let Some((program, options)) = args.split_first() else {
+        return false;
+    };
+    is_shell(program)
+        && options.iter().all(|arg| {
+            let arg = arg.to_ascii_lowercase();
+            match arg.strip_prefix("--") {
+                Some(long) => !long.starts_with("command"),
+                None => arg
+                    .strip_prefix(['-', '+'])
+                    .is_some_and(|short| !short.is_empty() && !short.contains('c')),
+            }
+        })
+}
+
+/// Whether `program` names a shell, which sitting at its prompt runs nothing.
 fn is_shell(program: &str) -> bool {
     let name = std::path::Path::new(program)
         .file_name()
@@ -666,6 +687,57 @@ mod tests {
         );
         pty.write(b"\x03");
         wait_for(&mut pty, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_running_a_command_counts_as_running() {
+        let args = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
+        for idle in [
+            &["bash", "--norc", "--noprofile", "-i"][..],
+            &["-zsh"],
+            &["/usr/bin/fish", "-l"],
+        ] {
+            assert!(is_idle_shell(&args(idle)), "{idle:?}");
+        }
+        for busy in [
+            &["sh", "-c", "sleep 30"][..],
+            &["bash", "-lc", "make"],
+            &["bash", "build.sh"],
+            &["fish", "--command=ls"],
+            &["vim"],
+            &[],
+        ] {
+            assert!(!is_idle_shell(&args(busy)), "{busy:?}");
+        }
+        for shell in ["sh", "bash"] {
+            let mut pty = Pty::spawn(
+                &[shell.into(), "-c".into(), "sleep 30; true".into()],
+                &Default::default(),
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // Before exec the child still carries the test binary's arguments.
+            loop {
+                pty.take_output();
+                let args = pty
+                    .running_program()
+                    .and_then(crate::close_confirm::process_args);
+                if args.as_ref().and_then(|a| a.first()).map(String::as_str) == Some(shell) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{shell} -c never counted as running: {args:?}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
     }
 
     #[test]

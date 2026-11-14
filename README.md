@@ -248,9 +248,10 @@ every ESC stripped. Set `paste_protection = false` to always paste immediately.
 Closing the window at an idle shell prompt quits at once. While another program holds the
 terminal's foreground (vim, ssh, a build), a banner names it and asks first: Enter (or a
 second close) closes the window, Escape keeps it, and other keys are ignored while it is
-shown. A command started with `-e` (`terminal -e vim`) counts as a running program too, unless
-it is a shell. On macOS, Cmd-W and every app quit (Cmd-Q, the Quit menu, Dock > Quit, logging
-out) ask the same way. Set `confirm_close = false` to always close immediately.
+shown. A command started with `-e` (`terminal -e vim`, `terminal -e sh -c make`) counts as a
+running program too, unless it is a shell at its prompt. On macOS, Cmd-W and every app quit
+(Cmd-Q, the Quit menu, Dock > Quit, logging out) ask the same way. Set `confirm_close = false`
+to always close immediately.
 
 ### Dropping files
 
