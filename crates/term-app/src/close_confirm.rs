@@ -30,7 +30,9 @@ pub fn process_name(pid: i32) -> Option<String> {
         let mut buf = [0u8; 256];
         // SAFETY: buf is writable for its full length.
         let len = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
-        (len > 0).then(|| String::from_utf8_lossy(&buf[..len as usize]).into_owned())
+        (len > 0)
+            .then(|| String::from_utf8_lossy(&buf[..len as usize]).into_owned())
+            .or_else(|| short_name(pid))
     };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let name: Option<String> = {
@@ -39,6 +41,74 @@ pub fn process_name(pid: i32) -> Option<String> {
     };
     name.map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+}
+
+/// The short (16 byte) name of `pid`, which unlike `proc_name` is readable for processes of
+/// another user, such as the setuid-root `top`.
+#[cfg(target_os = "macos")]
+fn short_name(pid: i32) -> Option<String> {
+    let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+    // SAFETY: info is a writable proc_bsdshortinfo of the size passed.
+    let len = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdshortinfo).cast(),
+            size,
+        )
+    };
+    (len == size).then(|| {
+        let comm = info.pbsi_comm.map(|c| c as u8);
+        let end = comm.iter().position(|&c| c == 0).unwrap_or(comm.len());
+        String::from_utf8_lossy(&comm[..end]).into_owned()
+    })
+}
+
+/// Sends the app menu's Quit (Cmd-Q) through the window's close button and adds Close Window
+/// (Cmd-W), so both reach `WindowEvent::CloseRequested` and its confirmation instead of
+/// `terminate:` ending the process at once. Needs winit's default menu to be installed.
+#[cfg(target_os = "macos")]
+#[cold]
+pub fn route_menu_quit_through_close() {
+    use objc2::rc::{Allocated, Retained};
+    use objc2::runtime::{AnyObject, Sel};
+    use objc2::{class, msg_send, sel};
+    use objc2_foundation::NSString;
+
+    // SAFETY: called on the main thread once the event loop runs; every message matches the
+    // AppKit signature of NSApplication, NSMenu and NSMenuItem.
+    unsafe {
+        let app: Option<Retained<AnyObject>> = msg_send![class!(NSApplication), sharedApplication];
+        let Some(app) = app else { return };
+        let menubar: Option<Retained<AnyObject>> = msg_send![&*app, mainMenu];
+        let Some(menubar) = menubar else { return };
+        let app_item: Option<Retained<AnyObject>> = msg_send![&*menubar, itemAtIndex: 0isize];
+        let Some(app_item) = app_item else { return };
+        let menu: Option<Retained<AnyObject>> = msg_send![&*app_item, submenu];
+        let Some(menu) = menu else { return };
+        let count: isize = msg_send![&*menu, numberOfItems];
+        for index in 0..count {
+            let item: Option<Retained<AnyObject>> = msg_send![&*menu, itemAtIndex: index];
+            let Some(item) = item else { continue };
+            let action: Option<Sel> = msg_send![&*item, action];
+            if action == Some(sel!(terminate:)) {
+                let _: () = msg_send![&*item, setAction: sel!(performClose:)];
+                let title = NSString::from_str("Close Window");
+                let key = NSString::from_str("w");
+                let close: Allocated<AnyObject> = msg_send![class!(NSMenuItem), alloc];
+                let close: Retained<AnyObject> = msg_send![
+                    close,
+                    initWithTitle: &*title,
+                    action: sel!(performClose:),
+                    keyEquivalent: &*key
+                ];
+                let _: () = msg_send![&*menu, insertItem: &*close, atIndex: index];
+                return;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -73,5 +143,13 @@ mod tests {
         child.wait().unwrap();
         assert_eq!(name.as_deref(), Some("sleep"));
         assert_eq!(process_name(i32::MAX), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_a_short_name() {
+        let name = short_name(std::process::id() as i32).unwrap();
+        assert!(!name.is_empty());
+        assert_eq!(short_name(i32::MAX), None);
     }
 }
