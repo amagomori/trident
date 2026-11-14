@@ -22,6 +22,15 @@ pub fn prompt(text: &str) -> String {
     format!("{what} Enter pastes, Esc cancels")
 }
 
+/// The banner while a paste waits: its prompt, then any other banner text.
+#[cold]
+pub fn banner(text: &str, other: Option<String>) -> String {
+    match other {
+        Some(other) => format!("{} | {other}", prompt(text)),
+        None => prompt(text),
+    }
+}
+
 /// The bytes sent to the shell for a paste.
 pub fn encode(text: &str, bracketed: bool) -> Vec<u8> {
     // Normalize newlines to carriage returns, as typed Enter would send.

@@ -1210,9 +1210,9 @@ impl App {
             (Some(error), None) => Some(error.to_owned()),
             (None, flow) => flow,
         };
-        let banner = match (self.pending_paste.as_deref().map(paste::prompt), banner) {
-            (Some(prompt), Some(banner)) => Some(format!("{prompt} | {banner}")),
-            (prompt, banner) => prompt.or(banner),
+        let banner = match &self.pending_paste {
+            Some(text) => Some(paste::banner(text, banner)),
+            None => banner,
         };
         let started = Instant::now();
         #[cfg(target_os = "linux")]
@@ -1316,6 +1316,7 @@ impl App {
     }
 
     /// Enter sends the waiting paste and Escape drops it; other keys are ignored.
+    #[cold]
     fn confirm_paste_key(&mut self, event: &KeyEvent) {
         use winit::keyboard::NamedKey;
         let confirmed = match event.logical_key {
