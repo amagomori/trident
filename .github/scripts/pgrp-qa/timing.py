@@ -15,6 +15,9 @@ Notification: Linux the D-Bus Notify call (`dbus-monitor`, needs the desktop ses
 a notification server, e.g. Plasma); macOS the app's `osascript display notification` child
 (unbundled binary), found by listing the app's children every 2 ms. Times are wall clock on the same machine.
 
+A title run is complete only when every title sent was seen; a notify run only when a Notify
+call with app_name "terminal" arrives (other clients' notifications on the bus are ignored).
+
 Fails (exit 1) when, for any scenario, an expected event never arrives on head, or head's
 median latency exceeds main's by more than max(20 ms, 10%); for the notify scenarios the
 allowance is at least the watcher's 200 ms poll: notify latency is bimodal (about 20 ms or
@@ -30,6 +33,7 @@ from pathlib import Path
 MAC = platform.system() == "Darwin"
 SCENARIOS = ["title-idle", "title-flood", "notify-quiet", "notify-flood"]
 NOTIFY_POLL_MS = 200
+APP_NAME = "terminal"  # command_notify.rs: notify_rust appname
 RUN_SH = r"""#!/bin/bash
 set -m
 cd "$1"
@@ -134,11 +138,17 @@ class Linux:
 
     def seen(self):
         titles = [(t, m.group(1)) for t, l in self.titles.lines if (m := re.search(r'"(K95-\d+)"', l))]
-        notes = []
+        # Only the app's own Notify calls count: another client on the session bus must not
+        # satisfy a run. dbus-monitor prints the call, then its arguments; app_name is the first.
+        notes, call = [], None
         for _, l in self.notes.lines:
             m = re.search(r"method call time=([\d.]+)", l)
             if m:
-                notes.append(float(m.group(1)))
+                call = float(m.group(1))
+            elif call is not None and (m := re.match(r'\s*string "(.*)"$', l)):
+                if m.group(1) == APP_NAME:
+                    notes.append(call)
+                call = None
         self.titles.stop()
         return titles, notes
 
@@ -240,8 +250,9 @@ def one_run(binary, scenario, env, desk, log):
             for t, name in titles:
                 first.setdefault(name, t)
             lat = [first[f"K95-{n}"] - e for n, e in enumerate(events) if f"K95-{n}" in first]
-            return {"latency_ms": [round(x * 1000, 1) for x in lat], "complete": f"K95-{len(events) - 1}" in first,
-                    "titles_seen": len(first), "titles_sent": len(events)}
+            seen = sum(f"K95-{n}" in first for n in range(len(events)))
+            return {"latency_ms": [round(x * 1000, 1) for x in lat], "complete": seen == len(events),
+                    "titles_seen": seen, "titles_sent": len(events)}
         after = [n for n in notes if n >= events[-1] - 0.05]
         return {"latency_ms": [round((after[0] - events[-1]) * 1000, 1)] if after else [],
                 "complete": bool(after), "notifications": len(notes)}
