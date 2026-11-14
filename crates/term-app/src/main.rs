@@ -1,3 +1,10 @@
+macro_rules! diag {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod clipboard;
 mod command_notify;
 mod config;
@@ -19,7 +26,13 @@ mod show;
 use config::Action;
 use input::MouseButton as ReportButton;
 use pty::Pty;
+use std::collections::HashSet;
+use std::fs::{File, FileType};
+use std::io::{Read, Write};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
+use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -31,11 +44,12 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::{Key, ModifiersState, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
+const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
 
 #[derive(Default)]
 struct PixelScroll {
@@ -472,8 +486,90 @@ fn wake_deadline(
     [frame, resize, probe].into_iter().flatten().min()
 }
 
+/// The alternate screen has no scrollback, so these scroll actions would do
+/// nothing there; let the key reach the program instead (vim, emacs, less).
+fn passes_through_on_alt_screen(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::LineUp | Action::LineDown | Action::Top | Action::Bottom
+    )
+}
+
 fn shell_shortcuts_available(term: &Terminal) -> bool {
     term.has_shell_marks() && !term.is_alt_screen()
+}
+
+#[derive(Default)]
+struct HeldAtFocus(HashSet<PhysicalKey>);
+
+impl HeldAtFocus {
+    fn observe(&mut self, key: PhysicalKey, state: ElementState, synthetic: bool) -> bool {
+        match state {
+            ElementState::Released => {
+                self.0.remove(&key);
+            }
+            ElementState::Pressed if synthetic => {
+                self.0.insert(key);
+            }
+            ElementState::Pressed => {}
+        }
+        self.0.contains(&key)
+    }
+}
+
+fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) -> bool {
+    (repeat || held_at_focus) && matches!(action, Action::NewWindow)
+}
+
+fn inherit_new_window_stderr(kind: Option<FileType>) -> bool {
+    kind.is_some_and(|kind| kind.is_file() || kind.is_char_device())
+}
+
+fn pipe_new_window_stderr(kind: Option<FileType>) -> bool {
+    kind.is_some_and(|kind| kind.is_fifo() || kind.is_socket())
+}
+
+fn new_window_stderr() -> (Stdio, bool) {
+    let kind = std::io::stderr()
+        .as_fd()
+        .try_clone_to_owned()
+        .and_then(|fd| File::from(fd).metadata())
+        .map(|metadata| metadata.file_type())
+        .ok();
+    if inherit_new_window_stderr(kind) {
+        (Stdio::inherit(), false)
+    } else if pipe_new_window_stderr(kind) {
+        (Stdio::piped(), true)
+    } else {
+        (Stdio::null(), false)
+    }
+}
+
+fn forward_new_window_stderr(mut reader: impl Read, mut writer: impl Write) -> std::io::Result<()> {
+    let mut chunk = [0; 4096];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(len) => {
+                let _ = writer.write_all(&chunk[..len]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn finish_startup_stderr() -> std::io::Result<()> {
+    let null = File::options().write(true).open("/dev/null")?;
+    if null.as_raw_fd() == libc::STDERR_FILENO {
+        let _ = null.into_raw_fd();
+        return Ok(());
+    }
+    // SAFETY: both descriptors are valid; dup2 atomically replaces stderr.
+    if unsafe { libc::dup2(null.as_raw_fd(), libc::STDERR_FILENO) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
@@ -653,6 +749,7 @@ fn sync_wakeup(
 }
 
 struct App {
+    startup_stderr: bool,
     search: Option<search::Search>,
     config: config::Config,
     config_error: Option<String>,
@@ -662,6 +759,7 @@ struct App {
     session: Option<Session>,
     font_size: f32,
     modifiers: ModifiersState,
+    held_at_focus: HeldAtFocus,
     focused: bool,
     mouse_pos: PhysicalPosition<f64>,
     left_down: bool,
@@ -699,7 +797,7 @@ impl App {
         let (config, config_error) = match config::load(&options.config_path) {
             Ok(config) => (config, None),
             Err(error) => {
-                eprintln!("{error}");
+                diag!("{error}");
                 (config::Config::default(), Some(error))
             }
         };
@@ -708,9 +806,10 @@ impl App {
         let watcher = config::watch(path, move || {
             let _ = wake.send_event(UserEvent::ConfigChanged);
         })
-        .map_err(|e| eprintln!("terminal: config reload unavailable: {e}"))
+        .map_err(|e| diag!("terminal: config reload unavailable: {e}"))
         .ok();
         App {
+            startup_stderr: false,
             search: None,
             font_size: options.size(&config),
             config,
@@ -720,6 +819,7 @@ impl App {
             proxy,
             session: None,
             modifiers: ModifiersState::empty(),
+            held_at_focus: HeldAtFocus::default(),
             focused: true,
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             left_down: false,
@@ -742,7 +842,7 @@ impl App {
                     "terminal: {}:1:1: font: {error}",
                     self.options.config_path.display()
                 );
-                eprintln!("{error}");
+                diag!("{error}");
                 self.config_error = Some(error);
                 self.config = config::Config::default();
                 self.font_size = self.options.size(&self.config);
@@ -808,7 +908,7 @@ impl App {
         };
         let size = window.inner_size();
         let renderer = Renderer::new(window.clone(), size.width, size.height)?;
-        eprintln!("terminal: rendering with {}", renderer.adapter_info);
+        diag!("terminal: rendering with {}", renderer.adapter_info);
 
         let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
         let mut term = Terminal::new(cols, rows);
@@ -841,7 +941,7 @@ impl App {
             if let Err(error) =
                 present_macos::install(renderer.gpu_device(), start, lines, self.proxy.clone())
             {
-                eprintln!("terminal: presentation feedback unavailable: {error}");
+                diag!("terminal: presentation feedback unavailable: {error}");
             }
         }
         #[cfg(target_os = "linux")]
@@ -861,7 +961,7 @@ impl App {
                 match present_wayland::Feedback::new(window.clone(), start, lines) {
                     Ok(feedback) => Some(feedback),
                     Err(error) => {
-                        eprintln!("terminal: presentation feedback unavailable: {error}");
+                        diag!("terminal: presentation feedback unavailable: {error}");
                         None
                     }
                 }
@@ -1125,6 +1225,13 @@ impl App {
             Some(&mut pre_present),
         );
         if rendered {
+            if self.startup_stderr {
+                if let Err(error) = finish_startup_stderr() {
+                    let _ = writeln!(std::io::stderr(), "terminal: startup stderr: {error}");
+                    std::process::exit(1);
+                }
+                self.startup_stderr = false;
+            }
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             if let Some(target) = exit_target {
                 self.exit_presentation.submitted(target, Instant::now());
@@ -1180,7 +1287,7 @@ impl App {
         self.process_output();
         let Some(s) = &mut self.session else { return };
         let Some(bytes) = drop_files::quoted_path(&path) else {
-            eprintln!("terminal: cannot drop a path containing control characters");
+            diag!("terminal: cannot drop a path containing control characters");
             return;
         };
         s.term.scroll_to_bottom();
@@ -1228,7 +1335,7 @@ impl App {
                 None
             };
             if next.shell != self.config.shell || next.env != self.config.env {
-                eprintln!("terminal: shell/env changes apply on the next launch");
+                diag!("terminal: shell/env changes apply on the next launch");
             }
             self.config = next;
             if let Some(s) = &mut self.session {
@@ -1254,7 +1361,7 @@ impl App {
         });
         self.config_error = result.err();
         if let Some(error) = &self.config_error {
-            eprintln!("{error}");
+            diag!("{error}");
         }
         if let Some(s) = &self.session {
             s.window.request_redraw();
@@ -1262,7 +1369,7 @@ impl App {
     }
 
     /// Handles terminal shortcuts; true if the key was consumed.
-    fn shortcut(&mut self, event: &KeyEvent) -> bool {
+    fn shortcut(&mut self, event: &KeyEvent, held_at_focus: bool) -> bool {
         let mods = self.modifiers;
         let Some(chord) = shortcut_chord(event.key_without_modifiers(), mods) else {
             return false;
@@ -1270,6 +1377,9 @@ impl App {
         let Some(action) = self.config.bindings.get(&chord).cloned() else {
             return cfg!(target_os = "macos") && mods.super_key();
         };
+        if suppress_shortcut_repeat(&action, event.repeat, held_at_focus) {
+            return true;
+        }
         match action {
             Action::Search => {
                 let search = self.search.get_or_insert_with(search::Search::default);
@@ -1281,6 +1391,55 @@ impl App {
                 self.update_ime_cursor_area();
                 if let Some(s) = &self.session {
                     s.window.request_redraw();
+                }
+            }
+            Action::NewWindow => {
+                if let Err(error) =
+                    std::thread::Builder::new()
+                        .name("new-window".into())
+                        .spawn(|| {
+                            let result = std::env::current_exe().and_then(|exe| {
+                                let (stderr, startup_stderr) = new_window_stderr();
+                                let mut command = std::process::Command::new(exe);
+                                command
+                                    .args(std::env::args_os().skip(1))
+                                    .stdin(Stdio::null())
+                                    .stdout(Stdio::null())
+                                    .stderr(stderr);
+                                if startup_stderr {
+                                    command.env(STARTUP_STDERR, "1");
+                                }
+                                command.spawn()
+                            });
+                            match result {
+                                Ok(mut child) => {
+                                    if let Some(stderr) = child.stderr.take()
+                                        && let Err(error) =
+                                            forward_new_window_stderr(stderr, std::io::stderr())
+                                    {
+                                        let _ = writeln!(std::io::stderr(), "new window: {error}");
+                                    }
+                                    match child.wait() {
+                                        Ok(status) if !status.success() => {
+                                            let _ = writeln!(
+                                                std::io::stderr(),
+                                                "terminal: new window exited with {status}"
+                                            );
+                                        }
+                                        Err(error) => {
+                                            let _ =
+                                                writeln!(std::io::stderr(), "new window: {error}");
+                                        }
+                                        Ok(_) => {}
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = writeln!(std::io::stderr(), "new window: {error}");
+                                }
+                            }
+                        })
+                {
+                    let _ = writeln!(std::io::stderr(), "new window: {error}");
                 }
             }
             Action::None => return false,
@@ -1330,13 +1489,20 @@ impl App {
                     s.request_frame();
                 }
             }
-            Action::PageUp | Action::PageDown | Action::Top | Action::Bottom => {
+            Action::LineUp
+            | Action::LineDown
+            | Action::PageUp
+            | Action::PageDown
+            | Action::Top
+            | Action::Bottom => {
                 if let Some(s) = &mut self.session {
-                    if matches!(action, Action::Top | Action::Bottom) && s.term.is_alt_screen() {
+                    if passes_through_on_alt_screen(&action) && s.term.is_alt_screen() {
                         return false;
                     }
                     let page = s.term.rows() as isize - 1;
                     let delta = match action {
+                        Action::LineUp => 1,
+                        Action::LineDown => -1,
                         Action::PageUp => page,
                         Action::PageDown => -page,
                         Action::Top => isize::MAX / 2,
@@ -1913,8 +2079,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed || self.shortcut(&event) {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                let held_at_focus =
+                    self.held_at_focus
+                        .observe(event.physical_key, event.state, is_synthetic);
+                if event.state != ElementState::Pressed || self.shortcut(&event, held_at_focus) {
                     return;
                 }
                 let find_preedit = self.search.as_ref().map(|f| f.preedit.as_str());
@@ -1995,30 +2168,34 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 fn main() {
+    let startup_stderr = std::env::var_os(STARTUP_STDERR).is_some();
+    // SAFETY: main has not started any threads or spawned the PTY yet.
+    unsafe { std::env::remove_var(STARTUP_STDERR) };
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
     let options = match parse_args() {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("terminal: {e}");
+            diag!("terminal: {e}");
             std::process::exit(2);
         }
     };
     let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("terminal: cannot start event loop: {e}");
+            diag!("terminal: cannot start event loop: {e}");
             std::process::exit(1);
         }
     };
     let mut app = App::new(options, event_loop.create_proxy());
+    app.startup_stderr = startup_stderr;
     if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("terminal: {e}");
+        diag!("terminal: {e}");
         std::process::exit(1);
     }
     if let Some(e) = app.error {
-        eprintln!("terminal: {e}");
+        diag!("terminal: {e}");
         std::process::exit(1);
     }
 }
@@ -2037,6 +2214,195 @@ mod tests {
         assert!(!shell_shortcuts_available(&term));
         term.advance(b"\x1b[?1049l");
         assert!(shell_shortcuts_available(&term));
+    }
+
+    #[test]
+    fn diagnostics_do_not_panic_when_stderr_is_closed() {
+        const CHILD: &str = "TERMINAL_TEST_CLOSED_STDERR";
+        if std::env::var_os(CHILD).is_some() {
+            let mut ready = [0];
+            std::io::stdin().read_exact(&mut ready).unwrap();
+            diag!("diagnostic to a closed pipe");
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::diagnostics_do_not_panic_when_stderr_is_closed",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stderr.take());
+        child.stdin.take().unwrap().write_all(b"1").unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn new_window_stderr_forwards_empty_and_large_output() {
+        for input in [
+            Vec::new(),
+            b"startup failed\n".to_vec(),
+            vec![b'x'; 100_000],
+        ] {
+            let mut output = Vec::new();
+            forward_new_window_stderr(input.as_slice(), &mut output).unwrap();
+            assert_eq!(output, input);
+        }
+    }
+
+    #[test]
+    fn new_window_stderr_drains_after_writer_closes() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut input = std::io::Cursor::new(vec![b'x'; 100_000]);
+        forward_new_window_stderr(&mut input, Closed).unwrap();
+        assert_eq!(input.position(), 100_000);
+    }
+
+    #[test]
+    fn new_window_stderr_retries_interrupted_reads_and_reports_errors() {
+        struct Errors(bool);
+        impl Read for Errors {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                let kind = if self.0 {
+                    self.0 = false;
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    std::io::ErrorKind::Other
+                };
+                Err(kind.into())
+            }
+        }
+        assert_eq!(
+            forward_new_window_stderr(Errors(true), Vec::new())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn new_window_stderr_inherits_only_files_and_character_devices() {
+        use std::os::unix::net::UnixStream;
+        let file = File::open(std::env::current_exe().unwrap()).unwrap();
+        let null = File::open("/dev/null").unwrap();
+        let directory = File::open(".").unwrap();
+        let (_, pipe) = std::io::pipe().unwrap();
+        let (socket, _) = UnixStream::pair().unwrap();
+        for (fd, inherit, pipe) in [
+            (file.as_fd(), true, false),
+            (null.as_fd(), true, false),
+            (directory.as_fd(), false, false),
+            (pipe.as_fd(), false, true),
+            (socket.as_fd(), false, true),
+        ] {
+            let kind = File::from(fd.try_clone_to_owned().unwrap())
+                .metadata()
+                .unwrap()
+                .file_type();
+            assert_eq!(inherit_new_window_stderr(Some(kind)), inherit);
+            assert_eq!(pipe_new_window_stderr(Some(kind)), pipe);
+        }
+        assert!(!inherit_new_window_stderr(None));
+        assert!(!pipe_new_window_stderr(None));
+    }
+
+    #[test]
+    fn keys_held_at_focus_stay_guarded_until_released() {
+        use winit::keyboard::KeyCode;
+        let n = PhysicalKey::Code(KeyCode::KeyN);
+        let other = PhysicalKey::Code(KeyCode::ArrowUp);
+        let mut held = HeldAtFocus::default();
+        assert!(!held.observe(n, ElementState::Pressed, false));
+        assert!(!held.observe(n, ElementState::Released, false));
+        assert!(held.observe(n, ElementState::Pressed, true));
+        assert!(held.observe(n, ElementState::Pressed, false));
+        assert!(!held.observe(other, ElementState::Released, false));
+        assert!(held.observe(n, ElementState::Pressed, false));
+        assert!(!held.observe(n, ElementState::Released, false));
+        assert!(!held.observe(n, ElementState::Pressed, false));
+        assert!(held.observe(n, ElementState::Pressed, true));
+        assert!(!held.observe(n, ElementState::Released, true));
+        assert!(!held.observe(n, ElementState::Pressed, false));
+    }
+
+    #[test]
+    fn only_new_window_suppresses_shortcut_repeats() {
+        for action in [
+            Action::NewWindow,
+            Action::LineUp,
+            Action::LineDown,
+            Action::Increase,
+            Action::Decrease,
+            Action::Copy,
+            Action::None,
+        ] {
+            assert!(!suppress_shortcut_repeat(&action, false, false));
+            for (repeat, synthetic) in [(true, false), (false, true), (true, true)] {
+                assert_eq!(
+                    suppress_shortcut_repeat(&action, repeat, synthetic),
+                    matches!(action, Action::NewWindow)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn line_and_edge_scrolls_pass_through_on_alt_screen() {
+        for action in [
+            Action::LineUp,
+            Action::LineDown,
+            Action::Top,
+            Action::Bottom,
+        ] {
+            assert!(passes_through_on_alt_screen(&action));
+        }
+        for action in [Action::PageUp, Action::PageDown, Action::NewWindow] {
+            assert!(!passes_through_on_alt_screen(&action));
+        }
+    }
+
+    #[test]
+    fn window_and_line_scroll_defaults_dispatch() {
+        use winit::keyboard::NamedKey;
+        for macos in [false, true] {
+            let bindings = config::default_bindings_for(macos);
+            let command = if macos {
+                ModifiersState::SUPER
+            } else {
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            };
+            for (key, mods, action) in [
+                (Key::Character("n".into()), command, Action::NewWindow),
+                (
+                    Key::Named(NamedKey::ArrowUp),
+                    command | ModifiersState::ALT,
+                    Action::LineUp,
+                ),
+                (
+                    Key::Named(NamedKey::ArrowDown),
+                    command | ModifiersState::ALT,
+                    Action::LineDown,
+                ),
+            ] {
+                assert_eq!(
+                    bindings.get(&shortcut_chord(key, mods).unwrap()),
+                    Some(&action)
+                );
+            }
+        }
     }
 
     #[test]
@@ -2229,7 +2595,7 @@ mod tests {
             let bytes = queued.bytes.len();
             let start = Instant::now();
             output.drain_on_exit(&mut term, queued);
-            eprintln!(
+            diag!(
                 "EXIT_DRAIN_TIMING frames={frames} bytes={bytes} elapsed_ms={:.3}",
                 start.elapsed().as_secs_f64() * 1000.0
             );

@@ -57,7 +57,7 @@ impl Clipboard {
                     .map(Backend::Arboard)
                     .map_err(|e| e.to_string()),
             })
-            .map_err(|e| eprintln!("terminal: clipboard unavailable: {e}"))
+            .map_err(|e| diag!("terminal: clipboard unavailable: {e}"))
             .ok();
         Self {
             inner,

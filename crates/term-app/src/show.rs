@@ -129,7 +129,7 @@ pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
     let options = match parse_args(args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("{}: {e}", env!("CARGO_BIN_NAME"));
+            diag!("{}: {e}", env!("CARGO_BIN_NAME"));
             return 2;
         }
     };
@@ -150,7 +150,7 @@ pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
         });
         if let Err(e) = result {
             let _ = out.flush();
-            eprintln!(
+            diag!(
                 "{} show: {}: {}",
                 env!("CARGO_BIN_NAME"),
                 printable(&path.to_string_lossy()),
@@ -704,7 +704,7 @@ fn allow_passthrough() -> bool {
         if !passthrough_allowed(&current)
             && tmux(&[&["set", "-p"], &target[..], &["allow-passthrough", "on"]].concat()).is_none()
         {
-            eprintln!(
+            diag!(
                 "{} show: couldn't turn on tmux's allow-passthrough, so images may not draw",
                 env!("CARGO_BIN_NAME")
             );
