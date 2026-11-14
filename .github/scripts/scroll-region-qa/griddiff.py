@@ -164,31 +164,57 @@ def streams():
         yield "fuzz-%d" % seed, text.encode(), c, r
 
 
+def file_sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.digest()
+
+
+def first_diff(pa, pb):
+    """Streams both dumps: (last checkpoint line, main line, head line) at the first differing line."""
+    check = b"?"
+    with open(pa, "rb") as fa, open(pb, "rb") as fb:
+        while True:
+            x, y = fa.readline(), fb.readline()
+            if x != y:
+                if x.startswith(b"@"):
+                    check = x.rstrip(b"\n")
+                return check, x.rstrip(b"\n"), y.rstrip(b"\n") if y else b"<end>"
+            if x.startswith(b"@"):
+                check = x.rstrip(b"\n")
+
+
+# Dumps repeat the whole scrollback at every checkpoint and can reach several GB per stream, so
+# they go to files and are compared by streaming, never held in memory.
 dumpers = {"main": build("main", o.main), "head": build("head", o.head)}
 failed, n = False, 0
 with tempfile.TemporaryDirectory() as tmp:
     for name, data, cols, rows in streams():
         path = os.path.join(tmp, "stream.bin")
         open(path, "wb").write(data)
-        dumps = {}
+        dumps, digests = {}, {}
         for label, exe in dumpers.items():
-            r = subprocess.run([exe, path, str(cols), str(rows)], capture_output=True)
-            tail = r.stdout[-40:].split(b"\n")
+            dumps[label] = os.path.join(tmp, "dump-%s.txt" % label)
+            with open(dumps[label], "wb") as f:
+                r = subprocess.run([exe, path, str(cols), str(rows)], stdout=f, stderr=subprocess.PIPE)
+            with open(dumps[label], "rb") as f:
+                f.seek(max(0, os.path.getsize(dumps[label]) - 40))
+                tail = f.read().split(b"\n")
             if r.returncode != 0 or b"END %d" % len(data) not in tail:
                 print("%s: %s dumper did not process the stream (exit %d): %s"
                       % (name, label, r.returncode, r.stderr.decode()[-400:]), file=sys.stderr)
                 sys.exit(2)
-            dumps[label] = r.stdout
+            digests[label] = file_sha(dumps[label])
         n += 1
-        if dumps["main"] != dumps["head"]:
+        if digests["main"] != digests["head"]:
             failed = True
-            a, b = dumps["main"].split(b"\n"), dumps["head"].split(b"\n")
-            i = next(i for i, (x, y) in enumerate(zip(a + [b""], b + [b""])) if x != y)
-            check = next((a[j] for j in range(i, -1, -1) if a[j].startswith(b"@")), b"?")
+            check, a, b = first_diff(dumps["main"], dumps["head"])
             open(os.path.join(out, name + ".bin"), "wb").write(data)
-            print("FAIL %s at %s\n  main: %s\n  head: %s" % (name, check.decode()[:60], a[i].decode()[:300],
-                                                            b[i].decode()[:300] if i < len(b) else "<end>"))
+            print("FAIL %s at %s\n  main: %s\n  head: %s" % (name, check.decode()[:60], a.decode()[:300],
+                                                            b.decode()[:300]))
         else:
-            print("ok   %s  %s" % (name, hashlib.sha256(dumps["main"]).hexdigest()[:12]))
+            print("ok   %s  %s" % (name, digests["main"].hex()[:12]))
 print("%d streams, %s" % (n, "DIFFERENCES (failing streams saved in %s)" % out if failed else "identical"))
 sys.exit(1 if failed else 0)
