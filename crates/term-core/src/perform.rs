@@ -201,6 +201,21 @@ impl Perform for Terminal {
         self.print_state.disarm_clear();
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
+            [b"8", attributes, rest @ ..] if !rest.is_empty() => {
+                let uri = match rest {
+                    [uri] => std::borrow::Cow::Borrowed(*uri),
+                    _ => std::borrow::Cow::Owned(rest.join(&b';')),
+                };
+                self.cursor.template.hyperlink = if uri.is_empty() {
+                    0
+                } else {
+                    let id = attributes
+                        .split(|&b| b == b':')
+                        .find_map(|p| p.strip_prefix(b"id="))
+                        .unwrap_or(b"");
+                    self.intern_link(id, &uri, u16::MAX as usize)
+                };
+            }
             [b"133", mark, args @ ..] => {
                 self.shell_mark(mark, args);
             }
@@ -331,13 +346,21 @@ impl Terminal {
     fn sgr(&mut self, params: &Params) {
         let t = &mut self.cursor.template;
         if params.is_empty() {
-            *t = Default::default();
+            *t = super::Cell {
+                hyperlink: t.hyperlink,
+                ..Default::default()
+            };
             return;
         }
         let mut iter = params.iter();
         while let Some(param) = iter.next() {
             match param[0] {
-                0 => *t = Default::default(),
+                0 => {
+                    *t = super::Cell {
+                        hyperlink: t.hyperlink,
+                        ..Default::default()
+                    }
+                }
                 1 => t.flags.insert(Flags::BOLD),
                 2 => t.flags.insert(Flags::DIM),
                 3 => t.flags.insert(Flags::ITALIC),
@@ -406,5 +429,26 @@ fn extended_color<'a>(param: &[u16], iter: &mut impl Iterator<Item = &'a [u16]>)
             Some(Color::Rgb(r, g, b))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_sgr_params_preserve_hyperlink_and_reset_style() {
+        let mut term = Terminal::new(8, 2);
+        term.advance(b"\x1b]8;;https://example.com\x07\x1b[1;31ma");
+        let hyperlink = term.cursor.template.hyperlink;
+        assert_ne!(hyperlink, 0);
+        term.sgr(&Params::default());
+        assert_eq!(
+            term.cursor.template,
+            super::super::Cell {
+                hyperlink,
+                ..Default::default()
+            }
+        );
     }
 }

@@ -320,6 +320,7 @@ impl Renderer {
         banner: Option<&str>,
         search: Option<&crate::SearchOverlay<'_>>,
         preedit: Option<Preedit<'_>>,
+        hover: Option<&term_core::Link>,
         pre_present: Option<&mut dyn FnMut()>,
     ) -> bool {
         for _ in 0..2 {
@@ -332,6 +333,7 @@ impl Renderer {
                 banner,
                 search,
                 preedit,
+                hover,
             ) {
                 break;
             }
@@ -376,6 +378,7 @@ impl Renderer {
         banner: Option<&str>,
         search: Option<&crate::SearchOverlay<'_>>,
         preedit: Option<Preedit<'_>>,
+        hover: Option<&term_core::Link>,
     ) -> bool {
         let mut backgrounds = std::mem::take(&mut self.backgrounds);
         let mut glyphs = std::mem::take(&mut self.glyphs);
@@ -467,7 +470,10 @@ impl Renderer {
                         }
                     }
                 }
-                if cell.flags.contains(Flags::UNDERLINE) {
+                if cell.flags.contains(Flags::UNDERLINE)
+                    || hover
+                        .is_some_and(|link| link.contains(term.viewport_to_point_signed(row, col)))
+                {
                     let w = cw * cells as f32;
                     overlays.push(self.rect(x, y + underline_offset, w, stroke, fg));
                 }

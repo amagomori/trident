@@ -44,6 +44,7 @@ use term_core::{MouseMode, Point, SelectionKind, Terminal};
 #[cfg(test)]
 use term_render::PADDING;
 use term_render::{Fonts, Renderer};
+mod links;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -247,6 +248,8 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
 
 struct Session {
     composition: ime::Composition,
+    link_pressed: bool,
+    hover: Option<term_core::Link>,
     ime_cursor_area: Option<[f32; 4]>,
     scroll: PixelScroll,
     pty_cell: (f32, f32),
@@ -1019,6 +1022,8 @@ impl App {
         };
         Ok(Session {
             composition: ime::Composition::default(),
+            link_pressed: false,
+            hover: None,
             ime_cursor_area: None,
             scroll: PixelScroll::default(),
             pty_cell: cell,
@@ -1207,6 +1212,7 @@ impl App {
             search.refresh(&mut s.term, false);
         }
         self.update_ime_cursor_area();
+        let hover = self.hover_link();
         let Some(s) = &mut self.session else { return };
         if s.term.modes.synchronized_output {
             s.redraw_pending = true;
@@ -1274,6 +1280,7 @@ impl App {
             banner.as_deref(),
             search.as_ref(),
             s.composition.preedit().filter(|_| search.is_none()),
+            hover.as_ref(),
             Some(&mut pre_present),
         );
         if rendered {
@@ -1513,6 +1520,7 @@ impl App {
                 {
                     search.set_preedit(text, cursor);
                 }
+                self.refresh_link();
                 self.update_ime_cursor_area();
                 if let Some(s) = &self.session {
                     s.window.request_redraw();
@@ -1761,6 +1769,63 @@ impl App {
             && !self.modifiers.shift_key()
     }
 
+    fn hover_link(&self) -> Option<term_core::Link> {
+        if !self.focused || !links::command_modifier(self.modifiers) {
+            return None;
+        }
+        let s = self.session.as_ref()?;
+        if pointer_in_search_bar(
+            self.search.is_some(),
+            self.mouse_pos,
+            s.window.inner_size(),
+            (s.fonts.metrics.width, s.fonts.metrics.height),
+        ) {
+            return None;
+        }
+        let pad = self.config.padding * s.window.scale_factor() as f32;
+        if term_render::ledger_bar(&s.term, pad, s.scroll.offset as f32, s.fonts.metrics.height)
+            .is_some_and(|bar| bar.contains(self.mouse_pos.y as f32))
+        {
+            return None;
+        }
+        if !pointer_in_grid(
+            self.mouse_pos,
+            self.config.padding as f64 * s.window.scale_factor(),
+            (s.term.cols(), s.term.rows()),
+            (s.fonts.metrics.width, s.fonts.metrics.height),
+        ) {
+            return None;
+        }
+        let (row, col) = self.cell_at(self.mouse_pos)?;
+        if self.search.is_none()
+            && let Some(preedit) = s.composition.preedit()
+            && let Some((cursor_row, cursor_col)) = s.term.input_cursor_position()
+            && cell_in_preedit(
+                &preedit.layout(cursor_col, s.term.cols()),
+                cursor_row,
+                (row, col),
+            )
+        {
+            return None;
+        }
+        s.term.link_at(s.term.viewport_to_point_signed(row, col))
+    }
+
+    fn refresh_link(&mut self) {
+        let link = self.hover_link();
+        if let Some(s) = &mut self.session
+            && s.hover != link
+        {
+            s.window.set_cursor(if link.is_some() {
+                winit::window::CursorIcon::Pointer
+            } else {
+                winit::window::CursorIcon::Default
+            });
+            s.hover = link;
+            s.request_frame();
+        }
+    }
+
     fn report_mouse(&mut self, button: ReportButton, pressed: bool, motion: bool) {
         let Some((row, col)) = self.cell_at(self.mouse_pos) else {
             return;
@@ -1809,6 +1874,23 @@ impl App {
             if !pressed && std::mem::take(&mut self.ledger_click) {
                 return;
             }
+        }
+        match links::mouse_action(
+            button,
+            pressed,
+            self.session.as_ref().is_some_and(|s| s.link_pressed),
+            || self.hover_link(),
+        ) {
+            Some(links::MouseAction::Release) => {
+                self.session.as_mut().unwrap().link_pressed = false;
+                return;
+            }
+            Some(links::MouseAction::Open(link)) => {
+                self.session.as_mut().unwrap().link_pressed = true;
+                links::open(link.uri);
+                return;
+            }
+            None => {}
         }
         // Finish a local drag even if Shift was released while mouse reporting is on.
         if button == MouseButton::Left && !pressed && self.left_down {
@@ -1862,6 +1944,7 @@ impl App {
     fn cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
         let old = self.cell_at(self.mouse_pos);
         self.mouse_pos = pos;
+        self.refresh_link();
         let cell = self.cell_at(pos);
         if self.left_down {
             if let (Some((row, col)), Some(s)) = (cell, &mut self.session) {
@@ -1970,6 +2053,50 @@ fn warn_vsync_unsupported(config: &config::Config, renderer: &Renderer) {
     if !config.vsync && !renderer.vsync_optional {
         diag!("terminal: vsync = false: this GPU surface only supports vsync; keeping it on");
     }
+}
+
+fn cell_in_preedit(
+    layout: &term_render::PreeditLayout,
+    preedit_row: usize,
+    (row, col): (isize, usize),
+) -> bool {
+    row == preedit_row as isize && (layout.column..layout.column + layout.width).contains(&col)
+}
+
+fn pointer_in_search_bar(
+    visible: bool,
+    pos: PhysicalPosition<f64>,
+    size: PhysicalSize<u32>,
+    cell: (f32, f32),
+) -> bool {
+    if !visible {
+        return false;
+    }
+    let layout = term_render::search_layout(
+        0,
+        0..0,
+        0,
+        size.width as f32,
+        size.height as f32,
+        cell.0,
+        cell.1,
+    );
+    pos.x >= 0.0
+        && pos.x < size.width as f64
+        && pos.y >= layout.cursor_area[1] as f64
+        && pos.y < size.height as f64
+}
+
+fn pointer_in_grid(
+    pos: PhysicalPosition<f64>,
+    padding: f64,
+    grid: (usize, usize),
+    cell: (f32, f32),
+) -> bool {
+    pos.x >= padding
+        && pos.x < padding + grid.0 as f64 * cell.0 as f64
+        && pos.y >= padding
+        && pos.y < padding + grid.1 as f64 * cell.1 as f64
 }
 
 fn grid_size(window: &Window, fonts: &Fonts, padding: f32) -> (usize, usize) {
@@ -2090,6 +2217,7 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(s) = &mut self.session {
             s.pty.refresh_flow();
         }
+        self.refresh_link();
         if let Some(s) = &mut self.session
             && std::mem::take(&mut s.pty.flow_redraw)
         {
@@ -2243,7 +2371,10 @@ impl ApplicationHandler<UserEvent> for App {
                     s.window.request_redraw();
                 }
             }
-            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+                self.refresh_link();
+            }
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
             WindowEvent::KeyboardInput {
                 event,
@@ -2331,6 +2462,7 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     self.write_input(text.as_bytes());
                 }
+                self.refresh_link();
                 self.update_ime_cursor_area();
             }
             WindowEvent::MouseInput { state, button, .. } => self.mouse_input(state, button),
@@ -2380,6 +2512,46 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_hit_test_excludes_padding_and_leftover_space() {
+        let padding = 12.0;
+        let grid = (80, 24);
+        let cell = (10.0, 20.0);
+        for (x, y) in [(12.0, 12.0), (811.9, 491.9), (400.0, 250.0)] {
+            assert!(pointer_in_grid(
+                PhysicalPosition::new(x, y),
+                padding,
+                grid,
+                cell
+            ));
+        }
+        for (x, y) in [
+            (11.9, 250.0),
+            (812.0, 250.0),
+            (400.0, 11.9),
+            (400.0, 492.0),
+            (0.0, 0.0),
+            (900.0, 600.0),
+            (f64::NAN, 250.0),
+        ] {
+            assert!(!pointer_in_grid(
+                PhysicalPosition::new(x, y),
+                padding,
+                grid,
+                cell
+            ));
+        }
+        for grid in [(0, 24), (80, 0), (0, 0)] {
+            assert!(!pointer_in_grid(
+                PhysicalPosition::new(12.0, 12.0),
+                padding,
+                grid,
+                cell
+            ));
+        }
+    }
+
     #[test]
     fn input_requests_frame_only_when_view_changes() {
         let mut term = Terminal::new(20, 3);
@@ -2603,6 +2775,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn preedit_hides_the_cells_it_covers_from_link_hover() {
+        let preedit = term_render::Preedit {
+            text: "日本",
+            cursor: None,
+        };
+        let layout = preedit.layout(3, 10);
+        assert!(cell_in_preedit(&layout, 2, (2, 3)));
+        assert!(cell_in_preedit(&layout, 2, (2, 6)));
+        assert!(!cell_in_preedit(&layout, 2, (2, 2)));
+        assert!(!cell_in_preedit(&layout, 2, (2, 7)));
+        assert!(!cell_in_preedit(&layout, 2, (1, 4)));
+        assert!(!cell_in_preedit(&layout, 2, (-1, 4)));
+    }
+
+    #[test]
+    fn search_bar_hit_test_uses_visible_physical_bounds() {
+        let size = PhysicalSize::new(800, 600);
+        let cell = (10.0, 20.0);
+        for (x, y) in [(0.0, 580.0), (799.9, 599.9), (400.0, 590.0)] {
+            let pos = PhysicalPosition::new(x, y);
+            assert!(pointer_in_search_bar(true, pos, size, cell));
+            assert!(!pointer_in_search_bar(false, pos, size, cell));
+        }
+        for (x, y) in [
+            (-0.1, 590.0),
+            (800.0, 590.0),
+            (400.0, 579.9),
+            (400.0, 600.0),
+        ] {
+            assert!(!pointer_in_search_bar(
+                true,
+                PhysicalPosition::new(x, y),
+                size,
+                cell,
+            ));
+        }
+        assert!(pointer_in_search_bar(
+            true,
+            PhysicalPosition::new(0.0, 0.0),
+            PhysicalSize::new(1, 1),
+            cell,
+        ));
+        assert!(!pointer_in_search_bar(
+            true,
+            PhysicalPosition::new(0.0, 0.0),
+            PhysicalSize::new(0, 0),
+            cell,
+        ));
     }
 
     #[test]

@@ -53,11 +53,13 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub flags: Flags,
+    pub hyperlink: u16,
 }
 
 impl Default for Cell {
     fn default() -> Self {
         Cell {
+            hyperlink: 0,
             c: ' ',
             fg: Color::DefaultFg,
             bg: Color::DefaultBg,
@@ -187,12 +189,67 @@ impl Row {
         self.hidden = None;
     }
 
+    /// Cells past the right edge, in order after the visible ones, as `resize` would bring
+    /// them back.
+    pub(crate) fn hidden_cells(&self) -> impl Iterator<Item = &Cell> {
+        static BLANK: Cell = Cell {
+            c: ' ',
+            fg: Color::DefaultFg,
+            bg: Color::DefaultBg,
+            flags: Flags(0),
+            hyperlink: 0,
+        };
+        let (lead, cells) = match self.hidden.as_deref() {
+            // The PAD stand-in was overwritten, so the wide character it covered is gone.
+            Some(h)
+                if h.padded
+                    && !self
+                        .cells
+                        .last()
+                        .is_some_and(|c| c.flags.contains(Flags::PAD)) =>
+            {
+                (Some(&BLANK), h.cells.get(2..).unwrap_or_default())
+            }
+            Some(h) => (None, &h.cells[..]),
+            None => (None, &[][..]),
+        };
+        lead.into_iter().chain(cells)
+    }
+
     pub fn materialize_wrap_padding(&mut self, from: usize) {
         if self.wrapped {
             for cell in &mut self.cells[from..] {
                 cell.flags.remove(Flags::WIDE_WRAP);
             }
         }
+    }
+
+    /// Marks the links the row references and returns how many were not marked yet.
+    pub(crate) fn mark_hyperlinks(&self, used: &mut [bool]) -> usize {
+        let hidden = self.hidden.as_deref().map_or(&[][..], |h| &h.cells[..]);
+        let mut marked = 0;
+        for cells in [&self.cells[..], hidden] {
+            // Neighbouring cells mostly share a link, so only a change of index is looked up.
+            let mut last = 0;
+            for cell in cells {
+                let index = cell.hyperlink;
+                if index != last {
+                    last = index;
+                    if index != 0 && !used[index as usize] {
+                        used[index as usize] = true;
+                        marked += 1;
+                    }
+                }
+            }
+        }
+        marked
+    }
+
+    pub(crate) fn hyperlinks_mut(&mut self) -> impl Iterator<Item = &mut u16> {
+        self.cells
+            .iter_mut()
+            .chain(self.hidden.iter_mut().flat_map(|h| h.cells.iter_mut()))
+            .map(|c| &mut c.hyperlink)
     }
 
     pub(crate) fn is_blank(&self) -> bool {
