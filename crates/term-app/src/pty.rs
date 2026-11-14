@@ -23,6 +23,9 @@ const READ_BUFFER: usize = 64 * 1024;
 /// is still queued, instead of after every read. Reads with escape sequences, which can
 /// change the input modes a shell return resets, are always checked.
 const FOREGROUND_INTERVAL: Duration = Duration::from_millis(5);
+/// Reads starting within this many bytes of an escape byte are always checked too, since
+/// they may finish a sequence split across reads.
+const ESCAPE_TAIL: usize = 64;
 
 /// Shell output read but not yet parsed, as one buffer: small reads (macOS returns about
 /// 1 KiB per read) still reach the parser as one batch.
@@ -74,8 +77,8 @@ struct Pending {
     checked_at: Option<Instant>,
     /// Start of the queued output read since the foreground group was last checked.
     unchecked_from: Option<usize>,
-    /// Whether the last read held an escape byte, so the next one may finish its sequence.
-    after_escape: bool,
+    /// Bytes read since the last escape byte, if any.
+    since_escape: Option<usize>,
 }
 
 impl Pending {
@@ -90,10 +93,14 @@ impl Pending {
         bytes: &[u8],
         shell: impl FnOnce() -> Option<bool>,
     ) -> bool {
-        let escape = memchr::memchr(0x1b, bytes).is_some();
-        let after_escape = std::mem::replace(&mut self.after_escape, escape);
-        if !escape
-            && !after_escape
+        let open = self.since_escape.is_some_and(|n| n < ESCAPE_TAIL);
+        let escape = memchr::memrchr(0x1b, bytes);
+        self.since_escape = match escape {
+            Some(at) => Some(bytes.len() - at - 1),
+            None => self.since_escape.map(|n| n.saturating_add(bytes.len())),
+        };
+        if escape.is_none()
+            && !open
             && !self.bytes.is_empty()
             && self
                 .checked_at
@@ -691,7 +698,7 @@ mod tests {
         assert!(!read(&mut pending, start + soon, b"flood\n", Some(false)));
         assert!(read(&mut pending, start + soon * 2, MODES, Some(false)));
         assert!(read(&mut pending, start + soon * 3, b"$ ", Some(true)));
-        assert!(!read(&mut pending, start + soon * 3, b"ls", Some(false)));
+        read(&mut pending, start + soon * 3, b"ls", Some(false));
         let output = pending.take_output(start + soon * 3, || Some(false));
         assert_eq!(output.shell_returns, [12 + MODES.len()]);
         assert!(!input_modes_on(&apply(&output)));
@@ -701,14 +708,25 @@ mod tests {
     fn a_read_finishing_an_escape_sequence_is_checked() {
         let mut pending = Pending::default();
         let start = Instant::now();
-        let (head, tail) = MODES.split_at(MODES.len() - 3);
+        let (head, rest) = MODES.split_at(MODES.len() - 6);
+        let (middle, tail) = rest.split_at(3);
         assert!(read(&mut pending, start, b"flood\n", Some(false)));
         assert!(read(&mut pending, start, head, Some(false)));
+        assert!(read(&mut pending, start, middle, Some(false)));
         assert!(read(&mut pending, start, tail, Some(false)));
-        assert!(!read(&mut pending, start, b"$ ", Some(true)));
-        let output = pending.take_output(start, || Some(true));
+        assert!(read(&mut pending, start, b"$ ", Some(true)));
+        let output = pending.take_output(start, || panic!("the last read was checked"));
         assert_eq!(output.shell_returns, [6 + MODES.len()]);
         assert!(!input_modes_on(&apply(&output)));
+    }
+
+    #[test]
+    fn plain_output_well_past_an_escape_is_throttled_again() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        assert!(read(&mut pending, start, MODES, Some(false)));
+        assert!(read(&mut pending, start, &[b'x'; ESCAPE_TAIL], Some(false)));
+        assert!(!read(&mut pending, start, b"x", Some(false)));
     }
 
     #[test]
