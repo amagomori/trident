@@ -1,4 +1,8 @@
-use term_core::{Terminal, search::Match};
+use std::time::{Duration, Instant};
+use term_core::{
+    Terminal,
+    search::{Match, SearchJob},
+};
 use winit::keyboard::ModifiersState;
 
 pub fn accepts_text(mods: ModifiersState, option_as_alt: bool) -> bool {
@@ -26,7 +30,14 @@ pub struct Search {
     pub current: Option<usize>,
     pub dirty: bool,
     pub invalid: bool,
+    job: Option<SearchJob>,
+    /// Selection to restore once the running search reaches it.
+    keep: Option<Match>,
+    reveal_found: bool,
 }
+
+/// Longest a search runs before handing the event loop back.
+pub const SLICE: Duration = Duration::from_millis(4);
 
 impl Search {
     pub fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
@@ -60,27 +71,92 @@ impl Search {
         );
         self.refresh(term, true);
     }
+    /// Restart the search, scanning the newest lines now and the rest in later `advance` calls.
     pub fn refresh(&mut self, term: &mut Terminal, reset: bool) {
-        let previous = self.current.and_then(|i| self.matches.get(i)).copied();
-        let result = term.search(&self.query, self.regex);
-        self.invalid = result.is_err();
-        self.matches = result.unwrap_or_default();
-        self.current = if reset {
-            self.matches.len().checked_sub(1)
-        } else {
-            previous
-                .and_then(|m| self.matches.iter().position(|candidate| *candidate == m))
-                .or_else(|| self.matches.len().checked_sub(1))
-        };
+        let previous = self
+            .current
+            .and_then(|i| self.matches.get(i))
+            .copied()
+            .or(self.keep);
+        self.matches.clear();
+        self.current = None;
         self.dirty = false;
-        if reset {
-            self.reveal(term);
+        self.keep = if reset { None } else { previous };
+        self.reveal_found = reset;
+        match term.search_job(&self.query, self.regex) {
+            Ok(job) => {
+                self.invalid = false;
+                self.job = Some(job);
+                self.advance(term, Some(Instant::now() + SLICE));
+            }
+            Err(_) => {
+                self.invalid = true;
+                self.job = None;
+                self.keep = None;
+            }
         }
+    }
+
+    pub fn searching(&self) -> bool {
+        self.job.is_some()
+    }
+
+    /// Scan older lines until `deadline` (`None`: to the end); true when the matches or the status changed.
+    pub fn advance(&mut self, term: &mut Terminal, deadline: Option<Instant>) -> bool {
+        let Some(job) = &mut self.job else {
+            return false;
+        };
+        let done = match deadline {
+            Some(deadline) => job.run_until(term, deadline),
+            None => job.run(term, usize::MAX),
+        };
+        let frontier = job.frontier();
+        let mut found = job.take_found();
+        let added = found.len();
+        if added > 0 {
+            found.append(&mut self.matches);
+            self.matches = found;
+            self.current = self.current.map(|i| i + added);
+        }
+        if done {
+            self.job = None;
+        }
+        if self.current.is_none() {
+            self.current = match self.keep {
+                Some(keep) => self
+                    .matches
+                    .iter()
+                    .position(|candidate| *candidate == keep)
+                    .or_else(|| {
+                        (done || frontier <= keep.start.line)
+                            .then(|| self.matches.len().checked_sub(1))
+                            .flatten()
+                    }),
+                None => self.matches.len().checked_sub(1),
+            };
+            if self.current.is_some() || done {
+                self.keep = None;
+            }
+            if self.current.is_some() && std::mem::take(&mut self.reveal_found) {
+                self.reveal(term);
+            }
+        }
+        added > 0 || done
     }
 
     pub fn step(&mut self, term: &mut Terminal, older: bool) {
         if self.dirty {
             self.refresh(term, false);
+        }
+        let wraps = self.current.is_none_or(|i| {
+            if older {
+                i == 0
+            } else {
+                i + 1 == self.matches.len()
+            }
+        });
+        if wraps {
+            self.advance(term, None);
         }
         if let Some(i) = self.current {
             self.current = Some(if older {
@@ -111,9 +187,18 @@ impl Search {
         let status = if self.invalid {
             "invalid regex".into()
         } else if self.matches.is_empty() {
-            "no matches".into()
+            if self.searching() {
+                "searching".into()
+            } else {
+                "no matches".into()
+            }
         } else {
-            format!("{}/{}", self.current.unwrap_or(0) + 1, self.matches.len())
+            format!(
+                "{}/{}{}",
+                self.current.unwrap_or(0) + 1,
+                self.matches.len(),
+                if self.searching() { "+" } else { "" }
+            )
         };
         format!(
             "{}  {}",
@@ -287,6 +372,43 @@ mod tests {
         search.refresh(&mut term, false);
         assert_eq!(search.matches[search.current.unwrap()].start.col, limit);
         assert_eq!(search.status(), "9998/10000  [plain]");
+    }
+
+    #[test]
+    fn sliced_refresh_matches_whole_search_and_keeps_selection() {
+        let mut term = Terminal::new(20, 3);
+        term.set_scrollback_limit(200_000);
+        for i in 0..200_000 {
+            term.advance(if i % 50_000 == 7 {
+                b"needle\r\n"
+            } else {
+                b"hay\r\n"
+            });
+        }
+        let whole = term.search("needle", false).unwrap();
+        assert_eq!(whole.len(), 4);
+        let mut search = Search {
+            query: "needle".into(),
+            ..Search::default()
+        };
+        search.refresh(&mut term, true);
+        while search.searching() {
+            assert!(search.status().contains('+') || search.status().starts_with("searching"));
+            search.advance(&mut term, Some(Instant::now() + SLICE));
+        }
+        assert_eq!(search.matches, whole);
+        assert_eq!(search.current, Some(3));
+        assert_eq!(search.status(), "4/4  [plain]");
+        search.step(&mut term, true);
+        search.step(&mut term, true);
+        search.refresh(&mut term, false);
+        search.advance(&mut term, None);
+        assert_eq!(search.current, Some(1));
+        search.refresh(&mut term, false);
+        search.step(&mut term, true);
+        search.step(&mut term, true);
+        assert_eq!(search.current, Some(3));
+        assert!(!search.searching());
     }
 
     #[test]

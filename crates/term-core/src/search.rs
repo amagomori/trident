@@ -1,6 +1,7 @@
 //! On-demand search over the active screen and its retained history.
 use crate::{Cell, Flags, Point, Terminal};
-use regex::RegexBuilder;
+use regex::{Regex, RegexBuilder};
+use std::time::Instant;
 
 pub const MATCH_LIMIT: usize = 10_000;
 
@@ -16,11 +17,146 @@ impl Match {
     }
 }
 
-impl Terminal {
-    pub fn search(&self, query: &str, regex: bool) -> Result<Vec<Match>, String> {
-        if query.is_empty() {
-            return Ok(Vec::new());
+/// A search over the screen and history that runs in slices, newest lines first.
+pub struct SearchJob {
+    re: Regex,
+    /// Last line of the next logical line to scan; `None` once the search is done.
+    next: Option<u64>,
+    /// First line of the oldest logical line scanned so far.
+    frontier: u64,
+    found: Vec<Match>,
+    chunks: Vec<std::ops::Range<usize>>,
+    total: usize,
+    text: String,
+    points: Vec<(Point, Point)>,
+}
+
+/// Logical lines scanned between deadline checks.
+const SLICE_LINES: usize = 256;
+
+impl SearchJob {
+    pub fn done(&self) -> bool {
+        self.next.is_none()
+    }
+
+    /// Matches start on or after this line come from this search; older lines are still unscanned.
+    pub fn frontier(&self) -> u64 {
+        self.frontier
+    }
+
+    /// Scan until the search is done or `deadline` passes, checking the clock every few hundred lines.
+    pub fn run_until(&mut self, term: &Terminal, deadline: Instant) -> bool {
+        while !self.run(term, SLICE_LINES) && Instant::now() < deadline {}
+        self.done()
+    }
+
+    /// Scan up to `lines` logical lines, returning whether the search is done.
+    pub fn run(&mut self, term: &Terminal, lines: usize) -> bool {
+        let last = term.history + term.rows as u64 - 1;
+        let first = term.first_line();
+        for _ in 0..lines {
+            let Some(next) = self.next else { break };
+            if next < first || self.total == MATCH_LIMIT {
+                self.next = None;
+                break;
+            }
+            let logical_end = next.min(last);
+            let mut logical_start = logical_end;
+            while logical_start > first && term.line(logical_start - 1).wrapped {
+                logical_start -= 1;
+            }
+            self.scan(term, logical_start, logical_end, last);
+            self.frontier = logical_start;
+            self.next =
+                (logical_start > first && self.total < MATCH_LIMIT).then(|| logical_start - 1);
         }
+        self.done()
+    }
+
+    fn scan(&mut self, term: &Terminal, logical_start: u64, logical_end: u64, last: u64) {
+        self.text.clear();
+        let mut has_points = false;
+        for line in logical_start..=logical_end {
+            for (_, cell) in text_cells(term, line, last) {
+                self.text.push(cell.c);
+            }
+        }
+        let offset = self.found.len();
+        let remaining = MATCH_LIMIT - self.total;
+        let mut oldest = 0;
+        let mut found = 0;
+        for m in self.re.find_iter(&self.text) {
+            if m.is_empty() {
+                continue;
+            }
+            if !has_points {
+                has_points = true;
+                self.points.clear();
+                for line in logical_start..=logical_end {
+                    for (col, cell) in text_cells(term, line, last) {
+                        let start = Point { line, col };
+                        let end = Point {
+                            line,
+                            col: col + usize::from(cell.flags.contains(Flags::WIDE)),
+                        };
+                        self.points
+                            .extend(std::iter::repeat_n((start, end), cell.c.len_utf8()));
+                    }
+                }
+            }
+            let matched = Match {
+                start: self.points[m.start()].0,
+                end: self.points[m.end() - 1].1,
+            };
+            if found < remaining {
+                self.found.push(matched);
+                found += 1;
+            } else {
+                self.found[offset + oldest] = matched;
+                oldest = (oldest + 1) % remaining;
+            }
+        }
+        self.found[offset..].rotate_left(oldest);
+        if found > 0 {
+            self.chunks.push(offset..self.found.len());
+            self.total += found;
+        }
+    }
+
+    /// Matches found since the last call, in ascending order; all are older than earlier ones.
+    pub fn take_found(&mut self) -> Vec<Match> {
+        let mut ordered = Vec::with_capacity(self.found.len());
+        for chunk in self.chunks.drain(..).rev() {
+            ordered.extend_from_slice(&self.found[chunk]);
+        }
+        self.found.clear();
+        ordered
+    }
+}
+
+/// The cells of `line` that are text, with their columns.
+fn text_cells(term: &Terminal, line: u64, last: u64) -> impl Iterator<Item = (usize, &Cell)> {
+    let row = term.line(line);
+    let cells = if !row.wrapped || line == last {
+        let end = row
+            .cells
+            .iter()
+            .rposition(|cell| *cell != Cell::default())
+            .map_or(0, |col| col + 1);
+        &row.cells[..end]
+    } else {
+        &row.cells[..]
+    };
+    cells.iter().enumerate().filter(|(_, cell)| {
+        !(cell.flags.contains(Flags::WIDE_SPACER)
+            || cell.flags.contains(Flags::PAD)
+            || cell.flags.contains(Flags::WIDE_WRAP))
+    })
+}
+
+impl Terminal {
+    /// Start a search; `run` it to collect matches, newest first.
+    pub fn search_job(&self, query: &str, regex: bool) -> Result<SearchJob, String> {
         let pattern = if regex {
             query.to_owned()
         } else {
@@ -30,81 +166,26 @@ impl Terminal {
             .case_insensitive(!query.chars().any(char::is_uppercase))
             .build()
             .map_err(|e| e.to_string())?;
-        let mut matches = Vec::with_capacity(MATCH_LIMIT);
-        let mut chunks = Vec::new();
-        let mut text = String::new();
-        let mut points = Vec::new();
         let last = self.history + self.rows as u64 - 1;
-        let first = self.first_line();
-        let mut logical_end = last;
-        loop {
-            let mut logical_start = logical_end;
-            while logical_start > first && self.line(logical_start - 1).wrapped {
-                logical_start -= 1;
-            }
-            for line in logical_start..=logical_end {
-                let row = self.line(line);
-                let end_of_line = !row.wrapped || line == last;
-                let cells = if end_of_line {
-                    let end = row
-                        .cells
-                        .iter()
-                        .rposition(|cell| *cell != Cell::default())
-                        .map_or(0, |col| col + 1);
-                    &row.cells[..end]
-                } else {
-                    &row.cells[..]
-                };
-                for (col, cell) in cells.iter().enumerate() {
-                    if cell.flags.contains(Flags::WIDE_SPACER)
-                        || cell.flags.contains(Flags::PAD)
-                        || cell.flags.contains(Flags::WIDE_WRAP)
-                    {
-                        continue;
-                    }
-                    let start = Point { line, col };
-                    let end = Point {
-                        line,
-                        col: col + usize::from(cell.flags.contains(Flags::WIDE)),
-                    };
-                    text.push(cell.c);
-                    points.extend(std::iter::repeat_n((start, end), cell.c.len_utf8()));
-                }
-            }
-            let offset = matches.len();
-            let remaining = MATCH_LIMIT - offset;
-            let mut oldest = 0;
-            for found in re.find_iter(&text) {
-                if found.is_empty() {
-                    continue;
-                }
-                let matched = Match {
-                    start: points[found.start()].0,
-                    end: points[found.end() - 1].1,
-                };
-                if matches.len() < MATCH_LIMIT {
-                    matches.push(matched);
-                } else {
-                    matches[offset + oldest] = matched;
-                    oldest = (oldest + 1) % remaining;
-                }
-            }
-            matches[offset..].rotate_left(oldest);
-            if matches.len() > offset {
-                chunks.push(offset..matches.len());
-            }
-            if matches.len() == MATCH_LIMIT || logical_start == first {
-                break;
-            }
-            text.clear();
-            points.clear();
-            logical_end = logical_start - 1;
+        Ok(SearchJob {
+            re,
+            next: (!query.is_empty()).then_some(last),
+            frontier: last + 1,
+            found: Vec::with_capacity(MATCH_LIMIT),
+            chunks: Vec::new(),
+            total: 0,
+            text: String::new(),
+            points: Vec::new(),
+        })
+    }
+
+    pub fn search(&self, query: &str, regex: bool) -> Result<Vec<Match>, String> {
+        if query.is_empty() {
+            return Ok(Vec::new());
         }
-        let mut ordered = Vec::with_capacity(matches.len());
-        for chunk in chunks.into_iter().rev() {
-            ordered.extend_from_slice(&matches[chunk]);
-        }
-        Ok(ordered)
+        let mut job = self.search_job(query, regex)?;
+        job.run(self, usize::MAX);
+        Ok(job.take_found())
     }
 
     /// Center an off-screen history line without moving an already visible line.
@@ -370,5 +451,62 @@ mod tests {
             assert!(matches.windows(2).all(|pair| pair[0].start < pair[1].start));
         }
         assert!(t.search("^", true).unwrap().is_empty());
+    }
+
+    fn sliced(t: &Terminal, query: &str, regex: bool, lines: usize) -> Vec<Match> {
+        let mut job = t.search_job(query, regex).unwrap();
+        let mut all = Vec::new();
+        while !job.run(t, lines) {
+            let older = job.take_found();
+            assert!(older.iter().all(|m| m.start.line >= job.frontier()));
+            assert!(
+                older
+                    .last()
+                    .zip(all.first())
+                    .is_none_or(|(a, b): (&Match, &Match)| a.start < b.start)
+            );
+            all.splice(0..0, older);
+        }
+        all.splice(0..0, job.take_found());
+        all
+    }
+
+    #[test]
+    fn sliced_search_matches_whole_search() {
+        let mut t = Terminal::new(6, 3);
+        t.set_scrollback_limit(500);
+        for i in 0..400 {
+            match i % 7 {
+                0 => t.advance("ab界cd ab\r\n".as_bytes()),
+                3 => t.advance(b"xx AB\r\n"),
+                5 => t.advance(b"abababababab\r\n"),
+                _ => t.advance(b"zz\r\n"),
+            }
+        }
+        t.advance(b"ab");
+        for (query, regex) in [
+            ("ab", false),
+            ("AB", false),
+            ("b界c", false),
+            ("d ab", false),
+            ("ab$", true),
+            ("a.a", true),
+            ("missing", false),
+            ("", false),
+        ] {
+            let whole = t.search(query, regex).unwrap();
+            for lines in [1, 2, 5, 64] {
+                assert_eq!(sliced(&t, query, regex, lines), whole, "{query} {lines}");
+            }
+        }
+
+        let mut capped = Terminal::new(4, 3);
+        capped.set_scrollback_limit(MATCH_LIMIT);
+        for _ in 0..MATCH_LIMIT / 2 + 1 {
+            capped.advance(b"aaaaaa\r\n");
+        }
+        let whole = capped.search("aa", false).unwrap();
+        assert_eq!(whole.len(), MATCH_LIMIT);
+        assert_eq!(sliced(&capped, "aa", false, 3), whole);
     }
 }

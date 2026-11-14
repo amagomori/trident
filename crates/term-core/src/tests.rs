@@ -1136,8 +1136,8 @@ mod bench {
     }
 
     #[inline(never)]
-    fn measured_search(term: &Terminal) {
-        black_box(term.search(black_box("a"), false).unwrap());
+    fn measured_search(term: &Terminal, query: &str) {
+        black_box(term.search(black_box(query), false).unwrap());
     }
 
     enum Kind {
@@ -1145,7 +1145,8 @@ mod bench {
         Throughput(fn() -> Vec<u8>, usize),
         Keystrokes,
         Images,
-        Search(usize),
+        /// Search over this many history lines of `a`s for the query.
+        Search(usize, &'static str),
     }
 
     const WORKLOADS: &[(&str, Kind)] = &[
@@ -1193,9 +1194,10 @@ mod bench {
         ("unicode_linux", Kind::Throughput(unicode, LINUX_BATCH)),
         ("keystroke_latency", Kind::Keystrokes),
         ("images", Kind::Images),
-        ("search_dense_10k", Kind::Search(10_000)),
-        ("search_dense_100k", Kind::Search(100_000)),
-        ("search_dense_1m", Kind::Search(1_000_000)),
+        ("search_dense_10k", Kind::Search(10_000, "a")),
+        ("search_dense_100k", Kind::Search(100_000, "a")),
+        ("search_dense_1m", Kind::Search(1_000_000, "a")),
+        ("search_sparse_100k", Kind::Search(100_000, "b")),
     ];
 
     fn median(secs: &mut [f64]) -> f64 {
@@ -1217,7 +1219,7 @@ mod bench {
                 continue;
             }
             let (unit, count, mut secs) = match kind {
-                Kind::Search(lines) => {
+                Kind::Search(lines, query) => {
                     let mut term = Terminal::new(80, 24);
                     term.set_scrollback_limit(*lines);
                     let line = [b'a'; 80];
@@ -1228,7 +1230,7 @@ mod bench {
                     let secs = (0..iters)
                         .map(|_| {
                             let start = Instant::now();
-                            measured_search(&term);
+                            measured_search(&term, query);
                             start.elapsed().as_secs_f64()
                         })
                         .collect();
