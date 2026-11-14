@@ -2315,6 +2315,18 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
             return;
         }
+        let searching = match (&mut self.session, &mut self.search) {
+            (Some(s), Some(search)) if search.searching() => {
+                if search.dirty {
+                    search.refresh(&mut s.term, false);
+                    s.window.request_redraw();
+                } else if search.advance(&mut s.term, Some(Instant::now() + search::SLICE)) {
+                    s.window.request_redraw();
+                }
+                search.searching()
+            }
+            _ => false,
+        };
         self.update_ime_cursor_area();
         let mut deadline = None;
         if let Some(s) = &mut self.session {
@@ -2342,7 +2354,11 @@ impl ApplicationHandler<UserEvent> for App {
                 Some(self.exit_presentation.wakeup(Instant::now())),
             );
         }
-        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+        event_loop.set_control_flow(if searching {
+            ControlFlow::Poll
+        } else {
+            deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+        });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
