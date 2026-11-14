@@ -350,7 +350,7 @@ instrumented, and each one gets the matching config in `compare/cfg/` (JetBrains
 14, 100x30, 10k scrollback).
 
 ```sh
-sudo apt install xvfb openbox python3-xlib fonts-jetbrains-mono
+sudo apt install xvfb openbox xdotool python3-xlib fonts-jetbrains-mono
 Xvfb :99 -screen 0 1920x1080x24 & DISPLAY=:99 openbox &
 cargo build --release
 DISPLAY=:99 python3 .github/scripts/compare/compare.py --terms terminal,alacritty
