@@ -98,6 +98,7 @@ padding = 6.0               # 0..=1000 logical pixels
 scrollback = 10000          # retained lines; 0 disables history
 drop_preview = true         # false: file drops insert only the shell-quoted path
 paste_protection = true     # false: never confirm multi-line or control-character pastes
+confirm_close = true        # false: close the window at once even while a program runs
 vsync = true                # false: present without waiting for vblank (lower latency, may tear)
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 
@@ -243,6 +244,11 @@ Enter and runs the command at once. Such pastes, and pastes containing other con
 characters (tab excepted), first show a banner: Enter pastes, Escape cancels, and other
 keys are ignored while it is shown. With bracketed paste on, text pastes directly with
 every ESC stripped. Set `paste_protection = false` to always paste immediately.
+
+Closing the window at an idle shell prompt quits at once. While another program holds the
+terminal's foreground (vim, ssh, a build), a banner names it and asks first: Enter (or a
+second close) closes the window, Escape keeps it, and other keys are ignored while it is
+shown. Set `confirm_close = false` to always close immediately.
 
 ### Dropping files
 
