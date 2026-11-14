@@ -30,12 +30,32 @@ fn keypad_letter(key: PhysicalKey) -> Option<char> {
     })
 }
 
+/// The SS3 letter for a keypad key in application keypad mode. Without Shift, a keypad
+/// key that produced a navigation key (Num Lock off) keeps its cursor/editing encoding,
+/// so less and stock Vim still see arrows, Home/End and Insert/Delete.
+fn application_keypad_letter(
+    key: &Key,
+    physical: PhysicalKey,
+    mods: ModifiersState,
+) -> Option<char> {
+    if let Key::Named(named) = key
+        && *named != NamedKey::Enter
+        && !mods.shift_key()
+    {
+        return None;
+    }
+    keypad_letter(physical)
+}
+
 pub fn application_keypad_owns_key(
+    key: &Key,
     physical: PhysicalKey,
     mods: ModifiersState,
     modes: &Modes,
 ) -> bool {
-    !mods.super_key() && modes.app_keypad && keypad_letter(physical).is_some()
+    !mods.super_key()
+        && modes.app_keypad
+        && application_keypad_letter(key, physical, mods).is_some()
 }
 
 /// xterm's modifier parameter: 1 + shift + 2*alt + 4*ctrl.
@@ -93,7 +113,7 @@ pub fn encode_key(
     alt_sends_esc: bool,
 ) -> Option<Vec<u8>> {
     if modes.app_keypad
-        && let Some(letter) = keypad_letter(physical)
+        && let Some(letter) = application_keypad_letter(key, physical, mods)
     {
         let m = modifier_param(mods);
         return Some(if m > 1 {
@@ -348,16 +368,19 @@ mod tests {
             ..Modes::default()
         };
         assert!(application_keypad_owns_key(
+            &Key::Named(NamedKey::End),
             PhysicalKey::Code(KeyCode::Numpad1),
             ModifiersState::SHIFT,
             &modes
         ));
         assert!(!application_keypad_owns_key(
+            &Key::Named(NamedKey::End),
             PhysicalKey::Code(KeyCode::End),
             ModifiersState::SHIFT,
             &modes
         ));
         assert!(!application_keypad_owns_key(
+            &ch("1"),
             PhysicalKey::Code(KeyCode::Numpad1),
             ModifiersState::empty(),
             &Modes::default()
@@ -372,6 +395,7 @@ mod tests {
                 ModifiersState::SUPER | ModifiersState::SHIFT,
             ] {
                 assert!(!application_keypad_owns_key(
+                    &ch("0"),
                     PhysicalKey::Code(physical),
                     mods,
                     &modes
@@ -379,9 +403,11 @@ mod tests {
             }
         }
         for (physical, logical, expected) in [
-            (KeyCode::Numpad0, NamedKey::Insert, b"\x1bOp".as_slice()),
-            (KeyCode::Numpad2, NamedKey::ArrowDown, b"\x1bOr"),
-            (KeyCode::NumpadDecimal, NamedKey::Delete, b"\x1bOn"),
+            (KeyCode::Numpad0, NamedKey::Insert, b"\x1b[2~".as_slice()),
+            (KeyCode::Numpad2, NamedKey::ArrowDown, b"\x1b[B"),
+            (KeyCode::Numpad1, NamedKey::End, b"\x1b[F"),
+            (KeyCode::NumpadDecimal, NamedKey::Delete, b"\x1b[3~"),
+            (KeyCode::NumpadEnter, NamedKey::Enter, b"\x1bOM"),
             (KeyCode::ArrowDown, NamedKey::ArrowDown, b"\x1b[B"),
             (KeyCode::Enter, NamedKey::Enter, b"\r"),
         ] {

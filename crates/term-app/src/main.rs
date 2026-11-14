@@ -615,13 +615,14 @@ fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
 
 fn shortcut_action(
     config: &config::Config,
+    logical: &Key,
     base: Key,
     physical: winit::keyboard::PhysicalKey,
     mods: ModifiersState,
     modes: &term_core::Modes,
     searching: bool,
 ) -> Option<Action> {
-    if !searching && input::application_keypad_owns_key(physical, mods, modes) {
+    if !searching && input::application_keypad_owns_key(logical, physical, mods, modes) {
         // Match configured keypad bindings before interpreting navigation aliases.
         use winit::keyboard::{KeyCode, PhysicalKey};
         let key = match physical {
@@ -1546,6 +1547,7 @@ impl App {
             .unwrap_or_default();
         let Some(action) = shortcut_action(
             &self.config,
+            &event.logical_key,
             event.key_without_modifiers(),
             event.physical_key,
             mods,
@@ -2676,6 +2678,7 @@ mod tests {
             assert_eq!(
                 shortcut_action(
                     &config,
+                    &Key::Character(text.into()),
                     Key::Character(text.into()),
                     PhysicalKey::Code(code),
                     ModifiersState::CONTROL | ModifiersState::SHIFT,
@@ -2693,6 +2696,7 @@ mod tests {
         assert_eq!(
             shortcut_action(
                 &mac,
+                &Key::Character("0".into()),
                 Key::Character("0".into()),
                 winit::keyboard::PhysicalKey::Code(KeyCode::Numpad0),
                 ModifiersState::SUPER,
@@ -2705,6 +2709,7 @@ mod tests {
         assert_eq!(
             shortcut_action(
                 &config,
+                &end.clone(),
                 end.clone(),
                 physical,
                 ModifiersState::SHIFT,
@@ -2716,6 +2721,7 @@ mod tests {
         assert_eq!(
             shortcut_action(
                 &config,
+                &end.clone(),
                 end.clone(),
                 physical,
                 ModifiersState::SHIFT,
@@ -2727,6 +2733,7 @@ mod tests {
         assert_eq!(
             shortcut_action(
                 &config,
+                &end.clone(),
                 end,
                 physical,
                 ModifiersState::SHIFT,
@@ -2743,6 +2750,7 @@ mod tests {
         assert_eq!(
             shortcut_action(
                 &custom,
+                &Key::Named(NamedKey::End),
                 Key::Named(NamedKey::End),
                 physical,
                 ModifiersState::SHIFT,
