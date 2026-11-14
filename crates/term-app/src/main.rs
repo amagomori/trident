@@ -1802,7 +1802,7 @@ impl App {
             s.window.set_cursor(if link.is_some() {
                 winit::window::CursorIcon::Pointer
             } else {
-                winit::window::CursorIcon::Text
+                winit::window::CursorIcon::Default
             });
             s.hover = link;
             s.request_frame();
