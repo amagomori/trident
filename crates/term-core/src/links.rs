@@ -66,6 +66,12 @@ impl LinkTable {
         (self.get(index) == Some((id, uri))).then_some(index)
     }
 
+    fn position(&mut self, id: &[u8], uri: &[u8], slot: usize) -> Option<u16> {
+        let index = (1..=self.len() as u16).find(|&index| self.get(index) == Some((id, uri)))?;
+        self.recent[slot] = index;
+        Some(index)
+    }
+
     fn insert(&mut self, id: &[u8], uri: &[u8], slot: usize) -> u16 {
         self.spans.push(Span {
             start: self.bytes.len(),
@@ -82,15 +88,18 @@ impl LinkTable {
         index
     }
 
-    /// Keeps the entries marked in `used` (by index), renumbered in order, and
-    /// returns the old-to-new index map.
+    /// Keeps the entries marked in `used` (by index), renumbered in order with
+    /// duplicates merged, and returns the old-to-new index map.
     pub(crate) fn compact(&mut self, used: &[bool]) -> Vec<u16> {
         let old = std::mem::take(self);
+        let mut kept = std::collections::HashMap::new();
         let mut remap = vec![0; used.len()];
         for index in 1..=old.len() as u16 {
             if used[index as usize] {
                 let (id, uri) = old.get(index).unwrap();
-                remap[index as usize] = self.insert(id, uri, recent_slot(id, uri));
+                remap[index as usize] = *kept
+                    .entry((id, uri))
+                    .or_insert_with(|| self.insert(id, uri, recent_slot(id, uri)));
             }
         }
         remap
@@ -105,11 +114,13 @@ impl Terminal {
         }
         if self.links.len() >= limit {
             self.compact_links();
+            if let Some(index) = self.links.position(id, uri, slot) {
+                return index;
+            }
         }
         if self.links.len() >= limit {
             return 0;
         }
-        let slot = recent_slot(id, uri);
         self.links.insert(id, uri, slot)
     }
 
@@ -434,6 +445,28 @@ mod tests {
             t.links.get(a),
             Some((b"".as_slice(), b"https://example.com/1".as_slice()))
         );
+    }
+
+    #[test]
+    fn full_table_of_live_duplicates_still_finds_a_known_link() {
+        let mut t = Terminal::new(8, 2);
+        for (col, uri) in [b"https://a", b"https://a", b"https://b", b"https://b"]
+            .into_iter()
+            .enumerate()
+        {
+            t.primary.lines[0].cells[col].hyperlink = t.links.insert(b"", uri, 0);
+        }
+        let index = t.intern_link(b"", b"https://a", 4);
+        assert_eq!(
+            t.links.get(index),
+            Some((b"".as_slice(), b"https://a".as_slice()))
+        );
+        assert_eq!(t.links.len(), 2);
+        let cells = &t.primary.lines[0].cells;
+        assert_eq!(cells[0].hyperlink, index);
+        assert_eq!(cells[1].hyperlink, index);
+        assert_eq!(cells[2].hyperlink, cells[3].hyperlink);
+        assert_eq!(t.intern_link(b"", b"https://a", 4), index);
     }
 
     #[test]
