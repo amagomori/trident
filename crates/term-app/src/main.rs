@@ -17,6 +17,7 @@ mod frame_clock;
 mod ime;
 mod input;
 mod latency;
+mod paste;
 #[cfg(target_os = "macos")]
 mod present_macos;
 #[cfg(target_os = "linux")]
@@ -778,6 +779,8 @@ struct App {
     last_click: Option<(Instant, Point, u8)>,
     scroll_accum: f64,
     clipboard: clipboard::Clipboard,
+    /// Clipboard text waiting for the user to confirm (paste protection).
+    pending_paste: Option<String>,
     error: Option<String>,
     exit_deadline: Option<Instant>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -842,6 +845,7 @@ impl App {
             last_click: None,
             scroll_accum: 0.0,
             clipboard: clipboard::Clipboard::default(),
+            pending_paste: None,
             error: None,
             exit_deadline: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1206,6 +1210,10 @@ impl App {
             (Some(error), None) => Some(error.to_owned()),
             (None, flow) => flow,
         };
+        let banner = match &self.pending_paste {
+            Some(text) => Some(paste::banner(text, banner)),
+            None => banner,
+        };
         let started = Instant::now();
         #[cfg(target_os = "linux")]
         let exit_target = (self.exit_deadline.is_some()
@@ -1277,6 +1285,10 @@ impl App {
     }
 
     fn paste(&mut self, primary: bool) {
+        // A waiting paste keeps the banner until Enter or Escape resolves it.
+        if self.pending_paste.is_some() {
+            return;
+        }
         let Some(text) = self.clipboard.get(primary) else {
             return;
         };
@@ -1287,19 +1299,44 @@ impl App {
             return;
         }
         let Some(s) = &self.session else { return };
-        // Normalize newlines to carriage returns, as typed Enter would send.
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        let bytes = if s.term.modes.bracketed_paste {
-            // Strip every ESC so the text cannot end the bracketed paste early.
-            let text = text.replace('\x1b', "");
-            format!("\x1b[200~{text}\x1b[201~")
-        } else {
-            text
+        if self.config.paste_protection
+            && paste::needs_confirmation(&text, s.term.modes.bracketed_paste)
+        {
+            self.pending_paste = Some(text);
+            s.window.request_redraw();
+            return;
+        }
+        self.send_paste(&text);
+    }
+
+    fn send_paste(&mut self, text: &str) {
+        let Some(s) = &self.session else { return };
+        let bytes = paste::encode(text, s.term.modes.bracketed_paste);
+        self.write_input(&bytes);
+    }
+
+    /// Enter sends the waiting paste and Escape drops it; other keys are ignored.
+    #[cold]
+    fn confirm_paste_key(&mut self, event: &KeyEvent) {
+        use winit::keyboard::NamedKey;
+        let confirmed = match event.logical_key {
+            Key::Named(NamedKey::Enter) => true,
+            Key::Named(NamedKey::Escape) => false,
+            _ => return,
         };
-        self.write_input(bytes.as_bytes());
+        if let Some(text) = self.pending_paste.take() {
+            if confirmed {
+                self.send_paste(&text);
+            } else if let Some(s) = &self.session {
+                s.window.request_redraw();
+            }
+        }
     }
 
     fn dropped_file(&mut self, path: PathBuf) {
+        if self.pending_paste.is_some() {
+            return;
+        }
         // Flush any deferred echo before inserting rows above the current prompt.
         self.process_output();
         let Some(s) = &mut self.session else { return };
@@ -2142,7 +2179,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let held_at_focus =
                     self.held_at_focus
                         .observe(event.physical_key, event.state, is_synthetic);
-                if event.state != ElementState::Pressed || self.shortcut(&event, held_at_focus) {
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+                if self.pending_paste.is_some() {
+                    self.confirm_paste_key(&event);
+                    return;
+                }
+                if self.shortcut(&event, held_at_focus) {
                     return;
                 }
                 let find_preedit = self.search.as_ref().map(|f| f.preedit.as_str());
@@ -2172,7 +2216,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
-                if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
+                if self.pending_paste.is_some() {
+                    // Like typed keys, committed text never reaches the shell past the banner.
+                } else if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
                     search.insert(&text, &mut s.term);
                     s.scroll.reset();
                     s.window.request_redraw();
@@ -2206,7 +2252,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     s.window.request_redraw();
                 }
-                if let Ime::Commit(text) = event {
+                if let Ime::Commit(text) = event
+                    && self.pending_paste.is_none()
+                {
                     self.write_input(text.as_bytes());
                 }
                 self.update_ime_cursor_area();

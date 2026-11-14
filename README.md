@@ -97,6 +97,7 @@ font_size = 14.0            # 4..=200 points
 padding = 6.0               # 0..=1000 logical pixels
 scrollback = 10000          # retained lines; 0 disables history
 drop_preview = true         # false: file drops insert only the shell-quoted path
+paste_protection = true     # false: never confirm multi-line or control-character pastes
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
@@ -222,6 +223,14 @@ theme files are hot-reloaded, including atomic saves, missing files created late
 and symlinks. An invalid or unreadable theme shows a diagnostic banner and keeps
 the last valid palettes, just like an invalid config.
 
+### Pasting
+
+When the running program has not enabled bracketed paste, a pasted line break acts as
+Enter and runs the command at once. Such pastes, and pastes containing other control
+characters (tab excepted), first show a banner: Enter pastes, Escape cancels, and other
+keys are ignored while it is shown. With bracketed paste on, text pastes directly with
+every ESC stripped. Set `paste_protection = false` to always paste immediately.
+
 ### Dropping files
 
 Drop a local file from your file manager onto the window to insert its POSIX-shell-quoted
@@ -338,6 +347,33 @@ matching, not physical-display latency.
 Likewise, llvmpipe on an X server can produce no Present completion events even
 when the Present extension is advertised; such runs explicitly use the labeled
 present-return fallback and cannot prove real-display scheduling gains.
+
+### Comparing against other terminals
+
+`.github/scripts/compare/compare.py` runs the same black-box tests in `terminal`,
+Alacritty, kitty, WezTerm and Ghostty on one Linux X display: startup (shell exec,
+window mapped, first paint), keypress-to-framebuffer latency through XTest, `cat` of a
+100 MiB file, the [vtebench](https://github.com/alacritty/vtebench) suite, and RSS/PSS
+plus idle CPU before and after a 50,000-line burst. Nothing in the terminals is
+instrumented, and each one gets the matching config in `compare/cfg/` (JetBrains Mono
+14, 100x30, 10k scrollback).
+
+```sh
+sudo apt install xvfb openbox xdotool python3-xlib fonts-jetbrains-mono
+Xvfb :99 -screen 0 1920x1080x24 & DISPLAY=:99 openbox &
+cargo build --release
+DISPLAY=:99 python3 .github/scripts/compare/compare.py --terms terminal,alacritty
+python3 .github/scripts/compare/summarize.py   # Markdown tables
+```
+
+Other terminals are looked up on `PATH`; pass `--bin kitty=PATH` (repeatable) for
+others, such as an extracted kitty bundle or a Ghostty AppImage. vtebench needs its
+binary (`cargo install --git https://github.com/alacritty/vtebench`) and a checkout
+(`--vtebench-dir`, default `~/vtebench`). `--tests` and `--terms` pick a subset;
+results merge into `target/compare/results.json`, so runs can be split. On Xvfb with
+llvmpipe the numbers are relative comparisons on one box, not real-display latency.
+Ghostty needs a Mesa GL version override there (set by the script), then spins its
+renderer and ignores XTest keys, so only its vtebench numbers are usable.
 
 ## License
 
