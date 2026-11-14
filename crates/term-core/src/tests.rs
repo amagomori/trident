@@ -1580,3 +1580,21 @@ fn clear_drops_the_commands_it_overwrites() {
     t.scroll_display(5 - t.display_offset() as isize);
     assert_eq!(pinned_text(&t, 0).as_deref(), Some("$ seq"));
 }
+
+#[test]
+fn inserted_lines_drop_commands_pushed_out_of_the_region() {
+    let mut t = term(20, 8, &"x\r\n".repeat(20));
+    t.advance(b"\x1b[4;1H\x1b]133;A\x07$ \x1b]133;B\x07one\r\n\x1b]133;C\x07out\x1b]133;D;0\x07");
+    t.advance(b"\x1b[7;1H\x1b]133;A\x07$ \x1b]133;B\x07two\r\n\x1b]133;C\x07out\x1b]133;D;0\x07");
+    t.advance(b"\x1b[1;5r\x1b[1;1H\x1b[4L\x1b[r");
+    let commands = &t.shell.commands;
+    assert!(
+        commands
+            .iter()
+            .zip(commands.iter().skip(1))
+            .all(|(a, b)| a.input_line < b.prompt_line),
+        "commands stay ordered"
+    );
+    let two = commands.back().unwrap();
+    assert_eq!(two.cells.iter().map(|c| c.c).collect::<String>(), "$ two");
+}

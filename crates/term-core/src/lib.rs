@@ -476,26 +476,33 @@ impl Terminal {
     #[inline(never)]
     fn shift_shell_lines_down(&mut self, top: usize, bottom: usize, n: usize) {
         let (top, bottom) = (self.history + top as u64, self.history + bottom as u64);
-        let shift = |line: &mut u64| {
-            if (top..=bottom).contains(line) {
-                *line += n as u64;
+        // `None` when the row is pushed past the region's bottom and dropped.
+        let shift = |line: u64| {
+            if (top..=bottom).contains(&line) {
+                Some(line + n as u64).filter(|&moved| moved <= bottom)
+            } else {
+                Some(line)
             }
         };
-        if let Some(line) = &mut self.shell.prompt_line {
-            shift(line);
-        }
-        if let Some((line, _)) = &mut self.shell.input_start {
-            shift(line);
-        }
-        for command in self.shell.commands.iter_mut().rev() {
-            if command.next_prompt.is_some_and(|next| next < top) {
-                break;
-            }
-            shift(&mut command.prompt_line);
-            shift(&mut command.input_line);
-            if let Some(next) = &mut command.next_prompt {
-                shift(next);
-            }
+        self.shell.prompt_line = self.shell.prompt_line.and_then(shift);
+        self.shell.input_start = self
+            .shell
+            .input_start
+            .and_then(|(line, col)| Some((shift(line)?, col)));
+        let commands = &mut self.shell.commands;
+        let mut i = commands.partition_point(|c| c.next_prompt.is_some_and(|next| next < top));
+        while i < commands.len() {
+            let command = &mut commands[i];
+            let Some(input_line) = shift(command.input_line) else {
+                commands.remove(i);
+                continue;
+            };
+            command.input_line = input_line;
+            command.prompt_line = shift(command.prompt_line).unwrap_or(input_line);
+            command.next_prompt = command
+                .next_prompt
+                .map(|next| shift(next).unwrap_or(bottom + 1));
+            i += 1;
         }
     }
 
