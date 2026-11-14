@@ -213,11 +213,7 @@ impl Perform for Terminal {
                         .split(|&b| b == b':')
                         .find_map(|p| p.strip_prefix(b"id="))
                         .unwrap_or(b"");
-                    self.intern_link(
-                        &String::from_utf8_lossy(id),
-                        &String::from_utf8_lossy(&uri),
-                        u16::MAX as usize,
-                    )
+                    self.intern_link(id, &uri, u16::MAX as usize)
                 };
             }
             [b"133", mark, args @ ..] => {
