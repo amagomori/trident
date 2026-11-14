@@ -54,6 +54,10 @@ use winit::window::{Theme, Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
+/// Bounds how long startup waits for the portal's color scheme before the
+/// first PTY output is parsed; the read overlaps window and GPU setup.
+#[cfg(target_os = "linux")]
+const INITIAL_APPEARANCE_WAIT: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
 struct PixelScroll {
@@ -869,6 +873,7 @@ impl App {
             }
             Err(error) => return Err(error),
         };
+        self.watch_appearance();
         let font = self.options.font(&self.config);
         let m = probe.metrics;
         let logical_size = LogicalSize::new(
@@ -932,7 +937,14 @@ impl App {
         let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
         let mut term = Terminal::new(cols, rows);
         self.appearance = window.theme().or(self.appearance);
-        self.watch_appearance();
+        #[cfg(target_os = "linux")]
+        if let Some(theme) = self
+            .appearance_watch
+            .as_mut()
+            .and_then(|watch| watch.initial(INITIAL_APPEARANCE_WAIT))
+        {
+            self.appearance = theme;
+        }
         term.palette = self.config.themes.palette(self.appearance).clone();
         term.set_scrollback_limit(self.options.scrollback(&self.config));
         term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
