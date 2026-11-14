@@ -2310,8 +2310,11 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let searching = match (&mut self.session, &mut self.search) {
-            (Some(s), Some(search)) if !search.dirty && search.searching() => {
-                if search.advance(&mut s.term, Some(Instant::now() + search::SLICE)) {
+            (Some(s), Some(search)) if search.searching() => {
+                if search.dirty {
+                    search.refresh(&mut s.term, false);
+                    s.window.request_redraw();
+                } else if search.advance(&mut s.term, Some(Instant::now() + search::SLICE)) {
                     s.window.request_redraw();
                 }
                 search.searching()
