@@ -2196,6 +2196,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match self.start(event_loop) {
             Ok(session) => {
+                #[cfg(target_os = "macos")]
+                close_confirm::route_menu_quit_through_close();
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
                 self.process_output();
