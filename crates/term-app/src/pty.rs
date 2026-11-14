@@ -181,6 +181,8 @@ pub struct Pty {
     pub wake_pending: Arc<AtomicBool>,
     watcher_stopped: Arc<AtomicBool>,
     #[cfg(unix)]
+    watcher_activity: Arc<crate::command_notify::Activity>,
+    #[cfg(unix)]
     watcher: Option<crate::command_notify::Watcher>,
     finished: Arc<dyn Fn(crate::command_notify::Finished) + Send + Sync>,
 }
@@ -266,6 +268,8 @@ impl Pty {
             .try_clone_reader()
             .map_err(|e| format!("cannot read pty: {e}"))?;
         let watcher_stopped = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        let watcher_activity = Arc::new(crate::command_notify::Activity::default());
         let mut writer = pair
             .master
             .take_writer()
@@ -325,6 +329,8 @@ impl Pty {
         let wake_pending = Arc::new(AtomicBool::new(false));
         let pending = wake_pending.clone();
         let reader_stopped = watcher_stopped.clone();
+        #[cfg(unix)]
+        let reader_activity = watcher_activity.clone();
         std::thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
@@ -333,6 +339,8 @@ impl Pty {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            #[cfg(unix)]
+                            reader_activity.kick();
                             let sequence = queue.read_sequence.fetch_add(1, Ordering::SeqCst) + 1;
                             let read_bytes =
                                 queue.read_bytes.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
@@ -362,6 +370,8 @@ impl Pty {
                     }
                 }
                 reader_stopped.store(true, Ordering::Release);
+                #[cfg(unix)]
+                reader_activity.wake_for_shutdown();
                 wake(true);
             })
             .map_err(|e| format!("cannot start reader thread: {e}"))?;
@@ -376,6 +386,8 @@ impl Pty {
             output,
             wake_pending,
             watcher_stopped,
+            #[cfg(unix)]
+            watcher_activity,
             #[cfg(unix)]
             watcher: None,
             finished: Arc::new(finished),
@@ -399,6 +411,7 @@ impl Pty {
                         fd,
                         shell,
                         self.watcher_stopped.clone(),
+                        self.watcher_activity.clone(),
                         move |event| finished(event),
                     )
                     .map_err(|e| format!("cannot start command watcher: {e}"))?,
@@ -430,6 +443,8 @@ impl Pty {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        #[cfg(unix)]
+        self.watcher_activity.kick();
         if bytes.is_empty() {
             return;
         }
@@ -501,6 +516,8 @@ impl Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         self.watcher_stopped.store(true, Ordering::Release);
+        #[cfg(unix)]
+        self.watcher_activity.wake_for_shutdown();
         self.output.pending.lock().unwrap().closed = true;
         self.output.room.notify_one();
         let _ = self.child.kill();

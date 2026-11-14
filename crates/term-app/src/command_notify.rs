@@ -9,6 +9,7 @@ pub struct Finished {
 #[derive(Default)]
 struct Foreground {
     running: std::collections::BTreeMap<i32, (Instant, Option<String>)>,
+    shell_name: Option<String>,
 }
 
 impl Foreground {
@@ -32,7 +33,20 @@ impl Foreground {
             }
         });
         if let Some(group) = group {
-            self.running.entry(group).or_insert_with(|| (now, name()));
+            match self.running.entry(group) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((now, name()));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    // A group first seen between fork and exec still shows the shell's image.
+                    let stored = &mut entry.get_mut().1;
+                    if (stored.is_none() || *stored == self.shell_name)
+                        && let Some(current) = name()
+                    {
+                        *stored = Some(current);
+                    }
+                }
+            }
         }
         finished
     }
@@ -190,15 +204,69 @@ fn command_name(group: libc::pid_t) -> Option<String> {
 }
 
 #[cfg(unix)]
+pub struct Activity {
+    enabled: std::sync::atomic::AtomicBool,
+    kicked: std::sync::atomic::AtomicBool,
+    idle: std::sync::atomic::AtomicBool,
+    receiver: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    sender: std::sync::mpsc::SyncSender<()>,
+    #[cfg(test)]
+    samples: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    wakeups: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(unix)]
+impl Default for Activity {
+    fn default() -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        Self {
+            enabled: false.into(),
+            kicked: false.into(),
+            idle: false.into(),
+            sender,
+            receiver: std::sync::Mutex::new(receiver),
+            #[cfg(test)]
+            samples: 0.into(),
+            #[cfg(test)]
+            wakeups: 0.into(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Activity {
+    #[inline(never)]
+    pub fn kick(&self) {
+        use std::sync::atomic::Ordering;
+        if self.enabled.load(Ordering::Acquire)
+            && !self.kicked.swap(true, Ordering::SeqCst)
+            && self.idle.load(Ordering::SeqCst)
+        {
+            self.wake_for_shutdown();
+        }
+    }
+
+    pub fn wake_for_shutdown(&self) {
+        let _ = self.sender.try_send(());
+    }
+}
+
+#[cfg(unix)]
 pub struct Watcher {
-    stop: std::sync::mpsc::Sender<()>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    activity: std::sync::Arc<Activity>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 #[cfg(unix)]
 impl Drop for Watcher {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        self.activity
+            .enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        self.activity.wake_for_shutdown();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -338,17 +406,31 @@ pub fn watch(
     fd: std::os::fd::OwnedFd,
     shell: u32,
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    activity: std::sync::Arc<Activity>,
     finished: impl Fn(Finished) + Send + 'static,
 ) -> std::io::Result<Watcher> {
     use std::os::fd::AsRawFd;
     use std::sync::atomic::Ordering;
-    let (stop, receiver) = std::sync::mpsc::channel();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let thread_activity = activity.clone();
     let thread = std::thread::Builder::new()
         .name("command-watcher".into())
         .spawn(move || {
+            let receiver = thread_activity.receiver.lock().unwrap();
+            let mut last_kick = Instant::now();
             let mut foreground = Foreground::default();
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                foreground.shell_name = command_name(shell as i32);
+            }
             let mut stopped_groups = StoppedGroups::default();
-            while !stopped.load(Ordering::Acquire) {
+            'watch: while !stopped.load(Ordering::Acquire) && !thread_stop.load(Ordering::Acquire) {
+                if thread_activity.kicked.swap(false, Ordering::SeqCst) {
+                    last_kick = Instant::now();
+                }
+                #[cfg(test)]
+                thread_activity.samples.fetch_add(1, Ordering::Relaxed);
                 // SAFETY: this thread owns the descriptor until it exits.
                 let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
                 let now = Instant::now();
@@ -374,15 +456,56 @@ pub fn watch(
                 for event in events {
                     finished(event);
                 }
-                if receiver.recv_timeout(Duration::from_millis(200))
-                    != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                {
-                    break;
+                let next_sample = Instant::now() + Duration::from_millis(200);
+                loop {
+                    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+                    let active = !foreground.running.is_empty()
+                        || last_kick.elapsed() < Duration::from_secs(1)
+                        // Only a noncanonical line editor is safe to leave unsampled.
+                        // SAFETY: this thread owns fd; termios is read only on success.
+                        || unsafe {
+                            libc::tcgetattr(fd.as_raw_fd(), termios.as_mut_ptr()) != 0
+                                || termios.assume_init().c_lflag & libc::ICANON != 0
+                        };
+                    let result = if active {
+                        receiver.recv_timeout(next_sample.saturating_duration_since(Instant::now()))
+                    } else {
+                        thread_activity.idle.store(true, Ordering::SeqCst);
+                        if thread_activity.kicked.swap(false, Ordering::SeqCst) {
+                            thread_activity.idle.store(false, Ordering::SeqCst);
+                            last_kick = Instant::now();
+                            continue;
+                        }
+                        let result = receiver
+                            .recv()
+                            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected);
+                        thread_activity.idle.store(false, Ordering::SeqCst);
+                        result
+                    };
+                    match result {
+                        Ok(()) => {
+                            #[cfg(test)]
+                            thread_activity.wakeups.fetch_add(1, Ordering::Relaxed);
+                            if stopped.load(Ordering::Acquire)
+                                || thread_stop.load(Ordering::Acquire)
+                            {
+                                break 'watch;
+                            }
+                            if !active {
+                                last_kick = Instant::now();
+                                break;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'watch,
+                    }
                 }
             }
         })?;
+    activity.enabled.store(true, Ordering::Release);
     Ok(Watcher {
         stop,
+        activity,
         thread: Some(thread),
     })
 }
@@ -430,6 +553,31 @@ mod tests {
         for (seconds, expected) in [(0, "0s"), (12, "12s"), (134, "2m 14s"), (3780, "1h 3m")] {
             assert_eq!(format_duration(Duration::from_secs(seconds)), expected);
         }
+    }
+
+    #[test]
+    fn name_seen_before_exec_is_refreshed() {
+        let mut state = Foreground {
+            shell_name: Some("bash".into()),
+            ..Default::default()
+        };
+        let start = Instant::now();
+        state.sample(Some(42), start, || Some("bash".into()), |_| false);
+        state.sample(
+            Some(42),
+            start + Duration::from_millis(200),
+            || Some("sleep 2".into()),
+            |_| false,
+        );
+        state.sample(
+            Some(42),
+            start + Duration::from_millis(400),
+            || panic!("name already settled"),
+            |_| false,
+        );
+        let events = state.sample(None, start + Duration::from_secs(2), || None, |_| true);
+        assert_eq!(events[0].name.as_deref(), Some("sleep 2"));
+        assert_eq!(events[0].duration, Duration::from_secs(2));
     }
 
     #[test]
@@ -732,12 +880,193 @@ mod tests {
         reader
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let watcher = watch(writer.into(), 1, Default::default(), |_| {
+        let activity = std::sync::Arc::new(Activity::default());
+        let watcher = watch(
+            writer.into(),
+            1,
+            Default::default(),
+            activity.clone(),
+            |_| panic!("no PTY group"),
+        )
+        .unwrap();
+        assert_sampling(&activity);
+        let start = Instant::now();
+        drop(watcher);
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    fn assert_idle(activity: &Activity) {
+        use std::sync::atomic::Ordering;
+        std::thread::sleep(Duration::from_millis(1500));
+        let samples = activity.samples.load(Ordering::Relaxed);
+        assert!(samples > 0);
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(activity.samples.load(Ordering::Relaxed), samples);
+    }
+
+    #[cfg(unix)]
+    fn assert_sampling(activity: &Activity) {
+        use std::sync::atomic::Ordering;
+        std::thread::sleep(Duration::from_millis(1500));
+        let samples = activity.samples.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(activity.samples.load(Ordering::Relaxed) > samples);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_watcher_kick_tracks_real_foreground_command() {
+        shell_command_finishes("bash", &["--noprofile", "--norc", "-i"], b"sleep 1\n", true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn silent_builtin_then_command_finishes() {
+        shell_command_finishes(
+            "bash",
+            &["--noprofile", "--norc", "-i"],
+            b"read -t 2 x; sleep 2\n",
+            true,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_shell_prompt_keeps_sampling() {
+        // macOS /bin/sh is bash with readline, so turn line editing off to keep the prompt canonical.
+        shell_command_finishes(
+            "bash",
+            &["--noediting", "--noprofile", "--norc", "-i"],
+            b"sleep 1\n",
+            false,
+        );
+    }
+
+    #[cfg(unix)]
+    fn shell_command_finishes(shell: &str, args: &[&str], input: &[u8], idle: bool) {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::io::{Read, Write};
+
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut command = CommandBuilder::new(shell);
+        command.args(args);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        // Drain the master like the app's reader, or the shell blocks on a full PTY (macOS).
+        let mut output = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || while matches!(output.read(&mut [0; 4096]), Ok(n) if n > 0) {});
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
+            .try_clone_to_owned()
+            .unwrap();
+        let activity = std::sync::Arc::new(Activity::default());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let watcher = watch(
+            fd,
+            child.process_id().unwrap(),
+            Default::default(),
+            activity.clone(),
+            move |event| {
+                sender.send(event).unwrap();
+            },
+        )
+        .unwrap();
+        if idle {
+            assert_idle(&activity);
+        } else {
+            assert_sampling(&activity);
+        }
+        // Kick before the shell forks, as happens on an Enter write.
+        activity.kick();
+        let mut writer = pair.master.take_writer().unwrap();
+        writer.write_all(input).unwrap();
+        writer.flush().unwrap();
+        let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(event.name.is_some_and(|name| name.starts_with("sleep")));
+        assert!(event.duration >= Duration::from_millis(400));
+        drop(watcher);
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_kicks_do_not_wake_watcher_or_increase_sample_rate() {
+        use std::sync::atomic::Ordering;
+        let (_reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let activity = std::sync::Arc::new(Activity::default());
+        let watcher = watch(
+            writer.into(),
+            1,
+            Default::default(),
+            activity.clone(),
+            |_| panic!("no PTY group"),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while activity.samples.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let samples = activity.samples.load(Ordering::Relaxed);
+        assert!(samples > 0);
+        let start = Instant::now();
+        let mut kicks = 0;
+        while start.elapsed() < Duration::from_secs(1) {
+            for _ in 0..100 {
+                activity.kick();
+                kicks += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(kicks > 1000);
+        let samples = activity.samples.load(Ordering::Relaxed) - samples;
+        assert!((4..=6).contains(&samples), "{samples} samples");
+        assert_eq!(activity.wakeups.load(Ordering::Relaxed), 0);
+        drop(watcher);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_exit_kick_stops_idle_watcher() {
+        use portable_pty::{PtySize, native_pty_system};
+        use std::sync::atomic::Ordering;
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
+            .try_clone_to_owned()
+            .unwrap();
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: fd owns a live PTY; termios is initialized before use.
+        unsafe {
+            assert_eq!(
+                libc::tcgetattr(std::os::fd::AsRawFd::as_raw_fd(&fd), termios.as_mut_ptr()),
+                0
+            );
+            let mut termios = termios.assume_init();
+            termios.c_lflag &= !libc::ICANON;
+            assert_eq!(
+                libc::tcsetattr(
+                    std::os::fd::AsRawFd::as_raw_fd(&fd),
+                    libc::TCSANOW,
+                    &termios
+                ),
+                0
+            );
+        }
+        let activity = std::sync::Arc::new(Activity::default());
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watcher = watch(fd, 1, stopped.clone(), activity.clone(), |_| {
             panic!("no PTY group")
         })
         .unwrap();
-        drop(watcher);
-        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+        assert_idle(&activity);
+        stopped.store(true, Ordering::Release);
+        activity.wake_for_shutdown();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !watcher.thread.as_ref().unwrap().is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(watcher.thread.as_ref().unwrap().is_finished());
     }
 
     #[test]
