@@ -382,6 +382,7 @@ impl Terminal {
         let col = self.cursor.col + usize::from(self.cursor.pending_wrap);
         match mark {
             b"A" => {
+                self.drop_overwritten_commands(line);
                 if let Some(last) = self.shell.commands.back_mut()
                     && last.next_prompt.is_none()
                 {
@@ -410,6 +411,7 @@ impl Terminal {
                 } else {
                     (Vec::new(), false)
                 };
+                self.drop_overwritten_commands(prompt_line);
                 let first = self.first_line();
                 let commands = &mut self.shell.commands;
                 if let Some(last) = commands.back_mut()
@@ -447,6 +449,53 @@ impl Terminal {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A prompt drawn at or above a recorded command (after `clear`, or the cursor moved
+    /// up over old output) has overwritten it.
+    fn drop_overwritten_commands(&mut self, prompt_line: u64) {
+        while self
+            .shell
+            .commands
+            .back()
+            .is_some_and(|c| c.prompt_line >= prompt_line)
+        {
+            self.shell.commands.pop_back();
+        }
+        if let Some(last) = self.shell.commands.back_mut()
+            && let Some(next) = &mut last.next_prompt
+        {
+            *next = (*next).min(prompt_line);
+        }
+    }
+
+    /// Rows `top..=bottom` moved down `n` rows (insert lines, reverse index): move the
+    /// prompt being typed and recorded commands with them.
+    #[cold]
+    #[inline(never)]
+    fn shift_shell_lines_down(&mut self, top: usize, bottom: usize, n: usize) {
+        let (top, bottom) = (self.history + top as u64, self.history + bottom as u64);
+        let shift = |line: &mut u64| {
+            if (top..=bottom).contains(line) {
+                *line += n as u64;
+            }
+        };
+        if let Some(line) = &mut self.shell.prompt_line {
+            shift(line);
+        }
+        if let Some((line, _)) = &mut self.shell.input_start {
+            shift(line);
+        }
+        for command in self.shell.commands.iter_mut().rev() {
+            if command.next_prompt.is_some_and(|next| next < top) {
+                break;
+            }
+            shift(&mut command.prompt_line);
+            shift(&mut command.input_line);
+            if let Some(next) = &mut command.next_prompt {
+                shift(next);
+            }
         }
     }
 
@@ -1256,6 +1305,9 @@ impl Terminal {
     fn scroll_down_region(&mut self, top: usize, bottom: usize, n: usize) {
         self.invalidate_output_ends_in_region(top, bottom, 0);
         let n = n.min(bottom - top + 1);
+        if self.shell.marks_seen && !self.alt_active {
+            self.shift_shell_lines_down(top, bottom, n);
+        }
         if !self.screen().placements.is_empty() {
             self.scroll_placements(top, bottom, n as isize, false);
         }

@@ -1548,3 +1548,35 @@ fn reset_forgets_commands() {
     t.scroll_display(5);
     assert!(t.pinned_command(0).is_none());
 }
+
+#[test]
+fn inserted_lines_move_the_prompt_being_typed() {
+    let mut t = term(20, 5, &long_command(20));
+    // What drop_files::insert_preview writes: room above the prompt, an image, cursor back.
+    t.advance(b"\x1b[3S\x1b[2;1H\x1b[3Limg\r\nimg\r\nimg\x1b[5;3H");
+    t.advance(b"ls\r\n\x1b]133;C\x07");
+    t.advance(&b"out\r\n".repeat(20));
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    t.scroll_display(5);
+    assert_eq!(pinned_text(&t, 0).as_deref(), Some("$ ls"));
+}
+
+#[test]
+fn clear_drops_the_commands_it_overwrites() {
+    let mut input = long_command(3);
+    input.push_str("clear\r\n\x1b]133;C\x07\x1b[3J\x1b[H\x1b[2J\x1b]133;D;0\x07");
+    input.push_str("\x1b]133;A\x07$ \x1b]133;B\x07seq\r\n\x1b]133;C\x07");
+    for i in 0..20 {
+        input.push_str(&format!("{i}\r\n"));
+    }
+    input.push_str("\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    let mut t = term(20, 5, &input);
+    for offset in 1..=t.scrollback_len() {
+        t.scroll_display(-(t.display_offset() as isize) + offset as isize);
+        if let Some(text) = pinned_text(&t, 0) {
+            assert_eq!(text, "$ seq", "offset {offset}");
+        }
+    }
+    t.scroll_display(5 - t.display_offset() as isize);
+    assert_eq!(pinned_text(&t, 0).as_deref(), Some("$ seq"));
+}
