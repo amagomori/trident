@@ -180,8 +180,7 @@ impl PrintState {
 }
 
 pub struct Terminal {
-    links: Vec<(String, String)>,
-    link_indices: std::collections::HashMap<(String, String), u16>,
+    links: links::LinkTable,
     pub palette: colors::Palette,
     cols: usize,
     rows: usize,
@@ -474,8 +473,7 @@ impl Terminal {
                 mark_line: None,
                 output_ends: Vec::new(),
             }),
-            links: Vec::new(),
-            link_indices: std::collections::HashMap::new(),
+            links: Default::default(),
             palette: colors::Palette::default(),
             cols,
             rows,
