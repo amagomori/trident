@@ -44,10 +44,13 @@ struct Probe {
     #[cfg(unix)]
     fd: Option<std::os::fd::OwnedFd>,
     shell: Option<u32>,
+    /// The first child is a command (`terminal -e vim`), not a shell: it counts as a
+    /// running program while it holds the foreground itself.
+    command: bool,
 }
 
 impl Probe {
-    /// The foreground process group, when it is a program other than the shell.
+    /// The foreground process group, when it is a program rather than an idle shell.
     #[cold]
     fn program(&self) -> Option<i32> {
         #[cfg(unix)]
@@ -56,7 +59,7 @@ impl Probe {
             // SAFETY: fd is a PTY master descriptor owned by this probe.
             let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
             let shell = self.shell?;
-            (group > 0 && group as u32 != shell).then_some(group)
+            (group > 0 && (self.command || group as u32 != shell)).then_some(group)
         }
         #[cfg(not(unix))]
         None
@@ -227,6 +230,35 @@ fn size(cols: usize, rows: usize, cell_w: f32, cell_h: f32) -> PtySize {
     }
 }
 
+/// Whether `program` names an interactive shell, which sitting at its prompt runs nothing.
+fn is_shell(program: &str) -> bool {
+    let name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .trim_start_matches('-');
+    matches!(
+        name,
+        "sh" | "ash"
+            | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "ksh"
+            | "mksh"
+            | "oksh"
+            | "yash"
+            | "csh"
+            | "tcsh"
+            | "nu"
+            | "elvish"
+            | "xonsh"
+            | "pwsh"
+            | "osh"
+            | "ysh"
+    )
+}
+
 impl Pty {
     /// Starts `command` (the user's login shell when empty). `wake` is called from the
     /// reader thread when output is ready, and with `true` once the shell exits.
@@ -294,6 +326,7 @@ impl Pty {
                 #[cfg(unix)]
                 fd: foreground_fd,
                 shell: shell_pid,
+                command: command.first().is_some_and(|program| !is_shell(program)),
             },
             ..Default::default()
         });
@@ -613,6 +646,35 @@ mod tests {
         );
         pty.write(b"\x03");
         wait_for(&mut pty, false);
+    }
+
+    #[test]
+    fn a_direct_command_counts_as_running() {
+        assert!(is_shell("/bin/bash") && is_shell("-zsh") && is_shell("fish"));
+        assert!(!is_shell("vim") && !is_shell("/usr/bin/ssh") && !is_shell("bashtop"));
+        let mut pty = Pty::spawn(
+            &["sleep".into(), "30".into()],
+            &Default::default(),
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let group = loop {
+            pty.take_output();
+            if let Some(group) = pty.running_program() {
+                break group;
+            }
+            assert!(Instant::now() < deadline, "sleep never counted as running");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(
+            crate::close_confirm::process_name(group).as_deref(),
+            Some("sleep")
+        );
     }
 
     #[test]
