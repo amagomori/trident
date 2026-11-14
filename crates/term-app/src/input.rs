@@ -46,6 +46,10 @@ fn control_byte(c: char) -> Option<u8> {
 /// `key` is the logical key, `base` the same key ignoring modifiers (for Ctrl/Alt
 /// combinations) and `text` the text the key produced. Alt prefixes ESC when
 /// `alt_sends_esc` is set (on macOS Option normally composes characters instead).
+///
+/// Application keypad mode (DECKPAM) deliberately does not change keypad keys: like
+/// Alacritty, they send the characters they produce. tmux forwards SS3 keypad codes to
+/// stock Vim, which has no termcodes for them there and garbles the buffer.
 pub fn encode_key(
     key: &Key,
     base: &Key,
@@ -190,6 +194,21 @@ mod tests {
 
     fn ch(s: &str) -> Key {
         Key::Character(s.into())
+    }
+
+    #[test]
+    fn keypad_keys_send_their_characters() {
+        let none = ModifiersState::empty();
+        for text in ["0", "5", "9", ".", "*", "+", "-", "/", "="] {
+            assert_eq!(
+                key(ch(text), Some(text), none),
+                Some(text.as_bytes().to_vec())
+            );
+        }
+        assert_eq!(
+            key(Key::Named(NamedKey::Enter), Some("\r"), none),
+            Some(b"\r".to_vec())
+        );
     }
 
     #[test]

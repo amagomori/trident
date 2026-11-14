@@ -966,6 +966,52 @@ fn difference(name: &str, expected: &str, actual: &str) -> String {
 }
 
 #[test]
+fn golden_keypad_modes() {
+    let steps: &[(&str, &[u8])] = &[
+        ("default", b""),
+        ("DECKPAM", b"\x1b="),
+        ("DECCKM set", b"\x1b[?1h"),
+        ("DECPNM", b"\x1b>"),
+        ("DECKPAM again", b"\x1b="),
+        ("DECCKM reset", b"\x1b[?1l"),
+        ("RIS", b"\x1bc"),
+    ];
+    let run = |bytewise: bool| {
+        let mut term = Terminal::new(5, 2);
+        let mut out = String::new();
+        for &(label, bytes) in steps {
+            if bytewise {
+                for byte in bytes.chunks(1) {
+                    term.advance(byte);
+                }
+            } else {
+                term.advance(bytes);
+            }
+            writeln!(
+                out,
+                "{label}: app_keypad={} app_cursor={}",
+                term.modes.app_keypad, term.modes.app_cursor
+            )
+            .unwrap();
+        }
+        out
+    };
+    let actual = run(false);
+    assert_eq!(actual, run(true));
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden/keypad_modes.snap");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(path, &actual).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(path).unwrap();
+        assert!(
+            expected == actual,
+            "{}",
+            difference("keypad_modes", &expected, &actual)
+        );
+    }
+}
+
+#[test]
 fn golden_terminal_state() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden");
     let update = std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1");

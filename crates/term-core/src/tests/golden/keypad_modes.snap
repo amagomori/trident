@@ -1,0 +1,7 @@
+default: app_keypad=false app_cursor=false
+DECKPAM: app_keypad=true app_cursor=false
+DECCKM set: app_keypad=true app_cursor=true
+DECPNM: app_keypad=false app_cursor=true
+DECKPAM again: app_keypad=true app_cursor=true
+DECCKM reset: app_keypad=true app_cursor=false
+RIS: app_keypad=false app_cursor=false
