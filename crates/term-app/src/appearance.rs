@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
@@ -67,7 +68,26 @@ fn spawn(
     })
 }
 
+/// Without either variable zbus falls back to `/run/user/$UID/bus`, which
+/// outside a login session can be a bus whose portal never answers.
+fn session_bus_configured(address: Option<OsString>, runtime_dir: Option<OsString>) -> bool {
+    address.is_some() || runtime_dir.is_some()
+}
+
 pub fn watch(changed: impl Fn(Option<Theme>) + Send + 'static) -> std::io::Result<Watch> {
+    if !session_bus_configured(
+        std::env::var_os("DBUS_SESSION_BUS_ADDRESS"),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+    ) {
+        diag!(
+            "terminal: OS appearance unavailable (using dark): DBUS_SESSION_BUS_ADDRESS and XDG_RUNTIME_DIR are unset"
+        );
+        return Ok(Watch {
+            stop: Arc::default(),
+            thread: None,
+            initial: None,
+        });
+    }
     let (first, initial) = mpsc::sync_channel(1);
     spawn(
         async move {
@@ -165,6 +185,15 @@ mod tests {
             drop(watch);
             finished.try_recv().unwrap();
         }
+    }
+
+    #[test]
+    fn session_bus_needs_an_address_or_runtime_dir() {
+        let set = || Some(OsString::from("x"));
+        assert!(session_bus_configured(set(), set()));
+        assert!(session_bus_configured(set(), None));
+        assert!(session_bus_configured(None, set()));
+        assert!(!session_bus_configured(None, None));
     }
 
     #[test]
