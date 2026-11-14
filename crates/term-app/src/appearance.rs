@@ -1,5 +1,7 @@
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
+use std::time::Duration;
 use winit::window::Theme;
 
 #[derive(Default)]
@@ -11,6 +13,15 @@ struct Stop {
 pub struct Watch {
     stop: Arc<Mutex<Stop>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    initial: Option<mpsc::Receiver<Option<Theme>>>,
+}
+
+impl Watch {
+    /// Waits up to `timeout` for the portal's first answer; `None` if it has
+    /// none yet (it still arrives through the callback) or was already taken.
+    pub fn initial(&mut self, timeout: Duration) -> Option<Option<Theme>> {
+        self.initial.take()?.recv_timeout(timeout).ok()
+    }
 }
 
 impl Drop for Watch {
@@ -27,7 +38,10 @@ impl Drop for Watch {
     }
 }
 
-fn spawn(future: impl Future<Output = ()> + Send + 'static) -> std::io::Result<Watch> {
+fn spawn(
+    future: impl Future<Output = ()> + Send + 'static,
+    initial: Option<mpsc::Receiver<Option<Theme>>>,
+) -> std::io::Result<Watch> {
     let stop = Arc::new(Mutex::new(Stop::default()));
     let cancelled = stop.clone();
     let thread = std::thread::Builder::new()
@@ -49,15 +63,20 @@ fn spawn(future: impl Future<Output = ()> + Send + 'static) -> std::io::Result<W
     Ok(Watch {
         stop,
         thread: Some(thread),
+        initial,
     })
 }
 
 pub fn watch(changed: impl Fn(Option<Theme>) + Send + 'static) -> std::io::Result<Watch> {
-    spawn(async move {
-        if let Err(error) = listen(changed).await {
-            diag!("terminal: OS appearance unavailable (using dark): {error}");
-        }
-    })
+    let (first, initial) = mpsc::sync_channel(1);
+    spawn(
+        async move {
+            if let Err(error) = listen(first, changed).await {
+                diag!("terminal: OS appearance unavailable (using dark): {error}");
+            }
+        },
+        Some(initial),
+    )
 }
 
 const NAMESPACE: &str = "org.freedesktop.appearance";
@@ -71,7 +90,10 @@ fn appearance(value: &zbus::Variant<'_>) -> Option<Theme> {
     }
 }
 
-async fn listen(changed: impl Fn(Option<Theme>)) -> zbus::Result<()> {
+async fn listen(
+    first: mpsc::SyncSender<Option<Theme>>,
+    changed: impl Fn(Option<Theme>),
+) -> zbus::Result<()> {
     use futures_lite::StreamExt;
     let connection = zbus::Connection::session().await?;
     let proxy = zbus::Proxy::new(
@@ -87,6 +109,8 @@ async fn listen(changed: impl Fn(Option<Theme>)) -> zbus::Result<()> {
         Ok(value) => value,
         Err(_) => proxy.call("Read", &(NAMESPACE, KEY)).await?,
     };
+    let _ = first.try_send(appearance(&value));
+    drop(first);
     changed(appearance(&value));
     while let Some(signal) = signals.next().await {
         if let Ok((namespace, key, value)) = signal
@@ -108,7 +132,7 @@ mod tests {
     #[test]
     fn dropping_finished_watch() {
         let (done, finished) = std::sync::mpsc::channel();
-        let watch = spawn(async move { done.send(()).unwrap() }).unwrap();
+        let watch = spawn(async move { done.send(()).unwrap() }, None).unwrap();
         finished
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap();
@@ -126,11 +150,14 @@ mod tests {
                     let _ = self.0.send(());
                 }
             }
-            let watch = spawn(async move {
-                let _guard = OnDrop(dropped);
-                ready.send(()).unwrap();
-                std::future::pending::<()>().await;
-            })
+            let watch = spawn(
+                async move {
+                    let _guard = OnDrop(dropped);
+                    ready.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                },
+                None,
+            )
             .unwrap();
             started
                 .recv_timeout(std::time::Duration::from_secs(2))
