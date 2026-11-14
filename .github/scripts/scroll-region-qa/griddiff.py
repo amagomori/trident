@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""griddiff.py --main WORKTREE --head WORKTREE [--fixtures DIR] [--seeds 200] [--out DIR]
+"""griddiff.py --main WORKTREE --head WORKTREE [--fixtures DIR] [--vtebench-dir DIR] [--seeds 200] [--out DIR]
 
 Headless differential for KAN-90: builds a tiny dumper against each worktree's term-core, feeds
 the same byte streams through `Terminal::advance` in uneven chunks and compares the full state
@@ -7,9 +7,12 @@ the same byte streams through `Terminal::advance` in uneven chunks and compares 
 chunk. Any difference between main and head FAILs (exit 1) with the first differing row.
 
 Streams: the fixtures.py files in --fixtures (absolute paths), vtebench's scrolling benchmarks'
-output when --vtebench-dir has them, and --seeds random streams mixing DECSTBM regions, scrolls
-(LF/RI/SU/SD/IL/DL), erases (EL/ED/ECH/DCH/ICH), SGR backgrounds (BCE), wide chars, wraps,
-alt-screen switches and resizes. Exits 2 if a dumper did not process a stream."""
+output at 100x30 (vtebench_tty.py copies run against a 100x30 pty; each setup's region and each
+benchmark's size are checked; --vtebench-dir '' skips them), and --seeds random streams mixing
+DECSTBM regions, scrolls (LF/RI/SU/SD/IL/DL), erases (EL/ED/ECH/DCH/ICH), SGR backgrounds (BCE),
+wide chars, wraps, alt-screen switches and resizes. Exits 2 if a dumper did not process a stream or
+a vtebench script did not emit what it must. --out (default $TMPDIR/griddiff) keeps the dumper
+builds and failing streams."""
 import argparse
 import hashlib
 import os
@@ -19,6 +22,8 @@ import subprocess
 import sys
 import tempfile
 
+import vtebench_tty
+
 sys.stdout.reconfigure(line_buffering=True)
 p = argparse.ArgumentParser()
 p.add_argument("--main", required=True)
@@ -26,7 +31,7 @@ p.add_argument("--head", required=True)
 p.add_argument("--fixtures", default="")
 p.add_argument("--vtebench-dir", default=os.path.expanduser("~/vtebench"))
 p.add_argument("--seeds", type=int, default=200)
-p.add_argument("--out", default="griddiff")
+p.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "griddiff"))
 o = p.parse_args()
 out = os.path.abspath(o.out)
 os.makedirs(out, exist_ok=True)
@@ -138,18 +143,22 @@ def streams():
             if name.endswith(".txt"):
                 data = open(os.path.join(fx, name), "rb").read()
                 yield name, data[: 2 << 20], 100, 30  # 2 MB is far past steady state
-    bdir = os.path.join(os.path.abspath(o.vtebench_dir), "benchmarks")
-    for name in ("scrolling_bottom_small_region", "scrolling_top_small_region", "scrolling_bottom_region",
-                 "scrolling_top_region", "scrolling_fullscreen", "scrolling"):
-        d = os.path.join(bdir, name)
-        if not os.path.isdir(d):
-            continue
-        env = dict(os.environ, LINES="30", COLUMNS="100")
-        setup = subprocess.run([os.path.join(d, "setup")], capture_output=True, env=env).stdout if os.path.exists(os.path.join(d, "setup")) else b""
-        bench = subprocess.run([os.path.join(d, "benchmark")], capture_output=True, env=env).stdout
-        if not bench:
-            sys.exit("vtebench benchmark %s produced no output" % name)
-        yield "vtebench-" + name, setup + bench * max(1, 200_000 // len(bench)), 100, 30
+    if o.vtebench_dir:
+        names = ("scrolling_bottom_small_region", "scrolling_top_small_region", "scrolling_bottom_region",
+                 "scrolling_top_region", "scrolling_fullscreen", "scrolling")
+        bdir = os.path.join(os.path.abspath(o.vtebench_dir), "benchmarks")
+        missing = [n for n in names if not os.path.isfile(os.path.join(bdir, n, "benchmark"))]
+        if missing:
+            print("no vtebench benchmark %s in %s" % (",".join(missing), bdir), file=sys.stderr)
+            sys.exit(2)
+        for name, d in zip(names, vtebench_tty.patch(bdir, names, os.path.join(tmp, "vtebench"))):
+            setup = vtebench_tty.run_sized(os.path.join(d, "setup"), 30, 100) if os.path.exists(os.path.join(d, "setup")) else (0, b"", b"")
+            bench = vtebench_tty.run_sized(os.path.join(d, "benchmark"), 30, 100)
+            why = vtebench_tty.check_setup(name, *setup, 30) or vtebench_tty.check_benchmark(name, *bench, 30, 100)
+            if why:
+                print(why, file=sys.stderr)
+                sys.exit(2)
+            yield "vtebench-" + name, setup[1] + bench[1] * max(1, 200_000 // len(bench[1])), 100, 30
     for seed in range(o.seeds):
         text, c, r = fuzz(seed)
         yield "fuzz-%d" % seed, text.encode(), c, r

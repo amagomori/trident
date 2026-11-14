@@ -27,7 +27,17 @@ vtebench and Alacritty: `git clone https://github.com/alacritty/vtebench ~/vtebe
 cargo install --locked --path ~/vtebench`; Alacritty from the distro, `cargo install --locked alacritty`
 (Linux, needs fontconfig/freetype/xcb/xkbcommon dev packages and cmake), or on macOS the
 release `Alacritty-v0.17.0.dmg` copied to /Applications (the Homebrew cask can fail Gatekeeper),
-binary `/Applications/Alacritty.app/Contents/MacOS/alacritty`.
+binary `/Applications/Alacritty.app/Contents/MacOS/alacritty`. On macOS neither that directory nor
+`~/.cargo/bin` (vtebench) is on PATH by default, so before the commands:
+
+```sh
+export PATH=$HOME/.cargo/bin:/Applications/Alacritty.app/Contents/MacOS:$PATH
+command -v alacritty vtebench   # both must print a path
+```
+
+Fonts: `cfg/alacritty.toml` uses JetBrains Mono. Install it (the release zip's `fonts/ttf` into
+`/Library/Fonts` on macOS); with the Menlo fallback, Alacritty 0.17.0 on macOS opens at 30 lines
+and settles at 28, and `vtebench_ab.py` fails its 100x30 check.
 
 ## Commands
 
@@ -42,8 +52,15 @@ python3 $Q/scroll-region-qa/vim_splits.py --bin main=$M --bin head=$H --out $HOM
 python3 $Q/scroll-region-qa/griddiff.py --main ../t-main --head ../t-head --fixtures $FX
 ```
 
-`region_full` (full-width lines) and `region_bg` (colored erase, full-reset path) are controls
-where little or no win is expected; they must not regress.
+The A/A bound is the larger |end| of the A/A 95% CI (ptyab's `A/A delta` line; `vtebench_ab.py`
+computes the same per benchmark). Faster beyond it: the A/B CI's upper end is below minus the
+bound; slower beyond it: the A/B CI's lower end is above the bound. ptyab's last line
+(`A/A noise bound`, the largest single A/A pair) is informational: one outlier pair sets it.
+
+`region_full` (full-width lines) is a control where little or no win is expected. `region_bg`
+(colored erase, full-reset path) is not a no-win control: on macOS (#64 at eea46c4) it was
+-22% [-24, -12] against an A/A CI of [-1.3, 0.6]. Both must not regress; a `region_bg` win is
+not a failure.
 
 ## What each check can catch
 
@@ -63,3 +80,7 @@ smoke test for regions and splits, not a detector for the reset bound.
   and `sudo mdutil -a -i off`. A macOS VM has a paravirtual Metal device and no Retina panel:
   say so with the results.
 - Keep the window at its 100x30 default; `vtebench_ab.py` fails if a terminal reports another size.
+- `vtebench_ab.py` and `griddiff.py` run patched copies of vtebench's scripts (`vtebench_tty.py`):
+  upstream's `tty="/dev/$(ps -o tty= -p $$)"` breaks on macOS (BSD ps pads the name) and with no
+  tty, and the setups then emit `ESC[1;0r` instead of their small region, still exiting 0.
+- `griddiff.py` keeps its dumper builds and failing streams in `--out` (default `$TMPDIR/griddiff`).

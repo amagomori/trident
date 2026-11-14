@@ -7,6 +7,8 @@ fixed corpus and scrolls its windows (`:split` scrolls through DECSTBM scroll re
 redraws) in three variants: default colors, a colored Normal background with cursorline, and
 nowrap with `list`. At each checkpoint vim stops, the window is captured (`NAME-a.png`), vim runs
 `:redraw!` (a full repaint from vim's own state) and the window is captured again (`NAME-b.png`).
+Captures are the 100x30 cell grid only (cfg/terminal.toml, without the title bar, padding and
+window corners), with the cursor hidden, so focus and cursor state cannot show up as a difference.
 
 FAIL when a checkpoint's incremental capture differs from its full repaint by any pixel: a stale
 or wrongly blanked cell from the bounded Row::reset shows up there. Differences between builds
@@ -15,6 +17,7 @@ pixels) are written next to the captures. Exits 2 if vim never reached a checkpo
 import argparse
 import os
 import platform
+import re
 import shutil
 import struct
 import subprocess
@@ -31,11 +34,16 @@ p.add_argument("--vim", default=shutil.which("vim") or "/usr/bin/vim")
 p.add_argument("--settle", type=float, default=0.8, help="seconds to let a frame render before capture")
 o = p.parse_args()
 out = os.path.abspath(o.out)
+CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cfg", "terminal.toml")
+PAD = int(re.search(r"^padding\s*=\s*(\d+)", open(CFG).read(), re.M).group(1))
 os.makedirs(out, exist_ok=True)
 
 CHECKPOINTS = ["plain", "bg", "nowrap"]
 DRIVE = r'''
 set nocompatible laststatus=2 ruler noshowmode shortmess+=I belloff=all t_vb=
+" The cursor stays hidden from the first checkpoint on: empty t_ve and t_vs keep vim from showing it.
+let &t_ve = ''
+let &t_vs = ''
 let s:dir = $QA_DIR
 function! s:Wait(name)
   call writefile(['x'], s:dir . '/' . a:name)
@@ -65,8 +73,10 @@ function! s:Exercise()
 endfunction
 function! s:Checkpoint(name)
   redraw
+  call echoraw("\e[?25l")
   call s:Wait(a:name . '-a')
   redraw!
+  call echoraw("\e[?25l")
   call s:Wait(a:name . '-b')
 endfunction
 split
@@ -168,7 +178,7 @@ def diff(a, b, path):
         rows.append(bytes(line))
     if n:
         png_write(path, wa, ha, rows)
-        return "%d pixels differ in x %d..%d, y %d..%d (%s)" % (n, *box, path)
+        return "%d pixels differ in x %d..%d, y %d..%d (%s)" % (n, box[0], box[2], box[1], box[3], path)
     return None
 
 
@@ -176,11 +186,15 @@ def window(pid):
     end = time.time() + 30
     while time.time() < end:
         if MAC:
+            # The close button is centered in the title bar, so the bar is 2 * its inset + its height.
             r = subprocess.run(["osascript", "-e", 'tell application "System Events" to tell (first process whose unix id is %d)\n'
-                                'set frontmost to true\nget {position, size} of window 1\nend tell' % pid],
+                                'set frontmost to true\nset w to window 1\n'
+                                'set b to first button of w whose subrole is "AXCloseButton"\n'
+                                'get {position, size} of w & {position, size} of b\nend tell' % pid],
                                capture_output=True, text=True)
             if r.returncode == 0 and r.stdout.strip():
-                return [int(v) for v in r.stdout.replace(",", " ").split()]
+                x, y, w, h, _, by, _, bh = [int(v) for v in r.stdout.replace(",", " ").split()]
+                return x, y, w, h, 2 * (by - y) + bh
         else:
             r = subprocess.run(["xdotool", "search", "--onlyvisible", "--pid", str(pid)], capture_output=True, text=True)
             if r.stdout.split():
@@ -192,11 +206,38 @@ def window(pid):
 
 
 def capture(win, path):
+    """Captures the cell grid: the window's content area inside the configured padding. Vim always
+    draws text, so a single-color capture is a frame the window had not presented yet: retried, then exit 2."""
+    for _ in range(5):
+        if not blank(grab(win, path)):
+            return
+        time.sleep(o.settle)
+    print("%s: the window stayed blank" % path, file=sys.stderr)
+    sys.exit(2)
+
+
+def blank(rows):
+    return len(set(rows)) == 1 and rows[0] == rows[0][:3] * (len(rows[0]) // 3)
+
+
+def grab(win, path):
     if MAC:
-        x, y, w, h = win
-        subprocess.run(["screencapture", "-x", "-t", "png", "-R", "%d,%d,%d,%d" % (x, y, w, h), path], check=True)
+        x, y, w, h, title = win
+        subprocess.run(["screencapture", "-x", "-t", "png", "-R", "%d,%d,%d,%d" % (x, y + title, w, h - title), path],
+                       check=True)
+        scale = png_size(path)[0] / w
     else:
         subprocess.run(["import", "-window", win, "PNG24:" + path], check=True)
+        scale = 1
+    pad = round(PAD * scale)
+    cw, ch, rows = png_read(path)
+    rows = [r[3 * pad:3 * (cw - pad)] for r in rows[pad:ch - pad]]
+    png_write(path, cw - 2 * pad, ch - 2 * pad, rows)
+    return rows
+
+
+def png_size(path):
+    return struct.unpack(">II", open(path, "rb").read()[16:24])
 
 
 def run(label, binary):
@@ -207,7 +248,7 @@ def run(label, binary):
     open(drive, "w").write(DRIVE)
     corpus(text)  # one path for every build: vim's status lines show it
     env = dict(os.environ, QA_DIR=d)
-    proc = subprocess.Popen([os.path.abspath(binary), "-e", o.vim, "-u", "NONE", "-i", "NONE", "-N", "-n",
+    proc = subprocess.Popen([os.path.abspath(binary), "--config", CFG, "-e", o.vim, "-u", "NONE", "-i", "NONE", "-N", "-n",
                              "-S", drive, text], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     win = window(proc.pid)
     shots = {}
@@ -221,9 +262,9 @@ def run(label, binary):
                         print("%s: vim never reached checkpoint %s" % (label, name), file=sys.stderr)
                         sys.exit(2)
                     time.sleep(0.05)
-                time.sleep(o.settle)
                 if MAC:
-                    win = window(proc.pid)
+                    win = window(proc.pid)  # raising it may refocus and repaint it, so settle after
+                time.sleep(o.settle)
                 shots[name] = os.path.join(out, "%s-%s.png" % (label, name))
                 capture(win, shots[name])
                 open(os.path.join(d, name + ".ack"), "w").close()
