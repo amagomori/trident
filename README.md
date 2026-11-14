@@ -136,6 +136,7 @@ bright_white = "#c0caf5"
 `vsync = false` (opt-in, live-reloaded) presents frames without waiting for vblank, using
 wgpu's `AutoNoVsync` present mode (Immediate, else Mailbox, else FIFO) on macOS and Linux.
 It cut latency on a 120 Hz Mac, but tearing is unmeasured, so the default stays `true`.
+Surfaces that only offer FIFO (e.g. OpenGL on Linux) keep vsync and log a diagnostic.
 
 Actions: `new_window`, `search`, `copy`, `paste`, `paste_primary` (primary selection where supported),
 `increase_font_size`, `decrease_font_size`, `reset_font_size`, `clear_scrollback`,

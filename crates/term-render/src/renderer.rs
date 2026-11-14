@@ -51,6 +51,8 @@ pub struct Renderer {
     image_clip: [u32; 4],
     srgb: bool,
     pub adapter_info: String,
+    /// False when the surface only offers FIFO, so `vsync = false` cannot take effect.
+    pub vsync_optional: bool,
     // Reused between frames to avoid allocating.
     backgrounds: Vec<Instance>,
     glyphs: Vec<Instance>,
@@ -106,6 +108,10 @@ impl Renderer {
         .map_err(|e| format!("cannot open GPU device: {e}"))?;
 
         let caps = surface.get_capabilities(&adapter);
+        let vsync_optional = caps
+            .present_modes
+            .iter()
+            .any(|m| matches!(m, wgpu::PresentMode::Immediate | wgpu::PresentMode::Mailbox));
         // Blend in gamma space like most terminals, so prefer a non-sRGB surface.
         let format = caps
             .formats
@@ -249,6 +255,7 @@ impl Renderer {
             image_clip: [0; 4],
             srgb: format.is_srgb(),
             adapter_info,
+            vsync_optional,
             backgrounds: Vec::new(),
             glyphs: Vec::new(),
             overlays: Vec::new(),
