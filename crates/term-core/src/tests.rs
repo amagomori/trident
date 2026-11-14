@@ -1387,3 +1387,164 @@ fn lowering_scrollback_limit_signals_shrink() {
     assert!(!t.take_shrunk());
     assert_eq!(t.scrollback_len(), 10);
 }
+
+fn long_command(output_lines: usize) -> String {
+    let mut input = String::from("\x1b]133;A\x07$ \x1b]133;B\x07cargo test\r\n\x1b]133;C\x07");
+    for i in 0..output_lines {
+        input.push_str(&format!("line {i}\r\n"));
+    }
+    input.push_str("\x1b]133;D;101\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    input
+}
+
+fn pinned_text(t: &Terminal, row: isize) -> Option<String> {
+    t.pinned_command(row)
+        .map(|p| p.command.cells.iter().map(|c| c.c).collect())
+}
+
+#[test]
+fn pinned_command_needs_shell_integration_and_scrollback() {
+    let mut t = term(20, 5, &"plain output\r\n".repeat(30));
+    t.scroll_display(10);
+    assert!(t.pinned_command(0).is_none());
+
+    let mut t = term(20, 5, &long_command(20));
+    assert!(
+        t.pinned_command(0).is_none(),
+        "nothing pinned at the bottom"
+    );
+    t.scroll_display(10);
+    let pinned = t.pinned_command(0).unwrap();
+    assert_eq!(pinned_text(&t, 0).as_deref(), Some("$ cargo test"));
+    assert_eq!(pinned.command.input_col, 2);
+    assert_eq!(pinned.command.exit_code, Some(101));
+    assert!(pinned.command.duration().is_some());
+    assert!(!pinned.command.continued);
+    assert_eq!(pinned.next_prompt_row, None);
+
+    t.advance(b"\x1b[?1049h");
+    assert!(
+        t.pinned_command(0).is_none(),
+        "no header on the alternate screen"
+    );
+}
+
+#[test]
+fn pinned_command_hides_when_its_prompt_is_visible() {
+    let mut t = term(20, 5, &long_command(20));
+    t.scroll_display(17);
+    assert_eq!(t.viewport_row(0).text().trim_end(), "$ cargo test");
+    assert!(t.pinned_command(0).is_none());
+    t.scroll_display(-1);
+    assert!(t.pinned_command(0).is_some());
+    // A partial row above the top keeps the prompt in view.
+    assert!(t.pinned_command(-1).is_none());
+}
+
+#[test]
+fn next_prompt_pushes_the_pinned_command_off() {
+    let mut t = term(20, 5, &long_command(20));
+    t.advance(b"ls\r\n\x1b]133;C\x07a\r\nb\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    t.advance(&b"\r\nz".repeat(10));
+    // Lines: prompt 0, output 1..=20, `ls` prompt 21, its output 22..=23, prompt 24.
+    t.scroll_display(t.scrollback_len() as isize);
+    t.scroll_display(-20);
+    assert_eq!(t.viewport_row(0).text().trim_end(), "line 19");
+    let pinned = t.pinned_command(0).unwrap();
+    assert_eq!(pinned.command.exit_code, Some(101));
+    assert_eq!(pinned.next_prompt_row, Some(1));
+    t.scroll_display(-1);
+    assert!(
+        t.pinned_command(0).is_none(),
+        "the next prompt reached the top"
+    );
+    t.scroll_display(-1);
+    let pinned = t.pinned_command(0).unwrap();
+    assert_eq!(pinned_text(&t, 0).as_deref(), Some("$ ls"));
+    assert_eq!(pinned.command.exit_code, Some(0));
+    assert_eq!(pinned.next_prompt_row, Some(2));
+}
+
+#[test]
+fn empty_prompt_ends_the_previous_command() {
+    let mut input = long_command(20);
+    input.push_str("\r\n\x1b]133;A\x07$ \x1b]133;B\x07\r\n");
+    for i in 0..10 {
+        input.push_str(&format!("noise {i}\r\n"));
+    }
+    let mut t = term(20, 5, &input);
+    t.scroll_display(t.scrollback_len() as isize - 22);
+    assert_eq!(t.viewport_row(0).text().trim_end(), "$");
+    assert!(t.pinned_command(0).is_none());
+    t.scroll_display(1);
+    assert!(
+        t.pinned_command(0).is_none(),
+        "the empty prompt is not a command"
+    );
+    t.scroll_display(1);
+    assert!(t.pinned_command(0).is_some());
+}
+
+#[test]
+fn running_command_and_prompt_without_input_mark() {
+    let mut input = String::from("\x1b]133;A\x07$ make\r\n\x1b]133;C\x07");
+    input.push_str(&"out\r\n".repeat(20));
+    let mut t = term(20, 5, &input);
+    t.scroll_display(5);
+    let pinned = t.pinned_command(0).unwrap();
+    assert_eq!(pinned.command.input_col, 0);
+    assert_eq!(pinned.command.finished, None);
+    assert_eq!(pinned.command.duration(), None);
+    assert_eq!(pinned.command.exit_code, None);
+}
+
+#[test]
+fn pinned_command_snapshot_survives_prompt_eviction() {
+    let mut t = Terminal::new(20, 5);
+    t.set_scrollback_limit(10);
+    t.advance(long_command(40).as_bytes());
+    t.scroll_display(10);
+    assert!(t.viewport_row(0).text().starts_with("line"));
+    assert_eq!(pinned_text(&t, 0).as_deref(), Some("$ cargo test"));
+    let prompt = t.pinned_command(0).unwrap().command.prompt_line;
+    t.scroll_to_line(prompt);
+    assert_eq!(
+        t.display_offset(),
+        10,
+        "evicted prompt jumps to the oldest line"
+    );
+}
+
+#[test]
+fn scroll_to_line_jumps_to_the_prompt() {
+    let mut t = term(20, 5, &long_command(20));
+    t.scroll_display(5);
+    let prompt = t.pinned_command(0).unwrap().command.prompt_line;
+    t.scroll_to_line(prompt);
+    assert_eq!(t.viewport_row(0).text().trim_end(), "$ cargo test");
+    assert!(t.pinned_command(0).is_none());
+    t.scroll_to_line(u64::MAX);
+    assert_eq!(t.display_offset(), 0);
+}
+
+#[test]
+fn wrapped_command_is_marked_continued() {
+    let mut input = String::from("\x1b]133;A\x07$ \x1b]133;B\x07");
+    input.push_str(&"x".repeat(25));
+    input.push_str("\r\n\x1b]133;C\x07");
+    input.push_str(&"out\r\n".repeat(20));
+    let mut t = term(20, 5, &input);
+    t.scroll_display(5);
+    let pinned = t.pinned_command(0).unwrap();
+    assert!(pinned.command.continued);
+    assert_eq!(pinned.command.cells.len(), 20);
+}
+
+#[test]
+fn reset_forgets_commands() {
+    let mut t = term(20, 5, &long_command(20));
+    t.advance(b"\x1bc");
+    t.advance(&b"x\r\n".repeat(20));
+    t.scroll_display(5);
+    assert!(t.pinned_command(0).is_none());
+}

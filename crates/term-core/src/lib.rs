@@ -15,6 +15,7 @@ pub use cell::{Cell, Color, Flags, Row, RowFlags};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
 use std::collections::VecDeque;
+use std::time::Instant;
 
 const DEFAULT_SCROLLBACK: usize = 10_000;
 const SYNC_RESET: &[u8] = b"\x1b[?2026l";
@@ -33,6 +34,45 @@ struct ShellState {
     command_finished: Vec<CommandFinished>,
     mark_line: Option<u64>,
     output_ends: Vec<OutputEnd>,
+    prompt_line: Option<u64>,
+    input_start: Option<(u64, usize)>,
+    commands: VecDeque<Command>,
+}
+
+/// Commands kept for the pinned header; older ones lose it first.
+const MAX_COMMANDS: usize = 1024;
+
+/// A command the shell ran, located by its OSC 133 marks in absolute lines.
+#[derive(Clone, Debug)]
+pub struct Command {
+    /// Line of the prompt start mark (`A`).
+    pub prompt_line: u64,
+    /// Line and column where the command text begins (`B`).
+    pub input_line: u64,
+    pub input_col: usize,
+    /// The input row as it was when the command started, up to its last used cell.
+    pub cells: Vec<Cell>,
+    /// The command text continues past `cells` on a soft-wrapped row.
+    pub continued: bool,
+    /// Line of the next prompt start, once one is drawn.
+    pub next_prompt: Option<u64>,
+    pub started: Instant,
+    pub finished: Option<Instant>,
+    pub exit_code: Option<i32>,
+}
+
+impl Command {
+    pub fn duration(&self) -> Option<std::time::Duration> {
+        Some(self.finished?.saturating_duration_since(self.started))
+    }
+}
+
+/// The command pinned over the top of a scrolled-back viewport.
+#[derive(Clone, Copy, Debug)]
+pub struct PinnedCommand<'a> {
+    pub command: &'a Command,
+    /// Viewport row of the next prompt when it is on screen; it pushes the header off.
+    pub next_prompt_row: Option<isize>,
 }
 
 struct OutputEnd {
@@ -334,6 +374,119 @@ impl Terminal {
 
     #[cold]
     #[inline(never)]
+    fn track_command(&mut self, mark: &[u8], args: &[&[u8]]) {
+        if self.alt_active || self.max_scrollback == 0 {
+            return;
+        }
+        let line = self.history + self.cursor.row as u64;
+        let col = self.cursor.col + usize::from(self.cursor.pending_wrap);
+        match mark {
+            b"A" => {
+                if let Some(last) = self.shell.commands.back_mut()
+                    && last.next_prompt.is_none()
+                {
+                    last.next_prompt = Some(line);
+                }
+                self.shell.prompt_line = Some(line);
+                self.shell.input_start = None;
+            }
+            b"B" => self.shell.input_start = Some((line, col)),
+            b"C" if self.shell.zone != Zone::Output => {
+                let prompt_line = self.shell.prompt_line.take().unwrap_or(line);
+                let (input_line, input_col) = self
+                    .shell
+                    .input_start
+                    .take()
+                    .filter(|&(input, _)| input >= prompt_line)
+                    .unwrap_or((prompt_line, 0));
+                let (cells, continued) = if (self.first_line()..=line).contains(&input_line) {
+                    let row = self.line(input_line);
+                    let used = row
+                        .cells
+                        .iter()
+                        .rposition(|cell| cell.c != ' ' || cell.flags.contains(Flags::WIDE_SPACER))
+                        .map_or(0, |col| col + 1);
+                    (row.cells[..used].to_vec(), row.wrapped && input_line < line)
+                } else {
+                    (Vec::new(), false)
+                };
+                let first = self.first_line();
+                let commands = &mut self.shell.commands;
+                if let Some(last) = commands.back_mut()
+                    && last.next_prompt.is_none()
+                {
+                    last.next_prompt = Some(prompt_line);
+                }
+                while commands.len() >= MAX_COMMANDS
+                    || commands
+                        .front()
+                        .is_some_and(|c| c.next_prompt.is_some_and(|next| next <= first))
+                {
+                    commands.pop_front();
+                }
+                commands.push_back(Command {
+                    prompt_line,
+                    input_line,
+                    input_col,
+                    cells,
+                    continued,
+                    next_prompt: None,
+                    started: Instant::now(),
+                    finished: None,
+                    exit_code: None,
+                });
+            }
+            b"D" if self.shell.zone == Zone::Output => {
+                if let Some(last) = self.shell.commands.back_mut()
+                    && last.finished.is_none()
+                {
+                    last.finished = Some(Instant::now());
+                    last.exit_code = args
+                        .first()
+                        .and_then(|s| std::str::from_utf8(s).ok()?.parse::<i32>().ok());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The command that owns the viewport's top row (`-1` while a partial row shows
+    /// above it), when the view is scrolled back and that command's prompt is out of view.
+    pub fn pinned_command(&self, top_row: isize) -> Option<PinnedCommand<'_>> {
+        if self.alt_active || (self.display_offset == 0 && top_row >= 0) {
+            return None;
+        }
+        let line = self.viewport_to_point_signed(top_row, 0).line;
+        let commands = &self.shell.commands;
+        let command = &commands[commands
+            .partition_point(|c| c.prompt_line <= line)
+            .checked_sub(1)?];
+        if command.input_line >= line || command.next_prompt.is_some_and(|next| next <= line) {
+            return None;
+        }
+        let top = self.history - self.display_offset as u64;
+        let next_prompt_row = command
+            .next_prompt
+            .map(|next| (next - top) as isize)
+            .filter(|&row| row < self.rows as isize);
+        Some(PinnedCommand {
+            command,
+            next_prompt_row,
+        })
+    }
+
+    /// Scroll so `line` is the top row, or as close as history allows.
+    pub fn scroll_to_line(&mut self, line: u64) {
+        if self.alt_active {
+            return;
+        }
+        let line = line.max(self.first_line());
+        self.display_offset =
+            (self.history.saturating_sub(line) as usize).min(self.scrollback_len());
+    }
+
+    #[cold]
+    #[inline(never)]
     fn shell_mark(&mut self, mark: &[u8], args: &[&[u8]]) {
         if !matches!(mark, b"A" | b"B" | b"C" | b"D") {
             return;
@@ -371,6 +524,7 @@ impl Terminal {
             self.shell.mark_line = None;
         }
         self.shell.marks_seen = true;
+        self.track_command(mark, args);
         let flag = match mark {
             b"A" => {
                 self.shell.zone = Zone::Prompt;
@@ -470,6 +624,9 @@ impl Terminal {
                 command_finished: Vec::new(),
                 mark_line: None,
                 output_ends: Vec::new(),
+                prompt_line: None,
+                input_start: None,
+                commands: VecDeque::new(),
             }),
             palette: colors::Palette::default(),
             cols,
