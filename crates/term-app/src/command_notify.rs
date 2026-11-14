@@ -416,15 +416,18 @@ pub fn watch(
     let thread = std::thread::Builder::new()
         .name("command-watcher".into())
         .spawn(move || {
-            let receiver = thread_activity.receiver.lock().unwrap();
+            let mut stopped_groups = StoppedGroups::default();
             let mut foreground = Foreground::default();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 foreground.shell_name = command_name(shell as i32);
             }
-            let mut stopped_groups = StoppedGroups::default();
+            let receiver = thread_activity
+                .receiver
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut last_kick = Instant::now();
-            while !stopped.load(Ordering::Acquire) && !thread_stop.load(Ordering::Acquire) {
+            'watch: while !stopped.load(Ordering::Acquire) && !thread_stop.load(Ordering::Acquire) {
                 if thread_activity.kicked.swap(false, Ordering::SeqCst) {
                     last_kick = Instant::now();
                 }
@@ -475,9 +478,7 @@ pub fn watch(
                             last_kick = Instant::now();
                             continue;
                         }
-                        let result = receiver
-                            .recv()
-                            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected);
+                        let result = receiver.recv_timeout(Duration::MAX);
                         thread_activity.idle.store(false, Ordering::SeqCst);
                         result
                     };
@@ -488,7 +489,7 @@ pub fn watch(
                             if stopped.load(Ordering::Acquire)
                                 || thread_stop.load(Ordering::Acquire)
                             {
-                                return;
+                                break 'watch;
                             }
                             if !active {
                                 last_kick = Instant::now();
@@ -496,7 +497,7 @@ pub fn watch(
                             }
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'watch,
                     }
                 }
             }
