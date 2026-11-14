@@ -30,21 +30,41 @@ fn keypad_letter(key: PhysicalKey) -> Option<char> {
     })
 }
 
-/// The SS3 letter for a keypad key in application keypad mode. Without Shift, a keypad
-/// key that produced a navigation key (Num Lock off) keeps its cursor/editing encoding,
-/// so less and stock Vim still see arrows, Home/End and Insert/Delete.
+/// The SS3 letter for a keypad key in application keypad mode. Without Shift, only keys
+/// that produced a character, or keypad Enter, are claimed: a Num Lock-off navigation key
+/// keeps its cursor/editing encoding (less, stock Vim), and KP_Begin, which has no logical
+/// key, sends nothing, as on main and in Alacritty. Mac keypads have no Num Lock and
+/// Alacritty and Terminal.app send plain digits there, so less still reads them as a count.
 fn application_keypad_letter(
     key: &Key,
     physical: PhysicalKey,
     mods: ModifiersState,
 ) -> Option<char> {
-    if let Key::Named(named) = key
-        && *named != NamedKey::Enter
-        && !mods.shift_key()
-    {
+    if !mods.shift_key() && !matches!(key, Key::Character(_) | Key::Named(NamedKey::Enter)) {
+        return None;
+    }
+    if cfg!(target_os = "macos") && is_keypad_digit(physical) {
         return None;
     }
     keypad_letter(physical)
+}
+
+fn is_keypad_digit(physical: PhysicalKey) -> bool {
+    matches!(
+        physical,
+        PhysicalKey::Code(
+            KeyCode::Numpad0
+                | KeyCode::Numpad1
+                | KeyCode::Numpad2
+                | KeyCode::Numpad3
+                | KeyCode::Numpad4
+                | KeyCode::Numpad5
+                | KeyCode::Numpad6
+                | KeyCode::Numpad7
+                | KeyCode::Numpad8
+                | KeyCode::Numpad9
+        )
+    )
 }
 
 pub fn application_keypad_owns_key(
@@ -308,11 +328,13 @@ mod tests {
                     true,
                 )
             };
-            assert_eq!(
-                encode(&term.modes),
-                Some(vec![0x1b, b'O', suffix]),
-                "{physical:?}"
-            );
+            let expected =
+                if cfg!(target_os = "macos") && is_keypad_digit(PhysicalKey::Code(physical)) {
+                    text.as_bytes().to_vec()
+                } else {
+                    vec![0x1b, b'O', suffix]
+                };
+            assert_eq!(encode(&term.modes), Some(expected), "{physical:?}");
             assert_eq!(
                 encode(&Modes::default()),
                 Some(text.as_bytes().to_vec()),
@@ -367,12 +389,15 @@ mod tests {
             app_keypad: true,
             ..Modes::default()
         };
-        assert!(application_keypad_owns_key(
-            &Key::Named(NamedKey::End),
-            PhysicalKey::Code(KeyCode::Numpad1),
-            ModifiersState::SHIFT,
-            &modes
-        ));
+        assert_eq!(
+            application_keypad_owns_key(
+                &Key::Named(NamedKey::End),
+                PhysicalKey::Code(KeyCode::Numpad1),
+                ModifiersState::SHIFT,
+                &modes
+            ),
+            !cfg!(target_os = "macos")
+        );
         assert!(!application_keypad_owns_key(
             &Key::Named(NamedKey::End),
             PhysicalKey::Code(KeyCode::End),
@@ -443,17 +468,17 @@ mod tests {
             mods.set(ModifiersState::ALT, bits & 2 != 0);
             mods.set(ModifiersState::CONTROL, bits & 4 != 0);
             let expected = if bits == 0 {
-                "\x1bOq".into()
+                "\x1bOj".into()
             } else {
-                format!("\x1bO{}q", bits + 1)
+                format!("\x1bO{}j", bits + 1)
             };
             for alt_sends_esc in [false, true] {
                 assert_eq!(
                     encode_key(
-                        &ch("1"),
-                        &ch("1"),
-                        Some("1"),
-                        PhysicalKey::Code(KeyCode::Numpad1),
+                        &ch("*"),
+                        &ch("*"),
+                        Some("*"),
+                        PhysicalKey::Code(KeyCode::NumpadMultiply),
                         mods,
                         &modes,
                         alt_sends_esc
@@ -461,6 +486,48 @@ mod tests {
                     Some(expected.as_bytes().to_vec())
                 );
             }
+        }
+    }
+
+    #[test]
+    fn application_keypad_begin_and_mac_digits_match_alacritty() {
+        let modes = Modes {
+            app_keypad: true,
+            ..Modes::default()
+        };
+        let begin = Key::Unidentified(winit::keyboard::NativeKey::Unidentified);
+        let physical = PhysicalKey::Code(KeyCode::Numpad5);
+        assert!(!application_keypad_owns_key(
+            &begin,
+            physical,
+            ModifiersState::empty(),
+            &modes
+        ));
+        assert_eq!(
+            encode_key(
+                &begin,
+                &begin,
+                None,
+                physical,
+                ModifiersState::empty(),
+                &modes,
+                true
+            ),
+            None
+        );
+        let five = encode_key(
+            &ch("5"),
+            &ch("5"),
+            Some("5"),
+            physical,
+            ModifiersState::empty(),
+            &modes,
+            true,
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(five, Some(b"5".to_vec()));
+        } else {
+            assert_eq!(five, Some(b"\x1bOu".to_vec()));
         }
     }
 

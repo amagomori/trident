@@ -2688,7 +2688,6 @@ mod tests {
                 Some(action)
             );
         }
-        let physical = PhysicalKey::Code(KeyCode::Numpad1);
         let mac = config::Config {
             bindings: config::default_bindings_for(true),
             ..Default::default()
@@ -2705,60 +2704,65 @@ mod tests {
             ),
             Some(Action::Reset)
         );
-        let end = Key::Named(NamedKey::End);
-        assert_eq!(
-            shortcut_action(
-                &config,
-                &end.clone(),
-                end.clone(),
-                physical,
-                ModifiersState::SHIFT,
-                &modes,
-                false
-            ),
-            None
-        );
-        assert_eq!(
-            shortcut_action(
-                &config,
-                &end.clone(),
-                end.clone(),
-                physical,
-                ModifiersState::SHIFT,
-                &modes,
-                true
-            ),
-            Some(Action::Bottom)
-        );
-        assert_eq!(
-            shortcut_action(
-                &config,
-                &end.clone(),
-                end,
-                physical,
-                ModifiersState::SHIFT,
-                &term_core::Modes::default(),
-                false
-            ),
-            Some(Action::Bottom)
-        );
-        let custom = config::parse(
-            std::path::Path::new("test.toml"),
-            "[keybindings]\n'shift+1' = 'copy'\n",
-        )
-        .unwrap();
-        assert_eq!(
-            shortcut_action(
-                &custom,
-                &Key::Named(NamedKey::End),
-                Key::Named(NamedKey::End),
-                physical,
-                ModifiersState::SHIFT,
-                &modes,
-                false
-            ),
-            Some(Action::Copy)
-        );
+        // Mac keypad digits stay numeric, so Shift+KP1 is ordinary Shift+End there.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let physical = PhysicalKey::Code(KeyCode::Numpad1);
+            let end = Key::Named(NamedKey::End);
+            assert_eq!(
+                shortcut_action(
+                    &config,
+                    &end.clone(),
+                    end.clone(),
+                    physical,
+                    ModifiersState::SHIFT,
+                    &modes,
+                    false
+                ),
+                None
+            );
+            assert_eq!(
+                shortcut_action(
+                    &config,
+                    &end.clone(),
+                    end.clone(),
+                    physical,
+                    ModifiersState::SHIFT,
+                    &modes,
+                    true
+                ),
+                Some(Action::Bottom)
+            );
+            assert_eq!(
+                shortcut_action(
+                    &config,
+                    &end.clone(),
+                    end,
+                    physical,
+                    ModifiersState::SHIFT,
+                    &term_core::Modes::default(),
+                    false
+                ),
+                Some(Action::Bottom)
+            );
+            let custom = config::parse(
+                std::path::Path::new("test.toml"),
+                "[keybindings]\n'shift+1' = 'copy'\n",
+            )
+            .unwrap();
+            assert_eq!(
+                shortcut_action(
+                    &custom,
+                    &Key::Named(NamedKey::End),
+                    Key::Named(NamedKey::End),
+                    physical,
+                    ModifiersState::SHIFT,
+                    &modes,
+                    false
+                ),
+                Some(Action::Copy)
+            );
+        }
     }
     #[test]
     fn clipboard_shortcuts_dispatch() {
