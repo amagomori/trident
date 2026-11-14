@@ -35,8 +35,8 @@ fn scrolling_recycles_rows_as_fresh_blanks() {
             bg: Color::Indexed(3),
             flags: Flags::BOLD | Flags::WIDE,
         });
-        dirty.set_wrapped(true);
         dirty.flags = RowFlags::PROMPT_START;
+        dirty.set_wrapped(true);
         dirty.flags.insert(RowFlags::FAILED);
         dirty.flags.insert(RowFlags::OUTPUT_START);
         dirty.prompt_col = 2;
