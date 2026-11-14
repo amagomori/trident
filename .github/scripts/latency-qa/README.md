@@ -23,5 +23,19 @@ python3 .github/scripts/latency-qa/vs_alacritty.py --main ../t-main/target/relea
 
 Both write `rows.json` (every run) and `summary.json` into `--out`. Report the timing source
 `ab.py` prints: only `wayland-presentation` is verified presentation; `x11-present`,
-`metal-presented` and `present-return` are labelled unverified. `vs_alacritty.py` measures
+`metal-presented` and `present-return` are labelled unverified. Where every presentation
+callback is a skip (the macOS VM's paravirtual Metal), `ab.py` reports present-return and
+marks fps/wasted n/a; it exits 2 if it gets no echo p50 at all. `vs_alacritty.py` measures
 until the pixels change in the captured screen, not photons at the panel.
+
+macOS Alacritty: the Homebrew cask is disabled (Gatekeeper), so use the release DMG:
+
+```sh
+curl -fsSLo /tmp/alacritty.dmg https://github.com/alacritty/alacritty/releases/download/v0.17.0/Alacritty-v0.17.0.dmg
+hdiutil attach -nobrowse -mountpoint /tmp/alacritty /tmp/alacritty.dmg
+cp -R /tmp/alacritty/Alacritty.app /Applications/ && hdiutil detach /tmp/alacritty
+/Applications/Alacritty.app/Contents/MacOS/alacritty --version   # alacritty 0.17.0
+```
+
+`keylat` polls with CGWindowListCreateImage, which costs about 5-7 ms per grab on the macOS VM, so
+its samples carry that much detection lag; it is the same for every label.

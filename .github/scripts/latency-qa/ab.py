@@ -37,7 +37,14 @@ def run(args, label, binary, workload, rnd, cfg_home):
     (args.out / f"r{rnd:02d}-{label}-{workload}.log").write_text(p.stdout + p.stderr)
     if p.returncode or not out.exists():
         sys.exit(f"{label} {workload} round {rnd} failed; see {out.with_suffix('.log')}")
-    return json.loads(out.read_text())[0]
+    r = json.loads(out.read_text())[0]
+    if r["frames"] == 0 and r["timing"].startswith("presented"):
+        # Every presentation callback was a skip (the macOS VM's paravirtual Metal reports
+        # presentedTime 0), so latency.py has no presented frames: fall back to present-return.
+        source = r["timing"].split(": ", 1)[1].split(" ")[0]
+        r.update(p50_ms=r["return_p50_ms"], p99_ms=r["return_p99_ms"], fps=None, wasted=None,
+                 timing=f"present-return ({source} gave no timestamps)")
+    return r
 
 
 def main():
@@ -53,6 +60,8 @@ def main():
     ap.add_argument("--xvfb", action="store_true", help="smoke only; not the merge number")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
+    if args.rounds < 3:
+        ap.error("--rounds must be at least 3 for paired-round CIs")
     args.out.mkdir(parents=True, exist_ok=True)
     copy = args.out / "terminal-main-copy"
     shutil.copy2(args.main, copy)
@@ -69,8 +78,9 @@ def main():
             for label in order:
                 r = run(args, label, bins[label], workload, rnd, cfg_home)
                 rows.append(dict(round=rnd, label=label, order="".join(o[0] for o in order), **r))
+                fps = "n/a" if r["fps"] is None else f"{r['fps']:.1f}"
                 print(f"round {rnd} {workload} {label}: p50 {r['p50_ms']} p99 {r['p99_ms']} "
-                      f"fps {r['fps']:.1f} wasted {r['wasted']} [{r['timing']}]", file=sys.stderr)
+                      f"fps {fps} wasted {r['wasted']} [{r['timing']}]", file=sys.stderr)
     timings = {r["timing"] for r in rows}
     summary = {"timing": sorted(timings), "rounds": args.rounds, "metrics": {}}
     lines = [f"timing source: {', '.join(sorted(timings))}" + (" (MIXED: rerun)" if len(timings) > 1 else ""),
@@ -81,6 +91,7 @@ def main():
             by = {(r["round"], r["label"]): r[key] for r in rows if r["workload"] == workload and r[key] is not None}
             rs = [n for n in range(1, args.rounds + 1) if all((n, l) in by for l in bins)]
             if len(rs) < 3:
+                lines.append(f"| {workload} | {key} | n/a | n/a | n/a | | | no data ({len(rs)} complete rounds) |")
                 continue
             aa = boot_ci([by[n, "copy"] - by[n, "main"] for n in rs])
             ab = boot_ci([by[n, "head"] - by[n, "main"] for n in rs])
@@ -96,6 +107,11 @@ def main():
     (args.out / "rows.json").write_text(json.dumps(rows, indent=1))
     (args.out / "summary.json").write_text(json.dumps(summary, indent=1))
     print("\n".join(lines))
+    missing = [w for w, k in (("echo", "echo.p50_ms"), ("load", "load.bytes_s"))
+               if w in workloads and k not in summary["metrics"]]
+    if missing:
+        print(f"ERROR: no {', '.join(missing)} result for at least 3 complete rounds", file=sys.stderr)
+        return 2
     return 1 if any(m["verdict"] == "REGRESSION" for m in summary["metrics"].values()) else 0
 
 

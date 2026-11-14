@@ -39,7 +39,11 @@ for _ in 0..<100 where rect == nil {
     if rect == nil { usleep(100_000) }
 }
 guard let win = rect else { fail("no on-screen window for pid \(pid)") }
-NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
+if #available(macOS 14, *) {
+    NSRunningApplication(processIdentifier: pid)?.activate()
+} else {
+    NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
+}
 usleep(1_500_000)
 
 let src = CGEventSource(stateID: .hidSystemState)

@@ -5,7 +5,7 @@ cannot carry our instrumentation.
 
 Linux: XTEST key -> XGetImage poll of the glyph region (method of KAN-62/KAN-91 compare.py),
        on the session's X server (DISPLAY, must not be Xvfb). Needs python3-xlib, xdotool.
-macOS: keylat (keylat.swift: CGEvent key -> CGDisplayCreateImage poll), logged-in GUI session,
+macOS: keylat (keylat.swift: CGEvent key -> CGWindowListCreateImage poll), logged-in GUI session,
        Accessibility + Screen Recording granted to the shell running this.
 Every round launches head, main, an identical main copy (A/A) and Alacritty in a fresh
 shuffled order; reports per-label median-of-medians and p99, and per-round paired deltas
@@ -15,7 +15,7 @@ with 95% bootstrap CIs.
       --alacritty "$(command -v alacritty)" --rounds 6 --probes 200 --out ~/kan89/vs-x11
   add --load to also run with `cat`-ing a 100 MiB file in the background of the same shell.
 """
-import argparse, json, os, random, shutil, signal, statistics, subprocess, sys, tempfile, time
+import argparse, json, os, random, shlex, shutil, signal, statistics, subprocess, sys, tempfile, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -50,8 +50,8 @@ def launch(args, label, binary, load):
     work = Path(tempfile.mkdtemp(prefix=f"kan89-{label}-"))
     body = "sleep 1; clear; "
     if load:
-        body += f'(while :; do cat "{args.cat_file}"; done) >/dev/null & '
-    body += f'touch "{work}/ready"; exec cat'
+        body += f'(while :; do cat {shlex.quote(str(args.cat_file))}; done) >/dev/null & '
+    body += f'touch {shlex.quote(str(work / "ready"))}; exec cat'
     probe = work / "probe.sh"
     probe.write_text(body + "\n")
     cmd = ["/bin/sh", str(probe)]
@@ -222,6 +222,8 @@ def main():
     ap.add_argument("--keylat", type=Path, default=HERE / "keylat", help="macOS: compiled keylat.swift")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
+    if args.rounds < 3:
+        ap.error("--rounds must be at least 3 for paired-round CIs")
     args.out = args.out.resolve()  # the probe shell runs in a temp cwd
     mac = sys.platform == "darwin"
     if not mac:
@@ -288,10 +290,15 @@ def main():
                 deltas.append(f"| {wl} | {a} - {b} | {ci[0]:+.2f} [{ci[1]:+.2f}, {ci[2]:+.2f}] |")
         aa = summary.get(f"{wl}.copy-main")
         ha = summary.get(f"{wl}.head-alacritty")
-        if aa and ha:
+        head_timeouts = sum(r.get("timeouts", 0) for r in rows if r["load"] == load and r["label"] == "head")
+        if head_timeouts:
+            summary[f"{wl}.verdict"] = f"NOT MET (head had {head_timeouts} timed-out probes)"
+        elif aa and ha:
             noise = max(abs(aa[1]), abs(aa[2]))
             summary[f"{wl}.verdict"] = "MET (head no worse than Alacritty)" if ha[0] <= noise else \
                 "NOT MET (head slower than Alacritty beyond A/A noise)"
+        else:
+            summary[f"{wl}.verdict"] = "NO VERDICT (fewer than 3 complete rounds; see errors above)"
     print("\n".join(lines))
     print("\n| workload | paired per-round delta of medians | median [95% CI] ms |\n| --- | --- | --- |")
     print("\n".join(deltas))
@@ -299,7 +306,10 @@ def main():
         if k.endswith("verdict"):
             print(f"{k}: {v}")
     (args.out / "summary.json").write_text(json.dumps(summary, indent=1))
-    return 0 if all(not k.endswith("verdict") or v.startswith("MET") for k, v in summary.items()) else 1
+    verdicts = [v for k, v in summary.items() if k.endswith("verdict")]
+    if any(v.startswith("NO VERDICT") for v in verdicts):
+        return 2
+    return 0 if all(v.startswith("MET") for v in verdicts) else 1
 
 
 if __name__ == "__main__":
