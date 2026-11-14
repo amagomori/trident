@@ -412,7 +412,10 @@ impl Terminal {
                         .iter()
                         .rposition(|cell| cell.c != ' ' || cell.flags.contains(Flags::WIDE_SPACER))
                         .map_or(0, |col| col + 1);
-                    (row.cells[..used].to_vec(), row.wrapped && input_line < line)
+                    (
+                        row.cells[..used].to_vec(),
+                        row.wrapped() && input_line < line,
+                    )
                 } else {
                     (Vec::new(), false)
                 };
