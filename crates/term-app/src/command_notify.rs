@@ -9,6 +9,7 @@ pub struct Finished {
 #[derive(Default)]
 struct Foreground {
     running: std::collections::BTreeMap<i32, (Instant, Option<String>)>,
+    shell_name: Option<String>,
 }
 
 impl Foreground {
@@ -32,7 +33,20 @@ impl Foreground {
             }
         });
         if let Some(group) = group {
-            self.running.entry(group).or_insert_with(|| (now, name()));
+            match self.running.entry(group) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((now, name()));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    // A group first seen between fork and exec still shows the shell's image.
+                    let stored = &mut entry.get_mut().1;
+                    if (stored.is_none() || *stored == self.shell_name)
+                        && let Some(current) = name()
+                    {
+                        *stored = Some(current);
+                    }
+                }
+            }
         }
         finished
     }
@@ -404,6 +418,10 @@ pub fn watch(
         .spawn(move || {
             let receiver = thread_activity.receiver.lock().unwrap();
             let mut foreground = Foreground::default();
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                foreground.shell_name = command_name(shell as i32);
+            }
             let mut stopped_groups = StoppedGroups::default();
             let mut last_kick = Instant::now();
             let mut next_sample = Instant::now();
@@ -536,6 +554,31 @@ mod tests {
         for (seconds, expected) in [(0, "0s"), (12, "12s"), (134, "2m 14s"), (3780, "1h 3m")] {
             assert_eq!(format_duration(Duration::from_secs(seconds)), expected);
         }
+    }
+
+    #[test]
+    fn name_seen_before_exec_is_refreshed() {
+        let mut state = Foreground {
+            shell_name: Some("bash".into()),
+            ..Default::default()
+        };
+        let start = Instant::now();
+        state.sample(Some(42), start, || Some("bash".into()), |_| false);
+        state.sample(
+            Some(42),
+            start + Duration::from_millis(200),
+            || Some("sleep 2".into()),
+            |_| false,
+        );
+        state.sample(
+            Some(42),
+            start + Duration::from_millis(400),
+            || panic!("name already settled"),
+            |_| false,
+        );
+        let events = state.sample(None, start + Duration::from_secs(2), || None, |_| true);
+        assert_eq!(events[0].name.as_deref(), Some("sleep 2"));
+        assert_eq!(events[0].duration, Duration::from_secs(2));
     }
 
     #[test]
