@@ -208,8 +208,8 @@ pub struct Activity {
     enabled: std::sync::atomic::AtomicBool,
     kicked: std::sync::atomic::AtomicBool,
     idle: std::sync::atomic::AtomicBool,
-    sender: std::sync::mpsc::SyncSender<()>,
     receiver: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    sender: std::sync::mpsc::SyncSender<()>,
     #[cfg(test)]
     samples: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -236,6 +236,7 @@ impl Default for Activity {
 
 #[cfg(unix)]
 impl Activity {
+    #[inline(never)]
     pub fn kick(&self) {
         use std::sync::atomic::Ordering;
         if self.enabled.load(Ordering::Acquire)
@@ -416,17 +417,14 @@ pub fn watch(
     let thread = std::thread::Builder::new()
         .name("command-watcher".into())
         .spawn(move || {
-            let receiver = thread_activity
-                .receiver
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut stopped_groups = StoppedGroups::default();
+            let receiver = thread_activity.receiver.lock().unwrap();
+            let mut last_kick = Instant::now();
             let mut foreground = Foreground::default();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 foreground.shell_name = command_name(shell as i32);
             }
-            let mut last_kick = Instant::now();
+            let mut stopped_groups = StoppedGroups::default();
             'watch: while !stopped.load(Ordering::Acquire) && !thread_stop.load(Ordering::Acquire) {
                 if thread_activity.kicked.swap(false, Ordering::SeqCst) {
                     last_kick = Instant::now();
