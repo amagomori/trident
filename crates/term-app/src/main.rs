@@ -1337,7 +1337,7 @@ impl App {
             self.appearance_watch = appearance::watch(move |theme| {
                 let _ = proxy.send_event(UserEvent::Appearance(generation, theme));
             })
-            .map_err(|e| eprintln!("terminal: cannot watch OS appearance: {e}"))
+            .map_err(|e| diag!("terminal: cannot watch OS appearance: {e}"))
             .ok();
         }
     }

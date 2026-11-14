@@ -55,7 +55,7 @@ fn spawn(future: impl Future<Output = ()> + Send + 'static) -> std::io::Result<W
 pub fn watch(changed: impl Fn(Option<Theme>) + Send + 'static) -> std::io::Result<Watch> {
     spawn(async move {
         if let Err(error) = listen(changed).await {
-            eprintln!("terminal: OS appearance unavailable (using dark): {error}");
+            diag!("terminal: OS appearance unavailable (using dark): {error}");
         }
     })
 }
