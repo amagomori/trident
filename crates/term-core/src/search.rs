@@ -29,6 +29,7 @@ pub struct SearchJob {
     total: usize,
     text: String,
     points: Vec<(Point, Point)>,
+    eager: bool,
 }
 
 /// Logical lines scanned between deadline checks.
@@ -74,52 +75,69 @@ impl SearchJob {
     }
 
     fn scan(&mut self, term: &Terminal, logical_start: u64, logical_end: u64, last: u64) {
-        self.text.clear();
-        let mut has_points = false;
-        for line in logical_start..=logical_end {
-            for (_, cell) in text_cells(term, line, last) {
-                self.text.push(cell.c);
+        let Self {
+            re,
+            found,
+            chunks,
+            total,
+            text,
+            points,
+            eager,
+            ..
+        } = self;
+        text.clear();
+        let has_points = *eager;
+        if has_points {
+            points.clear();
+            for line in logical_start..=logical_end {
+                for (col, cell) in text_cells(term, line, last) {
+                    text.push(cell.c);
+                    push_points(points, line, col, cell);
+                }
+            }
+        } else {
+            for line in logical_start..=logical_end {
+                for (_, cell) in text_cells(term, line, last) {
+                    text.push(cell.c);
+                }
             }
         }
-        let offset = self.found.len();
-        let remaining = MATCH_LIMIT - self.total;
+        if !has_points {
+            if !re.is_match(text) {
+                *eager = false;
+                return;
+            }
+            points.clear();
+            for line in logical_start..=logical_end {
+                for (col, cell) in text_cells(term, line, last) {
+                    push_points(points, line, col, cell);
+                }
+            }
+        }
+        let offset = found.len();
+        let limit = offset + MATCH_LIMIT - *total;
+        let remaining = limit - offset;
         let mut oldest = 0;
-        let mut found = 0;
-        for m in self.re.find_iter(&self.text) {
+        for m in re.find_iter(text) {
             if m.is_empty() {
                 continue;
             }
-            if !has_points {
-                has_points = true;
-                self.points.clear();
-                for line in logical_start..=logical_end {
-                    for (col, cell) in text_cells(term, line, last) {
-                        let start = Point { line, col };
-                        let end = Point {
-                            line,
-                            col: col + usize::from(cell.flags.contains(Flags::WIDE)),
-                        };
-                        self.points
-                            .extend(std::iter::repeat_n((start, end), cell.c.len_utf8()));
-                    }
-                }
-            }
             let matched = Match {
-                start: self.points[m.start()].0,
-                end: self.points[m.end() - 1].1,
+                start: points[m.start()].0,
+                end: points[m.end() - 1].1,
             };
-            if found < remaining {
-                self.found.push(matched);
-                found += 1;
+            if found.len() < limit {
+                found.push(matched);
             } else {
-                self.found[offset + oldest] = matched;
+                found[offset + oldest] = matched;
                 oldest = (oldest + 1) % remaining;
             }
         }
-        self.found[offset..].rotate_left(oldest);
-        if found > 0 {
-            self.chunks.push(offset..self.found.len());
-            self.total += found;
+        found[offset..].rotate_left(oldest);
+        *eager = found.len() > offset;
+        if *eager {
+            chunks.push(offset..found.len());
+            *total += found.len() - offset;
         }
     }
 
@@ -132,6 +150,15 @@ impl SearchJob {
         self.found.clear();
         ordered
     }
+}
+
+fn push_points(points: &mut Vec<(Point, Point)>, line: u64, col: usize, cell: &Cell) {
+    let start = Point { line, col };
+    let end = Point {
+        line,
+        col: col + usize::from(cell.flags.contains(Flags::WIDE)),
+    };
+    points.extend(std::iter::repeat_n((start, end), cell.c.len_utf8()));
 }
 
 /// The cells of `line` that are text, with their columns.
@@ -176,6 +203,7 @@ impl Terminal {
             total: 0,
             text: String::new(),
             points: Vec::new(),
+            eager: true,
         })
     }
 
