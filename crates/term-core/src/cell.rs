@@ -100,7 +100,7 @@ struct Hidden {
 
 impl Row {
     /// Blank the row in place, keeping its allocation unless it is oversized.
-    pub fn reset(&mut self, cols: usize, template: &Cell, released: &mut bool) {
+    pub(crate) fn reset(&mut self, cols: usize, template: &Cell, released: &mut bool) {
         let blank = Cell::blank(template);
         if self.cells.len() == cols
             && self.cells.capacity() <= cols.saturating_mul(2)
