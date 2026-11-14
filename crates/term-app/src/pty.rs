@@ -44,8 +44,8 @@ struct Probe {
     #[cfg(unix)]
     fd: Option<std::os::fd::OwnedFd>,
     shell: Option<u32>,
-    /// The first child is a command (`terminal -e vim`), not a shell: it counts as a
-    /// running program while it holds the foreground itself.
+    /// The first child was an explicit command (`terminal -e vim`), which counts as a
+    /// running program while it holds the foreground, unless it is (or became) a shell.
     command: bool,
 }
 
@@ -59,7 +59,10 @@ impl Probe {
             // SAFETY: fd is a PTY master descriptor owned by this probe.
             let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
             let shell = self.shell?;
-            (group > 0 && (self.command || group as u32 != shell)).then_some(group)
+            let running = group as u32 != shell
+                || (self.command
+                    && !crate::close_confirm::process_name(group).is_some_and(|n| is_shell(&n)));
+            (group > 0 && running).then_some(group)
         }
         #[cfg(not(unix))]
         None
@@ -326,7 +329,7 @@ impl Pty {
                 #[cfg(unix)]
                 fd: foreground_fd,
                 shell: shell_pid,
-                command: command.first().is_some_and(|program| !is_shell(program)),
+                command: !command.is_empty(),
             },
             ..Default::default()
         });
@@ -652,6 +655,31 @@ mod tests {
     fn a_direct_command_counts_as_running() {
         assert!(is_shell("/bin/bash") && is_shell("-zsh") && is_shell("fish"));
         assert!(!is_shell("vim") && !is_shell("/usr/bin/ssh") && !is_shell("bashtop"));
+        let mut wrapped = Pty::spawn(
+            &[
+                "env".into(),
+                "bash".into(),
+                "--norc".into(),
+                "--noprofile".into(),
+                "-i".into(),
+            ],
+            &Default::default(),
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while wrapped.running_program().is_some() {
+            wrapped.take_output();
+            assert!(
+                Instant::now() < deadline,
+                "env bash still counted as running"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let mut pty = Pty::spawn(
             &["sleep".into(), "30".into()],
             &Default::default(),
