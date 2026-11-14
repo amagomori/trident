@@ -26,6 +26,8 @@ pub(crate) struct LinkTable {
     free: Vec<u16>,
     /// The previous byte buffer, kept so repacking reuses its allocation.
     spare: Vec<u8>,
+    /// Table size at which unreferenced entries are released before growing further.
+    next_release: usize,
 }
 
 struct Span {
@@ -35,6 +37,13 @@ struct Span {
 }
 
 const RECENT_BITS: u32 = 12;
+
+/// Entries the table may hold before its first release scan.
+const MIN_RELEASE: usize = 4096;
+
+/// Grid cells a release scan may visit per entry it allows, which bounds the amortized
+/// scan cost while keeping the table close to what the grid can still reference.
+const CELLS_PER_ENTRY: usize = 8;
 
 /// A cache slot plus a 16-bit tag from other hash bits, so most misses are
 /// rejected without touching the stored bytes.
@@ -69,6 +78,10 @@ impl LinkTable {
 
     fn is_full(&self, limit: usize) -> bool {
         self.free.is_empty() && self.len() >= limit
+    }
+
+    fn needs_release(&self, limit: usize) -> bool {
+        self.is_full(self.next_release.max(MIN_RELEASE).min(limit))
     }
 
     pub(crate) fn get(&self, index: u16) -> Option<(&[u8], &[u8])> {
@@ -147,6 +160,7 @@ impl LinkTable {
     /// duplicates merged, and returns the old-to-new index map.
     pub(crate) fn compact(&mut self, used: &[bool]) -> Vec<u16> {
         let old = std::mem::take(self);
+        self.next_release = old.next_release;
         let mut kept = std::collections::HashMap::new();
         let mut remap = vec![0; used.len()];
         for index in 1..=old.len() as u16 {
@@ -167,10 +181,20 @@ impl Terminal {
         if let Some(index) = self.links.find(id, uri, slot) {
             return index;
         }
-        if self.links.is_full(limit) && !self.release_links() {
-            self.compact_links();
-            if let Some(index) = self.links.position(id, uri, slot) {
-                return index;
+        if self.links.needs_release(limit) {
+            let released = self.release_links();
+            let live = self.links.len() - self.links.free.len();
+            let cells = [&self.primary, &self.alternate]
+                .iter()
+                .map(|screen| screen.lines.len() + screen.scrollback.len())
+                .sum::<usize>()
+                * self.cols;
+            self.links.next_release = (2 * live).max(cells / CELLS_PER_ENTRY);
+            if !released && self.links.is_full(limit) {
+                self.compact_links();
+                if let Some(index) = self.links.position(id, uri, slot) {
+                    return index;
+                }
             }
         }
         if self.links.is_full(limit) {
@@ -494,6 +518,19 @@ mod tests {
     }
 
     #[test]
+    fn narrowed_wrapped_url_keeps_its_hidden_tail() {
+        let uri = "https://examplewrapped/path/abcdefghij";
+        let mut t = Terminal::new(20, 4);
+        t.advance(uri.as_bytes());
+        t.resize(15, 4);
+        for line in 0..2 {
+            assert_eq!(t.link_at(Point { line, col: 3 }).unwrap().uri, uri);
+        }
+        t.resize(20, 4);
+        assert_eq!(t.link_at(Point { line: 1, col: 3 }).unwrap().uri, uri);
+    }
+
+    #[test]
     fn wrapped_url_keeps_cells_hidden_by_narrowing() {
         let uri = "https://example.com/abcdefghijklmnop";
         let mut t = Terminal::new(20, 4);
@@ -677,6 +714,15 @@ mod tests {
                 Some((k.as_bytes(), uri.as_bytes()))
             );
         }
+    }
+
+    #[test]
+    fn table_stays_near_what_a_small_grid_can_reference() {
+        let mut t = Terminal::new(8, 2);
+        for id in 0..20_000 {
+            assert_ne!(intern(&mut t, id, u16::MAX as usize), 0);
+        }
+        assert!(t.links.len() <= MIN_RELEASE, "{}", t.links.len());
     }
 
     #[test]
