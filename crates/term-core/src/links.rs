@@ -24,6 +24,8 @@ pub(crate) struct LinkTable {
     spans: Vec<Span>,
     recent: Vec<u32>,
     free: Vec<u16>,
+    /// The previous byte buffer, kept so repacking reuses its allocation.
+    spare: Vec<u8>,
 }
 
 struct Span {
@@ -118,7 +120,9 @@ impl LinkTable {
     /// Frees the entries not marked in `used` (by index) for reuse, keeping every
     /// other index, and repacks the stored bytes. Returns whether any was freed.
     fn release(&mut self, used: &[bool]) -> bool {
-        let mut bytes = Vec::with_capacity(self.bytes.len());
+        let mut bytes = std::mem::take(&mut self.spare);
+        bytes.clear();
+        bytes.reserve(self.bytes.len());
         for (at, span) in self.spans.iter_mut().enumerate().rev() {
             if used[at + 1] {
                 let len = (span.id_len + span.uri_len) as usize;
@@ -135,7 +139,7 @@ impl LinkTable {
                 self.free.push(at as u16 + 1);
             }
         }
-        self.bytes = bytes;
+        self.spare = std::mem::replace(&mut self.bytes, bytes);
         !self.free.is_empty()
     }
 
