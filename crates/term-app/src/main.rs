@@ -396,22 +396,18 @@ const SYNC_RESET: &[u8] = b"\x1b[?2026l";
 /// Applies output up to the last synchronized frame already complete in `output`, so a
 /// backlog of finished frames is drawn once instead of one presentation per frame.
 fn advance_output(term: &mut Terminal, output: &mut pty::Output) -> usize {
-    let last_reset = memchr::memmem::rfind(&output.bytes, SYNC_RESET)
-        .map_or(0, |start| start + SYNC_RESET.len());
+    let bytes = &output.bytes;
+    let mut last_reset = None;
     let mut start = 0;
     let mut applied = 0;
     let mut ended = false;
     for &offset in &output.shell_returns {
-        start += advance_frames(
-            term,
-            &output.bytes[start..offset],
-            last_reset.saturating_sub(start),
-        );
+        start += advance_frames(term, bytes, start, offset, &mut last_reset);
         if start == offset {
             term.reset_input_modes();
             applied += 1;
         }
-        ended = term.synchronized_output_ended() && start >= last_reset;
+        ended = term.synchronized_output_ended() && start >= last_reset_in(bytes, &mut last_reset);
         if ended {
             break;
         }
@@ -420,20 +416,32 @@ fn advance_output(term: &mut Terminal, output: &mut pty::Output) -> usize {
     if !ended {
         start += advance_frames(
             term,
-            &output.bytes[start..],
-            last_reset.saturating_sub(start),
+            &output.bytes,
+            start,
+            output.bytes.len(),
+            &mut last_reset,
         );
     }
     start
 }
 
-/// Advances frame by frame until the frame end at or past `last_reset`.
-fn advance_frames(term: &mut Terminal, bytes: &[u8], last_reset: usize) -> usize {
-    let mut consumed = 0;
+/// Advances `bytes[start..end]` frame by frame until the frame end at or past the last
+/// one in `bytes`, returning the bytes consumed.
+fn advance_frames(
+    term: &mut Terminal,
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+    last_reset: &mut Option<usize>,
+) -> usize {
+    let mut consumed = start;
     loop {
-        consumed += term.advance_until_sync_end(&bytes[consumed..]);
-        if !term.synchronized_output_ended() || consumed >= last_reset || consumed == bytes.len() {
-            return consumed;
+        consumed += term.advance_until_sync_end(&bytes[consumed..end]);
+        if !term.synchronized_output_ended()
+            || consumed == end
+            || consumed >= last_reset_in(bytes, last_reset)
+        {
+            return consumed - start;
         }
     }
 }
@@ -447,6 +455,13 @@ fn reset_view_for_input(term: &mut Terminal, scroll: &mut PixelScroll) -> bool {
     scroll.reset();
     term.selection = None;
     changed
+}
+
+/// The end of the last frame reset in `bytes`, searched only once a frame has ended.
+fn last_reset_in(bytes: &[u8], last_reset: &mut Option<usize>) -> usize {
+    *last_reset.get_or_insert_with(|| {
+        memchr::memmem::rfind(bytes, SYNC_RESET).map_or(0, |start| start + SYNC_RESET.len())
+    })
 }
 
 fn update_terminal(
@@ -3981,6 +3996,24 @@ mod tests {
         assert!(term.modes.synchronized_output);
         assert!(!output.presented());
         assert!(output.waiting_since.is_none());
+    }
+
+    #[test]
+    fn last_frame_end_is_searched_only_after_a_frame_ends() {
+        let mut term = Terminal::new(10, 2);
+        let open = b"plain\r\n\x1b[?2026hA";
+        let mut last_reset = None;
+        assert_eq!(
+            advance_frames(&mut term, open, 0, open.len(), &mut last_reset),
+            open.len()
+        );
+        assert_eq!(last_reset, None);
+        assert!(term.modes.synchronized_output);
+        let backlog = b"B\x1b[?2026l\x1b[?2026hC\x1b[?2026l\x1b[?2026hD";
+        let consumed = advance_frames(&mut term, backlog, 0, backlog.len(), &mut last_reset);
+        assert_eq!(consumed, backlog.len() - b"\x1b[?2026hD".len());
+        assert_eq!(last_reset, Some(consumed));
+        assert!(term.synchronized_output_ended());
     }
 
     #[test]
