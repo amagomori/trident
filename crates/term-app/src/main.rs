@@ -1285,6 +1285,10 @@ impl App {
     }
 
     fn paste(&mut self, primary: bool) {
+        // A waiting paste keeps the banner until Enter or Escape resolves it.
+        if self.pending_paste.is_some() {
+            return;
+        }
         let Some(text) = self.clipboard.get(primary) else {
             return;
         };
@@ -1329,6 +1333,9 @@ impl App {
     }
 
     fn dropped_file(&mut self, path: PathBuf) {
+        if self.pending_paste.is_some() {
+            return;
+        }
         // Flush any deferred echo before inserting rows above the current prompt.
         self.process_output();
         let Some(s) = &mut self.session else { return };
@@ -2208,7 +2215,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
-                if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
+                if self.pending_paste.is_some() {
+                    // Like typed keys, committed text never reaches the shell past the banner.
+                } else if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
                     search.insert(&text, &mut s.term);
                     s.scroll.reset();
                     s.window.request_redraw();
@@ -2242,7 +2251,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     s.window.request_redraw();
                 }
-                if let Ime::Commit(text) = event {
+                if let Ime::Commit(text) = event
+                    && self.pending_paste.is_none()
+                {
                     self.write_input(text.as_bytes());
                 }
                 self.update_ime_cursor_area();
