@@ -39,12 +39,12 @@ impl Terminal {
         let mut logical_end = last;
         loop {
             let mut logical_start = logical_end;
-            while logical_start > first && self.line(logical_start - 1).wrapped {
+            while logical_start > first && self.line(logical_start - 1).wrapped() {
                 logical_start -= 1;
             }
             for line in logical_start..=logical_end {
                 let row = self.line(line);
-                let end_of_line = !row.wrapped || line == last;
+                let end_of_line = !row.wrapped() || line == last;
                 let cells = if end_of_line {
                     let end = row
                         .cells

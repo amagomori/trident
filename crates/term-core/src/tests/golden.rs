@@ -900,7 +900,7 @@ fn rows<'a>(out: &mut String, label: &str, rows: impl IntoIterator<Item = &'a Ro
     writeln!(out, "{label}:").unwrap();
     for (index, row) in rows.into_iter().enumerate() {
         let text: String = row.cells.iter().map(|cell| cell.c).collect();
-        writeln!(out, "  row {index} wrap={} text={text:?}", row.wrapped).unwrap();
+        writeln!(out, "  row {index} wrap={} text={text:?}", row.wrapped()).unwrap();
         let mut start = 0;
         while start < row.cells.len() {
             let attr = attributes(&row.cells[start]);

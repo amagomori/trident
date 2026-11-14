@@ -170,6 +170,7 @@ impl Perform for Terminal {
                 }
                 for row in 0..self.rows {
                     self.lines_mut()[row].clear_hidden();
+                    self.lines_mut()[row].touch_all();
                     for cell in self.lines_mut()[row].cells.iter_mut() {
                         *cell = Default::default();
                         cell.c = 'E';
