@@ -116,7 +116,8 @@ impl Row {
     /// Blank the row in place, keeping its allocation unless it is oversized.
     pub(crate) fn reset(&mut self, cols: usize, template: &Cell, released: &mut bool) {
         let blank = Cell::blank(template);
-        if self.cells.len() == cols
+        if false
+            && self.cells.len() == cols
             && self.cells.capacity() <= cols.saturating_mul(2)
             && self.cells.last() == Some(&blank)
         {
