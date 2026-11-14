@@ -19,8 +19,8 @@ const MIN_LINES: usize = 32 * 1024;
 /// parses per wake-up, so huge bursts can't starve rendering.
 const MAX_QUEUED: usize = 8 << 20;
 const READ_BUFFER: usize = 64 * 1024;
-/// How often the reader asks for the PTY's foreground process group while a command
-/// holds it and its output is still queued, instead of after every read.
+/// How often the reader asks for the PTY's foreground process group while earlier output
+/// is still queued, instead of after every read.
 const FOREGROUND_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Shell output read but not yet parsed, as one buffer: small reads (macOS returns about
@@ -76,12 +76,11 @@ struct Pending {
 }
 
 impl Pending {
-    /// Checks the foreground group for the next read, except while a command held it at
-    /// a check less than `FOREGROUND_INTERVAL` ago and earlier output is still queued: a
-    /// later check then marks a return at the first unchecked read, before the prompt.
+    /// Checks the foreground group for the next read, unless earlier output is still
+    /// queued and was checked less than `FOREGROUND_INTERVAL` ago: the next check, at the
+    /// latest when the output is taken, marks a return at the first unchecked read.
     fn check_foreground(&mut self, now: Instant, shell: impl FnOnce() -> Option<bool>) -> bool {
-        if self.foreground.away
-            && !self.bytes.is_empty()
+        if !self.bytes.is_empty()
             && self
                 .checked_at
                 .is_some_and(|at| now.duration_since(at) < FOREGROUND_INTERVAL)
@@ -607,16 +606,33 @@ mod tests {
     }
 
     #[test]
-    fn reads_are_checked_while_the_shell_holds_the_foreground_or_nothing_is_queued() {
+    fn reads_are_checked_whenever_nothing_is_queued() {
         let mut pending = Pending::default();
         let start = Instant::now();
         assert!(read(&mut pending, start, b"$ ", Some(true)));
-        assert!(read(&mut pending, start, b"ls", Some(true)));
-        assert!(read(&mut pending, start, b"", None));
-        assert!(read(&mut pending, start, b"cmd", Some(false)));
-        pending.take_output(start, || panic!("every read was checked"));
+        assert!(!read(&mut pending, start, b"ls", Some(false)));
+        let output = pending.take_output(start, || Some(false));
+        assert!(output.shell_returns.is_empty());
         assert!(read(&mut pending, start, b"out", Some(false)));
-        assert!(!read(&mut pending, start, b"more", Some(false)));
+        assert!(!read(&mut pending, start, b"more", Some(true)));
+        assert_eq!(pending.take_output(start, || Some(true)).shell_returns, [3]);
+    }
+
+    #[test]
+    fn a_command_started_between_checks_still_marks_its_return() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        read(&mut pending, start, b"$ ", Some(true));
+        read(&mut pending, start, b"vim", Some(false));
+        assert!(
+            pending
+                .take_output(start, || Some(false))
+                .shell_returns
+                .is_empty()
+        );
+        read(&mut pending, start, b"screen", Some(false));
+        read(&mut pending, start, b"$ ", Some(true));
+        assert_eq!(pending.take_output(start, || Some(true)).shell_returns, [6]);
     }
 
     #[test]
