@@ -290,16 +290,8 @@ impl Terminal {
             }
             7 => self.modes.autowrap = enable,
             25 => self.modes.show_cursor = enable,
-            47 => self.set_alt_screen(enable, false, false),
-            1047 => {
-                // Unlike 1049, 1047 clears the alternate buffer on exit, not entry.
-                if !enable && self.alt_active {
-                    for row in 0..self.rows {
-                        self.erase_row(row);
-                    }
-                }
-                self.set_alt_screen(enable, false, false);
-            }
+            // 1049 clears the alternate buffer on entry; 1047 clears it on exit.
+            47 | 1047 => self.set_alt_screen(enable, false, !enable && mode == 1047),
             1048 => {
                 if enable {
                     self.save_cursor()
@@ -307,7 +299,7 @@ impl Terminal {
                     self.restore_cursor()
                 }
             }
-            1049 => self.set_alt_screen(enable, true, true),
+            1049 => self.set_alt_screen(enable, true, enable),
             1000 => self.set_mouse(MouseMode::Click, enable),
             1002 => self.set_mouse(MouseMode::Drag, enable),
             1003 => self.set_mouse(MouseMode::Motion, enable),

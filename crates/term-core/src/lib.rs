@@ -1502,12 +1502,14 @@ impl Terminal {
                 self.save_cursor();
             }
             self.alt_active = true;
-            if clear {
-                for r in 0..self.rows {
-                    self.erase_row(r);
-                }
+        }
+        // Clears the alternate buffer: after switching on entry, before switching back on exit.
+        if clear {
+            for r in 0..self.rows {
+                self.erase_row(r);
             }
-        } else {
+        }
+        if !enable {
             self.alt_active = false;
             if save_cursor {
                 self.restore_cursor();
