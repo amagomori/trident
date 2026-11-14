@@ -486,6 +486,15 @@ fn wake_deadline(
     [frame, resize, probe].into_iter().flatten().min()
 }
 
+/// The alternate screen has no scrollback, so these scroll actions would do
+/// nothing there; let the key reach the program instead (vim, emacs, less).
+fn passes_through_on_alt_screen(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::LineUp | Action::LineDown | Action::Top | Action::Bottom
+    )
+}
+
 fn shell_shortcuts_available(term: &Terminal) -> bool {
     term.has_shell_marks() && !term.is_alt_screen()
 }
@@ -1487,7 +1496,7 @@ impl App {
             | Action::Top
             | Action::Bottom => {
                 if let Some(s) = &mut self.session {
-                    if matches!(action, Action::Top | Action::Bottom) && s.term.is_alt_screen() {
+                    if passes_through_on_alt_screen(&action) && s.term.is_alt_screen() {
                         return false;
                     }
                     let page = s.term.rows() as isize - 1;
@@ -2347,6 +2356,21 @@ mod tests {
                     matches!(action, Action::NewWindow)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn line_and_edge_scrolls_pass_through_on_alt_screen() {
+        for action in [
+            Action::LineUp,
+            Action::LineDown,
+            Action::Top,
+            Action::Bottom,
+        ] {
+            assert!(passes_through_on_alt_screen(&action));
+        }
+        for action in [Action::PageUp, Action::PageDown, Action::NewWindow] {
+            assert!(!passes_through_on_alt_screen(&action));
         }
     }
 
