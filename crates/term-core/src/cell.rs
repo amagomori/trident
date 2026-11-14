@@ -228,10 +228,18 @@ impl Row {
     pub(crate) fn mark_hyperlinks(&self, used: &mut [bool]) -> usize {
         let hidden = self.hidden.as_deref().map_or(&[][..], |h| &h.cells[..]);
         let mut marked = 0;
-        for cell in self.cells.iter().chain(hidden) {
-            if cell.hyperlink != 0 && !used[cell.hyperlink as usize] {
-                used[cell.hyperlink as usize] = true;
-                marked += 1;
+        for cells in [&self.cells[..], hidden] {
+            // Neighbouring cells mostly share a link, so only a change of index is looked up.
+            let mut last = 0;
+            for cell in cells {
+                let index = cell.hyperlink;
+                if index != last {
+                    last = index;
+                    if index != 0 && !used[index as usize] {
+                        used[index as usize] = true;
+                        marked += 1;
+                    }
+                }
             }
         }
         marked

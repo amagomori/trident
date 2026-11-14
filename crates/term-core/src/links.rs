@@ -207,7 +207,7 @@ impl Terminal {
                 .map(|screen| screen.lines.len() + screen.scrollback.len())
                 .sum::<usize>()
                 * self.cols;
-            self.links.next_release = (2 * live).max(cells / CELLS_PER_ENTRY);
+            self.links.next_release = (4 * live).max(cells / CELLS_PER_ENTRY);
         }
         if self.links.is_full(limit) {
             return 0;
