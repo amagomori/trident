@@ -73,6 +73,8 @@ pub static QUIT_CONFIRMS: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 #[cfg(target_os = "macos")]
 thread_local! {
     static QUIT_HOOK: std::cell::RefCell<Option<QuitHook>> = const { std::cell::RefCell::new(None) };
+    /// AppKit waits for `answer_quit` on a quit that `should_terminate` deferred.
+    static QUIT_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(target_os = "macos")]
@@ -82,27 +84,88 @@ struct QuitHook {
 }
 
 /// `applicationShouldTerminate:`, which every app quit (Cmd-Q, menu or Dock Quit, logout)
-/// asks: with a program running it cancels the quit and closes the window instead, so the
-/// close banner asks first.
+/// asks: with a program running it defers the quit and closes the window instead, so the
+/// close banner asks first and `answer_quit` lets the quit (and a logout) go on or cancels it.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn should_terminate(
     _this: *mut objc2::runtime::AnyObject,
     _cmd: objc2::runtime::Sel,
     _sender: *mut objc2::runtime::AnyObject,
 ) -> usize {
-    const NS_TERMINATE_CANCEL: usize = 0;
     const NS_TERMINATE_NOW: usize = 1;
+    const NS_TERMINATE_LATER: usize = 2;
     let confirms = QUIT_CONFIRMS.load(std::sync::atomic::Ordering::Relaxed);
     QUIT_HOOK.with_borrow(|hook| match hook {
         Some(hook) if confirms && (hook.running)() => {
+            QUIT_DEFERRED.set(true);
             // SAFETY: window is a live NSWindow and this runs on the main thread.
             let _: () = unsafe {
                 objc2::msg_send![&*hook.window, performClose: std::ptr::null::<objc2::runtime::AnyObject>()]
             };
-            NS_TERMINATE_CANCEL
+            NS_TERMINATE_LATER
         }
         _ => NS_TERMINATE_NOW,
     })
+}
+
+/// Answers a quit that `should_terminate` deferred, quitting the app or cancelling the quit;
+/// false when no quit was waiting.
+#[cfg(target_os = "macos")]
+#[cold]
+pub fn answer_quit(quit: bool) -> bool {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send, sel};
+    use objc2_foundation::NSString;
+
+    if !QUIT_DEFERRED.replace(false) {
+        return false;
+    }
+    // Replying runs AppKit's terminate, which re-enters winit's event handler, so the reply
+    // waits for the handler to return; in every run loop mode, as AppKit waits in the modal
+    // panel mode.
+    // SAFETY: on the main thread; the messages match their AppKit signatures, and
+    // `terminalAnswerQuit:` was added with `v@:@` along with should_terminate.
+    unsafe {
+        let app: Retained<AnyObject> = msg_send![class!(NSApplication), sharedApplication];
+        let delegate: Option<Retained<AnyObject>> = msg_send![&*app, delegate];
+        let Some(delegate) = delegate else {
+            return false;
+        };
+        let modes: Retained<AnyObject> = msg_send![
+            class!(NSArray),
+            arrayWithObject: &*NSString::from_str("kCFRunLoopCommonModes")
+        ];
+        let answer: Option<&AnyObject> = quit.then_some(&*app);
+        let _: () = msg_send![
+            &*delegate,
+            performSelector: sel!(terminalAnswerQuit:),
+            withObject: answer,
+            afterDelay: 0.0f64,
+            inModes: &*modes
+        ];
+    }
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn answer_quit(_quit: bool) -> bool {
+    false
+}
+
+/// `terminalAnswerQuit:`, replying to the deferred quit: a non-nil `quit` lets it go on.
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn reply_to_quit(
+    _this: *mut objc2::runtime::AnyObject,
+    _cmd: objc2::runtime::Sel,
+    quit: *mut objc2::runtime::AnyObject,
+) {
+    // SAFETY: on the main thread, where performSelector delivers it.
+    unsafe {
+        let app: objc2::rc::Retained<objc2::runtime::AnyObject> =
+            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        let _: () = objc2::msg_send![&*app, replyToApplicationShouldTerminate: !quit.is_null()];
+    }
 }
 
 /// Makes every app quit go through `window`'s close confirmation (see `should_terminate`) and
@@ -125,7 +188,8 @@ pub fn route_app_quit_through_close(
     };
     // SAFETY: called on the main thread once the event loop runs; every message matches the
     // AppKit signature of NSApplication, NSMenu, NSMenuItem and NSView; ns_view is the live
-    // view of `window`, and should_terminate has the `Q@:@` signature it is added with.
+    // view of `window`, and should_terminate and reply_to_quit have the `Q@:@` and `v@:@`
+    // signatures they are added with.
     unsafe {
         let view: &AnyObject = handle.ns_view.cast().as_ref();
         let ns_window: Option<Retained<AnyObject>> = msg_send![view, window];
@@ -146,6 +210,15 @@ pub fn route_app_quit_through_close(
         if !added.as_bool() {
             return;
         }
+        let reply: Imp = std::mem::transmute(
+            reply_to_quit as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        objc2::ffi::class_addMethod(
+            delegate as *const AnyClass as *mut AnyClass,
+            sel!(terminalAnswerQuit:),
+            reply,
+            c"v@:@".as_ptr(),
+        );
         QUIT_HOOK.set(Some(QuitHook {
             window: ns_window,
             running: Box::new(running),
