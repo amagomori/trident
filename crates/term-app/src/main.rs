@@ -2662,7 +2662,7 @@ mod tests {
 
     #[test]
     fn keypad_bindings_precede_claim_but_navigation_aliases_do_not() {
-        use winit::keyboard::{KeyCode, NamedKey, PhysicalKey};
+        use winit::keyboard::{KeyCode, PhysicalKey};
         let config = config::Config {
             bindings: config::default_bindings_for(false),
             ..Default::default()
@@ -2707,6 +2707,7 @@ mod tests {
         // Mac keypad digits stay numeric, so Shift+KP1 is ordinary Shift+End there.
         #[cfg(not(target_os = "macos"))]
         {
+            use winit::keyboard::NamedKey;
             let physical = PhysicalKey::Code(KeyCode::Numpad1);
             let end = Key::Named(NamedKey::End);
             assert_eq!(
