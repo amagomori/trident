@@ -1,8 +1,8 @@
+use crate::theme;
 use notify::Watcher;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use term_core::colors::Palette;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -14,7 +14,7 @@ pub struct Config {
     pub drop_preview: bool,
     pub shell: Vec<String>,
     pub env: BTreeMap<String, String>,
-    pub palette: Palette,
+    pub themes: theme::Themes,
     pub bindings: BTreeMap<Chord, Action>,
 }
 
@@ -29,7 +29,7 @@ impl Default for Config {
             drop_preview: true,
             shell: Vec::new(),
             env: BTreeMap::new(),
-            palette: Palette::default(),
+            themes: theme::Themes::default(),
             bindings: default_bindings(),
         }
     }
@@ -47,6 +47,7 @@ struct Raw {
     shell: Option<Shell>,
     env: BTreeMap<String, String>,
     colors: BTreeMap<String, String>,
+    theme: Option<theme::Selection>,
     keybindings: BTreeMap<String, Binding>,
 }
 
@@ -292,7 +293,7 @@ pub fn default_path() -> PathBuf {
         .join("terminal/config.toml")
 }
 
-fn diagnostic(path: &Path, text: &str, offset: usize, message: &str) -> String {
+pub(crate) fn diagnostic(path: &Path, text: &str, offset: usize, message: &str) -> String {
     let prefix = &text[..offset.min(text.len())];
     let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
     let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
@@ -376,49 +377,10 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         return Err(error("shell", "expected a nonempty program"));
     }
     config.env = raw.env;
-    let names = [
-        "black",
-        "red",
-        "green",
-        "yellow",
-        "blue",
-        "magenta",
-        "cyan",
-        "white",
-        "bright_black",
-        "bright_red",
-        "bright_green",
-        "bright_yellow",
-        "bright_blue",
-        "bright_magenta",
-        "bright_cyan",
-        "bright_white",
-    ];
-    for (name, value) in raw.colors {
-        let key = format!("colors.{name}");
-        let rgb = if value.len() == 7
-            && value.starts_with('#')
-            && value[1..].bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            let n = u32::from_str_radix(&value[1..], 16).unwrap();
-            ((n >> 16) as u8, (n >> 8) as u8, n as u8)
-        } else {
-            return Err(error(&key, &format!("expected \"#rrggbb\", got {value:?}")));
-        };
-        match name.as_str() {
-            "foreground" => config.palette.foreground = rgb,
-            "background" => config.palette.background = rgb,
-            "cursor" => config.palette.cursor = rgb,
-            "selection" => config.palette.selection = rgb,
-            _ => {
-                if let Some(index) = names.iter().position(|&n| n == name) {
-                    config.palette.ansi[index] = rgb;
-                } else {
-                    return Err(error(&key, "unknown key"));
-                }
-            }
-        }
-    }
+    theme::apply(&mut term_core::colors::Palette::default(), &raw.colors)
+        .map_err(|(key, message)| error(&format!("colors.{key}"), &message))?;
+    config.themes = theme::Themes::load(path, raw.theme, raw.colors)
+        .map_err(|message| error("theme", &message))?;
     for (name, binding) in raw.keybindings {
         let key = format!("keybindings.{name}");
         let chord = Chord::parse(&name).map_err(|e| error(&key, &e))?;
@@ -438,6 +400,14 @@ pub fn load(path: &Path) -> Result<Config, String> {
 
 pub struct ConfigWatcher {
     _watcher: std::sync::Arc<std::sync::Mutex<notify::RecommendedWatcher>>,
+}
+
+fn config_watch_paths(path: &Path) -> std::collections::BTreeSet<PathBuf> {
+    let mut paths = watch_paths(path);
+    for file in theme::files(path) {
+        paths.extend(watch_paths(&file));
+    }
+    paths
 }
 
 fn watch_paths(path: &Path) -> std::collections::BTreeSet<PathBuf> {
@@ -479,7 +449,7 @@ pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Resu
             let _ = tx.send(event);
         }
     })?;
-    let mut paths = watch_paths(&path);
+    let mut paths = config_watch_paths(&path);
     let rebuild = |watcher: &mut notify::RecommendedWatcher,
                    watched: &mut std::collections::BTreeSet<PathBuf>,
                    paths: &std::collections::BTreeSet<PathBuf>| {
@@ -529,7 +499,7 @@ pub fn watch(path: PathBuf, changed: impl Fn() + Send + 'static) -> notify::Resu
                     .is_ok()
                 {}
                 let Some(watcher) = weak.upgrade() else { break };
-                paths = watch_paths(&path);
+                paths = config_watch_paths(&path);
                 {
                     let mut watcher = watcher.lock().unwrap();
                     rebuild(&mut watcher, &mut watched, &paths);
@@ -798,6 +768,111 @@ mod tests {
     }
 
     #[test]
+    fn theme_files_and_config_overrides() {
+        use winit::window::Theme;
+        let dir = unique_temp_dir("terminal-theme-test");
+        let path = dir.join("config.toml");
+        let theme = dir.join("custom.toml");
+        std::fs::write(&theme, "[colors]\nbackground = '#112233'\nred = '#abcdef'").unwrap();
+        let config = parse(&path, "theme = { light = 'custom.toml', dark = 'solarized-dark' }\n[colors]\ncursor = '#123456'").unwrap();
+        assert!(config.themes.automatic());
+        assert_eq!(
+            config.themes.palette(Some(Theme::Light)).background,
+            (0x11, 0x22, 0x33)
+        );
+        assert_eq!(
+            config.themes.palette(Some(Theme::Light)).ansi[1],
+            (0xab, 0xcd, 0xef)
+        );
+        for appearance in [None, Some(Theme::Light), Some(Theme::Dark)] {
+            assert_eq!(config.themes.palette(appearance).cursor, (0x12, 0x34, 0x56));
+        }
+        for text in [
+            "theme = 'custom.toml'".into(),
+            format!("theme = {:?}", theme),
+        ] {
+            let config = parse(&path, &text).unwrap();
+            assert!(!config.themes.automatic());
+            assert_eq!(config.themes.palette(None).background, (0x11, 0x22, 0x33));
+        }
+        assert!(parse_text("theme = 'auto'").unwrap().themes.automatic());
+        assert!(
+            parse(&path, "theme = 'missing.toml'")
+                .unwrap_err()
+                .contains("missing.toml:1:1")
+        );
+        for invalid in [
+            "[colors]\nred = 'invalid'",
+            "[colors]\nunknown = '#112233'",
+            "[colors]\nred = [",
+            "typo = 2",
+        ] {
+            std::fs::write(&theme, invalid).unwrap();
+            let error = parse(&path, "theme = 'custom.toml'").unwrap_err();
+            assert!(error.contains("custom.toml:"), "{error}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn watcher_reloads_external_themes_and_recovers_from_invalid_files() {
+        let dir = unique_temp_dir("terminal-theme-watch");
+        let path = dir.join("config.toml");
+        let theme = dir.join("missing/custom.toml");
+        std::fs::write(
+            &path,
+            "theme = { light = 'missing/custom.toml', dark = 'tokyo-night' }",
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let config_path = path.clone();
+        let watcher = watch(path.clone(), move || {
+            let result = load(&config_path).ok().map(|c| {
+                c.themes
+                    .palette(Some(winit::window::Theme::Light))
+                    .background
+            });
+            let _ = tx.send(result);
+        })
+        .unwrap();
+        let wait = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let observed = rx
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap();
+                if observed == expected {
+                    break;
+                }
+            }
+        };
+        std::fs::create_dir(theme.parent().unwrap()).unwrap();
+        std::fs::write(&theme, "[colors]\nbackground = '#112233'").unwrap();
+        wait(Some((0x11, 0x22, 0x33)));
+        let replacement = theme.with_extension("new");
+        std::fs::write(&replacement, "[colors]\nbackground = '#abcdef'").unwrap();
+        std::fs::rename(replacement, &theme).unwrap();
+        wait(Some((0xab, 0xcd, 0xef)));
+        std::fs::write(&theme, "[colors]\nbackground = 'invalid'").unwrap();
+        wait(None);
+        std::fs::write(&theme, "[colors]\nbackground = '#445566'").unwrap();
+        wait(Some((0x44, 0x55, 0x66)));
+        std::fs::remove_file(&theme).unwrap();
+        wait(None);
+        std::fs::write(&theme, "[colors]\nbackground = '#778899'").unwrap();
+        wait(Some((0x77, 0x88, 0x99)));
+        std::fs::write(&path, "theme = { light = 'auto', dark = 'tokyo-night' }").unwrap();
+        wait(None);
+        let named_auto = dir.join("auto");
+        std::fs::write(&named_auto, "[colors]\nbackground = '#010203'").unwrap();
+        wait(Some((1, 2, 3)));
+        std::fs::write(&named_auto, "[colors]\nbackground = '#040506'").unwrap();
+        wait(Some((4, 5, 6)));
+        drop(watcher);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn defaults_and_full_config() {
         assert!(parse_text("").unwrap().drop_preview);
         assert!(!parse_text("drop_preview = false").unwrap().drop_preview);
@@ -841,8 +916,8 @@ bright_white = "#fefdfc"
         assert_eq!(config.scrollback, 500);
         assert_eq!(config.shell, ["zsh", "-l"]);
         assert_eq!(config.env["TERM"], "custom");
-        assert_eq!(config.palette.background, (0xab, 0xcd, 0xef));
-        assert_eq!(config.palette.ansi[15], (254, 253, 252));
+        assert_eq!(config.themes.palette(None).background, (0xab, 0xcd, 0xef));
+        assert_eq!(config.themes.palette(None).ansi[15], (254, 253, 252));
         assert_eq!(
             config.bindings[&Chord::parse("ctrl+shift+c").unwrap()],
             Action::None

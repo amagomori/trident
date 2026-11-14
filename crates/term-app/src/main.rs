@@ -5,6 +5,8 @@ macro_rules! diag {
     }};
 }
 
+#[cfg(target_os = "linux")]
+mod appearance;
 mod clipboard;
 mod command_notify;
 mod config;
@@ -22,6 +24,7 @@ mod present_wayland;
 mod pty;
 mod search;
 mod show;
+mod theme;
 
 use config::Action;
 use input::MouseButton as ReportButton;
@@ -46,7 +49,7 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::window::{Window, WindowId};
+use winit::window::{Theme, Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
@@ -112,6 +115,8 @@ impl ResizeThrottle {
 
 #[derive(Debug)]
 enum UserEvent {
+    #[cfg(target_os = "linux")]
+    Appearance(u64, Option<Theme>),
     CommandFinished(command_notify::Finished),
     ConfigChanged,
     Output,
@@ -751,6 +756,11 @@ fn sync_wakeup(
 struct App {
     startup_stderr: bool,
     search: Option<search::Search>,
+    appearance: Option<Theme>,
+    #[cfg(target_os = "linux")]
+    appearance_watch: Option<appearance::Watch>,
+    #[cfg(target_os = "linux")]
+    appearance_generation: u64,
     config: config::Config,
     config_error: Option<String>,
     _watcher: Option<config::ConfigWatcher>,
@@ -811,6 +821,11 @@ impl App {
         App {
             startup_stderr: false,
             search: None,
+            appearance: None,
+            #[cfg(target_os = "linux")]
+            appearance_watch: None,
+            #[cfg(target_os = "linux")]
+            appearance_generation: 0,
             font_size: options.size(&config),
             config,
             config_error,
@@ -912,7 +927,9 @@ impl App {
 
         let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
         let mut term = Terminal::new(cols, rows);
-        term.palette = self.config.palette.clone();
+        self.appearance = window.theme().or(self.appearance);
+        self.watch_appearance();
+        term.palette = self.config.themes.palette(self.appearance).clone();
         term.set_scrollback_limit(self.options.scrollback(&self.config));
         term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
         let cell = (fonts.metrics.width, fonts.metrics.height);
@@ -1308,6 +1325,36 @@ impl App {
         }
     }
 
+    fn watch_appearance(&mut self) {
+        #[cfg(target_os = "linux")]
+        if !self.config.themes.automatic() {
+            self.appearance_watch = None;
+            self.appearance = None;
+        } else if self.appearance_watch.is_none() {
+            self.appearance_generation += 1;
+            let generation = self.appearance_generation;
+            let proxy = self.proxy.clone();
+            self.appearance_watch = appearance::watch(move |theme| {
+                let _ = proxy.send_event(UserEvent::Appearance(generation, theme));
+            })
+            .map_err(|e| diag!("terminal: cannot watch OS appearance: {e}"))
+            .ok();
+        }
+    }
+
+    fn set_appearance(&mut self, appearance: Option<Theme>) {
+        if self.appearance == appearance {
+            return;
+        }
+        self.appearance = appearance;
+        if self.config.themes.automatic()
+            && let Some(s) = &mut self.session
+        {
+            s.term.palette = self.config.themes.palette(appearance).clone();
+            s.window.request_redraw();
+        }
+    }
+
     fn reload_config(&mut self) {
         let result = config::load(&self.options.config_path).and_then(|next| {
             let font_changed = self.options.font.is_none() && next.font != self.config.font;
@@ -1338,10 +1385,11 @@ impl App {
                 diag!("terminal: shell/env changes apply on the next launch");
             }
             self.config = next;
+            self.watch_appearance();
             if let Some(s) = &mut self.session {
                 s.pty
                     .set_command_notifications(self.config.notify_long_commands_after != 0)?;
-                s.term.palette = self.config.palette.clone();
+                s.term.palette = self.config.themes.palette(self.appearance).clone();
                 s.term
                     .set_scrollback_limit(self.options.scrollback(&self.config));
                 if let Some(search) = &mut self.search {
@@ -1853,6 +1901,12 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
+            #[cfg(target_os = "linux")]
+            UserEvent::Appearance(generation, theme) => {
+                if self.appearance_watch.is_some() && generation == self.appearance_generation {
+                    self.set_appearance(theme);
+                }
+            }
             UserEvent::CommandFinished(finished) => {
                 if command_notify::should_notify(
                     self.focused,
@@ -2048,6 +2102,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
+            WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(search) = &mut self.search {
