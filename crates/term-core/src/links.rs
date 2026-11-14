@@ -13,23 +13,38 @@ impl Link {
     }
 }
 
-/// Interned OSC 8 `(id, uri)` pairs, indexed from 1, stored in one buffer with an
-/// open-addressing index so lookups never allocate.
+/// OSC 8 `(id, uri)` pairs, indexed from 1, stored in one buffer. Recently seen
+/// pairs are found through a small direct-mapped cache, so repeated links share
+/// an index without a per-sequence hash-table probe; a pair evicted from the
+/// cache may be stored again under a new index.
 #[derive(Default)]
 pub(crate) struct LinkTable {
     bytes: Vec<u8>,
     spans: Vec<Span>,
-    /// Each slot holds a link index in its low 16 bits and the top 16 bits of
-    /// the link's hash above them; 0 marks an empty slot.
-    slots: Vec<u32>,
-    hasher: std::hash::RandomState,
+    recent: Vec<u16>,
 }
 
 struct Span {
     start: usize,
     id_len: u32,
     uri_len: u32,
-    hash: u64,
+}
+
+const RECENT_BITS: u32 = 12;
+
+fn recent_slot(id: &[u8], uri: &[u8]) -> usize {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut hash = id.len() as u64;
+    for part in [id, uri] {
+        let (words, rest) = part.as_chunks::<8>();
+        for word in words {
+            hash = (hash.rotate_left(5) ^ u64::from_le_bytes(*word)).wrapping_mul(K);
+        }
+        let mut tail = [0; 8];
+        tail[..rest.len()].copy_from_slice(rest);
+        hash = (hash.rotate_left(5) ^ u64::from_le_bytes(tail)).wrapping_mul(K);
+    }
+    (hash >> (64 - RECENT_BITS)) as usize
 }
 
 impl LinkTable {
@@ -46,70 +61,36 @@ impl LinkTable {
         ))
     }
 
-    pub(crate) fn hash(&self, id: &[u8], uri: &[u8]) -> u64 {
-        std::hash::BuildHasher::hash_one(&self.hasher, (id, uri))
+    fn find(&self, id: &[u8], uri: &[u8], slot: usize) -> Option<u16> {
+        let index = *self.recent.get(slot)?;
+        (self.get(index) == Some((id, uri))).then_some(index)
     }
 
-    pub(crate) fn find(&self, id: &[u8], uri: &[u8], hash: u64) -> Option<u16> {
-        let mask = self.slots.len().wrapping_sub(1);
-        let tag = (hash >> 48) as u32;
-        let mut slot = hash as usize & mask;
-        while let Some(&entry) = self.slots.get(slot).filter(|&&entry| entry != 0) {
-            let index = entry as u16;
-            if entry >> 16 == tag && self.get(index) == Some((id, uri)) {
-                return Some(index);
-            }
-            slot = (slot + 1) & mask;
-        }
-        None
-    }
-
-    pub(crate) fn insert(&mut self, id: &[u8], uri: &[u8], hash: u64) -> u16 {
+    fn insert(&mut self, id: &[u8], uri: &[u8], slot: usize) -> u16 {
         self.spans.push(Span {
             start: self.bytes.len(),
             id_len: id.len() as u32,
             uri_len: uri.len() as u32,
-            hash,
         });
         self.bytes.extend_from_slice(id);
         self.bytes.extend_from_slice(uri);
+        if self.recent.is_empty() {
+            self.recent = vec![0; 1 << RECENT_BITS];
+        }
         let index = self.spans.len() as u16;
-        if self.slots.len() < self.spans.len() * 2 {
-            self.slots = vec![0; (self.spans.len() * 2).next_power_of_two().max(16)];
-            for index in 1..=index {
-                self.place(index);
-            }
-        } else {
-            self.place(index);
-        }
+        self.recent[slot] = index;
         index
-    }
-
-    fn place(&mut self, index: u16) {
-        let hash = self.spans[index as usize - 1].hash;
-        let mask = self.slots.len() - 1;
-        let mut slot = hash as usize & mask;
-        while self.slots[slot] != 0 {
-            slot = (slot + 1) & mask;
-        }
-        self.slots[slot] = index as u32 | ((hash >> 48) as u32) << 16;
     }
 
     /// Keeps the entries marked in `used` (by index), renumbered in order, and
     /// returns the old-to-new index map.
     pub(crate) fn compact(&mut self, used: &[bool]) -> Vec<u16> {
-        let fresh = LinkTable {
-            bytes: Vec::new(),
-            spans: Vec::new(),
-            slots: vec![0; self.slots.len()],
-            hasher: self.hasher.clone(),
-        };
-        let old = std::mem::replace(self, fresh);
+        let old = std::mem::take(self);
         let mut remap = vec![0; used.len()];
         for index in 1..=old.len() as u16 {
             if used[index as usize] {
                 let (id, uri) = old.get(index).unwrap();
-                remap[index as usize] = self.insert(id, uri, old.spans[index as usize - 1].hash);
+                remap[index as usize] = self.insert(id, uri, recent_slot(id, uri));
             }
         }
         remap
@@ -118,8 +99,8 @@ impl LinkTable {
 
 impl Terminal {
     pub(crate) fn intern_link(&mut self, id: &[u8], uri: &[u8], limit: usize) -> u16 {
-        let hash = self.links.hash(id, uri);
-        if let Some(index) = self.links.find(id, uri, hash) {
+        let slot = recent_slot(id, uri);
+        if let Some(index) = self.links.find(id, uri, slot) {
             return index;
         }
         if self.links.len() >= limit {
@@ -128,7 +109,8 @@ impl Terminal {
         if self.links.len() >= limit {
             return 0;
         }
-        self.links.insert(id, uri, hash)
+        let slot = recent_slot(id, uri);
+        self.links.insert(id, uri, slot)
     }
 
     fn visit_hyperlinks(&mut self, mut visit: impl FnMut(&mut u16)) {
@@ -181,12 +163,15 @@ impl Terminal {
             .collect();
         if index != 0 {
             let at = cells.iter().position(|(p, _)| *p == point)?;
+            let same = |other: u16| {
+                other == index || (other != 0 && self.links.get(other) == self.links.get(index))
+            };
             let mut start = at;
             let mut end = at;
-            while start > 0 && cells[start - 1].1.hyperlink == index {
+            while start > 0 && same(cells[start - 1].1.hyperlink) {
                 start -= 1;
             }
-            while end + 1 < cells.len() && cells[end + 1].1.hyperlink == index {
+            while end + 1 < cells.len() && same(cells[end + 1].1.hyperlink) {
                 end += 1;
             }
             return Some(Link {
@@ -427,22 +412,40 @@ mod tests {
     }
 
     #[test]
-    fn link_table_finds_every_entry_after_growth() {
+    fn link_table_reuses_recent_entries() {
         let mut t = Terminal::new(8, 2);
         for id in 0..1000 {
-            assert_eq!(intern(&mut t, id, 2000), id as u16 + 1);
-        }
-        for id in 0..1000 {
-            assert_eq!(intern(&mut t, id, 2000), id as u16 + 1);
+            let index = intern(&mut t, id, 2000);
+            assert_eq!(intern(&mut t, id, 2000), index);
             let (k, uri) = key(id);
-            assert_eq!(
-                t.links.get(id as u16 + 1),
-                Some((k.as_bytes(), uri.as_bytes()))
-            );
+            assert_eq!(t.links.get(index), Some((k.as_bytes(), uri.as_bytes())));
         }
-        assert_eq!(t.intern_link(b"", b"https://example.com/1", 2000), 1001);
-        assert_eq!(t.intern_link(b"1", b"https://example.com/", 2000), 1002);
-        assert_eq!(t.links.len(), 1002);
+        assert_eq!(t.links.len(), 1000);
+        for id in 0..1000 {
+            let index = intern(&mut t, id, 2000);
+            let (k, uri) = key(id);
+            assert_eq!(t.links.get(index), Some((k.as_bytes(), uri.as_bytes())));
+        }
+        assert!(t.links.len() < 2000);
+        let a = t.intern_link(b"", b"https://example.com/1", 2000);
+        let b = t.intern_link(b"1", b"https://example.com/", 2000);
+        assert_ne!(a, b);
+        assert_eq!(
+            t.links.get(a),
+            Some((b"".as_slice(), b"https://example.com/1".as_slice()))
+        );
+    }
+
+    #[test]
+    fn adjacent_runs_of_a_stored_twice_link_hover_together() {
+        let mut t = Terminal::new(8, 2);
+        t.advance(b"\x1b]8;id=a;https://a\x07ab\x1b]8;;\x07c");
+        let again = t.links.insert(b"a", b"https://a", 0);
+        t.primary.lines[0].cells[2].hyperlink = again;
+        let link = t.link_at(Point { line: 0, col: 2 }).unwrap();
+        assert_eq!(link.uri, "https://a");
+        assert_eq!(link.start, Point { line: 0, col: 0 });
+        assert_eq!(link.end, Point { line: 0, col: 2 });
     }
 
     #[test]
@@ -486,8 +489,10 @@ mod tests {
         assert_eq!(intern(&mut t, 8, 8), 8);
         assert_eq!(t.links.len(), 8);
         let (id, uri) = key(0);
-        let hash = t.links.hash(id.as_bytes(), uri.as_bytes());
-        assert!(t.links.find(id.as_bytes(), uri.as_bytes(), hash).is_none());
+        assert!(
+            (1..=t.links.len() as u16)
+                .all(|index| t.links.get(index) != Some((id.as_bytes(), uri.as_bytes())))
+        );
         assert_eq!(t.primary.scrollback[0].cells[0].hyperlink, 1);
         assert_eq!(t.primary.lines[0].cells[0].hyperlink, 2);
         assert_eq!(t.alternate.lines[0].cells[0].hyperlink, 3);
