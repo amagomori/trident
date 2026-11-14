@@ -23,7 +23,7 @@ cd "$1"
 exec 9<>fifo
 : > ready
 while [ ! -e go ]; do read -t 1 -u 9 _; done
-cat "$2"
+cat "$2" || : > cat-failed
 stty -icanon -echo
 printf '\033[c'
 IFS= read -rs -d c _
@@ -89,8 +89,14 @@ def one_run(args, binary, data, env, log):
         time.sleep(args.settle)
         cpu0, t0 = cpu_secs(proc.pid), time.monotonic()
         (work / "go").touch()
+        # Wake the shell's `read -t 1` now, so its poll period stays out of the timed span.
+        fd = os.open(work / "fifo", os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, b"\n")
+        os.close(fd)
         t1 = wait_for(work / "done", args.timeout, proc)
         cpu1 = cpu_secs(proc.pid)
+        if (work / "cat-failed").exists():
+            raise RuntimeError(f"cat {data} failed inside the app's shell")
         return {"wall_s": t1 - t0, "cpu_s": cpu1 - cpu0}
     finally:
         proc.send_signal(signal.SIGTERM)
@@ -121,6 +127,8 @@ def main():
     ap.add_argument("--xvfb", action="store_true", help="Linux smoke only; not the merge number")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
+    # run.sh cds into its work dir, so the data path handed to it must be absolute.
+    args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
     copy = args.out / "main-copy" / args.main.name
     copy.parent.mkdir(exist_ok=True)
