@@ -68,18 +68,27 @@ fn short_name(pid: i32) -> Option<String> {
 
 /// Sends the app menu's Quit (Cmd-Q) through the window's close button and adds Close Window
 /// (Cmd-W), so both reach `WindowEvent::CloseRequested` and its confirmation instead of
-/// `terminate:` ending the process at once. Needs winit's default menu to be installed.
+/// `terminate:` ending the process at once. Quit targets `window` itself, so it still works
+/// while the window is minimized. Needs winit's default menu to be installed.
 #[cfg(target_os = "macos")]
 #[cold]
-pub fn route_menu_quit_through_close() {
+pub fn route_menu_quit_through_close(window: &winit::window::Window) {
     use objc2::rc::{Allocated, Retained};
     use objc2::runtime::{AnyObject, Sel};
     use objc2::{class, msg_send, sel};
     use objc2_foundation::NSString;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+    let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) else {
+        return;
+    };
     // SAFETY: called on the main thread once the event loop runs; every message matches the
-    // AppKit signature of NSApplication, NSMenu and NSMenuItem.
+    // AppKit signature of NSApplication, NSMenu, NSMenuItem and NSView; ns_view is the live
+    // view of `window`.
     unsafe {
+        let view: &AnyObject = handle.ns_view.cast().as_ref();
+        let ns_window: Option<Retained<AnyObject>> = msg_send![view, window];
+        let Some(ns_window) = ns_window else { return };
         let app: Option<Retained<AnyObject>> = msg_send![class!(NSApplication), sharedApplication];
         let Some(app) = app else { return };
         let menubar: Option<Retained<AnyObject>> = msg_send![&*app, mainMenu];
@@ -95,6 +104,7 @@ pub fn route_menu_quit_through_close() {
             let action: Option<Sel> = msg_send![&*item, action];
             if action == Some(sel!(terminate:)) {
                 let _: () = msg_send![&*item, setAction: sel!(performClose:)];
+                let _: () = msg_send![&*item, setTarget: &*ns_window];
                 let title = NSString::from_str("Close Window");
                 let key = NSString::from_str("w");
                 let close: Allocated<AnyObject> = msg_send![class!(NSMenuItem), alloc];

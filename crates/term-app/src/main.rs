@@ -1411,6 +1411,9 @@ impl App {
         match (running, &self.session) {
             (Some(pid), Some(s)) => {
                 self.pending_close = Some(close_confirm::process_name(pid));
+                if s.window.is_minimized() == Some(true) {
+                    s.window.set_minimized(false);
+                }
                 s.window.request_redraw();
             }
             _ => event_loop.exit(),
@@ -2197,7 +2200,7 @@ impl ApplicationHandler<UserEvent> for App {
         match self.start(event_loop) {
             Ok(session) => {
                 #[cfg(target_os = "macos")]
-                close_confirm::route_menu_quit_through_close();
+                close_confirm::route_menu_quit_through_close(&session.window);
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
                 self.process_output();
