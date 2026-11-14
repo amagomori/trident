@@ -138,7 +138,14 @@ mod tests {
             .arg("5")
             .spawn()
             .unwrap();
-        let name = process_name(child.id() as i32);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let name = loop {
+            let name = process_name(child.id() as i32);
+            if name.as_deref() == Some("sleep") || std::time::Instant::now() > deadline {
+                break name;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(name.as_deref(), Some("sleep"));
