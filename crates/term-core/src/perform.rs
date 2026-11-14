@@ -15,6 +15,7 @@ impl Perform for Terminal {
     }
 
     fn execute(&mut self, byte: u8) {
+        self.sync_cursor_row();
         self.print_state.disarm_clear();
         match byte {
             0x07 => self.bell = true,
@@ -37,6 +38,7 @@ impl Perform for Terminal {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        self.sync_cursor_row();
         if self.print_state.clear_armed()
             && !matches!((action, intermediates), ('H' | 'f' | 'J', []))
         {
@@ -164,6 +166,7 @@ impl Perform for Terminal {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.sync_cursor_row();
         self.print_state.disarm_clear();
         match (byte, intermediates) {
             (b'7', []) => self.save_cursor(),
@@ -204,6 +207,7 @@ impl Perform for Terminal {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        self.sync_cursor_row();
         self.print_state.disarm_clear();
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {

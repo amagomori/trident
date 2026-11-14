@@ -753,6 +753,7 @@ impl Terminal {
             None => self.advance_bytes(&mut parser, bytes),
         }
         self.parser = parser;
+        self.sync_cursor_row();
         self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
         self.print_state.disarm_clear();
     }
@@ -1360,6 +1361,14 @@ impl Terminal {
         }
     }
 
+    /// Records `put_char`'s writes in the cursor row's occupancy. Prints only move the cursor
+    /// right within a row, so this runs before anything else can move it or read occupancy.
+    pub(crate) fn sync_cursor_row(&mut self) {
+        let end = self.cursor.col + usize::from(self.cursor.pending_wrap);
+        let row = self.cursor.row;
+        self.lines_mut()[row].touch(end);
+    }
+
     fn put_char(&mut self, c: char) {
         let c = match self.charsets[self.active_charset] {
             Charset::DecSpecial => dec_special(c),
@@ -1373,6 +1382,7 @@ impl Terminal {
         }
 
         if self.cursor.pending_wrap && self.modes.autowrap {
+            self.sync_cursor_row();
             let row = self.cursor.row;
             self.lines_mut()[row].set_wrapped(true);
             self.cursor.col = 0;
@@ -1419,7 +1429,6 @@ impl Terminal {
             line.cells[col + 1] = spacer;
         }
         line.cells[col] = cell;
-        line.touch(col + width);
 
         self.print_state = PrintState(c as u32);
         if col + width >= cols {

@@ -93,6 +93,10 @@ fn row_occupancy_tracks_every_write() {
         "界",
         "\r\n",
         "\n",
+        "\r",
+        "\x08",
+        "\x1b[5D",
+        "\x1b[9G",
         "\x1bM",
         "\x1b[K",
         "\x1b[1K",
@@ -134,21 +138,23 @@ fn row_occupancy_tracks_every_write() {
         let mut t = Terminal::new(cols, 6);
         t.set_scrollback_limit(4);
         for step in 0..20_000 {
-            match next(40) {
-                0 => {
-                    let (c, r) = (2 + next(cols + 20), 1 + next(8));
-                    t.resize(c, r);
-                }
-                1..=4 => {
-                    let (r, c) = (1 + next(8), 1 + next(cols + 2));
-                    t.advance(format!("\x1b[{r};{c}H").as_bytes());
-                }
-                5 => {
-                    let line: String = (0..next(2 * cols)).map(|_| 'x').collect();
-                    t.advance(line.as_bytes());
-                }
-                op => t.advance(OPS[op % OPS.len()].as_bytes()),
+            if next(40) == 0 {
+                let (c, r) = (2 + next(cols + 20), 1 + next(8));
+                t.resize(c, r);
             }
+            // Several ops per `advance`, so prints and cursor moves land in one batch.
+            let mut batch = String::new();
+            for _ in 0..1 + next(4) {
+                match next(40) {
+                    0..=3 => {
+                        let (r, c) = (1 + next(8), 1 + next(cols + 2));
+                        batch.push_str(&format!("\x1b[{r};{c}H"));
+                    }
+                    4 => batch.extend((0..next(2 * cols)).map(|_| 'x')),
+                    op => batch.push_str(OPS[op % OPS.len()]),
+                }
+            }
+            t.advance(batch.as_bytes());
             assert_occupancy(&t, step);
         }
     }
