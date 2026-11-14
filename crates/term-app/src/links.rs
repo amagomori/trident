@@ -87,6 +87,7 @@ mod tests {
             uri: "https://example.com".into(),
             start: term_core::Point { line: 0, col: 0 },
             end: term_core::Point { line: 0, col: 1 },
+            pieces: Vec::new(),
         };
         for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
             match mouse_action(button, true, false, || Some(link.clone())) {

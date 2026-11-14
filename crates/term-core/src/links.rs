@@ -5,11 +5,14 @@ pub struct Link {
     pub uri: String,
     pub start: Point,
     pub end: Point,
+    /// Other visible runs of the same OSC 8 link, which share its explicit `id`, in order.
+    pub pieces: Vec<(Point, Point)>,
 }
 
 impl Link {
     pub fn contains(&self, point: Point) -> bool {
-        self.start <= point && point <= self.end
+        let after = self.pieces.partition_point(|(start, _)| *start <= point);
+        (self.start <= point && point <= self.end) || after > 0 && point <= self.pieces[after - 1].1
     }
 }
 
@@ -299,10 +302,29 @@ impl Terminal {
             while end + 1 < cells.len() && same(cells[end + 1].1.hyperlink) {
                 end += 1;
             }
+            let (id, uri) = self.links.get(index)?;
+            let (start, end) = (cells[start].0, cells[end].0);
+            let mut pieces = Vec::new();
+            if !id.is_empty() {
+                let top = self.history - self.display_offset as u64;
+                for line in top..top + self.rows as u64 {
+                    let mut run: Option<(Point, Point)> = None;
+                    for (col, cell) in self.line(line).cells.iter().enumerate() {
+                        let p = Point { line, col };
+                        if same(cell.hyperlink) && !(start <= p && p <= end) {
+                            run.get_or_insert((p, p)).1 = p;
+                        } else if let Some(piece) = run.take() {
+                            pieces.push(piece);
+                        }
+                    }
+                    pieces.extend(run);
+                }
+            }
             return Some(Link {
-                uri: String::from_utf8_lossy(self.links.get(index)?.1).into_owned(),
-                start: cells[start].0,
-                end: cells[end].0,
+                uri: String::from_utf8_lossy(uri).into_owned(),
+                start,
+                end,
+                pieces,
             });
         }
         // Cells hidden past the right edge still belong to the line; they get columns past
@@ -384,6 +406,7 @@ impl Terminal {
                 uri: uri.to_owned(),
                 start,
                 end,
+                pieces: Vec::new(),
             };
             if link.contains(point) {
                 return Some(link);
@@ -795,6 +818,29 @@ mod tests {
             })
             .is_some()
         );
+    }
+
+    #[test]
+    fn hovering_one_piece_of_an_id_covers_every_visible_piece() {
+        let mut t = Terminal::new(40, 3);
+        t.advance(
+            b"\x1b]8;id=grp;https://g\x07ab\x1b]8;;\x07 x \x1b]8;;https://g\x07cd\x1b]8;;\x07\r\n",
+        );
+        t.advance(b"\x1b]8;id=grp;https://g\x07ef\x1b]8;;\x07 \x1b]8;id=other;https://g\x07gh\x1b]8;;\x07");
+        let link = t.link_at(Point { line: 0, col: 0 }).unwrap();
+        assert_eq!(link.uri, "https://g");
+        assert!(link.contains(Point { line: 1, col: 1 }));
+        assert!(!link.contains(Point { line: 0, col: 2 }));
+        assert!(
+            !link.contains(Point { line: 0, col: 6 }),
+            "a link without the id is separate"
+        );
+        assert!(
+            !link.contains(Point { line: 1, col: 3 }),
+            "a different id is separate"
+        );
+        let unnamed = t.link_at(Point { line: 0, col: 6 }).unwrap();
+        assert!(unnamed.pieces.is_empty());
     }
 
     #[test]
