@@ -516,6 +516,11 @@ impl Renderer {
                 }
             }
         }
+        if let Some(bar) = crate::ledger_bar(term, padding, pixel_offset, ch)
+            && !self.draw_ledger(term, fonts, padding, &bar, &mut overlays)
+        {
+            ok = false;
+        }
         // Scrollback position indicator.
         if (term.display_offset() > 0 || pixel_offset > 0.0) && term.scrollback_len() > 0 {
             let total = (term.scrollback_len() + term.rows()) as f32;
@@ -708,6 +713,125 @@ impl Renderer {
         self.glyphs = glyphs;
         self.overlays = overlays;
         ok
+    }
+
+    /// Draws the pinned command header; false if the atlas filled up.
+    fn draw_ledger(
+        &mut self,
+        term: &Terminal,
+        fonts: &mut Fonts,
+        padding: f32,
+        bar: &crate::LedgerBar<'_>,
+        overlays: &mut Vec<Instance>,
+    ) -> bool {
+        use crate::ledger::Tone;
+        let mix = |a: Rgb, b: Rgb, t: f32| {
+            let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+            (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
+        };
+        let palette = &term.palette;
+        let (cw, ch) = (fonts.metrics.width, fonts.metrics.height);
+        let width = self.config.width as f32;
+        let tint = mix(palette.background, palette.foreground, 0.1);
+        let dim = mix(palette.foreground, tint, 0.45);
+        let command = bar.pinned.command;
+        let stripe = match (command.finished, command.exit_code) {
+            (None, _) => palette.ansi[4],
+            (Some(_), Some(0)) => palette.ansi[2],
+            (Some(_), Some(_)) => palette.ansi[1],
+            (Some(_), None) => dim,
+        };
+        overlays.push(self.rect(0.0, bar.top, width, bar.height, tint));
+        let rule = (fonts.metrics.stroke).max(1.0);
+        overlays.push(self.rect(
+            0.0,
+            bar.top + bar.height - rule,
+            width,
+            rule,
+            mix(palette.background, palette.foreground, 0.22),
+        ));
+        overlays.push(self.rect(0.0, bar.top, (rule * 3.0).max(3.0), bar.height, stripe));
+
+        let status = crate::ledger::status(
+            command.exit_code,
+            command.finished.is_some(),
+            command.duration(),
+        );
+        let status_len = status.iter().map(|(s, _)| s.chars().count()).sum();
+        let layout = crate::ledger::layout(
+            term.cols(),
+            command.cells.len(),
+            command.continued,
+            status_len,
+        );
+        let y = bar.top + bar.height - ch;
+        let mut glyphs: Vec<(usize, char, u8, Style, Rgb)> = Vec::new();
+        for (col, cell) in command.cells[..layout.command_columns].iter().enumerate() {
+            if cell.flags.contains(Flags::WIDE_SPACER)
+                || cell.flags.contains(Flags::HIDDEN)
+                || cell.c == ' '
+            {
+                continue;
+            }
+            let cells = if cell.flags.contains(Flags::WIDE) {
+                2
+            } else {
+                1
+            };
+            if col + cells > layout.command_columns {
+                break;
+            }
+            let fg = palette.resolve(if cell.flags.contains(Flags::INVERSE) {
+                cell.bg
+            } else {
+                cell.fg
+            });
+            let fg = if col < command.input_col {
+                mix(fg, tint, 0.35)
+            } else {
+                fg
+            };
+            let style = Style::new(
+                cell.flags.contains(Flags::BOLD),
+                cell.flags.contains(Flags::ITALIC),
+            );
+            glyphs.push((col, cell.c, cells as u8, style, fg));
+        }
+        if let Some(col) = layout.ellipsis {
+            glyphs.push((col, '\u{2026}', 1, Style::new(false, false), dim));
+        }
+        let mut col = layout.status_column;
+        for (text, tone) in &status {
+            let (fg, bold) = match tone {
+                Tone::Failed => (palette.ansi[1], true),
+                Tone::Succeeded => (palette.ansi[2], true),
+                Tone::Running => (palette.ansi[4], false),
+                Tone::Dim => (dim, false),
+            };
+            for c in text.chars() {
+                if col >= layout.status_column + layout.status_columns {
+                    break;
+                }
+                if c != ' ' {
+                    glyphs.push((col, c, 1, Style::new(bold, false), fg));
+                }
+                col += 1;
+            }
+        }
+        for (col, c, cells, style, fg) in glyphs {
+            let key = GlyphKey { c, style, cells };
+            match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                Ok(Some(g)) => overlays.push(Instance {
+                    pos: [padding + col as f32 * cw + g.left, y + g.top],
+                    size: [g.width, g.height],
+                    uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
+                    color: self.color(fg, 1.0),
+                }),
+                Ok(None) => {}
+                Err(_) => return false,
+            }
+        }
+        true
     }
 
     #[cfg(target_os = "macos")]

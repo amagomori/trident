@@ -789,6 +789,8 @@ struct App {
     focused: bool,
     mouse_pos: PhysicalPosition<f64>,
     left_down: bool,
+    /// The left press landed on the pinned command header; swallow its release.
+    ledger_click: bool,
     /// Button held while a program tracks the mouse, for drag reports.
     reported_button: Option<ReportButton>,
     last_click: Option<(Instant, Point, u8)>,
@@ -856,6 +858,7 @@ impl App {
             focused: true,
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             left_down: false,
+            ledger_click: false,
             reported_button: None,
             last_click: None,
             scroll_accum: 0.0,
@@ -1777,8 +1780,36 @@ impl App {
         }
     }
 
+    /// Clicking the pinned command header scrolls to that command's prompt.
+    fn click_ledger(&mut self) -> bool {
+        let Some(s) = &mut self.session else {
+            return false;
+        };
+        let pad = self.config.padding * s.window.scale_factor() as f32;
+        let Some(line) =
+            term_render::ledger_bar(&s.term, pad, s.scroll.offset as f32, s.fonts.metrics.height)
+                .filter(|bar| bar.contains(self.mouse_pos.y as f32))
+                .map(|bar| bar.pinned.command.prompt_line)
+        else {
+            return false;
+        };
+        s.scroll.reset();
+        s.term.scroll_to_line(line);
+        s.request_frame();
+        true
+    }
+
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) {
         let pressed = state == ElementState::Pressed;
+        if button == MouseButton::Left {
+            if pressed && !self.left_down && self.click_ledger() {
+                self.ledger_click = true;
+                return;
+            }
+            if !pressed && std::mem::take(&mut self.ledger_click) {
+                return;
+            }
+        }
         // Finish a local drag even if Shift was released while mouse reporting is on.
         if button == MouseButton::Left && !pressed && self.left_down {
             self.left_down = false;

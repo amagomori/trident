@@ -8,10 +8,12 @@ mod color;
 mod fallback;
 mod font;
 mod images;
+mod ledger;
 mod preedit;
 mod renderer;
 
 pub use font::{CellMetrics, FAMILY as BUNDLED_FONT_FAMILY, Fonts, REGULAR as BUNDLED_FONT, Style};
+pub use ledger::{LedgerBar, ledger_bar};
 pub use preedit::{Preedit, PreeditLayout};
 pub use renderer::{PADDING, Renderer};
 

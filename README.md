@@ -150,6 +150,8 @@ or `{ send = "..." }`. Chords use `ctrl`, `shift`, `alt` (alias `option`), and
 Shell integration uses OSC 133 marks emitted by your shell. With integration enabled,
 clearing at a prompt preserves the screen in scrollback (explicit scrollback clears
 still wipe it). Failed commands have a thin red marker beside their prompt.
+While you scroll back through a command's output, that command stays pinned in a bar at
+the top with its exit status and run time; click the bar to jump to its prompt.
 Cmd+Up/Down on macOS or Ctrl+Shift+Up/Down on Linux jumps between prompts.
 Cmd+Shift+A on macOS or Ctrl+Shift+A on Linux selects the latest command output
 starting in or above the viewport. These shortcuts can be rebound with
