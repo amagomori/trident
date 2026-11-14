@@ -144,13 +144,13 @@ fn row_occupancy_tracks_every_write() {
             // Several ops per `advance`, so prints and cursor moves land in one batch.
             let mut batch = String::new();
             for _ in 0..1 + next(4) {
-                match next(40) {
+                match next(OPS.len() + 5) {
                     0..=3 => {
                         let (r, c) = (1 + next(8), 1 + next(cols + 2));
                         batch.push_str(&format!("\x1b[{r};{c}H"));
                     }
                     4 => batch.extend((0..next(2 * cols)).map(|_| 'x')),
-                    op => batch.push_str(OPS[op % OPS.len()]),
+                    op => batch.push_str(OPS[op - 5]),
                 }
             }
             t.advance(batch.as_bytes());
