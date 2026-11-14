@@ -98,6 +98,7 @@ padding = 6.0               # 0..=1000 logical pixels
 scrollback = 10000          # retained lines; 0 disables history
 drop_preview = true         # false: file drops insert only the shell-quoted path
 paste_protection = true     # false: never confirm multi-line or control-character pastes
+vsync = true                # false: present without waiting for vblank (lower latency, may tear)
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
@@ -131,6 +132,10 @@ bright_white = "#c0caf5"
 "ctrl+shift+t" = { send = "\u001b[1;5T" }
 "ctrl+shift+v" = "none"     # remove a default shortcut; pass key to the shell
 ```
+
+`vsync = false` (opt-in, live-reloaded) presents frames without waiting for vblank, using
+wgpu's `AutoNoVsync` present mode (Immediate, else Mailbox, else FIFO) on macOS and Linux.
+It cut latency on a 120 Hz Mac, but tearing is unmeasured, so the default stays `true`.
 
 Actions: `new_window`, `search`, `copy`, `paste`, `paste_primary` (primary selection where supported),
 `increase_font_size`, `decrease_font_size`, `reset_font_size`, `clear_scrollback`,

@@ -931,7 +931,7 @@ impl App {
             Fonts::new(font, self.font_size * scale as f32)?
         };
         let size = window.inner_size();
-        let renderer = Renderer::new(window.clone(), size.width, size.height)?;
+        let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
         diag!("terminal: rendering with {}", renderer.adapter_info);
 
         let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
@@ -1445,6 +1445,7 @@ impl App {
                     search.dirty = true;
                 }
                 release_freed_memory(&mut s.term);
+                s.renderer.set_vsync(self.config.vsync);
                 if let Some(fonts) = fonts {
                     s.fonts = fonts;
                     s.renderer.clear_glyph_cache();
