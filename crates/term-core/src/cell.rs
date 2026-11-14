@@ -256,6 +256,23 @@ impl Row {
     /// Cells past the right edge, in order after the visible ones, as `resize` would bring
     /// them back.
     pub(crate) fn hidden_cells(&self) -> impl Iterator<Item = &Cell> {
+        let (_, lead, cells) = self.hidden_parts().unwrap_or((0, None, &[]));
+        lead.into_iter().chain(cells)
+    }
+
+    /// Cells past the right edge with their columns, as `resize` would bring them back.
+    pub(crate) fn hidden_columns(&self) -> impl Iterator<Item = (usize, &Cell)> {
+        let (start, lead, cells) = self.hidden_parts().unwrap_or((0, None, &[]));
+        (start..).zip(lead.into_iter().chain(cells))
+    }
+
+    pub(crate) fn has_hidden(&self) -> bool {
+        self.hidden.is_some()
+    }
+
+    /// The column of the first hidden cell, a blank standing in for an overwritten wide
+    /// character, and the rest of the hidden cells.
+    fn hidden_parts(&self) -> Option<(usize, Option<&Cell>, &[Cell])> {
         static BLANK: Cell = Cell {
             c: ' ',
             fg: Color::DefaultFg,
@@ -263,21 +280,23 @@ impl Row {
             flags: Flags(0),
             hyperlink: 0,
         };
-        let (lead, cells) = match self.hidden.as_deref() {
+        let h = self.hidden.as_deref()?;
+        let pad_intact = self
+            .cells
+            .last()
+            .is_some_and(|c| c.flags.contains(Flags::PAD));
+        Some(if h.padded && pad_intact {
+            (self.cells.len() - 1, None, &h.cells[..])
+        } else if h.padded {
             // The PAD stand-in was overwritten, so the wide character it covered is gone.
-            Some(h)
-                if h.padded
-                    && !self
-                        .cells
-                        .last()
-                        .is_some_and(|c| c.flags.contains(Flags::PAD)) =>
-            {
-                (Some(&BLANK), h.cells.get(2..).unwrap_or_default())
-            }
-            Some(h) => (None, &h.cells[..]),
-            None => (None, &[][..]),
-        };
-        lead.into_iter().chain(cells)
+            (
+                self.cells.len(),
+                Some(&BLANK),
+                h.cells.get(2..).unwrap_or_default(),
+            )
+        } else {
+            (self.cells.len(), None, &h.cells[..])
+        })
     }
 
     pub fn materialize_wrap_padding(&mut self, from: usize) {

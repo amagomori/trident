@@ -1,5 +1,5 @@
 //! On-demand search over the active screen and its retained history.
-use crate::{Cell, Flags, Point, Terminal};
+use crate::{Cell, Flags, Point, Row, Terminal};
 use regex::{Regex, RegexBuilder};
 use std::time::Instant;
 
@@ -90,15 +90,28 @@ impl SearchJob {
         if has_points {
             points.clear();
             for line in logical_start..=logical_end {
-                for (col, cell) in text_cells(term, line, last) {
+                let (cells, row, hidden) = text_cells(term, line, last);
+                for (col, cell) in cells {
                     text.push(cell.c);
                     push_points(points, line, col, cell);
+                }
+                if hidden > 0 {
+                    for (col, cell) in hidden_text_cells(row, hidden) {
+                        text.push(cell.c);
+                        push_points(points, line, col, cell);
+                    }
                 }
             }
         } else {
             for line in logical_start..=logical_end {
-                for (_, cell) in text_cells(term, line, last) {
+                let (cells, row, hidden) = text_cells(term, line, last);
+                for (_, cell) in cells {
                     text.push(cell.c);
+                }
+                if hidden > 0 {
+                    for (_, cell) in hidden_text_cells(row, hidden) {
+                        text.push(cell.c);
+                    }
                 }
             }
         }
@@ -109,8 +122,14 @@ impl SearchJob {
             }
             points.clear();
             for line in logical_start..=logical_end {
-                for (col, cell) in text_cells(term, line, last) {
+                let (cells, row, hidden) = text_cells(term, line, last);
+                for (col, cell) in cells {
                     push_points(points, line, col, cell);
+                }
+                if hidden > 0 {
+                    for (col, cell) in hidden_text_cells(row, hidden) {
+                        push_points(points, line, col, cell);
+                    }
                 }
             }
         }
@@ -161,10 +180,21 @@ fn push_points(points: &mut Vec<(Point, Point)>, line: u64, col: usize, cell: &C
     points.extend(std::iter::repeat_n((start, end), cell.c.len_utf8()));
 }
 
-/// The cells of `line` that are text, with their columns.
-fn text_cells(term: &Terminal, line: u64, last: u64) -> impl Iterator<Item = (usize, &Cell)> {
+/// The visible cells of `line` that are text, with their columns, plus how many of its
+/// cells past the right edge (kept from a wider window) belong to the text too.
+fn text_cells(
+    term: &Terminal,
+    line: u64,
+    last: u64,
+) -> (impl Iterator<Item = (usize, &Cell)>, &Row, usize) {
     let row = term.line(line);
-    let cells = if !row.wrapped() || line == last {
+    let trim = !row.wrapped() || line == last;
+    let hidden = if row.has_hidden() {
+        hidden_text_len(row, trim)
+    } else {
+        0
+    };
+    let cells = if trim && hidden == 0 {
         let end = row
             .cells
             .iter()
@@ -174,11 +204,42 @@ fn text_cells(term: &Terminal, line: u64, last: u64) -> impl Iterator<Item = (us
     } else {
         &row.cells[..]
     };
-    cells.iter().enumerate().filter(|(_, cell)| {
-        !(cell.flags.contains(Flags::WIDE_SPACER)
-            || cell.flags.contains(Flags::PAD)
-            || cell.flags.contains(Flags::WIDE_WRAP))
-    })
+    (cells.iter().enumerate().filter(is_text), row, hidden)
+}
+
+/// Searches a narrowed row as if it were widened again, so results don't depend on width.
+#[cold]
+fn hidden_text_len(row: &Row, trim: bool) -> usize {
+    if trim {
+        row.hidden_columns()
+            .enumerate()
+            .filter(|(_, (_, cell))| **cell != Cell::default())
+            .last()
+            .map_or(0, |(i, _)| i + 1)
+    } else {
+        row.hidden_columns().count()
+    }
+}
+
+fn hidden_text_cells(row: &Row, len: usize) -> impl Iterator<Item = (usize, &Cell)> {
+    row.hidden_columns().take(len).filter(is_text)
+}
+
+fn is_text(&(_, cell): &(usize, &Cell)) -> bool {
+    !(cell.flags.contains(Flags::WIDE_SPACER)
+        || cell.flags.contains(Flags::PAD)
+        || cell.flags.contains(Flags::WIDE_WRAP))
+}
+
+/// The index of the match that highlights the cell at `point`, if any. Padding that stands
+/// in for the end of a soft-wrapped row (`WIDE_WRAP`, added when a wide character wrapped
+/// early or the window widened) is not text, so a match running past it leaves it unlit.
+pub fn highlighted(matches: &[Match], point: Point, cell: &Cell) -> Option<usize> {
+    let index = matches.partition_point(|m| m.end < point);
+    matches
+        .get(index)
+        .is_some_and(|m| m.contains(point) && !cell.flags.contains(Flags::WIDE_WRAP))
+        .then_some(index)
 }
 
 impl Terminal {
@@ -406,6 +467,87 @@ mod tests {
                 assert!(t.search("absent", false).unwrap().is_empty());
                 assert!(t.search("[", true).is_err());
             }
+        }
+    }
+
+    /// The cells the renderer would light for `matches`, over every line and column.
+    fn lit(t: &Terminal, matches: &[Match]) -> Vec<Point> {
+        let mut lit = Vec::new();
+        for line in t.first_line()..t.history + t.rows as u64 {
+            for (col, cell) in t.line(line).cells.iter().enumerate() {
+                let point = Point { line, col };
+                if highlighted(matches, point, cell).is_some() {
+                    lit.push(point);
+                }
+            }
+        }
+        lit
+    }
+
+    fn points(cells: &[(u64, usize)]) -> Vec<Point> {
+        cells
+            .iter()
+            .map(|&(line, col)| Point { line, col })
+            .collect()
+    }
+
+    #[test]
+    fn widened_wrap_padding_is_not_highlighted() {
+        let mut t = Terminal::new(10, 3);
+        t.advance(b"zzzzzzWRAPSPAN");
+        let expected = points(&[
+            (0, 6),
+            (0, 7),
+            (0, 8),
+            (0, 9),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (1, 3),
+        ]);
+        for cols in [10, 16, 40, 12, 10] {
+            t.resize(cols, 3);
+            let matches = t.search("wrapspan", false).unwrap();
+            assert_eq!(lit(&t, &matches), expected, "{cols} columns");
+        }
+
+        let mut t = Terminal::new(4, 2);
+        t.advance("abc界".as_bytes());
+        for cols in [4, 6] {
+            t.resize(cols, 2);
+            let matches = t.search("c界", false).unwrap();
+            assert_eq!(
+                lit(&t, &matches),
+                points(&[(0, 2), (1, 0), (1, 1)]),
+                "{cols}"
+            );
+        }
+    }
+
+    #[test]
+    fn narrowed_rows_search_their_hidden_cells() {
+        let mut t = Terminal::new(6, 3);
+        t.advance("abcdefGHIJ\r\nshort line here\r\nab界".as_bytes());
+        let queries = ["cdef", "fG", "ce", "line here", "b界", "ab", "e$", "J$"];
+        let expected: Vec<_> = queries
+            .iter()
+            .map(|q| t.search(q, q.ends_with('$')).unwrap())
+            .collect();
+        assert!(expected[2].is_empty());
+        for cols in [3, 2, 5, 4, 9, 3, 6] {
+            t.resize(cols, 3);
+            for (query, expected) in queries.iter().zip(&expected) {
+                assert_eq!(
+                    &t.search(query, query.ends_with('$')).unwrap(),
+                    expected,
+                    "{query} at {cols} columns"
+                );
+            }
+            let visible = |m: &Match| m.start.col < cols;
+            let matches = t.search("cdef", false).unwrap();
+            let lit = lit(&t, &matches);
+            assert!(lit.iter().all(|p| p.col < cols));
+            assert_eq!(lit.is_empty(), !matches.iter().any(visible));
         }
     }
 
