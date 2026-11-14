@@ -1364,6 +1364,10 @@ impl App {
         }
         // Only the literal, quoted path goes to the shell: never a show command or Enter.
         self.write_input(&bytes);
+        // The scroll and preview above changed the screen even if nothing echoes the path.
+        if let Some(s) = &mut self.session {
+            s.request_frame();
+        }
     }
 
     fn copy(&mut self, primary: bool) {
