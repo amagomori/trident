@@ -5,6 +5,7 @@ pub mod colors;
 pub mod images;
 pub mod search;
 
+mod ascii;
 mod cell;
 mod ghost;
 mod kitty;

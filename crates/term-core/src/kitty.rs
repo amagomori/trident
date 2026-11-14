@@ -247,30 +247,30 @@ impl Terminal {
             bytes = match self.kitty.scan {
                 Scan::Ground => match find_apc(bytes) {
                     Some(i) => {
-                        parser.advance(self, &bytes[..i + 2]);
+                        self.advance_vt(parser, &bytes[..i + 2]);
                         self.kitty.scan = Scan::Apc;
                         self.kitty.apc = Apc::default();
                         &bytes[i + 2..]
                     }
                     None if bytes.last() == Some(&ESC) => {
-                        parser.advance(self, &bytes[..bytes.len() - 1]);
+                        self.advance_vt(parser, &bytes[..bytes.len() - 1]);
                         self.kitty.scan = Scan::Esc;
                         &[]
                     }
                     None => {
-                        parser.advance(self, bytes);
+                        self.advance_vt(parser, bytes);
                         &[]
                     }
                 },
                 Scan::Esc => {
                     self.kitty.scan = Scan::Ground;
                     if bytes[0] == b'_' {
-                        parser.advance(self, b"\x1b_");
+                        self.advance_vt(parser, b"\x1b_");
                         self.kitty.scan = Scan::Apc;
                         self.kitty.apc = Apc::default();
                         &bytes[1..]
                     } else {
-                        parser.advance(self, b"\x1b");
+                        self.advance_vt(parser, b"\x1b");
                         bytes
                     }
                 }
@@ -294,13 +294,13 @@ impl Terminal {
                 Scan::ApcEsc => {
                     self.kitty.scan = Scan::Ground;
                     if bytes[0] == b'\\' {
-                        parser.advance(self, b"\x1b\\");
+                        self.advance_vt(parser, b"\x1b\\");
                         self.apc_end();
                         &bytes[1..]
                     } else {
                         // Any other escape cancels the APC, as it does in vte.
                         self.kitty.apc = Apc::default();
-                        parser.advance(self, b"\x1b");
+                        self.advance_vt(parser, b"\x1b");
                         bytes
                     }
                 }
