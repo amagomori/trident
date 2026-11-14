@@ -76,14 +76,15 @@ impl Cell {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Row {
     pub cells: Vec<Cell>,
     pub flags: RowFlags,
     pub(crate) prompt_col: u32,
     pub(crate) output_col: u16,
     /// Every cell from this column on equals the last one, so `reset` can skip them;
-    /// `u8::MAX` means not known. Writers to `cells` must call `touch` or `touch_all`.
+    /// `u8::MAX` means not known. Writers to `cells` must call `touch` or `touch_all`;
+    /// `put_char` relies on `Terminal::sync_cursor_row`.
     occupied: u8,
     /// Cells past the right edge, kept when the window narrows so widening brings them back.
     /// Boxed so rows that were never cut stay small; every scroll moves rows around.
@@ -97,6 +98,19 @@ struct Hidden {
     /// longer fits; the character itself is the start of `cells`.
     padded: bool,
 }
+
+/// `occupied` is only a bound on the content, so rows that show the same thing are equal.
+impl PartialEq for Row {
+    fn eq(&self, other: &Self) -> bool {
+        self.cells == other.cells
+            && self.flags == other.flags
+            && self.prompt_col == other.prompt_col
+            && self.output_col == other.output_col
+            && self.hidden == other.hidden
+    }
+}
+
+impl Eq for Row {}
 
 impl Row {
     /// Blank the row in place, keeping its allocation unless it is oversized.
@@ -155,9 +169,7 @@ impl Row {
     /// Records a write to the cells before column `end`.
     #[inline]
     pub(crate) fn touch(&mut self, end: usize) {
-        if end > usize::from(self.occupied) {
-            self.occupied = u8::try_from(end).unwrap_or(u8::MAX);
-        }
+        self.occupied = self.occupied.max(end.min(usize::from(u8::MAX)) as u8);
     }
 
     /// Records a write that may have changed any cell.

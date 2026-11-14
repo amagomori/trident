@@ -244,6 +244,7 @@ impl Terminal {
     /// Feeds bytes to the VT parser, diverting `ESC _ ... ESC \` to the graphics protocol.
     pub(crate) fn advance_bytes(&mut self, parser: &mut vte::Parser, mut bytes: &[u8]) {
         while !bytes.is_empty() {
+            self.sync_cursor_row();
             bytes = match self.kitty.scan {
                 Scan::Ground => match find_apc(bytes) {
                     Some(i) => {
