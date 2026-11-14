@@ -232,16 +232,16 @@ impl Terminal {
             last += 1;
         }
         let index = self.line(point.line).cells[point.col].hyperlink;
-        let cells: Vec<_> = (first..=last)
-            .flat_map(|line| {
-                self.line(line)
-                    .cells
-                    .iter()
-                    .enumerate()
-                    .map(move |(col, cell)| (Point { line, col }, cell))
-            })
-            .collect();
         if index != 0 {
+            let cells: Vec<_> = (first..=last)
+                .flat_map(|line| {
+                    self.line(line)
+                        .cells
+                        .iter()
+                        .enumerate()
+                        .map(move |(col, cell)| (Point { line, col }, cell))
+                })
+                .collect();
             let at = cells.iter().position(|(p, _)| *p == point)?;
             let same = |other: u16| {
                 other == index || (other != 0 && self.links.get(other) == self.links.get(index))
@@ -260,9 +260,19 @@ impl Terminal {
                 end: cells[end].0,
             });
         }
+        // Cells hidden past the right edge still belong to the line; they get columns past
+        // `cols` so the link's ends can be clamped back onto visible cells.
+        let cells = (first..=last).flat_map(|line| {
+            let row = self.line(line);
+            row.cells
+                .iter()
+                .chain(row.hidden_cells())
+                .enumerate()
+                .map(move |(col, cell)| (Point { line, col }, cell))
+        });
         let mut text = String::new();
         let mut positions = Vec::new();
-        for (p, cell) in &cells {
+        for (p, cell) in cells {
             if cell.flags.contains(Flags::WIDE_SPACER)
                 || cell.flags.contains(Flags::PAD)
                 || cell.flags.contains(Flags::WIDE_WRAP)
@@ -270,7 +280,7 @@ impl Terminal {
                 continue;
             }
             for _ in 0..cell.c.len_utf8() {
-                positions.push(*p);
+                positions.push(p);
             }
             text.push(cell.c);
         }
@@ -309,9 +319,17 @@ impl Terminal {
             if uri.len() <= scheme.len() {
                 continue;
             }
-            let start = positions[offset];
+            let mut start = positions[offset];
             let mut end = positions[offset + uri.len() - 1];
-            if self.line(end.line).cells[end.col]
+            if start.col >= self.cols {
+                start = Point {
+                    line: start.line + 1,
+                    col: 0,
+                };
+            }
+            if end.col >= self.cols {
+                end.col = self.cols - 1;
+            } else if self.line(end.line).cells[end.col]
                 .flags
                 .contains(Flags::WIDE)
             {
@@ -473,6 +491,38 @@ mod tests {
             t.link_at(Point { line: 2, col: 0 }).unwrap().uri,
             "file:///tmp/a"
         );
+    }
+
+    #[test]
+    fn wrapped_url_keeps_cells_hidden_by_narrowing() {
+        let uri = "https://example.com/abcdefghijklmnop";
+        let mut t = Terminal::new(20, 4);
+        t.advance(uri.as_bytes());
+        t.resize(30, 4);
+        t.resize(10, 4);
+        for line in 0..2 {
+            let link = t.link_at(Point { line, col: 0 }).unwrap();
+            assert_eq!(link.uri, uri);
+            assert_eq!(link.start, Point { line: 0, col: 0 });
+            assert_eq!(link.end, Point { line: 1, col: 9 });
+        }
+        assert!(t.link_at(Point { line: 1, col: 9 }).is_some());
+
+        // A URL that starts in the hidden part is highlighted from the next row.
+        let mut t = Terminal::new(20, 4);
+        t.advance(b"0123456789abc https://e.com/xyz");
+        t.resize(10, 4);
+        let link = t.link_at(Point { line: 1, col: 0 }).unwrap();
+        assert_eq!(link.uri, "https://e.com/xyz");
+        assert_eq!(link.start, Point { line: 1, col: 0 });
+        assert_eq!(link.end, Point { line: 1, col: 9 });
+        assert!(t.link_at(Point { line: 0, col: 9 }).is_none());
+
+        // Widening brings the hidden cells back with the same link.
+        t.resize(20, 4);
+        let link = t.link_at(Point { line: 0, col: 14 }).unwrap();
+        assert_eq!(link.uri, "https://e.com/xyz");
+        assert_eq!(link.start, Point { line: 0, col: 14 });
     }
 
     #[test]

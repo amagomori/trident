@@ -189,6 +189,11 @@ impl Row {
         self.hidden = None;
     }
 
+    /// Cells past the right edge, in order after the visible ones.
+    pub(crate) fn hidden_cells(&self) -> &[Cell] {
+        self.hidden.as_deref().map_or(&[], |h| &h.cells)
+    }
+
     pub fn materialize_wrap_padding(&mut self, from: usize) {
         if self.wrapped {
             for cell in &mut self.cells[from..] {
