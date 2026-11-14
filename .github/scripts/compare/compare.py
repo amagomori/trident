@@ -498,7 +498,7 @@ def resolve_bins(names, overrides):
         found = shutil.which(os.path.expanduser(bins[name]))
         if not found:
             sys.exit(f"{name}: {bins[name]} not found (pass --bin {name}=PATH)")
-        bins[name] = found
+        bins[name] = os.path.abspath(found)
     return bins
 
 
