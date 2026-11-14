@@ -477,6 +477,23 @@ impl Pty {
         self.output.probe.program()
     }
 
+    /// Whether a program holds the foreground, as a check that outlives this borrow, for the
+    /// macOS app quit hook.
+    #[cfg(target_os = "macos")]
+    pub fn running_program_check(&self) -> impl Fn() -> bool + 'static {
+        let probe = Probe {
+            fd: self
+                .output
+                .probe
+                .fd
+                .as_ref()
+                .and_then(|fd| fd.try_clone().ok()),
+            shell: self.output.probe.shell,
+            command: self.output.probe.command,
+        };
+        move || probe.program().is_some()
+    }
+
     /// Everything the shell wrote since the last call.
     pub fn take_output(&mut self) -> Output {
         let mut p = self.output.pending.lock().unwrap();

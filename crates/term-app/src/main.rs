@@ -1535,6 +1535,8 @@ impl App {
             }
             let next_vsync_off = !next.vsync && self.config.vsync;
             self.config = next;
+            #[cfg(target_os = "macos")]
+            close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
             self.watch_appearance();
             if let Some(s) = &mut self.session {
                 s.pty
@@ -2200,7 +2202,12 @@ impl ApplicationHandler<UserEvent> for App {
         match self.start(event_loop) {
             Ok(session) => {
                 #[cfg(target_os = "macos")]
-                close_confirm::route_menu_quit_through_close(&session.window);
+                close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
+                #[cfg(target_os = "macos")]
+                close_confirm::route_app_quit_through_close(
+                    &session.window,
+                    session.pty.running_program_check(),
+                );
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
                 self.process_output();
