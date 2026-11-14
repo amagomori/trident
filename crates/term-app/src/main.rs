@@ -1128,6 +1128,18 @@ impl App {
     }
 
     fn present_frame(&mut self) {
+        // During a flood, keep parsing instead of blocking in drawable acquisition until
+        // the previous frame's vsync; `UserEvent::Presented` brings the frame back.
+        #[cfg(target_os = "macos")]
+        if self.exit_deadline.is_none()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.since_frame >= DEFER_AFTER)
+            && present_macos::wait_for_drawable()
+        {
+            return;
+        }
         #[cfg(target_os = "linux")]
         if self.exit_deadline.is_some() && !self.exit_presentation.needs_wayland_submission() {
             return;
@@ -1956,7 +1968,13 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Output => self.output_ready(),
             #[cfg(target_os = "macos")]
-            UserEvent::Presented => {}
+            UserEvent::Presented => {
+                if self.exit_deadline.is_none()
+                    && let Some(s) = &self.session
+                {
+                    s.window.request_redraw();
+                }
+            }
             UserEvent::Exit => {
                 self.exit_deadline
                     .get_or_insert_with(|| Instant::now() + EXIT_TIMEOUT);
