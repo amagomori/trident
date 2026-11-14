@@ -47,6 +47,21 @@ struct Probe {
 }
 
 impl Probe {
+    /// The foreground process group, when it is a program other than the shell.
+    #[cold]
+    fn program(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            let fd = self.fd.as_ref()?;
+            // SAFETY: fd is a PTY master descriptor owned by this probe.
+            let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+            let shell = self.shell?;
+            (group > 0 && group as u32 != shell).then_some(group)
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
     fn shell(&self) -> Option<bool> {
         #[cfg(unix)]
         {
@@ -421,6 +436,11 @@ impl Pty {
         Ok(())
     }
 
+    /// The process group of a program running in the foreground instead of the shell.
+    pub fn running_program(&self) -> Option<i32> {
+        self.output.probe.program()
+    }
+
     /// Everything the shell wrote since the last call.
     pub fn take_output(&mut self) -> Output {
         let mut p = self.output.pending.lock().unwrap();
@@ -551,6 +571,48 @@ mod tests {
         assert!(pty.watcher.is_none());
         pty.set_command_notifications(true).unwrap();
         assert!(pty.watcher.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_program_is_reported_only_away_from_the_shell() {
+        let mut pty = Pty::spawn(
+            &[
+                "bash".into(),
+                "--norc".into(),
+                "--noprofile".into(),
+                "--noediting".into(),
+                "-i".into(),
+            ],
+            &Default::default(),
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let wait_for = |pty: &mut Pty, running: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                pty.take_output();
+                let program = pty.running_program();
+                if program.is_some() == running {
+                    return program;
+                }
+                assert!(Instant::now() < deadline, "running stayed {}", !running);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for(&mut pty, false);
+        pty.write(b"sleep 30\r");
+        let group = wait_for(&mut pty, true).unwrap();
+        assert_eq!(
+            crate::close_confirm::process_name(group).as_deref(),
+            Some("sleep")
+        );
+        pty.write(b"\x03");
+        wait_for(&mut pty, false);
     }
 
     #[test]
