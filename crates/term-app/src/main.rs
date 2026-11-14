@@ -1338,7 +1338,9 @@ impl App {
         if let Some(text) = self.pending_paste.take() {
             if confirmed {
                 self.send_paste(&text);
-            } else if let Some(s) = &self.session {
+            }
+            // `write_input` only redraws for a view change, so clear the banner here.
+            if let Some(s) = &self.session {
                 s.window.request_redraw();
             }
         }
