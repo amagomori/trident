@@ -64,7 +64,7 @@ def default_bins():
 
 
 TERMS = {
-    "terminal": lambda b, cmd: [b, "--font-size", "14", "--scrollback", "10000", "-e", *cmd],
+    "terminal": lambda b, cmd: [b, "--config", str(CFG / "terminal.toml"), "-e", *cmd],
     "alacritty": lambda b, cmd: [b, "--config-file", str(CFG / "alacritty.toml"), "-e", *cmd],
     "kitty": lambda b, cmd: [b, "--config", str(CFG / "kitty.conf"), *cmd],
     "wezterm": lambda b, cmd: [b, "--config-file", str(CFG / "wezterm.lua"), "start",
@@ -331,6 +331,7 @@ def t_cat(name):
 
 def t_vtebench(name):
     out = ARGS.work / f"vtebench-{name}.dat"
+    out.unlink(missing_ok=True)
     s = script(f'sleep 2; cd "{ARGS.vtebench_dir}" && "{ARGS.vtebench}" -s '
                f'--max-secs {ARGS.vte_secs} --dat "$D/out.dat" 2> "$D/log"; '
                'cp "$D/out.dat" "$1"; touch "$D/done"; echo x > "$D/done"; exec sleep 600')
