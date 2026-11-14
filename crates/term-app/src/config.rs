@@ -12,6 +12,7 @@ pub struct Config {
     pub scrollback: usize,
     pub notify_long_commands_after: u64,
     pub drop_preview: bool,
+    pub paste_protection: bool,
     pub shell: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub themes: theme::Themes,
@@ -27,6 +28,7 @@ impl Default for Config {
             scrollback: 10_000,
             notify_long_commands_after: 10,
             drop_preview: true,
+            paste_protection: true,
             shell: Vec::new(),
             env: BTreeMap::new(),
             themes: theme::Themes::default(),
@@ -44,6 +46,7 @@ struct Raw {
     scrollback: Option<usize>,
     notify_long_commands_after: Option<u64>,
     drop_preview: Option<bool>,
+    paste_protection: Option<bool>,
     shell: Option<Shell>,
     env: BTreeMap<String, String>,
     colors: BTreeMap<String, String>,
@@ -348,6 +351,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     let mut config = Config {
         font: raw.font,
         drop_preview: raw.drop_preview.unwrap_or(true),
+        paste_protection: raw.paste_protection.unwrap_or(true),
         ..Config::default()
     };
     if let Some(size) = raw.font_size {
@@ -876,6 +880,12 @@ mod tests {
     fn defaults_and_full_config() {
         assert!(parse_text("").unwrap().drop_preview);
         assert!(!parse_text("drop_preview = false").unwrap().drop_preview);
+        assert!(parse_text("").unwrap().paste_protection);
+        assert!(
+            !parse_text("paste_protection = false")
+                .unwrap()
+                .paste_protection
+        );
         assert_eq!(parse_text("").unwrap(), Config::default());
         let config = parse_text(
             r##"
