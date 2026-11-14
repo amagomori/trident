@@ -84,8 +84,9 @@ pub struct Row {
     pub flags: RowFlags,
     pub(crate) prompt_col: u32,
     pub(crate) output_col: u16,
-    /// The line continues on the next row because it soft-wrapped.
-    pub wrapped: bool,
+    /// Every cell from this column on equals the last one, so `reset` can skip them;
+    /// `u8::MAX` means not known. Writers to `cells` must call `touch` or `touch_all`.
+    occupied: u8,
     /// Cells past the right edge, kept when the window narrows so widening brings them back.
     /// Boxed so rows that were never cut stay small; every scroll moves rows around.
     hidden: Option<Box<Hidden>>,
@@ -102,37 +103,88 @@ struct Hidden {
 impl Row {
     /// Blank the row in place, keeping its allocation unless it is oversized.
     pub fn reset(&mut self, cols: usize, template: &Cell, released: &mut bool) {
-        self.cells.clear();
-        if self.cells.capacity() > cols.saturating_mul(2) {
-            self.cells.shrink_to(cols);
-            *released = true;
+        let blank = Cell::blank(template);
+        if self.cells.len() == cols
+            && self.cells.capacity() <= cols.saturating_mul(2)
+            && self.cells.last() == Some(&blank)
+        {
+            let occupied = self.occupied();
+            self.cells[..occupied].fill(blank);
+        } else {
+            self.cells.clear();
+            if self.cells.capacity() > cols.saturating_mul(2) {
+                self.cells.shrink_to(cols);
+                *released = true;
+            }
+            self.cells.resize(cols, blank);
         }
-        self.cells.resize(cols, Cell::blank(template));
+        self.occupied = 0;
         self.flags = RowFlags::default();
         self.prompt_col = 0;
         self.output_col = 0;
-        self.wrapped = false;
         self.hidden = None;
     }
 
     pub(crate) fn erase(&mut self, blank: Row) {
         self.cells = blank.cells;
-        self.wrapped = false;
+        self.occupied = blank.occupied;
+        self.set_wrapped(false);
         self.hidden = None;
+    }
+
+    /// The line continues on the next row because it soft-wrapped.
+    pub fn wrapped(&self) -> bool {
+        self.flags.contains(RowFlags::WRAPPED)
+    }
+
+    pub fn set_wrapped(&mut self, wrapped: bool) {
+        if wrapped {
+            self.flags.insert(RowFlags::WRAPPED);
+        } else {
+            self.flags.remove(RowFlags::WRAPPED);
+        }
+    }
+
+    /// The number of leading cells that may differ from the last cell.
+    pub(crate) fn occupied(&self) -> usize {
+        if self.occupied == u8::MAX {
+            self.cells.len()
+        } else {
+            usize::from(self.occupied).min(self.cells.len())
+        }
+    }
+
+    /// Records a write to the cells before column `end`.
+    #[inline]
+    pub(crate) fn touch(&mut self, end: usize) {
+        if end > usize::from(self.occupied) {
+            self.occupied = u8::try_from(end).unwrap_or(u8::MAX);
+        }
+    }
+
+    /// Records a write that may have changed any cell.
+    pub(crate) fn touch_all(&mut self) {
+        self.occupied = u8::MAX;
+    }
+
+    /// Records that every cell from column `from` on now holds the same blank.
+    pub(crate) fn set_blank_from(&mut self, from: usize) {
+        self.occupied = u8::try_from(from).unwrap_or(u8::MAX);
     }
 
     pub fn new(cols: usize, template: &Cell) -> Row {
         Row {
             cells: vec![Cell::blank(template); cols],
-            wrapped: false,
             flags: RowFlags::default(),
             prompt_col: 0,
             output_col: 0,
+            occupied: 0,
             hidden: None,
         }
     }
 
     pub fn resize(&mut self, cols: usize) {
+        self.touch_all();
         let mut cells = std::mem::take(&mut self.cells);
         if let Some(hidden) = self.hidden.take() {
             let Hidden {
@@ -161,7 +213,7 @@ impl Row {
                     ..Cell::default()
                 });
             }
-            if !self.wrapped {
+            if !self.wrapped() {
                 let used = hidden
                     .iter()
                     .rposition(|c| *c != Cell::default())
@@ -176,7 +228,7 @@ impl Row {
             }
         } else {
             let mut blank = Cell::default();
-            if self.wrapped {
+            if self.wrapped() {
                 blank.flags.insert(Flags::WIDE_WRAP);
             }
             cells.resize(cols, blank);
@@ -217,7 +269,7 @@ impl Row {
     }
 
     pub fn materialize_wrap_padding(&mut self, from: usize) {
-        if self.wrapped {
+        if self.wrapped() {
             for cell in &mut self.cells[from..] {
                 cell.flags.remove(Flags::WIDE_WRAP);
             }
@@ -284,6 +336,7 @@ impl RowFlags {
     pub const SUCCEEDED: Self = Self(16);
     pub(crate) const OUTPUT_BEFORE_PROMPT: Self = Self(32);
     pub(crate) const OUTPUT_END: Self = Self(64);
+    const WRAPPED: Self = Self(128);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
