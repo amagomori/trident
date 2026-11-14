@@ -189,9 +189,31 @@ impl Row {
         self.hidden = None;
     }
 
-    /// Cells past the right edge, in order after the visible ones.
-    pub(crate) fn hidden_cells(&self) -> &[Cell] {
-        self.hidden.as_deref().map_or(&[], |h| &h.cells)
+    /// Cells past the right edge, in order after the visible ones, as `resize` would bring
+    /// them back.
+    pub(crate) fn hidden_cells(&self) -> impl Iterator<Item = &Cell> {
+        static BLANK: Cell = Cell {
+            c: ' ',
+            fg: Color::DefaultFg,
+            bg: Color::DefaultBg,
+            flags: Flags(0),
+            hyperlink: 0,
+        };
+        let (lead, cells) = match self.hidden.as_deref() {
+            // The PAD stand-in was overwritten, so the wide character it covered is gone.
+            Some(h)
+                if h.padded
+                    && !self
+                        .cells
+                        .last()
+                        .is_some_and(|c| c.flags.contains(Flags::PAD)) =>
+            {
+                (Some(&BLANK), h.cells.get(2..).unwrap_or_default())
+            }
+            Some(h) => (None, &h.cells[..]),
+            None => (None, &[][..]),
+        };
+        lead.into_iter().chain(cells)
     }
 
     pub fn materialize_wrap_padding(&mut self, from: usize) {
