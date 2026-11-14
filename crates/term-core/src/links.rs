@@ -16,12 +16,14 @@ impl Link {
 /// OSC 8 `(id, uri)` pairs, indexed from 1, stored in one buffer. Recently seen
 /// pairs are found through a small direct-mapped cache, so repeated links share
 /// an index without a per-sequence hash-table probe; a pair evicted from the
-/// cache may be stored again under a new index.
+/// cache may be stored again under a new index. Indices no cell references are
+/// released in place and reused, so live cells never need renumbering.
 #[derive(Default)]
 pub(crate) struct LinkTable {
     bytes: Vec<u8>,
     spans: Vec<Span>,
     recent: Vec<u32>,
+    free: Vec<u16>,
 }
 
 struct Span {
@@ -63,6 +65,10 @@ impl LinkTable {
         self.spans.len()
     }
 
+    fn is_full(&self, limit: usize) -> bool {
+        self.free.is_empty() && self.len() >= limit
+    }
+
     pub(crate) fn get(&self, index: u16) -> Option<(&[u8], &[u8])> {
         let span = self.spans.get((index as usize).checked_sub(1)?)?;
         let mid = span.start + span.id_len as usize;
@@ -85,19 +91,52 @@ impl LinkTable {
     }
 
     fn insert(&mut self, id: &[u8], uri: &[u8], slot: Slot) -> u16 {
-        self.spans.push(Span {
+        let span = Span {
             start: self.bytes.len(),
             id_len: id.len() as u32,
             uri_len: uri.len() as u32,
-        });
+        };
+        let index = match self.free.pop() {
+            Some(index) => {
+                self.spans[index as usize - 1] = span;
+                index
+            }
+            None => {
+                self.spans.push(span);
+                self.spans.len() as u16
+            }
+        };
         self.bytes.extend_from_slice(id);
         self.bytes.extend_from_slice(uri);
         if self.recent.is_empty() {
             self.recent = vec![0; 1 << RECENT_BITS];
         }
-        let index = self.spans.len() as u16;
         self.recent[slot.at] = slot.tag << 16 | index as u32;
         index
+    }
+
+    /// Frees the entries not marked in `used` (by index) for reuse, keeping every
+    /// other index, and repacks the stored bytes. Returns whether any was freed.
+    fn release(&mut self, used: &[bool]) -> bool {
+        let mut bytes = Vec::with_capacity(self.bytes.len());
+        for (at, span) in self.spans.iter_mut().enumerate().rev() {
+            if used[at + 1] {
+                let len = (span.id_len + span.uri_len) as usize;
+                let start = bytes.len();
+                bytes.extend_from_slice(&self.bytes[span.start..span.start + len]);
+                span.start = start;
+            } else {
+                // An empty URI is never interned, so a freed span never matches.
+                *span = Span {
+                    start: 0,
+                    id_len: 0,
+                    uri_len: 0,
+                };
+                self.free.push(at as u16 + 1);
+            }
+        }
+        self.bytes = bytes;
+        !self.free.is_empty()
     }
 
     /// Keeps the entries marked in `used` (by index), renumbered in order with
@@ -124,16 +163,30 @@ impl Terminal {
         if let Some(index) = self.links.find(id, uri, slot) {
             return index;
         }
-        if self.links.len() >= limit {
+        if self.links.is_full(limit) && !self.release_links() {
             self.compact_links();
             if let Some(index) = self.links.position(id, uri, slot) {
                 return index;
             }
         }
-        if self.links.len() >= limit {
+        if self.links.is_full(limit) {
             return 0;
         }
         self.links.insert(id, uri, slot)
+    }
+
+    fn release_links(&mut self) -> bool {
+        let mut used = vec![false; self.links.len() + 1];
+        used[self.cursor.template.hyperlink as usize] = true;
+        for screen in [&self.primary, &self.alternate] {
+            if let Some(saved) = &screen.saved {
+                used[saved.cursor.template.hyperlink as usize] = true;
+            }
+            for row in screen.lines.iter().chain(screen.scrollback.iter()) {
+                row.mark_hyperlinks(&mut used);
+            }
+        }
+        self.links.release(&used)
     }
 
     fn visit_hyperlinks(&mut self, mut visit: impl FnMut(&mut u16)) {
@@ -511,9 +564,14 @@ mod tests {
     #[test]
     fn compaction_preserves_all_references() {
         let mut t = Terminal::new(8, 2);
-        for id in 0..8 {
-            assert_eq!(intern(&mut t, id, 8), id as u16 + 1);
+        let slot = Slot { at: 0, tag: 0 };
+        let (_, dup) = key(1);
+        for id in [1, 1, 3, 4, 5, 6, 7, 8] {
+            let (k, uri) = key(id);
+            let uri = if id == 1 { dup.clone() } else { uri };
+            t.links.insert(k.as_bytes(), uri.as_bytes(), slot);
         }
+        t.primary.lines[1].cells[0].hyperlink = 1;
         let mut history = crate::Row::new(8, &crate::Cell::default());
         history.cells[0].hyperlink = 2;
         t.primary.scrollback.push_back(history);
@@ -532,13 +590,9 @@ mod tests {
         t.cursor.template.hyperlink = 7;
         t.primary.lines[0].cells[7].hyperlink = 8;
         t.primary.lines[0].resize(2);
-        assert_eq!(intern(&mut t, 8, 8), 8);
+        assert_eq!(intern(&mut t, 9, 8), 8);
         assert_eq!(t.links.len(), 8);
-        let (id, uri) = key(0);
-        assert!(
-            (1..=t.links.len() as u16)
-                .all(|index| t.links.get(index) != Some((id.as_bytes(), uri.as_bytes())))
-        );
+        assert_eq!(t.primary.lines[1].cells[0].hyperlink, 1);
         assert_eq!(t.primary.scrollback[0].cells[0].hyperlink, 1);
         assert_eq!(t.primary.lines[0].cells[0].hyperlink, 2);
         assert_eq!(t.alternate.lines[0].cells[0].hyperlink, 3);
@@ -547,9 +601,36 @@ mod tests {
         assert_eq!(t.cursor.template.hyperlink, 6);
         t.primary.lines[0].resize(8);
         assert_eq!(t.primary.lines[0].cells[7].hyperlink, 7);
-        for id in 1..=8 {
-            assert_eq!(intern(&mut t, id, 8), id as u16);
+        for (index, id) in [3, 4, 5, 6, 7, 8, 9].into_iter().enumerate() {
+            let (k, uri) = key(id);
+            assert_eq!(
+                t.links.get(index as u16 + 2),
+                Some((k.as_bytes(), uri.as_bytes()))
+            );
         }
+    }
+
+    #[test]
+    fn unreferenced_links_are_reused_without_renumbering() {
+        let mut t = Terminal::new(8, 2);
+        for id in 0..4 {
+            assert_eq!(intern(&mut t, id, 4), id as u16 + 1);
+        }
+        t.primary.lines[0].cells[0].hyperlink = 2;
+        let mut history = crate::Row::new(8, &crate::Cell::default());
+        history.cells[0].hyperlink = 4;
+        t.primary.scrollback.push_back(history);
+        assert_eq!(intern(&mut t, 4, 4), 1);
+        assert_eq!(intern(&mut t, 5, 4), 3);
+        assert_eq!(t.links.len(), 4);
+        assert_eq!(intern(&mut t, 1, 4), 2);
+        assert_eq!(intern(&mut t, 4, 4), 1);
+        for (index, id) in [(1, 4), (2, 1), (3, 5), (4, 3)] {
+            let (k, uri) = key(id);
+            assert_eq!(t.links.get(index), Some((k.as_bytes(), uri.as_bytes())));
+        }
+        assert_eq!(t.primary.lines[0].cells[0].hyperlink, 2);
+        assert_eq!(t.primary.scrollback[0].cells[0].hyperlink, 4);
     }
 
     #[test]
@@ -561,8 +642,10 @@ mod tests {
         assert_eq!(intern(&mut t, 2, 2), 0);
         assert_eq!(intern(&mut t, 0, 2), 1);
         t.primary.lines[0].cells[0] = crate::Cell::default();
-        assert_eq!(intern(&mut t, 2, 2), 2);
-        assert_eq!(t.primary.lines[0].cells[1].hyperlink, 1);
+        assert_eq!(intern(&mut t, 2, 2), 1);
+        assert_eq!(t.primary.lines[0].cells[1].hyperlink, 2);
+        let (k, uri) = key(1);
+        assert_eq!(t.links.get(2), Some((k.as_bytes(), uri.as_bytes())));
     }
 
     #[test]

@@ -197,6 +197,15 @@ impl Row {
         }
     }
 
+    pub(crate) fn mark_hyperlinks(&self, used: &mut [bool]) {
+        let hidden = self.hidden.as_deref().map_or(&[][..], |h| &h.cells[..]);
+        for cell in self.cells.iter().chain(hidden) {
+            if cell.hyperlink != 0 {
+                used[cell.hyperlink as usize] = true;
+            }
+        }
+    }
+
     pub(crate) fn hyperlinks_mut(&mut self) -> impl Iterator<Item = &mut u16> {
         self.cells
             .iter_mut()
