@@ -43,6 +43,78 @@ pub fn process_name(pid: i32) -> Option<String> {
         .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
 }
 
+/// The arguments (argv) of process `pid`, if it still exists and the platform reports them.
+#[cold]
+pub fn process_args(pid: i32) -> Option<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    let args = {
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let cmdline = cmdline.strip_suffix(&[0]).unwrap_or(&cmdline);
+        (!cmdline.is_empty()).then(|| {
+            cmdline
+                .split(|&b| b == 0)
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect()
+        })
+    };
+    #[cfg(target_os = "macos")]
+    let args = macos_args(pid);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let args: Option<Vec<String>> = {
+        let _ = pid;
+        None
+    };
+    args
+}
+
+/// argv of `pid` from `KERN_PROCARGS2`: argc, the executable path and its NUL padding, then
+/// the arguments, each NUL-terminated.
+#[cfg(target_os = "macos")]
+fn macos_args(pid: i32) -> Option<Vec<String>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size: libc::size_t = 0;
+    // SAFETY: a null buffer asks sysctl for the size only.
+    let sized = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if sized != 0 || size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: buf is writable for `size` bytes, which sysctl lowers to what it wrote.
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    buf.truncate(size);
+    let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
+    let rest = &buf[4..];
+    let path_end = rest.iter().position(|&b| b == 0)?;
+    let start = path_end + rest[path_end..].iter().position(|&b| b != 0)?;
+    let args: Vec<String> = rest[start..]
+        .split(|&b| b == 0)
+        .take(argc)
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    (args.len() == argc && argc > 0).then_some(args)
+}
+
 /// The short (16 byte) name of `pid`, which unlike `proc_name` is readable for processes of
 /// another user, such as the setuid-root `top`.
 #[cfg(target_os = "macos")]
