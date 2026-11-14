@@ -33,8 +33,8 @@ fn keypad_letter(key: PhysicalKey) -> Option<char> {
 /// The SS3 letter for a keypad key in application keypad mode. Without Shift, only keys
 /// that produced a character, or keypad Enter, are claimed: a Num Lock-off navigation key
 /// keeps its cursor/editing encoding (less, stock Vim), and KP_Begin, which has no logical
-/// key, sends nothing, as on main and in Alacritty. Mac keypads have no Num Lock and
-/// Alacritty and Terminal.app send plain digits there, so less still reads them as a count.
+/// key, sends nothing. Keypad digits stay plain digits, so less and stock Vim still read
+/// them as a count; only Shift+digit on Linux is claimed. This matches main and Alacritty.
 fn application_keypad_letter(
     key: &Key,
     physical: PhysicalKey,
@@ -43,7 +43,7 @@ fn application_keypad_letter(
     if !mods.shift_key() && !matches!(key, Key::Character(_) | Key::Named(NamedKey::Enter)) {
         return None;
     }
-    if cfg!(target_os = "macos") && is_keypad_digit(physical) {
+    if is_keypad_digit(physical) && (cfg!(target_os = "macos") || !mods.shift_key()) {
         return None;
     }
     keypad_letter(physical)
@@ -328,12 +328,11 @@ mod tests {
                     true,
                 )
             };
-            let expected =
-                if cfg!(target_os = "macos") && is_keypad_digit(PhysicalKey::Code(physical)) {
-                    text.as_bytes().to_vec()
-                } else {
-                    vec![0x1b, b'O', suffix]
-                };
+            let expected = if is_keypad_digit(PhysicalKey::Code(physical)) {
+                text.as_bytes().to_vec()
+            } else {
+                vec![0x1b, b'O', suffix]
+            };
             assert_eq!(encode(&term.modes), Some(expected), "{physical:?}");
             assert_eq!(
                 encode(&Modes::default()),
@@ -490,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn application_keypad_begin_and_mac_digits_match_alacritty() {
+    fn application_keypad_begin_and_digits_match_alacritty() {
         let modes = Modes {
             app_keypad: true,
             ..Modes::default()
@@ -524,10 +523,25 @@ mod tests {
             &modes,
             true,
         );
-        if cfg!(target_os = "macos") {
-            assert_eq!(five, Some(b"5".to_vec()));
-        } else {
-            assert_eq!(five, Some(b"\x1bOu".to_vec()));
+        assert_eq!(five, Some(b"5".to_vec()));
+        for mods in [
+            ModifiersState::ALT,
+            ModifiersState::CONTROL,
+            ModifiersState::ALT | ModifiersState::CONTROL,
+        ] {
+            assert_eq!(
+                encode_key(&ch("5"), &ch("5"), Some("5"), physical, mods, &modes, true),
+                encode_key(
+                    &ch("5"),
+                    &ch("5"),
+                    Some("5"),
+                    PhysicalKey::Code(KeyCode::Digit5),
+                    mods,
+                    &modes,
+                    true
+                ),
+                "{mods:?}"
+            );
         }
     }
 
