@@ -84,28 +84,64 @@ struct QuitHook {
 }
 
 /// `applicationShouldTerminate:`, which every app quit (Cmd-Q, menu or Dock Quit, logout)
-/// asks: with a program running it defers the quit and closes the window instead, so the
-/// close banner asks first and `answer_quit` lets the quit (and a logout) go on or cancels it.
+/// asks: with a program running it closes the window instead, so the close banner asks first.
+/// A quit of the app alone is cancelled, so a second one confirms like a second close; a
+/// logout or shutdown is deferred until `answer_quit` lets it go on or cancels it, since
+/// AppKit sends it only once.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn should_terminate(
     _this: *mut objc2::runtime::AnyObject,
     _cmd: objc2::runtime::Sel,
     _sender: *mut objc2::runtime::AnyObject,
 ) -> usize {
+    const NS_TERMINATE_CANCEL: usize = 0;
     const NS_TERMINATE_NOW: usize = 1;
     const NS_TERMINATE_LATER: usize = 2;
     let confirms = QUIT_CONFIRMS.load(std::sync::atomic::Ordering::Relaxed);
     QUIT_HOOK.with_borrow(|hook| match hook {
         Some(hook) if confirms && (hook.running)() => {
-            QUIT_DEFERRED.set(true);
+            // SAFETY: on the main thread.
+            let session_ends = unsafe { quit_ends_session() };
+            QUIT_DEFERRED.set(session_ends);
             // SAFETY: window is a live NSWindow and this runs on the main thread.
             let _: () = unsafe {
                 objc2::msg_send![&*hook.window, performClose: std::ptr::null::<objc2::runtime::AnyObject>()]
             };
-            NS_TERMINATE_LATER
+            if session_ends {
+                NS_TERMINATE_LATER
+            } else {
+                NS_TERMINATE_CANCEL
+            }
         }
         _ => NS_TERMINATE_NOW,
     })
+}
+
+/// Whether the quit being handled is a logout, restart or shutdown: an Apple Event quit with a
+/// reason (`keyAEQuitReason`), which a Dock or menu Quit lacks.
+///
+/// # Safety
+/// Must be called on the main thread.
+#[cfg(target_os = "macos")]
+unsafe fn quit_ends_session() -> bool {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    const KEY_AE_QUIT_REASON: u32 = u32::from_be_bytes(*b"why?");
+    // SAFETY: on the main thread; the messages match NSAppleEventManager and
+    // NSAppleEventDescriptor.
+    unsafe {
+        let manager: Retained<AnyObject> =
+            msg_send![class!(NSAppleEventManager), sharedAppleEventManager];
+        let event: Option<Retained<AnyObject>> = msg_send![&*manager, currentAppleEvent];
+        event.is_some_and(|event| {
+            let param: Option<Retained<AnyObject>> =
+                msg_send![&*event, paramDescriptorForKeyword: KEY_AE_QUIT_REASON];
+            let attribute: Option<Retained<AnyObject>> =
+                msg_send![&*event, attributeDescriptorForKeyword: KEY_AE_QUIT_REASON];
+            param.is_some() || attribute.is_some()
+        })
+    }
 }
 
 /// Answers a quit that `should_terminate` deferred, quitting the app or cancelling the quit;
