@@ -432,6 +432,17 @@ fn advance_frames(term: &mut Terminal, bytes: &[u8], last_reset: usize) -> usize
     }
 }
 
+/// Scrolls to the bottom and clears the selection before input reaches the PTY, returning
+/// whether that changed what is on screen. Otherwise the echo, not the keypress, changes the
+/// screen, and drawing now would block the event loop for a frame just as the echo arrives.
+fn reset_view_for_input(term: &mut Terminal, scroll: &mut PixelScroll) -> bool {
+    let changed = term.display_offset() != 0 || scroll.offset != 0.0 || term.selection.is_some();
+    term.scroll_to_bottom();
+    scroll.reset();
+    term.selection = None;
+    changed
+}
+
 fn update_terminal(
     term: &mut Terminal,
     scroll: &mut PixelScroll,
@@ -1289,11 +1300,11 @@ impl App {
         if let Some(log) = &mut s.latency {
             log.input(Instant::now());
         }
-        s.term.scroll_to_bottom();
-        s.scroll.reset();
-        s.term.selection = None;
+        let visible_change = reset_view_for_input(&mut s.term, &mut s.scroll);
         s.pty.write(bytes);
-        s.request_frame();
+        if visible_change {
+            s.request_frame();
+        }
     }
 
     fn paste(&mut self, primary: bool) {
@@ -1339,7 +1350,9 @@ impl App {
         if let Some(text) = self.pending_paste.take() {
             if confirmed {
                 self.send_paste(&text);
-            } else if let Some(s) = &self.session {
+            }
+            // `write_input` only redraws for a view change, so clear the banner here.
+            if let Some(s) = &self.session {
                 s.window.request_redraw();
             }
         }
@@ -1356,15 +1369,21 @@ impl App {
             diag!("terminal: cannot drop a path containing control characters");
             return;
         };
+        // `write_input` can no longer see this scroll or the preview, so track them here.
+        let mut visible_change = s.term.display_offset() != 0;
         s.term.scroll_to_bottom();
         if drop_files::preview_enabled(self.config.drop_preview, &s.term)
             && let Some((image, rows)) =
                 show::drop_preview(&path, s.term.cols(), s.term.rows(), s.pty_cell)
         {
             drop_files::insert_preview(&mut s.term, &image, rows);
+            visible_change = true;
         }
         // Only the literal, quoted path goes to the shell: never a show command or Enter.
         self.write_input(&bytes);
+        if visible_change && let Some(s) = &mut self.session {
+            s.request_frame();
+        }
     }
 
     fn copy(&mut self, primary: bool) {
@@ -2318,6 +2337,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn input_requests_frame_only_when_view_changes() {
+        let mut term = Terminal::new(20, 3);
+        term.advance(b"1\r\n2\r\n3\r\n4\r\n5\r\n6");
+        let mut scroll = PixelScroll::default();
+        assert!(!reset_view_for_input(&mut term, &mut scroll));
+
+        term.scroll_display(2);
+        assert!(reset_view_for_input(&mut term, &mut scroll));
+        assert_eq!(term.display_offset(), 0);
+        assert!(!reset_view_for_input(&mut term, &mut scroll));
+
+        scroll.offset = 0.5;
+        assert!(reset_view_for_input(&mut term, &mut scroll));
+        assert_eq!(scroll.offset, 0.0);
+
+        let point = term.viewport_to_point(0, 0);
+        term.start_selection(point, SelectionKind::Simple);
+        assert!(reset_view_for_input(&mut term, &mut scroll));
+        assert!(term.selection.is_none());
+        assert!(!reset_view_for_input(&mut term, &mut scroll));
+    }
+
     #[test]
     fn shell_shortcuts_follow_primary_screen_marks() {
         let mut term = Terminal::new(20, 3);
