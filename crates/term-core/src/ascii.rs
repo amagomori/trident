@@ -307,6 +307,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn runs_crossing_the_buffer_size() {
+        let pattern = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".repeat(15);
+        for len in [255, 256, 257, 512] {
+            let mut input = pattern[..len].to_vec();
+            compare(&input);
+            input.extend_from_slice(b"\r\nxy");
+            compare(&input);
+        }
+    }
+
+    #[test]
     fn last_column_and_pending_wrap() {
         for input in [
             "abcde\x1b[1;5HXY",
