@@ -1355,17 +1355,19 @@ impl App {
             diag!("terminal: cannot drop a path containing control characters");
             return;
         };
+        // `write_input` can no longer see this scroll or the preview, so track them here.
+        let mut visible_change = s.term.display_offset() != 0;
         s.term.scroll_to_bottom();
         if drop_files::preview_enabled(self.config.drop_preview, &s.term)
             && let Some((image, rows)) =
                 show::drop_preview(&path, s.term.cols(), s.term.rows(), s.pty_cell)
         {
             drop_files::insert_preview(&mut s.term, &image, rows);
+            visible_change = true;
         }
         // Only the literal, quoted path goes to the shell: never a show command or Enter.
         self.write_input(&bytes);
-        // The scroll and preview above changed the screen even if nothing echoes the path.
-        if let Some(s) = &mut self.session {
+        if visible_change && let Some(s) = &mut self.session {
             s.request_frame();
         }
     }
