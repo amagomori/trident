@@ -51,10 +51,20 @@ pub struct Renderer {
     image_clip: [u32; 4],
     srgb: bool,
     pub adapter_info: String,
+    /// False when the surface only offers FIFO, so `vsync = false` cannot take effect.
+    pub vsync_optional: bool,
     // Reused between frames to avoid allocating.
     backgrounds: Vec<Instance>,
     glyphs: Vec<Instance>,
     overlays: Vec<Instance>,
+}
+
+fn present_mode(vsync: bool) -> wgpu::PresentMode {
+    if vsync {
+        wgpu::PresentMode::AutoVsync
+    } else {
+        wgpu::PresentMode::AutoNoVsync
+    }
 }
 
 /// Inner padding around the grid, in logical pixels.
@@ -67,8 +77,8 @@ impl Renderer {
     }
 
     /// Creates a renderer drawing into `window`, whose drawable area is `width` x `height`
-    /// physical pixels.
-    pub fn new<W>(window: Arc<W>, width: u32, height: u32) -> Result<Renderer, String>
+    /// physical pixels. `vsync` false presents without waiting for vblank (may tear).
+    pub fn new<W>(window: Arc<W>, width: u32, height: u32, vsync: bool) -> Result<Renderer, String>
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + 'static,
     {
@@ -98,6 +108,10 @@ impl Renderer {
         .map_err(|e| format!("cannot open GPU device: {e}"))?;
 
         let caps = surface.get_capabilities(&adapter);
+        let vsync_optional = caps
+            .present_modes
+            .iter()
+            .any(|m| matches!(m, wgpu::PresentMode::Immediate | wgpu::PresentMode::Mailbox));
         // Blend in gamma space like most terminals, so prefer a non-sRGB surface.
         let format = caps
             .formats
@@ -109,7 +123,7 @@ impl Renderer {
             .get_default_config(&adapter, width.max(1), height.max(1))
             .ok_or("surface is not supported by the adapter")?;
         config.format = format;
-        config.present_mode = wgpu::PresentMode::AutoVsync;
+        config.present_mode = present_mode(vsync);
         config.alpha_mode = caps.alpha_modes[0];
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
@@ -241,6 +255,7 @@ impl Renderer {
             image_clip: [0; 4],
             srgb: format.is_srgb(),
             adapter_info,
+            vsync_optional,
             backgrounds: Vec::new(),
             glyphs: Vec::new(),
             overlays: Vec::new(),
@@ -254,6 +269,14 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+    }
+
+    pub fn set_vsync(&mut self, vsync: bool) {
+        let mode = present_mode(vsync);
+        if self.config.present_mode != mode {
+            self.config.present_mode = mode;
+            self.surface.configure(&self.device, &self.config);
+        }
     }
 
     /// Glyph rasterizations depend on the font size, so drop them when it changes.

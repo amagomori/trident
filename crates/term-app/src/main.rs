@@ -942,8 +942,9 @@ impl App {
             Fonts::new(font, self.font_size * scale as f32)?
         };
         let size = window.inner_size();
-        let renderer = Renderer::new(window.clone(), size.width, size.height)?;
+        let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
         diag!("terminal: rendering with {}", renderer.adapter_info);
+        warn_vsync_unsupported(&self.config, &renderer);
 
         let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
         let mut term = Terminal::new(cols, rows);
@@ -1452,6 +1453,7 @@ impl App {
             if next.shell != self.config.shell || next.env != self.config.env {
                 diag!("terminal: shell/env changes apply on the next launch");
             }
+            let next_vsync_off = !next.vsync && self.config.vsync;
             self.config = next;
             self.watch_appearance();
             if let Some(s) = &mut self.session {
@@ -1464,6 +1466,10 @@ impl App {
                     search.dirty = true;
                 }
                 release_freed_memory(&mut s.term);
+                if next_vsync_off {
+                    warn_vsync_unsupported(&self.config, &s.renderer);
+                }
+                s.renderer.set_vsync(self.config.vsync);
                 if let Some(fonts) = fonts {
                     s.fonts = fonts;
                     s.renderer.clear_glyph_cache();
@@ -1927,6 +1933,12 @@ fn release_freed_memory(term: &mut Terminal) -> bool {
 
 fn pty_resize_needed(grid_changed: bool, previous_cell: (f32, f32), cell: (f32, f32)) -> bool {
     grid_changed || previous_cell != cell
+}
+
+fn warn_vsync_unsupported(config: &config::Config, renderer: &Renderer) {
+    if !config.vsync && !renderer.vsync_optional {
+        diag!("terminal: vsync = false: this GPU surface only supports vsync; keeping it on");
+    }
 }
 
 fn grid_size(window: &Window, fonts: &Fonts, padding: f32) -> (usize, usize) {

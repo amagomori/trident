@@ -13,6 +13,7 @@ pub struct Config {
     pub notify_long_commands_after: u64,
     pub drop_preview: bool,
     pub paste_protection: bool,
+    pub vsync: bool,
     pub shell: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub themes: theme::Themes,
@@ -29,6 +30,7 @@ impl Default for Config {
             notify_long_commands_after: 10,
             drop_preview: true,
             paste_protection: true,
+            vsync: true,
             shell: Vec::new(),
             env: BTreeMap::new(),
             themes: theme::Themes::default(),
@@ -47,6 +49,7 @@ struct Raw {
     notify_long_commands_after: Option<u64>,
     drop_preview: Option<bool>,
     paste_protection: Option<bool>,
+    vsync: Option<bool>,
     shell: Option<Shell>,
     env: BTreeMap<String, String>,
     colors: BTreeMap<String, String>,
@@ -352,6 +355,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         font: raw.font,
         drop_preview: raw.drop_preview.unwrap_or(true),
         paste_protection: raw.paste_protection.unwrap_or(true),
+        vsync: raw.vsync.unwrap_or(true),
         ..Config::default()
     };
     if let Some(size) = raw.font_size {
@@ -886,6 +890,9 @@ mod tests {
                 .unwrap()
                 .paste_protection
         );
+        assert!(parse_text("").unwrap().vsync);
+        assert!(!parse_text("vsync = false").unwrap().vsync);
+        assert!(parse_text("vsync = 0").is_err());
         assert_eq!(parse_text("").unwrap(), Config::default());
         let config = parse_text(
             r##"
