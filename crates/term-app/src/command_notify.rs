@@ -935,19 +935,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn canonical_shell_prompt_keeps_sampling() {
-        shell_command_finishes("/bin/sh", &["-i"], b"sleep 1\n", false);
+        // macOS /bin/sh is bash with readline, so turn line editing off to keep the prompt canonical.
+        shell_command_finishes(
+            "bash",
+            &["--noediting", "--noprofile", "--norc", "-i"],
+            b"sleep 1\n",
+            false,
+        );
     }
 
     #[cfg(unix)]
     fn shell_command_finishes(shell: &str, args: &[&str], input: &[u8], idle: bool) {
         use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-        use std::io::Write;
+        use std::io::{Read, Write};
 
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
         let mut command = CommandBuilder::new(shell);
         command.args(args);
         let mut child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
+        // Drain the master like the app's reader, or the shell blocks on a full PTY (macOS).
+        let mut output = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || while matches!(output.read(&mut [0; 4096]), Ok(n) if n > 0) {});
         let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
             .try_clone_to_owned()
             .unwrap();
