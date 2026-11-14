@@ -424,7 +424,6 @@ pub fn watch(
             }
             let mut stopped_groups = StoppedGroups::default();
             let mut last_kick = Instant::now();
-            let mut next_sample = Instant::now();
             while !stopped.load(Ordering::Acquire) && !thread_stop.load(Ordering::Acquire) {
                 if thread_activity.kicked.swap(false, Ordering::SeqCst) {
                     last_kick = Instant::now();
@@ -456,7 +455,7 @@ pub fn watch(
                 for event in events {
                     finished(event);
                 }
-                next_sample += Duration::from_millis(200);
+                let next_sample = Instant::now() + Duration::from_millis(200);
                 loop {
                     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
                     let active = !foreground.running.is_empty()
@@ -493,7 +492,6 @@ pub fn watch(
                             }
                             if !active {
                                 last_kick = Instant::now();
-                                next_sample = Instant::now();
                                 break;
                             }
                         }
