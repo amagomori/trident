@@ -21,7 +21,7 @@ impl Link {
 pub(crate) struct LinkTable {
     bytes: Vec<u8>,
     spans: Vec<Span>,
-    recent: Vec<u16>,
+    recent: Vec<u32>,
 }
 
 struct Span {
@@ -32,7 +32,15 @@ struct Span {
 
 const RECENT_BITS: u32 = 12;
 
-fn recent_slot(id: &[u8], uri: &[u8]) -> usize {
+/// A cache slot plus a 16-bit tag from other hash bits, so most misses are
+/// rejected without touching the stored bytes.
+#[derive(Clone, Copy)]
+struct Slot {
+    at: usize,
+    tag: u32,
+}
+
+fn recent_slot(id: &[u8], uri: &[u8]) -> Slot {
     const K: u64 = 0x517c_c1b7_2722_0a95;
     let mut hash = id.len() as u64;
     for part in [id, uri] {
@@ -44,7 +52,10 @@ fn recent_slot(id: &[u8], uri: &[u8]) -> usize {
         tail[..rest.len()].copy_from_slice(rest);
         hash = (hash.rotate_left(5) ^ u64::from_le_bytes(tail)).wrapping_mul(K);
     }
-    (hash >> (64 - RECENT_BITS)) as usize
+    Slot {
+        at: (hash >> (64 - RECENT_BITS)) as usize,
+        tag: (hash >> (48 - RECENT_BITS)) as u32 & 0xffff,
+    }
 }
 
 impl LinkTable {
@@ -61,18 +72,19 @@ impl LinkTable {
         ))
     }
 
-    fn find(&self, id: &[u8], uri: &[u8], slot: usize) -> Option<u16> {
-        let index = *self.recent.get(slot)?;
-        (self.get(index) == Some((id, uri))).then_some(index)
+    fn find(&self, id: &[u8], uri: &[u8], slot: Slot) -> Option<u16> {
+        let entry = *self.recent.get(slot.at)?;
+        let index = entry as u16;
+        (entry >> 16 == slot.tag && self.get(index) == Some((id, uri))).then_some(index)
     }
 
-    fn position(&mut self, id: &[u8], uri: &[u8], slot: usize) -> Option<u16> {
+    fn position(&mut self, id: &[u8], uri: &[u8], slot: Slot) -> Option<u16> {
         let index = (1..=self.len() as u16).find(|&index| self.get(index) == Some((id, uri)))?;
-        self.recent[slot] = index;
+        self.recent[slot.at] = slot.tag << 16 | index as u32;
         Some(index)
     }
 
-    fn insert(&mut self, id: &[u8], uri: &[u8], slot: usize) -> u16 {
+    fn insert(&mut self, id: &[u8], uri: &[u8], slot: Slot) -> u16 {
         self.spans.push(Span {
             start: self.bytes.len(),
             id_len: id.len() as u32,
@@ -84,7 +96,7 @@ impl LinkTable {
             self.recent = vec![0; 1 << RECENT_BITS];
         }
         let index = self.spans.len() as u16;
-        self.recent[slot] = index;
+        self.recent[slot.at] = slot.tag << 16 | index as u32;
         index
     }
 
@@ -454,7 +466,8 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            t.primary.lines[0].cells[col].hyperlink = t.links.insert(b"", uri, 0);
+            t.primary.lines[0].cells[col].hyperlink =
+                t.links.insert(b"", uri, Slot { at: 0, tag: 0 });
         }
         let index = t.intern_link(b"", b"https://a", 4);
         assert_eq!(
@@ -473,7 +486,7 @@ mod tests {
     fn adjacent_runs_of_a_stored_twice_link_hover_together() {
         let mut t = Terminal::new(8, 2);
         t.advance(b"\x1b]8;id=a;https://a\x07ab\x1b]8;;\x07c");
-        let again = t.links.insert(b"a", b"https://a", 0);
+        let again = t.links.insert(b"a", b"https://a", Slot { at: 0, tag: 0 });
         t.primary.lines[0].cells[2].hyperlink = again;
         let link = t.link_at(Point { line: 0, col: 2 }).unwrap();
         assert_eq!(link.uri, "https://a");
