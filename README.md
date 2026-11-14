@@ -218,6 +218,11 @@ appearance events; on Linux (X11 and Wayland) it uses the desktop's
 an unavailable appearance, or “no preference” uses the dark theme. Fixed themes
 ignore OS appearance changes. No appearance listener is started for fixed themes.
 
+Programs can follow the theme: `CSI ? 996 n` asks for the current color scheme and
+gets `CSI ? 997 ; 1 n` (dark) or `CSI ? 997 ; 2 n` (light) back, judged by the
+theme's background. With mode 2031 set (`CSI ? 2031 h`), the same report is sent
+whenever a switch (OS appearance or config reload) changes dark to light or back.
+
 A theme name may instead be an absolute path or a path relative to the config's
 directory, for example `theme = "themes/my-theme.toml"`. Theme files have a
 `[colors]` table with the same 20 keys and `"#rrggbb"` values shown above (16 ANSI
