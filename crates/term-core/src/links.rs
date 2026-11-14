@@ -518,6 +518,21 @@ mod tests {
         assert_eq!(link.end, Point { line: 1, col: 9 });
         assert!(t.link_at(Point { line: 0, col: 9 }).is_none());
 
+        // Writing over the stand-in for a hidden wide character drops that character.
+        let mut w = Terminal::new(14, 4);
+        w.advance("https://abcd界ef/ghij".as_bytes());
+        w.resize(13, 4);
+        w.advance(b"\x1b[1;13Hx");
+        assert_eq!(
+            w.link_at(Point { line: 0, col: 0 }).unwrap().uri,
+            "https://abcdx"
+        );
+        w.resize(14, 4);
+        assert_eq!(
+            w.link_at(Point { line: 0, col: 0 }).unwrap().uri,
+            "https://abcdx"
+        );
+
         // Widening brings the hidden cells back with the same link.
         t.resize(20, 4);
         let link = t.link_at(Point { line: 0, col: 14 }).unwrap();
