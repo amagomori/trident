@@ -50,6 +50,12 @@ impl Default for Palette {
 }
 
 impl Palette {
+    /// Whether the background reads as dark, by its Rec. 709 luma.
+    pub fn is_dark(&self) -> bool {
+        let (r, g, b) = self.background;
+        2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b) < 128 * 10000
+    }
+
     pub fn resolve(&self, color: Color) -> Rgb {
         match color {
             Color::DefaultFg => self.foreground,

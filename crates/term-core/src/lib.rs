@@ -166,6 +166,8 @@ pub struct Modes {
     pub focus_events: bool,
     pub alt_scroll: bool,
     pub synchronized_output: bool,
+    /// Mode 2031: report color-scheme changes with `CSI ? 997 ; 1|2 n`.
+    pub color_scheme_updates: bool,
 }
 
 /// A point in the terminal's history: `line` counts every line ever scrolled into
@@ -799,6 +801,15 @@ impl Terminal {
 
     pub fn rows(&self) -> usize {
         self.rows
+    }
+
+    /// Switches the palette; with mode 2031 set, a dark/light change is reported.
+    pub fn set_palette(&mut self, palette: colors::Palette) {
+        let changed = palette.is_dark() != self.palette.is_dark();
+        self.palette = palette;
+        if changed && self.modes.color_scheme_updates {
+            self.report_color_scheme();
+        }
     }
 
     pub fn take_responses(&mut self) -> Vec<u8> {
