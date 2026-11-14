@@ -1791,6 +1791,17 @@ impl App {
             return None;
         }
         let (row, col) = self.cell_at(self.mouse_pos)?;
+        if self.search.is_none()
+            && let Some(preedit) = s.composition.preedit()
+            && let Some((cursor_row, cursor_col)) = s.term.input_cursor_position()
+            && cell_in_preedit(
+                &preedit.layout(cursor_col, s.term.cols()),
+                cursor_row,
+                (row, col),
+            )
+        {
+            return None;
+        }
         s.term.link_at(s.term.viewport_to_point_signed(row, col))
     }
 
@@ -2036,6 +2047,14 @@ fn warn_vsync_unsupported(config: &config::Config, renderer: &Renderer) {
     if !config.vsync && !renderer.vsync_optional {
         diag!("terminal: vsync = false: this GPU surface only supports vsync; keeping it on");
     }
+}
+
+fn cell_in_preedit(
+    layout: &term_render::PreeditLayout,
+    preedit_row: usize,
+    (row, col): (isize, usize),
+) -> bool {
+    row == preedit_row as isize && (layout.column..layout.column + layout.width).contains(&col)
 }
 
 fn pointer_in_search_bar(
@@ -2437,6 +2456,7 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     self.write_input(text.as_bytes());
                 }
+                self.refresh_link();
                 self.update_ime_cursor_area();
             }
             WindowEvent::MouseInput { state, button, .. } => self.mouse_input(state, button),
@@ -2749,6 +2769,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn preedit_hides_the_cells_it_covers_from_link_hover() {
+        let preedit = term_render::Preedit {
+            text: "日本",
+            cursor: None,
+        };
+        let layout = preedit.layout(3, 10);
+        assert!(cell_in_preedit(&layout, 2, (2, 3)));
+        assert!(cell_in_preedit(&layout, 2, (2, 6)));
+        assert!(!cell_in_preedit(&layout, 2, (2, 2)));
+        assert!(!cell_in_preedit(&layout, 2, (2, 7)));
+        assert!(!cell_in_preedit(&layout, 2, (1, 4)));
+        assert!(!cell_in_preedit(&layout, 2, (-1, 4)));
     }
 
     #[test]
