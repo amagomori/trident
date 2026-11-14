@@ -49,6 +49,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 CFG = HERE / "cfg"
 TICK = os.sysconf("SC_CLK_TCK")
+LIVE = set()
 
 
 def default_bins():
@@ -163,6 +164,7 @@ class Term:
         self.proc = subprocess.Popen(TERMS[name](ARGS.bins[name], cmd), env=env(name), stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, start_new_session=True,
                                      cwd=self.dir)
+        LIVE.add(self)
 
     def wait_file(self, name, timeout=120):
         f = self.dir / name
@@ -202,6 +204,9 @@ class Term:
         return None
 
     def close(self):
+        LIVE.discard(self)
+        # snapshot first: helpers outside the launcher's group reparent to init once it exits
+        procs = tree(self.proc.pid)
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(self.proc.pid, sig)
@@ -213,7 +218,7 @@ class Term:
             except subprocess.TimeoutExpired:
                 pass
         # AppImage/wezterm may leave helpers in their own groups: kill whole tree
-        for p in tree(self.proc.pid):
+        for p in set(procs) | set(tree(self.proc.pid)):
             try:
                 os.kill(p, signal.SIGKILL)
             except ProcessLookupError:
@@ -551,6 +556,9 @@ if __name__ == "__main__":
                 r = TESTS[test](name)
             except Exception as e:
                 r = {"error": repr(e)}
+            finally:
+                for t in list(LIVE):
+                    t.close()
             print("   ", json.dumps(r)[:400], flush=True)
             results.setdefault(test, {})[name] = r
             path.write_text(json.dumps(results, indent=1))
