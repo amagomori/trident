@@ -663,18 +663,18 @@ mod tests {
         )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        let group = loop {
+        // Before exec the child still carries the test thread's name.
+        loop {
             pty.take_output();
-            if let Some(group) = pty.running_program() {
-                break group;
+            let name = pty
+                .running_program()
+                .and_then(crate::close_confirm::process_name);
+            if name.as_deref() == Some("sleep") {
+                break;
             }
             assert!(Instant::now() < deadline, "sleep never counted as running");
             std::thread::sleep(Duration::from_millis(20));
-        };
-        assert_eq!(
-            crate::close_confirm::process_name(group).as_deref(),
-            Some("sleep")
-        );
+        }
     }
 
     #[test]
