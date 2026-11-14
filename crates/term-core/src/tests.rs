@@ -1,5 +1,22 @@
 use super::*;
 
+#[test]
+fn input_cursor_ignores_visibility_but_tracks_viewport_and_alternate_screen() {
+    let mut t = Terminal::new(10, 3);
+    t.advance(b"\x1b[2;4H\x1b[?25l");
+    assert_eq!(t.cursor_position(), None);
+    assert_eq!(t.input_cursor_position(), Some((1, 3)));
+    t.advance(b"\x1b[?1049h\x1b[3;7H");
+    assert_eq!(t.input_cursor_position(), Some((2, 6)));
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.input_cursor_position(), Some((1, 3)));
+    t.advance(b"\x1b[3;1H\n\n\n");
+    t.scroll_display(3);
+    assert_eq!(t.input_cursor_position(), None);
+    t.scroll_to_bottom();
+    assert_eq!(t.input_cursor_position(), Some((2, 0)));
+}
+
 mod golden;
 
 #[test]

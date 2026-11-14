@@ -8,9 +8,11 @@ mod color;
 mod fallback;
 mod font;
 mod images;
+mod preedit;
 mod renderer;
 
 pub use font::{CellMetrics, FAMILY as BUNDLED_FONT_FAMILY, Fonts, REGULAR as BUNDLED_FONT, Style};
+pub use preedit::{Preedit, PreeditLayout};
 pub use renderer::{PADDING, Renderer};
 
 pub struct SearchOverlay<'a> {

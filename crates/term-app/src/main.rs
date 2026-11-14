@@ -5,6 +5,7 @@ mod drop_files;
 mod flow_control;
 #[cfg(any(target_os = "linux", test))]
 mod frame_clock;
+mod ime;
 mod input;
 mod latency;
 #[cfg(target_os = "macos")]
@@ -221,8 +222,9 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
 }
 
 struct Session {
-    scroll: PixelScroll,
+    composition: ime::Composition,
     ime_cursor_area: Option<[f32; 4]>,
+    scroll: PixelScroll,
     pty_cell: (f32, f32),
     window: Arc<Window>,
     renderer: Renderer,
@@ -868,8 +870,9 @@ impl App {
             }
         };
         Ok(Session {
-            scroll: PixelScroll::default(),
+            composition: ime::Composition::default(),
             ime_cursor_area: None,
+            scroll: PixelScroll::default(),
             pty_cell: cell,
             latency,
             window,
@@ -1118,6 +1121,7 @@ impl App {
             self.focused,
             banner.as_deref(),
             search.as_ref(),
+            s.composition.preedit().filter(|_| search.is_none()),
             Some(&mut pre_present),
         );
         if rendered {
@@ -1268,7 +1272,12 @@ impl App {
         };
         match action {
             Action::Search => {
-                self.search.get_or_insert_with(search::Search::default);
+                let search = self.search.get_or_insert_with(search::Search::default);
+                if let Some((text, cursor)) =
+                    self.session.as_mut().and_then(|s| s.composition.take())
+                {
+                    search.set_preedit(text, cursor);
+                }
                 self.update_ime_cursor_area();
                 if let Some(s) = &self.session {
                     s.window.request_redraw();
@@ -1411,11 +1420,20 @@ impl App {
             )
             .cursor_area
         } else {
-            let (row, col) = s.term.cursor_position().unwrap_or((0, 0));
+            let (row, col) = s
+                .term
+                .input_cursor_position()
+                .unwrap_or((s.term.rows() - 1, 0));
+            let col = s.composition.preedit().map_or(col, |p| {
+                let layout = p.layout(col, s.term.cols());
+                layout.caret.unwrap_or(layout.column)
+            });
             let pad = self.config.padding * s.window.scale_factor() as f32;
+            let size = s.window.inner_size();
             [
-                pad + col as f32 * m.width,
-                pad + row as f32 * m.height + s.scroll.offset as f32,
+                (pad + col as f32 * m.width).min((size.width as f32 - m.width).max(0.0)),
+                (pad + row as f32 * m.height + s.scroll.offset as f32)
+                    .min((size.height as f32 - m.height).max(0.0)),
                 m.width,
                 m.height,
             ]
@@ -1832,6 +1850,7 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
             return;
         }
+        self.update_ime_cursor_area();
         let mut deadline = None;
         if let Some(s) = &mut self.session {
             if sync_expired(s.synchronized_since, Instant::now()) {
@@ -1879,6 +1898,13 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 if let Some(s) = &mut self.session {
+                    if !focused {
+                        s.composition.clear();
+                        if let Some(search) = &mut self.search {
+                            search.clear_preedit();
+                        }
+                        s.ime_cursor_area = None;
+                    }
                     if s.term.modes.focus_events {
                         s.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
                     }
@@ -1889,6 +1915,14 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed || self.shortcut(&event) {
+                    return;
+                }
+                let find_preedit = self.search.as_ref().map(|f| f.preedit.as_str());
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| ime::holds_keys(&s.composition, find_preedit))
+                {
                     return;
                 }
                 if self.search.is_some() {
@@ -1909,7 +1943,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.write_input(&bytes);
                 }
             }
-            WindowEvent::Ime(Ime::Commit(text)) => {
+            WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
                 if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
                     search.insert(&text, &mut s.term);
                     s.scroll.reset();
@@ -1919,7 +1953,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.update_ime_cursor_area();
             }
-            WindowEvent::Ime(event) => {
+            WindowEvent::Ime(event) if self.search.is_some() => {
                 if let Some(search) = &mut self.search {
                     match event {
                         Ime::Preedit(text, cursor) => search.set_preedit(text, cursor),
@@ -1931,6 +1965,23 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(s) = &self.session {
                     s.window.request_redraw();
                 }
+            }
+            WindowEvent::Ime(event) => {
+                if let Some(s) = &mut self.session {
+                    s.composition.update(&event);
+                    if matches!(event, Ime::Enabled | Ime::Disabled) {
+                        s.ime_cursor_area = None;
+                    }
+                    if matches!(&event, Ime::Preedit(text, _) if !text.is_empty()) {
+                        s.term.scroll_to_bottom();
+                        s.scroll.reset();
+                    }
+                    s.window.request_redraw();
+                }
+                if let Ime::Commit(text) = event {
+                    self.write_input(text.as_bytes());
+                }
+                self.update_ime_cursor_area();
             }
             WindowEvent::MouseInput { state, button, .. } => self.mouse_input(state, button),
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
