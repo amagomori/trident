@@ -45,6 +45,9 @@ const MIN_RELEASE: usize = 4096;
 /// scan cost while keeping the table close to what the grid can still reference.
 const CELLS_PER_ENTRY: usize = 8;
 
+/// Share of a full table freed by dropping the links of the oldest history rows.
+const EVICT_FRACTION: usize = 8;
+
 /// A cache slot plus a 16-bit tag from other hash bits, so most misses are
 /// rejected without touching the stored bytes.
 #[derive(Clone, Copy)]
@@ -182,7 +185,19 @@ impl Terminal {
             return index;
         }
         if self.links.needs_release(limit) {
-            let released = self.release_links();
+            // A full table drops the links of the oldest history rows so new output keeps its links.
+            let keep = if self.links.len() >= limit {
+                limit - limit / EVICT_FRACTION
+            } else {
+                usize::MAX
+            };
+            self.release_links(keep);
+            if self.links.is_full(limit) {
+                self.compact_links();
+                if let Some(index) = self.links.position(id, uri, slot) {
+                    return index;
+                }
+            }
             let live = self.links.len() - self.links.free.len();
             let cells = [&self.primary, &self.alternate]
                 .iter()
@@ -190,12 +205,6 @@ impl Terminal {
                 .sum::<usize>()
                 * self.cols;
             self.links.next_release = (2 * live).max(cells / CELLS_PER_ENTRY);
-            if !released && self.links.is_full(limit) {
-                self.compact_links();
-                if let Some(index) = self.links.position(id, uri, slot) {
-                    return index;
-                }
-            }
         }
         if self.links.is_full(limit) {
             return 0;
@@ -203,15 +212,27 @@ impl Terminal {
         self.links.insert(id, uri, slot)
     }
 
-    fn release_links(&mut self) -> bool {
+    /// Releases the links no cell references. Once `keep` distinct links are referenced, walking
+    /// from the screens back through history, older history rows lose their links.
+    fn release_links(&mut self, keep: usize) -> bool {
         let mut used = vec![false; self.links.len() + 1];
         used[self.cursor.template.hyperlink as usize] = true;
+        let mut marked = 0;
         for screen in [&self.primary, &self.alternate] {
             if let Some(saved) = &screen.saved {
                 used[saved.cursor.template.hyperlink as usize] = true;
             }
-            for row in screen.lines.iter().chain(screen.scrollback.iter()) {
-                row.mark_hyperlinks(&mut used);
+            for row in &screen.lines {
+                marked += row.mark_hyperlinks(&mut used);
+            }
+        }
+        for screen in [&mut self.primary, &mut self.alternate] {
+            for row in screen.scrollback.iter_mut().rev() {
+                if marked < keep {
+                    marked += row.mark_hyperlinks(&mut used);
+                } else {
+                    row.hyperlinks_mut().for_each(|index| *index = 0);
+                }
             }
         }
         self.links.release(&used)
@@ -375,6 +396,7 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn cell_size() {
@@ -515,6 +537,26 @@ mod tests {
             t.link_at(Point { line: 2, col: 0 }).unwrap().uri,
             "file:///tmp/a"
         );
+    }
+
+    #[test]
+    fn narrowing_never_joins_a_url_that_was_not_printed() {
+        let body: String = ('a'..='z').chain('A'..='Z').cycle().take(200).collect();
+        for prefix in [0, 1, 5, 19, 79, 85, 99] {
+            for len in [70, 81, 99, 101, 150, 199] {
+                let uri = format!("https://wr9/{}", &body[..len]);
+                let mut t = Terminal::new(100, 6);
+                t.advance(format!("{}{uri} tail", " ".repeat(prefix)).as_bytes());
+                t.resize(80, 6);
+                for line in 0..t.history + 6 {
+                    for col in 0..80 {
+                        if let Some(link) = t.link_at(Point { line, col }) {
+                            assert_eq!(link.uri, uri, "prefix {prefix} len {len} at {line},{col}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -714,6 +756,45 @@ mod tests {
                 Some((k.as_bytes(), uri.as_bytes()))
             );
         }
+    }
+
+    #[test]
+    fn full_table_drops_the_oldest_history_links_to_keep_new_ones() {
+        let mut t = Terminal::new(80, 5);
+        let mut out = Vec::new();
+        for line in 0..7_000 {
+            for n in 0..10 {
+                write!(
+                    out,
+                    "\x1b]8;;https://e.com/{line}/{n}\x1b\\L\x1b]8;;\x1b\\ "
+                )
+                .unwrap();
+            }
+            out.extend_from_slice(b"\r\n");
+        }
+        t.advance(&out);
+        let last = t.history + 3;
+        let link = t
+            .link_at(Point {
+                line: last,
+                col: 18,
+            })
+            .unwrap();
+        assert_eq!(link.uri, "https://e.com/6999/9");
+        assert!(
+            t.link_at(Point {
+                line: t.first_line(),
+                col: 0
+            })
+            .is_none()
+        );
+        assert!(
+            t.link_at(Point {
+                line: t.history - 5000,
+                col: 0
+            })
+            .is_some()
+        );
     }
 
     #[test]

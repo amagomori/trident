@@ -224,13 +224,17 @@ impl Row {
         }
     }
 
-    pub(crate) fn mark_hyperlinks(&self, used: &mut [bool]) {
+    /// Marks the links the row references and returns how many were not marked yet.
+    pub(crate) fn mark_hyperlinks(&self, used: &mut [bool]) -> usize {
         let hidden = self.hidden.as_deref().map_or(&[][..], |h| &h.cells[..]);
+        let mut marked = 0;
         for cell in self.cells.iter().chain(hidden) {
-            if cell.hyperlink != 0 {
+            if cell.hyperlink != 0 && !used[cell.hyperlink as usize] {
                 used[cell.hyperlink as usize] = true;
+                marked += 1;
             }
         }
+        marked
     }
 
     pub(crate) fn hyperlinks_mut(&mut self) -> impl Iterator<Item = &mut u16> {
