@@ -1782,6 +1782,12 @@ impl App {
         ) {
             return None;
         }
+        let pad = self.config.padding * s.window.scale_factor() as f32;
+        if term_render::ledger_bar(&s.term, pad, s.scroll.offset as f32, s.fonts.metrics.height)
+            .is_some_and(|bar| bar.contains(self.mouse_pos.y as f32))
+        {
+            return None;
+        }
         if !pointer_in_grid(
             self.mouse_pos,
             self.config.padding as f64 * s.window.scale_factor(),
