@@ -66,15 +66,56 @@ fn short_name(pid: i32) -> Option<String> {
     })
 }
 
-/// Sends the app menu's Quit (Cmd-Q) through the window's close button and adds Close Window
-/// (Cmd-W), so both reach `WindowEvent::CloseRequested` and its confirmation instead of
-/// `terminate:` ending the process at once. Quit targets `window` itself, so it still works
-/// while the window is minimized. Needs winit's default menu to be installed.
+/// Whether quitting the app asks first; follows `confirm_close` across config reloads.
+#[cfg(target_os = "macos")]
+pub static QUIT_CONFIRMS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static QUIT_HOOK: std::cell::RefCell<Option<QuitHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(target_os = "macos")]
+struct QuitHook {
+    window: objc2::rc::Retained<objc2::runtime::AnyObject>,
+    running: Box<dyn Fn() -> bool>,
+}
+
+/// `applicationShouldTerminate:`, which every app quit (Cmd-Q, menu or Dock Quit, logout)
+/// asks: with a program running it cancels the quit and closes the window instead, so the
+/// close banner asks first.
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn should_terminate(
+    _this: *mut objc2::runtime::AnyObject,
+    _cmd: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) -> usize {
+    const NS_TERMINATE_CANCEL: usize = 0;
+    const NS_TERMINATE_NOW: usize = 1;
+    let confirms = QUIT_CONFIRMS.load(std::sync::atomic::Ordering::Relaxed);
+    QUIT_HOOK.with_borrow(|hook| match hook {
+        Some(hook) if confirms && (hook.running)() => {
+            // SAFETY: window is a live NSWindow and this runs on the main thread.
+            let _: () = unsafe {
+                objc2::msg_send![&*hook.window, performClose: std::ptr::null::<objc2::runtime::AnyObject>()]
+            };
+            NS_TERMINATE_CANCEL
+        }
+        _ => NS_TERMINATE_NOW,
+    })
+}
+
+/// Makes every app quit go through `window`'s close confirmation (see `should_terminate`) and
+/// adds Close Window (Cmd-W) to the app menu. Needs winit's application delegate and default
+/// menu to be installed.
 #[cfg(target_os = "macos")]
 #[cold]
-pub fn route_menu_quit_through_close(window: &winit::window::Window) {
+pub fn route_app_quit_through_close(
+    window: &winit::window::Window,
+    running: impl Fn() -> bool + 'static,
+) {
     use objc2::rc::{Allocated, Retained};
-    use objc2::runtime::{AnyObject, Sel};
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
     use objc2::{class, msg_send, sel};
     use objc2_foundation::NSString;
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -84,11 +125,32 @@ pub fn route_menu_quit_through_close(window: &winit::window::Window) {
     };
     // SAFETY: called on the main thread once the event loop runs; every message matches the
     // AppKit signature of NSApplication, NSMenu, NSMenuItem and NSView; ns_view is the live
-    // view of `window`.
+    // view of `window`, and should_terminate has the `Q@:@` signature it is added with.
     unsafe {
         let view: &AnyObject = handle.ns_view.cast().as_ref();
         let ns_window: Option<Retained<AnyObject>> = msg_send![view, window];
         let Some(ns_window) = ns_window else { return };
+        let Some(delegate) = AnyClass::get(c"WinitApplicationDelegate") else {
+            return;
+        };
+        let imp: Imp = std::mem::transmute(
+            should_terminate
+                as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> usize,
+        );
+        let added = objc2::ffi::class_addMethod(
+            delegate as *const AnyClass as *mut AnyClass,
+            sel!(applicationShouldTerminate:),
+            imp,
+            c"Q@:@".as_ptr(),
+        );
+        if !added.as_bool() {
+            return;
+        }
+        QUIT_HOOK.set(Some(QuitHook {
+            window: ns_window,
+            running: Box::new(running),
+        }));
+
         let app: Option<Retained<AnyObject>> = msg_send![class!(NSApplication), sharedApplication];
         let Some(app) = app else { return };
         let menubar: Option<Retained<AnyObject>> = msg_send![&*app, mainMenu];
@@ -103,8 +165,6 @@ pub fn route_menu_quit_through_close(window: &winit::window::Window) {
             let Some(item) = item else { continue };
             let action: Option<Sel> = msg_send![&*item, action];
             if action == Some(sel!(terminate:)) {
-                let _: () = msg_send![&*item, setAction: sel!(performClose:)];
-                let _: () = msg_send![&*item, setTarget: &*ns_window];
                 let title = NSString::from_str("Close Window");
                 let key = NSString::from_str("w");
                 let close: Allocated<AnyObject> = msg_send![class!(NSMenuItem), alloc];
