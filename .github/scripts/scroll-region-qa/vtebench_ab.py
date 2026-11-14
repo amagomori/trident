@@ -47,7 +47,7 @@ p.add_argument("--benchmarks", default="", help="comma list; default: every vteb
 p.add_argument("--out", default=os.path.expanduser("~/qa-vtebench_ab.json"))
 o = p.parse_args()
 
-vtebench = shutil.which(o.vtebench) or o.vtebench
+vtebench = os.path.abspath(shutil.which(o.vtebench) or o.vtebench)  # the terminal's shell starts elsewhere
 bench_root = os.path.join(os.path.abspath(os.path.expanduser(o.vtebench_dir)), "benchmarks")
 if not os.access(vtebench, os.X_OK) or not os.path.isdir(bench_root):
     sys.exit("need the vtebench binary (--vtebench) and a vtebench checkout (--vtebench-dir)")
