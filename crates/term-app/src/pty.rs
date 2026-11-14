@@ -20,7 +20,8 @@ const MIN_LINES: usize = 32 * 1024;
 const MAX_QUEUED: usize = 8 << 20;
 const READ_BUFFER: usize = 64 * 1024;
 /// How often the reader asks for the PTY's foreground process group while earlier output
-/// is still queued, instead of after every read.
+/// is still queued, instead of after every read. Reads with escape sequences, which can
+/// change the input modes a shell return resets, are always checked.
 const FOREGROUND_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Shell output read but not yet parsed, as one buffer: small reads (macOS returns about
@@ -73,14 +74,27 @@ struct Pending {
     checked_at: Option<Instant>,
     /// Start of the queued output read since the foreground group was last checked.
     unchecked_from: Option<usize>,
+    /// Whether the last read held an escape byte, so the next one may finish its sequence.
+    after_escape: bool,
 }
 
 impl Pending {
     /// Checks the foreground group for the next read, unless earlier output is still
     /// queued and was checked less than `FOREGROUND_INTERVAL` ago: the next check, at the
     /// latest when the output is taken, marks a return at the first unchecked read.
-    fn check_foreground(&mut self, now: Instant, shell: impl FnOnce() -> Option<bool>) -> bool {
-        if !self.bytes.is_empty()
+    /// Skipped reads hold no escape sequence, so a mark anywhere among them resets the
+    /// same modes as one at the exact read where the shell got the foreground back.
+    fn check_foreground(
+        &mut self,
+        now: Instant,
+        bytes: &[u8],
+        shell: impl FnOnce() -> Option<bool>,
+    ) -> bool {
+        let escape = memchr::memchr(0x1b, bytes).is_some();
+        let after_escape = std::mem::replace(&mut self.after_escape, escape);
+        if !escape
+            && !after_escape
+            && !self.bytes.is_empty()
             && self
                 .checked_at
                 .is_some_and(|at| now.duration_since(at) < FOREGROUND_INTERVAL)
@@ -316,8 +330,9 @@ impl Pty {
                             let read_bytes =
                                 queue.read_bytes.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
                             let mut p = queue.pending.lock().unwrap();
-                            let checked =
-                                p.check_foreground(Instant::now(), || queue.probe.shell());
+                            let checked = p.check_foreground(Instant::now(), &buf[..n], || {
+                                queue.probe.shell()
+                            });
                             if p.full() {
                                 // The UI may be holding off parsing until its next frame.
                                 pending.store(true, Ordering::Release);
@@ -543,7 +558,7 @@ mod tests {
     }
 
     fn read(pending: &mut Pending, at: Instant, bytes: &[u8], shell: Option<bool>) -> bool {
-        let checked = pending.check_foreground(at, || shell);
+        let checked = pending.check_foreground(at, bytes, || shell);
         pending.append(bytes, checked);
         checked
     }
@@ -644,5 +659,71 @@ mod tests {
         assert!(pending.take_output(start, || None).shell_returns.is_empty());
         read(&mut pending, start, b"prompt", Some(true));
         assert_eq!(pending.take_output(start, || Some(true)).shell_returns, [0]);
+    }
+
+    const MODES: &[u8] = b"\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h";
+
+    fn apply(output: &Output) -> term_core::Terminal {
+        let mut term = term_core::Terminal::new(20, 4);
+        let mut start = 0;
+        for &offset in &output.shell_returns {
+            term.advance(&output.bytes[start..offset]);
+            term.reset_input_modes();
+            start = offset;
+        }
+        term.advance(&output.bytes[start..]);
+        term
+    }
+
+    fn input_modes_on(term: &term_core::Terminal) -> bool {
+        term.modes.mouse != term_core::MouseMode::Off
+            || term.modes.sgr_mouse
+            || term.modes.focus_events
+            || term.modes.bracketed_paste
+    }
+
+    #[test]
+    fn modes_a_command_sets_at_the_end_of_a_flood_are_reset() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        let soon = FOREGROUND_INTERVAL / 4;
+        assert!(read(&mut pending, start, b"flood\n", Some(false)));
+        assert!(!read(&mut pending, start + soon, b"flood\n", Some(false)));
+        assert!(read(&mut pending, start + soon * 2, MODES, Some(false)));
+        assert!(read(&mut pending, start + soon * 3, b"$ ", Some(true)));
+        assert!(!read(&mut pending, start + soon * 3, b"ls", Some(false)));
+        let output = pending.take_output(start + soon * 3, || Some(false));
+        assert_eq!(output.shell_returns, [12 + MODES.len()]);
+        assert!(!input_modes_on(&apply(&output)));
+    }
+
+    #[test]
+    fn a_read_finishing_an_escape_sequence_is_checked() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        let (head, tail) = MODES.split_at(MODES.len() - 3);
+        assert!(read(&mut pending, start, b"flood\n", Some(false)));
+        assert!(read(&mut pending, start, head, Some(false)));
+        assert!(read(&mut pending, start, tail, Some(false)));
+        assert!(!read(&mut pending, start, b"$ ", Some(true)));
+        let output = pending.take_output(start, || Some(true));
+        assert_eq!(output.shell_returns, [6 + MODES.len()]);
+        assert!(!input_modes_on(&apply(&output)));
+    }
+
+    #[test]
+    fn a_prompt_enabling_paste_after_a_flood_keeps_it() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        read(&mut pending, start, MODES, Some(false));
+        read(&mut pending, start, b"flood\n", Some(false));
+        read(&mut pending, start, b"flood\n", Some(true));
+        assert!(read(&mut pending, start, b"\x1b[?2004h$ ", Some(true)));
+        let output = pending.take_output(start, || panic!("the last read was checked"));
+        assert_eq!(output.shell_returns, [MODES.len() + 6]);
+        let term = apply(&output);
+        assert!(term.modes.bracketed_paste);
+        assert_eq!(term.modes.mouse, term_core::MouseMode::Off);
+        assert!(!term.modes.focus_events);
     }
 }
