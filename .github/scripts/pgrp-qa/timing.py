@@ -12,8 +12,8 @@ main and head, shuffled, from the moment the command acts to the moment the desk
 
 Window title: Linux `xprop -spy`; macOS a JXA loop on System Events (needs Accessibility).
 Notification: Linux the D-Bus Notify call (`dbus-monitor`, needs the desktop session bus and
-a notification server, e.g. Plasma); macOS the app's `osascript display notification` child,
-polled every 20 ms (unbundled binary). Times are wall clock on the same machine.
+a notification server, e.g. Plasma); macOS the app's `osascript display notification` child
+(unbundled binary), found by listing the app's children every 2 ms. Times are wall clock on the same machine.
 
 Fails (exit 1) when, for any scenario, an expected event never arrives on head, or head's
 median latency exceeds main's by more than max(20 ms, 10%); for the notify scenarios the
@@ -23,7 +23,7 @@ moves a 6-run median by tens of ms between identical builds.
   python3 .github/scripts/pgrp-qa/timing.py --main ../t-main/target/release/terminal \
       --head ../t-head/target/release/terminal --runs 6 --out timing
 """
-import argparse, json, os, platform, random, re, shutil, signal, statistics, subprocess
+import argparse, ctypes, ctypes.util, json, os, platform, random, re, shutil, signal, statistics, subprocess
 import sys, tempfile, threading, time
 from pathlib import Path
 
@@ -162,6 +162,7 @@ for (;;) {
 class Mac:
     def __init__(self, env):
         self.env = env
+        self.libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib")
 
     def osa(self, script):
         subprocess.run(["osascript", "-e", script], capture_output=True, check=True)
@@ -194,11 +195,17 @@ class Mac:
         self.notes, self.stop_poll = [], threading.Event()
 
         def poll():
+            # The osascript child lives ~50 ms, so a pgrep loop can miss it; list the app's
+            # children through libproc every 2 ms instead.
+            seen, buf, name = set(), (ctypes.c_int * 256)(), ctypes.create_string_buffer(256)
             while not self.stop_poll.is_set():
-                r = subprocess.run(["pgrep", "-f", "display notification"], capture_output=True)
-                if r.returncode == 0 and (not self.notes or time.time() - self.notes[-1] > 1):
-                    self.notes.append(time.time())
-                time.sleep(0.02)
+                n = self.libproc.proc_listpids(6, pid, buf, ctypes.sizeof(buf)) // 4  # PROC_PPID_ONLY
+                for child in buf[:max(n, 0)]:
+                    if child and child not in seen and self.libproc.proc_name(child, name, 256) > 0 \
+                            and name.value == b"osascript":
+                        seen.add(child)
+                        self.notes.append(time.time())
+                time.sleep(0.002)
         threading.Thread(target=poll, daemon=True).start()
         time.sleep(0.5)
 
