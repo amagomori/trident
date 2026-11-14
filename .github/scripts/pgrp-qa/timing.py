@@ -16,7 +16,9 @@ a notification server, e.g. Plasma); macOS the app's `osascript display notifica
 polled every 20 ms (unbundled binary). Times are wall clock on the same machine.
 
 Fails (exit 1) when, for any scenario, an expected event never arrives on head, or head's
-median latency exceeds main's by more than max(20 ms, 10%).
+median latency exceeds main's by more than max(20 ms, 10%); for the notify scenarios the
+allowance is at least 100 ms (half the watcher's 200 ms poll), since the poll phase alone
+moves a 6-run median by tens of ms between identical builds.
 
   python3 .github/scripts/pgrp-qa/timing.py --main ../t-main/target/release/terminal \
       --head ../t-head/target/release/terminal --runs 6 --out timing
@@ -27,11 +29,12 @@ from pathlib import Path
 
 MAC = platform.system() == "Darwin"
 SCENARIOS = ["title-idle", "title-flood", "notify-quiet", "notify-flood"]
+NOTIFY_POLL_MS = 200
 RUN_SH = r"""#!/bin/bash
 set -m
 cd "$1"
 exec 9<>fifo
-while [ ! -e go ]; do read -t 0.05 -u 9 _; done
+while [ ! -e go ]; do sleep 0.05; done
 python3 fixture.py "$2"
 while :; do read -t 60 -u 9 _; done
 """
@@ -163,11 +166,30 @@ class Mac:
     def osa(self, script):
         subprocess.run(["osascript", "-e", script], capture_output=True, check=True)
 
+    def frontmost_pid(self):
+        return int(subprocess.run(["osascript", "-e", 'tell application "System Events" to get unix id of '
+                                   'first process whose frontmost is true'], capture_output=True, text=True).stdout
+                   or 0)
+
     def start(self, pid, unfocus):
-        self.osa(f'tell application "System Events" to set frontmost of (first process whose unix id is {pid}) to true')
+        proc = f'(first process whose unix id is {pid})'
+        end = time.monotonic() + 15
+        while subprocess.run(["osascript", "-e", f'tell application "System Events" to count windows of {proc}'],
+                             capture_output=True, text=True).stdout.strip() in ("", "0"):
+            if time.monotonic() > end:
+                raise TimeoutError("app window")
+            time.sleep(0.1)
+        self.osa(f'tell application "System Events" to set frontmost of {proc} to true')
         time.sleep(1)
         if unfocus:
-            self.osa('tell application "Finder" to activate')
+            # A launching app can activate itself after Finder does; it must stay unfocused.
+            for _ in range(10):
+                self.osa('tell application "Finder" to activate')
+                time.sleep(0.5)
+                if self.frontmost_pid() != pid:
+                    break
+            else:
+                raise RuntimeError("could not move focus away from the app")
         self.titles = Watch(["osascript", "-l", "JavaScript", "-e", JXA % pid])
         self.notes, self.stop_poll = [], threading.Event()
 
@@ -263,7 +285,8 @@ def main():
             stats[label] = (statistics.median(lat) if lat else float("nan"), max(lat, default=float("nan")),
                             sum(r["complete"] for r in rs), len(rs))
         m, h = stats["main"], stats["head"]
-        bad = h[2] < h[3] or not h[0] <= m[0] + max(20, 0.1 * m[0])
+        allow = max(20, 0.1 * m[0], NOTIFY_POLL_MS / 2 if scenario.startswith("notify") else 0)
+        bad = h[2] < h[3] or not h[0] <= m[0] + allow
         failed |= bad
         print(f"{scenario:13s}  {m[0]:7.1f}/{m[1]:7.1f}   {h[0]:7.1f}/{h[1]:7.1f}   {h[2]}/{h[3]} (main {m[2]}/{m[3]})"
               f"   {'FAIL' if bad else 'ok'}")

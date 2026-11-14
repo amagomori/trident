@@ -46,7 +46,7 @@ if MAC:
     class _Timebase(ctypes.Structure):
         _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
 
-    _libc = ctypes.CDLL(ctypes.util.find_library("c"))
+    _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
     _tb = _Timebase()
     _libc.mach_timebase_info(ctypes.byref(_tb))
 
