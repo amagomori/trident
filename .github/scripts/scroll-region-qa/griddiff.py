@@ -11,7 +11,7 @@ output at 100x30 (vtebench_tty.py copies run against a 100x30 pty; each setup's 
 benchmark's size are checked; --vtebench-dir '' skips them), and --seeds random streams mixing
 DECSTBM regions, scrolls (LF/RI/SU/SD/IL/DL), erases (EL/ED/ECH/DCH/ICH), SGR backgrounds (BCE),
 wide chars, wraps, alt-screen switches and resizes. Exits 2 if a dumper did not process a stream or
-a vtebench script did not emit what it must. --out (default $TMPDIR/griddiff) keeps the dumper
+a vtebench script did not emit what it must. --out (default ~/qa-griddiff) keeps the dumper
 builds and failing streams."""
 import argparse
 import hashlib
@@ -31,7 +31,7 @@ p.add_argument("--head", required=True)
 p.add_argument("--fixtures", default="")
 p.add_argument("--vtebench-dir", default=os.path.expanduser("~/vtebench"))
 p.add_argument("--seeds", type=int, default=200)
-p.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "griddiff"))
+p.add_argument("--out", default=os.path.expanduser("~/qa-griddiff"))
 o = p.parse_args()
 out = os.path.abspath(o.out)
 os.makedirs(out, exist_ok=True)

@@ -83,5 +83,5 @@ smoke test for regions and splits, not a detector for the reset bound.
 - `vtebench_ab.py` and `griddiff.py` run patched copies of vtebench's scripts (`vtebench_tty.py`):
   upstream's `tty="/dev/$(ps -o tty= -p $$)"` breaks on macOS (BSD ps pads the name) and with no
   tty, and the setups then emit `ESC[1;0r` instead of their small region, still exiting 0.
-- `griddiff.py` keeps its dumper builds and failing streams in `--out` (default `$TMPDIR/griddiff`).
-- `vtebench_ab.py` writes its results to `--out` (default `$TMPDIR/vtebench_ab.json`).
+- `griddiff.py` keeps its dumper builds and failing streams in `--out` (default `~/qa-griddiff`).
+- `vtebench_ab.py` writes its results to `--out` (default `~/qa-vtebench_ab.json`).

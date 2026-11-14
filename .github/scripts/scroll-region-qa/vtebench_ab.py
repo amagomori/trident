@@ -44,7 +44,7 @@ p.add_argument("--rounds", type=int, default=8)
 p.add_argument("--max-secs", type=int, default=3)
 p.add_argument("--min-samples", type=int, default=3)
 p.add_argument("--benchmarks", default="", help="comma list; default: every vtebench benchmark")
-p.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "vtebench_ab.json"))
+p.add_argument("--out", default=os.path.expanduser("~/qa-vtebench_ab.json"))
 o = p.parse_args()
 
 vtebench = shutil.which(o.vtebench) or o.vtebench
