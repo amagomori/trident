@@ -266,6 +266,30 @@ mod tests {
     }
 
     #[test]
+    fn capped_results_select_newest_and_preserve_navigation() {
+        let limit = term_core::search::MATCH_LIMIT;
+        let mut term = Terminal::new(limit + 4, 1);
+        term.advance("a".repeat(limit + 1).as_bytes());
+        let mut search = Search::default();
+        search.insert("a", &mut term);
+        assert_eq!(search.current, Some(limit - 1));
+        assert_eq!(search.matches[limit - 1].start.col, limit);
+        assert_eq!(search.status(), "10000/10000  [plain]");
+        search.step(&mut term, false);
+        assert_eq!(search.current, Some(0));
+        assert_eq!(search.matches[0].start.col, 1);
+        term.advance(b"a");
+        search.refresh(&mut term, false);
+        assert_eq!(search.current, Some(limit - 1));
+        assert_eq!(search.matches[limit - 1].start.col, limit + 1);
+        search.step(&mut term, true);
+        term.advance(b"a");
+        search.refresh(&mut term, false);
+        assert_eq!(search.matches[search.current.unwrap()].start.col, limit);
+        assert_eq!(search.status(), "9998/10000  [plain]");
+    }
+
+    #[test]
     fn clipboard_text_is_single_line_without_controls() {
         let mut search = Search::default();
         let mut term = Terminal::new(20, 2);
