@@ -1,0 +1,19 @@
+size=8x2 active=primary
+cursor row=1 col=6 visible=true shape=block pending_wrap=false
+cursor attributes: fg=index(2) bg=default-bg flags=[]
+scroll_region=0..=1 history=0 display_offset=0
+primary:
+  row 0 wrap=false text="shell   "
+    cells 0..8: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="     !  "
+    cells 0..5: fg=default-fg bg=default-bg flags=[]
+    cells 5..6: fg=index(2) bg=default-bg flags=[]
+    cells 6..8: fg=default-fg bg=default-bg flags=[]
+scrollback (oldest first):
+alternate:
+  row 0 wrap=false text="        "
+    cells 0..8: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="  ALT   "
+    cells 0..2: fg=default-fg bg=default-bg flags=[]
+    cells 2..5: fg=index(2) bg=default-bg flags=[]
+    cells 5..8: fg=default-fg bg=default-bg flags=[]
