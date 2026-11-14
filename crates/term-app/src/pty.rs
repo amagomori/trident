@@ -8,6 +8,7 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// Output the reader thread queues before it waits for the UI, once it also holds
 /// `MIN_LINES` lines. That many lines is well past a screen plus default scrollback, so a
@@ -18,6 +19,13 @@ const MIN_LINES: usize = 32 * 1024;
 /// parses per wake-up, so huge bursts can't starve rendering.
 const MAX_QUEUED: usize = 8 << 20;
 const READ_BUFFER: usize = 64 * 1024;
+/// How often the reader asks for the PTY's foreground process group while earlier output
+/// is still queued, instead of after every read. Reads with escape sequences, which can
+/// change the input modes a shell return resets, are always checked.
+const FOREGROUND_INTERVAL: Duration = Duration::from_millis(5);
+/// Reads starting within this many bytes of an escape byte are always checked too, since
+/// they may finish a sequence split across reads.
+const ESCAPE_TAIL: usize = 64;
 
 /// Shell output read but not yet parsed, as one buffer: small reads (macOS returns about
 /// 1 KiB per read) still reach the parser as one batch.
@@ -27,6 +35,34 @@ struct Queue {
     read_bytes: AtomicU64,
     pending: Mutex<Pending>,
     room: Condvar,
+    probe: Probe,
+}
+
+/// Asks whether the shell itself is the PTY's foreground process group.
+#[derive(Default)]
+struct Probe {
+    #[cfg(unix)]
+    fd: Option<std::os::fd::OwnedFd>,
+    shell: Option<u32>,
+}
+
+impl Probe {
+    fn shell(&self) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            let fd = self.fd.as_ref()?;
+            // SAFETY: fd is a PTY master descriptor owned by this probe.
+            let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+            self.shell
+                .filter(|_| group > 0)
+                .map(|pid| group as u32 == pid)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.shell;
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -37,18 +73,65 @@ struct Pending {
     shell_returns: Vec<usize>,
     lines: usize,
     closed: bool,
+    foreground: Foreground,
+    checked_at: Option<Instant>,
+    /// Start of the queued output read since the foreground group was last checked.
+    unchecked_from: Option<usize>,
+    /// Bytes read since the last escape byte, if any.
+    since_escape: Option<usize>,
 }
 
 impl Pending {
-    fn append(&mut self, bytes: &[u8], shell_returned: bool) {
-        if shell_returned {
-            self.shell_returns.push(self.bytes.len());
+    /// Checks the foreground group for the next read, unless earlier output is still
+    /// queued and was checked less than `FOREGROUND_INTERVAL` ago: the next check, at the
+    /// latest when the output is taken, marks a return at the first unchecked read.
+    /// Skipped reads hold no escape sequence, so a mark anywhere among them resets the
+    /// same modes as one at the exact read where the shell got the foreground back.
+    fn check_foreground(
+        &mut self,
+        now: Instant,
+        bytes: &[u8],
+        shell: impl FnOnce() -> Option<bool>,
+    ) -> bool {
+        let open = self.since_escape.is_some_and(|n| n < ESCAPE_TAIL);
+        let escape = memchr::memrchr(0x1b, bytes);
+        self.since_escape = match escape {
+            Some(at) => Some(bytes.len() - at - 1),
+            None => self.since_escape.map(|n| n.saturating_add(bytes.len())),
+        };
+        if escape.is_none()
+            && !open
+            && !self.bytes.is_empty()
+            && self
+                .checked_at
+                .is_some_and(|at| now.duration_since(at) < FOREGROUND_INTERVAL)
+        {
+            return false;
+        }
+        self.sample_foreground(now, shell());
+        true
+    }
+
+    fn sample_foreground(&mut self, now: Instant, shell: Option<bool>) {
+        self.checked_at = Some(now);
+        let from = self.unchecked_from.take().unwrap_or(self.bytes.len());
+        if self.foreground.sample(shell) {
+            self.shell_returns.push(from);
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8], checked: bool) {
+        if !checked && self.unchecked_from.is_none() {
+            self.unchecked_from = Some(self.bytes.len());
         }
         self.bytes.extend_from_slice(bytes);
         self.lines += bytes.iter().filter(|&&b| b == b'\n').count();
     }
 
-    fn take_output(&mut self) -> Output {
+    fn take_output(&mut self, now: Instant, shell: impl FnOnce() -> Option<bool>) -> Output {
+        if self.unchecked_from.is_some() {
+            self.sample_foreground(now, shell());
+        }
         self.lines = 0;
         Output {
             bytes: std::mem::take(&mut self.bytes),
@@ -187,10 +270,19 @@ impl Pty {
             .master
             .take_writer()
             .map_err(|e| format!("cannot write pty: {e}"))?;
-        let output = Arc::new(Queue::default());
+        let output = Arc::new(Queue {
+            probe: Probe {
+                #[cfg(unix)]
+                fd: foreground_fd,
+                shell: shell_pid,
+            },
+            ..Default::default()
+        });
         let writer_queue = output.clone();
         #[cfg(unix)]
-        let writer_fd = foreground_fd
+        let writer_fd = output
+            .probe
+            .fd
             .as_ref()
             .map(|fd| fd.try_clone())
             .transpose()
@@ -237,7 +329,6 @@ impl Pty {
             .name("pty-reader".into())
             .spawn(move || {
                 let mut buf = vec![0u8; READ_BUFFER];
-                let mut foreground = Foreground::default();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
@@ -245,20 +336,10 @@ impl Pty {
                             let sequence = queue.read_sequence.fetch_add(1, Ordering::SeqCst) + 1;
                             let read_bytes =
                                 queue.read_bytes.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
-                            #[cfg(unix)]
-                            let shell = foreground_fd.as_ref().and_then(|fd| {
-                                let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
-                                shell_pid
-                                    .filter(|_| group > 0)
-                                    .map(|pid| group as u32 == pid)
-                            });
-                            #[cfg(not(unix))]
-                            let shell = {
-                                let _ = shell_pid;
-                                None
-                            };
-                            let shell_returned = foreground.sample(shell);
                             let mut p = queue.pending.lock().unwrap();
+                            let checked = p.check_foreground(Instant::now(), &buf[..n], || {
+                                queue.probe.shell()
+                            });
                             if p.full() {
                                 // The UI may be holding off parsing until its next frame.
                                 pending.store(true, Ordering::Release);
@@ -272,7 +353,7 @@ impl Pty {
                             }
                             p.sequence = sequence;
                             p.read_bytes = read_bytes;
-                            p.append(&buf[..n], shell_returned);
+                            p.append(&buf[..n], checked);
                             drop(p);
                             if !pending.swap(true, Ordering::AcqRel) {
                                 wake(false);
@@ -330,7 +411,7 @@ impl Pty {
     /// Everything the shell wrote since the last call.
     pub fn take_output(&mut self) -> Output {
         let mut p = self.output.pending.lock().unwrap();
-        let output = p.take_output();
+        let output = p.take_output(Instant::now(), || self.output.probe.shell());
         if !output.bytes.is_empty() {
             if let Some(boundary) = &self.pause_boundary {
                 self.flow
@@ -483,21 +564,184 @@ mod tests {
         assert!(!foreground.sample(Some(true)));
     }
 
+    fn read(pending: &mut Pending, at: Instant, bytes: &[u8], shell: Option<bool>) -> bool {
+        let checked = pending.check_foreground(at, bytes, || shell);
+        pending.append(bytes, checked);
+        checked
+    }
+
     #[test]
     fn queue_offsets_follow_chunks_and_restart_after_drain() {
         let mut pending = Pending::default();
-        pending.append(b"away\n", false);
-        pending.append(b"prompt", true);
-        pending.append(b"away", false);
-        pending.append(b"prompt", true);
-        let output = pending.take_output();
+        let start = Instant::now();
+        let at = |step: u32| start + FOREGROUND_INTERVAL * step;
+        read(&mut pending, at(0), b"away\n", Some(false));
+        read(&mut pending, at(1), b"prompt", Some(true));
+        read(&mut pending, at(2), b"away", Some(false));
+        read(&mut pending, at(3), b"prompt", Some(true));
+        let output = pending.take_output(at(3), || panic!("every read was checked"));
         assert_eq!(output.bytes, b"away\npromptawayprompt");
         assert_eq!(output.shell_returns, [5, 15]);
         assert_eq!(pending.lines, 0);
-        let empty = pending.take_output();
+        let empty = pending.take_output(at(3), || panic!("nothing was read"));
         assert!(empty.bytes.is_empty());
         assert!(empty.shell_returns.is_empty());
-        pending.append(b"prompt", true);
-        assert_eq!(pending.take_output().shell_returns, [0]);
+        read(&mut pending, at(4), b"away", Some(false));
+        pending.take_output(at(4), || panic!("every read was checked"));
+        read(&mut pending, at(5), b"prompt", Some(true));
+        assert_eq!(pending.take_output(at(5), || None).shell_returns, [0]);
+    }
+
+    #[test]
+    fn queued_command_output_is_checked_once_per_interval() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        let soon = FOREGROUND_INTERVAL / 4;
+        assert!(read(&mut pending, start, b"cmd", Some(false)));
+        assert!(!read(&mut pending, start + soon, b"out", Some(true)));
+        assert!(!read(&mut pending, start + soon * 2, b"prompt", Some(true)));
+        assert!(read(
+            &mut pending,
+            start + FOREGROUND_INTERVAL,
+            b"$ ",
+            Some(true)
+        ));
+        let output = pending.take_output(start + FOREGROUND_INTERVAL, || {
+            panic!("the last read was checked")
+        });
+        assert_eq!(output.bytes, b"cmdoutprompt$ ");
+        assert_eq!(output.shell_returns, [3]);
+    }
+
+    #[test]
+    fn taking_unchecked_output_marks_a_return_before_it() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        read(&mut pending, start, b"cmd", Some(false));
+        read(&mut pending, start, b"out", Some(false));
+        read(&mut pending, start, b"prompt", Some(true));
+        let output = pending.take_output(start, || Some(true));
+        assert_eq!(output.bytes, b"cmdoutprompt");
+        assert_eq!(output.shell_returns, [3]);
+        assert!(read(&mut pending, start, b"$ ", Some(true)));
+        assert!(pending.take_output(start, || None).shell_returns.is_empty());
+    }
+
+    #[test]
+    fn reads_are_checked_whenever_nothing_is_queued() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        assert!(read(&mut pending, start, b"$ ", Some(true)));
+        assert!(!read(&mut pending, start, b"ls", Some(false)));
+        let output = pending.take_output(start, || Some(false));
+        assert!(output.shell_returns.is_empty());
+        assert!(read(&mut pending, start, b"out", Some(false)));
+        assert!(!read(&mut pending, start, b"more", Some(true)));
+        assert_eq!(pending.take_output(start, || Some(true)).shell_returns, [3]);
+    }
+
+    #[test]
+    fn a_command_started_between_checks_still_marks_its_return() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        read(&mut pending, start, b"$ ", Some(true));
+        read(&mut pending, start, b"vim", Some(false));
+        assert!(
+            pending
+                .take_output(start, || Some(false))
+                .shell_returns
+                .is_empty()
+        );
+        read(&mut pending, start, b"screen", Some(false));
+        read(&mut pending, start, b"$ ", Some(true));
+        assert_eq!(pending.take_output(start, || Some(true)).shell_returns, [6]);
+    }
+
+    #[test]
+    fn an_unavailable_group_neither_marks_nor_forgets_a_command() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        read(&mut pending, start, b"cmd", Some(false));
+        read(&mut pending, start, b"out", None);
+        assert!(pending.take_output(start, || None).shell_returns.is_empty());
+        read(&mut pending, start, b"prompt", Some(true));
+        assert_eq!(pending.take_output(start, || Some(true)).shell_returns, [0]);
+    }
+
+    const MODES: &[u8] = b"\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h";
+
+    fn apply(output: &Output) -> term_core::Terminal {
+        let mut term = term_core::Terminal::new(20, 4);
+        let mut start = 0;
+        for &offset in &output.shell_returns {
+            term.advance(&output.bytes[start..offset]);
+            term.reset_input_modes();
+            start = offset;
+        }
+        term.advance(&output.bytes[start..]);
+        term
+    }
+
+    fn input_modes_on(term: &term_core::Terminal) -> bool {
+        term.modes.mouse != term_core::MouseMode::Off
+            || term.modes.sgr_mouse
+            || term.modes.focus_events
+            || term.modes.bracketed_paste
+    }
+
+    #[test]
+    fn modes_a_command_sets_at_the_end_of_a_flood_are_reset() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        let soon = FOREGROUND_INTERVAL / 4;
+        assert!(read(&mut pending, start, b"flood\n", Some(false)));
+        assert!(!read(&mut pending, start + soon, b"flood\n", Some(false)));
+        assert!(read(&mut pending, start + soon * 2, MODES, Some(false)));
+        assert!(read(&mut pending, start + soon * 3, b"$ ", Some(true)));
+        read(&mut pending, start + soon * 3, b"ls", Some(false));
+        let output = pending.take_output(start + soon * 3, || Some(false));
+        assert_eq!(output.shell_returns, [12 + MODES.len()]);
+        assert!(!input_modes_on(&apply(&output)));
+    }
+
+    #[test]
+    fn a_read_finishing_an_escape_sequence_is_checked() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        let (head, rest) = MODES.split_at(MODES.len() - 6);
+        let (middle, tail) = rest.split_at(3);
+        assert!(read(&mut pending, start, b"flood\n", Some(false)));
+        assert!(read(&mut pending, start, head, Some(false)));
+        assert!(read(&mut pending, start, middle, Some(false)));
+        assert!(read(&mut pending, start, tail, Some(false)));
+        assert!(read(&mut pending, start, b"$ ", Some(true)));
+        let output = pending.take_output(start, || panic!("the last read was checked"));
+        assert_eq!(output.shell_returns, [6 + MODES.len()]);
+        assert!(!input_modes_on(&apply(&output)));
+    }
+
+    #[test]
+    fn plain_output_well_past_an_escape_is_throttled_again() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        assert!(read(&mut pending, start, MODES, Some(false)));
+        assert!(read(&mut pending, start, &[b'x'; ESCAPE_TAIL], Some(false)));
+        assert!(!read(&mut pending, start, b"x", Some(false)));
+    }
+
+    #[test]
+    fn a_prompt_enabling_paste_after_a_flood_keeps_it() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        read(&mut pending, start, MODES, Some(false));
+        read(&mut pending, start, b"flood\n", Some(false));
+        read(&mut pending, start, b"flood\n", Some(true));
+        assert!(read(&mut pending, start, b"\x1b[?2004h$ ", Some(true)));
+        let output = pending.take_output(start, || panic!("the last read was checked"));
+        assert_eq!(output.shell_returns, [MODES.len() + 6]);
+        let term = apply(&output);
+        assert!(term.modes.bracketed_paste);
+        assert_eq!(term.modes.mouse, term_core::MouseMode::Off);
+        assert!(!term.modes.focus_events);
     }
 }
