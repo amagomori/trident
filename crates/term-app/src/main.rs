@@ -1416,7 +1416,11 @@ impl App {
                 }
                 s.window.request_redraw();
             }
-            _ => event_loop.exit(),
+            _ => {
+                if !close_confirm::answer_quit(true) {
+                    event_loop.exit();
+                }
+            }
         }
     }
 
@@ -1425,9 +1429,14 @@ impl App {
     fn confirm_close_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
         use winit::keyboard::NamedKey;
         match event.logical_key {
-            Key::Named(NamedKey::Enter) => event_loop.exit(),
+            Key::Named(NamedKey::Enter) => {
+                if !close_confirm::answer_quit(true) {
+                    event_loop.exit();
+                }
+            }
             Key::Named(NamedKey::Escape) => {
                 self.pending_close = None;
+                close_confirm::answer_quit(false);
                 if let Some(s) = &self.session {
                     s.window.request_redraw();
                 }
