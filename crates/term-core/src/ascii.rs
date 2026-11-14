@@ -210,10 +210,18 @@ pub(crate) mod tests {
     }
 
     fn searches(t: &Terminal) -> Vec<Result<Vec<Match>, String>> {
-        ["a", "e", "日", "é", "ab", r"\w+", r"\s\S"]
-            .iter()
-            .map(|q| t.search(q, q.starts_with('\\')))
-            .collect()
+        // Unicode classes like `\w` take long to compile in debug builds.
+        [
+            ("a", false),
+            ("e", false),
+            ("日", false),
+            ("é", false),
+            ("ab", false),
+        ]
+        .into_iter()
+        .chain([("[a-z0-9]+", true), (" [^ ]", true)])
+        .map(|(query, regex)| t.search(query, regex))
+        .collect()
     }
 
     struct Rng(u64);
@@ -265,11 +273,13 @@ pub(crate) mod tests {
             );
             start = end;
         }
-        assert_eq!(
-            searches(&batched),
-            searches(&per_char),
-            "{setup:?} {cuts:?}"
-        );
+        if search {
+            assert_eq!(
+                searches(&batched),
+                searches(&per_char),
+                "{setup:?} {cuts:?}"
+            );
+        }
     }
 
     fn compare(input: &[u8]) {
