@@ -202,20 +202,22 @@ impl Perform for Terminal {
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
             [b"8", attributes, rest @ ..] if !rest.is_empty() => {
-                let uri = rest
-                    .iter()
-                    .map(|p| String::from_utf8_lossy(p))
-                    .collect::<Vec<_>>()
-                    .join(";");
-                let id = String::from_utf8_lossy(attributes)
-                    .split(':')
-                    .find_map(|p| p.strip_prefix("id="))
-                    .unwrap_or("")
-                    .to_owned();
+                let uri = match rest {
+                    [uri] => std::borrow::Cow::Borrowed(*uri),
+                    _ => std::borrow::Cow::Owned(rest.join(&b';')),
+                };
                 self.cursor.template.hyperlink = if uri.is_empty() {
                     0
                 } else {
-                    self.intern_link((id, uri), u16::MAX as usize)
+                    let id = attributes
+                        .split(|&b| b == b':')
+                        .find_map(|p| p.strip_prefix(b"id="))
+                        .unwrap_or(b"");
+                    self.intern_link(
+                        &String::from_utf8_lossy(id),
+                        &String::from_utf8_lossy(&uri),
+                        u16::MAX as usize,
+                    )
                 };
             }
             [b"133", mark, args @ ..] => {

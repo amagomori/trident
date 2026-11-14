@@ -13,9 +13,113 @@ impl Link {
     }
 }
 
+/// Interned OSC 8 `(id, uri)` pairs, indexed from 1, stored in one string with an
+/// open-addressing index so lookups never allocate.
+#[derive(Default)]
+pub(crate) struct LinkTable {
+    text: String,
+    spans: Vec<Span>,
+    slots: Vec<u16>,
+    hasher: std::hash::RandomState,
+}
+
+struct Span {
+    start: usize,
+    id_len: u32,
+    uri_len: u32,
+    hash: u64,
+}
+
+impl LinkTable {
+    pub(crate) fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    pub(crate) fn get(&self, index: u16) -> Option<(&str, &str)> {
+        let span = self.spans.get((index as usize).checked_sub(1)?)?;
+        let mid = span.start + span.id_len as usize;
+        Some((
+            &self.text[span.start..mid],
+            &self.text[mid..mid + span.uri_len as usize],
+        ))
+    }
+
+    fn hash(&self, id: &str, uri: &str) -> u64 {
+        std::hash::BuildHasher::hash_one(&self.hasher, (id, uri))
+    }
+
+    pub(crate) fn find(&self, id: &str, uri: &str) -> Option<u16> {
+        let hash = self.hash(id, uri);
+        let mask = self.slots.len().wrapping_sub(1);
+        let mut slot = hash as usize & mask;
+        while let Some(&index) = self.slots.get(slot).filter(|&&index| index != 0) {
+            if self.spans[index as usize - 1].hash == hash && self.get(index) == Some((id, uri)) {
+                return Some(index);
+            }
+            slot = (slot + 1) & mask;
+        }
+        None
+    }
+
+    pub(crate) fn push(&mut self, id: &str, uri: &str) -> u16 {
+        let hash = self.hash(id, uri);
+        self.insert(id, uri, hash)
+    }
+
+    fn insert(&mut self, id: &str, uri: &str, hash: u64) -> u16 {
+        self.spans.push(Span {
+            start: self.text.len(),
+            id_len: id.len() as u32,
+            uri_len: uri.len() as u32,
+            hash,
+        });
+        self.text.push_str(id);
+        self.text.push_str(uri);
+        let index = self.spans.len() as u16;
+        if self.slots.len() < self.spans.len() * 2 {
+            self.slots = vec![0; (self.spans.len() * 2).next_power_of_two().max(16)];
+            for index in 1..=index {
+                self.place(index);
+            }
+        } else {
+            self.place(index);
+        }
+        index
+    }
+
+    fn place(&mut self, index: u16) {
+        let mask = self.slots.len() - 1;
+        let mut slot = self.spans[index as usize - 1].hash as usize & mask;
+        while self.slots[slot] != 0 {
+            slot = (slot + 1) & mask;
+        }
+        self.slots[slot] = index;
+    }
+
+    /// Keeps the entries marked in `used` (by index), renumbered in order, and
+    /// returns the old-to-new index map.
+    pub(crate) fn compact(&mut self, used: &[bool]) -> Vec<u16> {
+        let fresh = LinkTable {
+            text: String::new(),
+            spans: Vec::new(),
+            slots: vec![0; self.slots.len()],
+            hasher: self.hasher.clone(),
+        };
+        let old = std::mem::replace(self, fresh);
+        let mut remap = vec![0; used.len()];
+        for index in 1..=old.len() as u16 {
+            if used[index as usize] {
+                let (id, uri) = old.get(index).unwrap();
+                remap[index as usize] = self.insert(id, uri, old.spans[index as usize - 1].hash);
+            }
+        }
+        remap
+    }
+}
+
 impl Terminal {
-    pub(crate) fn intern_link(&mut self, key: (String, String), limit: usize) -> u16 {
-        if let Some(&index) = self.link_indices.get(&key) {
+    pub(crate) fn intern_link(&mut self, id: &str, uri: &str, limit: usize) -> u16 {
+        if let Some(index) = self.links.find(id, uri) {
             return index;
         }
         if self.links.len() >= limit {
@@ -24,10 +128,7 @@ impl Terminal {
         if self.links.len() >= limit {
             return 0;
         }
-        let index = (self.links.len() + 1) as u16;
-        self.links.push(key.clone());
-        self.link_indices.insert(key, index);
-        index
+        self.links.push(id, uri)
     }
 
     fn visit_hyperlinks(&mut self, mut visit: impl FnMut(&mut u16)) {
@@ -47,17 +148,7 @@ impl Terminal {
     fn compact_links(&mut self) {
         let mut used = vec![false; self.links.len() + 1];
         self.visit_hyperlinks(|index| used[*index as usize] = true);
-        let mut remap = vec![0; used.len()];
-        let old = std::mem::take(&mut self.links);
-        self.link_indices.clear();
-        for (i, key) in old.into_iter().enumerate() {
-            if used[i + 1] {
-                let index = (self.links.len() + 1) as u16;
-                remap[i + 1] = index;
-                self.links.push(key.clone());
-                self.link_indices.insert(key, index);
-            }
-        }
+        let remap = self.links.compact(&used);
         self.visit_hyperlinks(|index| *index = remap[*index as usize]);
     }
 
@@ -97,7 +188,7 @@ impl Terminal {
                 end += 1;
             }
             return Some(Link {
-                uri: self.links.get(index as usize - 1)?.1.clone(),
+                uri: self.links.get(index)?.1.to_owned(),
                 start: cells[start].0,
                 end: cells[end].0,
             });
@@ -328,11 +419,43 @@ mod tests {
         (id.to_string(), format!("https://example.com/{id}"))
     }
 
+    fn intern(t: &mut Terminal, id: usize, limit: usize) -> u16 {
+        let (id, uri) = key(id);
+        t.intern_link(&id, &uri, limit)
+    }
+
+    #[test]
+    fn link_table_finds_every_entry_after_growth() {
+        let mut t = Terminal::new(8, 2);
+        for id in 0..1000 {
+            assert_eq!(intern(&mut t, id, 2000), id as u16 + 1);
+        }
+        for id in 0..1000 {
+            assert_eq!(intern(&mut t, id, 2000), id as u16 + 1);
+            let (k, uri) = key(id);
+            assert_eq!(t.links.get(id as u16 + 1), Some((k.as_str(), uri.as_str())));
+        }
+        assert_eq!(t.intern_link("", "https://example.com/1", 2000), 1001);
+        assert_eq!(t.intern_link("1", "https://example.com/", 2000), 1002);
+        assert_eq!(t.links.len(), 1002);
+    }
+
+    #[test]
+    fn osc_link_uri_keeps_semicolons_and_id_among_params() {
+        let mut t = Terminal::new(20, 2);
+        t.advance(b"\x1b]8;x=1:id=q:y=2;https://a/b;c=d\x07x\x1b]8;;\x07");
+        assert_eq!(t.links.get(1), Some(("q", "https://a/b;c=d")));
+        t.advance(b"\x1b]8;id=q;https://a/b;c=d\x1b\\y\x1b]8;;\x1b\\");
+        assert_eq!(t.links.len(), 1);
+        assert_eq!(t.line(0).cells[1].hyperlink, 1);
+        assert_eq!(t.cursor.template.hyperlink, 0);
+    }
+
     #[test]
     fn compaction_preserves_all_references() {
         let mut t = Terminal::new(8, 2);
         for id in 0..8 {
-            assert_eq!(t.intern_link(key(id), 8), id as u16 + 1);
+            assert_eq!(intern(&mut t, id, 8), id as u16 + 1);
         }
         let mut history = crate::Row::new(8, &crate::Cell::default());
         history.cells[0].hyperlink = 2;
@@ -352,9 +475,9 @@ mod tests {
         t.cursor.template.hyperlink = 7;
         t.primary.lines[0].cells[7].hyperlink = 8;
         t.primary.lines[0].resize(2);
-        assert_eq!(t.intern_link(key(8), 8), 8);
+        assert_eq!(intern(&mut t, 8, 8), 8);
         assert_eq!(t.links.len(), 8);
-        assert!(!t.link_indices.contains_key(&key(0)));
+        assert!(t.links.find(&key(0).0, &key(0).1).is_none());
         assert_eq!(t.primary.scrollback[0].cells[0].hyperlink, 1);
         assert_eq!(t.primary.lines[0].cells[0].hyperlink, 2);
         assert_eq!(t.alternate.lines[0].cells[0].hyperlink, 3);
@@ -364,7 +487,7 @@ mod tests {
         t.primary.lines[0].resize(8);
         assert_eq!(t.primary.lines[0].cells[7].hyperlink, 7);
         for id in 1..=8 {
-            assert_eq!(t.intern_link(key(id), 8), id as u16);
+            assert_eq!(intern(&mut t, id, 8), id as u16);
         }
     }
 
@@ -372,12 +495,12 @@ mod tests {
     fn full_live_table_rejects_new_links_but_reuses_existing() {
         let mut t = Terminal::new(8, 2);
         for id in 0..2 {
-            t.primary.lines[0].cells[id].hyperlink = t.intern_link(key(id), 2);
+            t.primary.lines[0].cells[id].hyperlink = intern(&mut t, id, 2);
         }
-        assert_eq!(t.intern_link(key(2), 2), 0);
-        assert_eq!(t.intern_link(key(0), 2), 1);
+        assert_eq!(intern(&mut t, 2, 2), 0);
+        assert_eq!(intern(&mut t, 0, 2), 1);
         t.primary.lines[0].cells[0] = crate::Cell::default();
-        assert_eq!(t.intern_link(key(2), 2), 2);
+        assert_eq!(intern(&mut t, 2, 2), 2);
         assert_eq!(t.primary.lines[0].cells[1].hyperlink, 1);
     }
 
@@ -397,8 +520,7 @@ mod tests {
             assert_eq!(t.primary.lines[0].cells[col].hyperlink, 0);
             if reset == b"\x1bc" {
                 assert!(t.primary.saved.is_none());
-                assert!(t.links.is_empty());
-                assert!(t.link_indices.is_empty());
+                assert_eq!(t.links.len(), 0);
             }
         }
     }
