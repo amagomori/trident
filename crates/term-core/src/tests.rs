@@ -510,7 +510,7 @@ fn synchronized_output() {
 #[test]
 fn private_mode_reports() {
     for mode in [
-        1, 6, 7, 25, 47, 1047, 1049, 1000, 1002, 1003, 1004, 1006, 1007, 2004,
+        1, 6, 7, 25, 47, 1047, 1049, 1000, 1002, 1003, 1004, 1006, 1007, 2004, 2031,
     ] {
         let mut t = term(10, 5, "");
         for (action, status) in [('h', 1), ('l', 2)] {
@@ -523,6 +523,44 @@ fn private_mode_reports() {
     }
     let mut t = term(10, 5, "\x1b[?1000h\x1b[?1002$p\x1b[?1003$p");
     assert_eq!(t.take_responses(), b"\x1b[?1002;2$y\x1b[?1003;2$y");
+}
+
+#[test]
+fn color_scheme_reports() {
+    let dark = crate::colors::Palette::default();
+    let light = crate::colors::Palette {
+        foreground: (0x34, 0x3b, 0x58),
+        background: (0xe1, 0xe2, 0xe7),
+        ..dark.clone()
+    };
+    assert!(dark.is_dark());
+    assert!(!light.is_dark());
+
+    let mut t = term(10, 5, "\x1b[?2031$p\x1b[?996n");
+    assert_eq!(t.take_responses(), b"\x1b[?2031;2$y\x1b[?997;1n");
+    t.set_palette(light.clone());
+    assert_eq!(t.take_responses(), b"", "mode 2031 is off");
+    t.advance(b"\x1b[?996n");
+    assert_eq!(t.take_responses(), b"\x1b[?997;2n");
+
+    t.advance(b"\x1b[?2031h");
+    assert!(t.modes.color_scheme_updates);
+    assert_eq!(t.take_responses(), b"");
+    t.set_palette(dark.clone());
+    assert_eq!(t.take_responses(), b"\x1b[?997;1n");
+    t.set_palette(dark.clone());
+    assert_eq!(t.take_responses(), b"", "same scheme");
+    t.set_palette(light.clone());
+    assert_eq!(t.take_responses(), b"\x1b[?997;2n");
+
+    t.advance(b"\x1b[?2031l");
+    t.set_palette(dark.clone());
+    assert_eq!(t.take_responses(), b"");
+
+    t.advance(b"\x1b[?2031h\x1bc");
+    assert!(!t.modes.color_scheme_updates);
+    t.set_palette(light);
+    assert_eq!(t.take_responses(), b"");
 }
 
 #[test]

@@ -125,6 +125,11 @@ impl Perform for Terminal {
                 }
                 _ => {}
             },
+            ('n', [b'?']) => {
+                if arg(params, 0, 0) == 996 {
+                    self.report_color_scheme();
+                }
+            }
             ('p', [b'?', b'$']) => {
                 self.report_private_mode(arg(params, 0, 0));
             }
@@ -264,11 +269,25 @@ impl Terminal {
             1007 => Some(self.modes.alt_scroll),
             2004 => Some(self.modes.bracketed_paste),
             2026 => Some(self.modes.synchronized_output),
+            2031 => Some(self.modes.color_scheme_updates),
             _ => None,
         };
         let status = enabled.map_or(0, |set| if set { 1 } else { 2 });
         let reply = format!("\x1b[?{mode};{status}$y");
         self.responses.extend_from_slice(reply.as_bytes());
+    }
+
+    /// Color-scheme report (`CSI ? 997 ; 1 n` dark, `; 2 n` light), answering DSR 996
+    /// and sent on theme switches while mode 2031 is set.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn report_color_scheme(&mut self) {
+        let reply: &[u8] = if self.palette.is_dark() {
+            b"\x1b[?997;1n"
+        } else {
+            b"\x1b[?997;2n"
+        };
+        self.responses.extend_from_slice(reply);
     }
 
     /// XTWINOPS size reports: text area in pixels (14), cell size in pixels (16) and text
@@ -322,6 +341,7 @@ impl Terminal {
             1006 => self.modes.sgr_mouse = enable,
             1007 => self.modes.alt_scroll = enable,
             2004 => self.modes.bracketed_paste = enable,
+            2031 => self.modes.color_scheme_updates = enable,
             2026 => {
                 if !enable && self.modes.synchronized_output {
                     self.synchronized_output_ended = true;

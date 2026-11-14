@@ -963,7 +963,7 @@ impl App {
         {
             self.appearance = theme;
         }
-        term.palette = self.config.themes.palette(self.appearance).clone();
+        term.set_palette(self.config.themes.palette(self.appearance).clone());
         term.set_scrollback_limit(self.options.scrollback(&self.config));
         term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
         let cell = (fonts.metrics.width, fonts.metrics.height);
@@ -1429,7 +1429,10 @@ impl App {
         if self.config.themes.automatic()
             && let Some(s) = &mut self.session
         {
-            s.term.palette = self.config.themes.palette(appearance).clone();
+            s.term
+                .set_palette(self.config.themes.palette(appearance).clone());
+            let responses = s.term.take_responses();
+            s.pty.write(&responses);
             s.window.request_redraw();
         }
     }
@@ -1469,7 +1472,10 @@ impl App {
             if let Some(s) = &mut self.session {
                 s.pty
                     .set_command_notifications(self.config.notify_long_commands_after != 0)?;
-                s.term.palette = self.config.themes.palette(self.appearance).clone();
+                s.term
+                    .set_palette(self.config.themes.palette(self.appearance).clone());
+                let responses = s.term.take_responses();
+                s.pty.write(&responses);
                 s.term
                     .set_scrollback_limit(self.options.scrollback(&self.config));
                 if let Some(search) = &mut self.search {
