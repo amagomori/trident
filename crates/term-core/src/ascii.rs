@@ -32,8 +32,9 @@ impl Terminal {
         template.flags.remove(Flags::WIDE | Flags::WIDE_SPACER);
         while let Some(&last) = bytes.last() {
             if self.cursor.pending_wrap {
+                self.sync_cursor_row();
                 let row = self.cursor.row;
-                self.lines_mut()[row].wrapped = true;
+                self.lines_mut()[row].set_wrapped(true);
                 self.cursor.col = 0;
                 self.linefeed();
             }

@@ -271,6 +271,8 @@ struct Session {
     resize: ResizeThrottle,
     synchronized_since: Option<Instant>,
     redraw_pending: bool,
+    #[cfg(target_os = "macos")]
+    drawable_wait: Option<Instant>,
     output: PendingOutput,
 }
 
@@ -1043,6 +1045,8 @@ impl App {
             presentation,
             synchronized_since: None,
             redraw_pending: false,
+            #[cfg(target_os = "macos")]
+            drawable_wait: None,
             output: PendingOutput::default(),
         })
     }
@@ -1160,6 +1164,24 @@ impl App {
     }
 
     fn present_frame(&mut self) {
+        // During a flood, keep parsing instead of blocking in drawable acquisition until
+        // the previous frame's vsync; `UserEvent::Presented` brings the frame back.
+        // Some Metal drawables never report back, so the wait gives up after `MAX_DEFER`.
+        #[cfg(target_os = "macos")]
+        if self.exit_deadline.is_none()
+            && let Some(s) = &mut self.session
+        {
+            if s.since_frame >= DEFER_AFTER
+                && s.output.waiting_since.is_none()
+                && s.drawable_wait
+                    .is_none_or(|since| since.elapsed() < MAX_DEFER)
+                && present_macos::wait_for_drawable()
+            {
+                s.drawable_wait.get_or_insert_with(Instant::now);
+                return;
+            }
+            s.drawable_wait = None;
+        }
         #[cfg(target_os = "linux")]
         if self.exit_deadline.is_some() && !self.exit_presentation.needs_wayland_submission() {
             return;
@@ -2163,7 +2185,13 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Output => self.output_ready(),
             #[cfg(target_os = "macos")]
-            UserEvent::Presented => {}
+            UserEvent::Presented => {
+                if self.exit_deadline.is_none()
+                    && let Some(s) = &self.session
+                {
+                    s.window.request_redraw();
+                }
+            }
             UserEvent::Exit => {
                 self.exit_deadline
                     .get_or_insert_with(|| Instant::now() + EXIT_TIMEOUT);
@@ -2341,6 +2369,15 @@ impl ApplicationHandler<UserEvent> for App {
                 s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
             );
             deadline = sync_wakeup(deadline, s.output.waiting_since, s.synchronized_since);
+            #[cfg(target_os = "macos")]
+            if let Some(since) = s.drawable_wait {
+                let retry = since + MAX_DEFER;
+                if now >= retry {
+                    s.window.request_redraw();
+                } else {
+                    deadline = Some(deadline.map_or(retry, |deadline| deadline.min(retry)));
+                }
+            }
             if s.pty.flow.paused {
                 let poll = now + Duration::from_millis(100);
                 deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));

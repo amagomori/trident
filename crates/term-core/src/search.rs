@@ -63,7 +63,7 @@ impl SearchJob {
             }
             let logical_end = next.min(last);
             let mut logical_start = logical_end;
-            while logical_start > first && term.line(logical_start - 1).wrapped {
+            while logical_start > first && term.line(logical_start - 1).wrapped() {
                 logical_start -= 1;
             }
             self.scan(term, logical_start, logical_end, last);
@@ -164,7 +164,7 @@ fn push_points(points: &mut Vec<(Point, Point)>, line: u64, col: usize, cell: &C
 /// The cells of `line` that are text, with their columns.
 fn text_cells(term: &Terminal, line: u64, last: u64) -> impl Iterator<Item = (usize, &Cell)> {
     let row = term.line(line);
-    let cells = if !row.wrapped || line == last {
+    let cells = if !row.wrapped() || line == last {
         let end = row
             .cells
             .iter()

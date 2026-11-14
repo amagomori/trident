@@ -20,6 +20,8 @@ struct Sink {
 static SINK: OnceLock<Sink> = OnceLock::new();
 static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static PRESENTED: AtomicUsize = AtomicUsize::new(0);
+static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+static WAKE_ON_PRESENT: AtomicBool = AtomicBool::new(false);
 static SKIPPED: Mutex<[usize; 2]> = Mutex::new([0; 2]);
 static EXITING: AtomicBool = AtomicBool::new(false);
 
@@ -29,6 +31,24 @@ pub fn begin_exit() {
 
 pub fn arm_exit() -> usize {
     SEQUENCE.load(Ordering::Acquire) + 1
+}
+
+fn drawable_in_flight() -> bool {
+    SEQUENCE.load(Ordering::Acquire) > COMPLETED.load(Ordering::Acquire)
+}
+
+/// Whether a submitted drawable is still waiting for its vsync, so acquiring the next one
+/// would block the UI thread. If so, a `Presented` event follows once it is presented.
+pub fn wait_for_drawable() -> bool {
+    if !drawable_in_flight() {
+        return false;
+    }
+    WAKE_ON_PRESENT.store(true, Ordering::Release);
+    if drawable_in_flight() {
+        return true;
+    }
+    WAKE_ON_PRESENT.store(false, Ordering::Release);
+    false
 }
 
 pub fn feedback() -> (usize, [usize; 2]) {
@@ -52,7 +72,7 @@ unsafe extern "C-unwind" fn present_drawable(
         .get()
         .expect("presentation hook installed without sink");
     if let Some(drawable) = unsafe { drawable.as_ref() } {
-        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let sequence = SEQUENCE.fetch_add(1, Ordering::AcqRel);
         let handler = RcBlock::new(move |drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
             let time = unsafe { drawable.as_ref() }.presentedTime();
             if time == 0.0 {
@@ -72,7 +92,8 @@ unsafe extern "C-unwind" fn present_drawable(
                     .unwrap()
                     .push(format!("presented {sequence} {time} {mode}"));
             }
-            if EXITING.load(Ordering::Acquire) {
+            COMPLETED.fetch_add(1, Ordering::AcqRel);
+            if WAKE_ON_PRESENT.swap(false, Ordering::AcqRel) || EXITING.load(Ordering::Acquire) {
                 let _ = sink.proxy.send_event(crate::UserEvent::Presented);
             }
         });

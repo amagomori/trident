@@ -36,8 +36,8 @@ fn scrolling_recycles_rows_as_fresh_blanks() {
             flags: Flags::BOLD | Flags::WIDE,
             hyperlink: 7,
         });
-        dirty.wrapped = true;
         dirty.flags = RowFlags::PROMPT_START;
+        dirty.set_wrapped(true);
         dirty.flags.insert(RowFlags::FAILED);
         dirty.flags.insert(RowFlags::OUTPUT_START);
         dirty.prompt_col = 2;
@@ -69,6 +69,117 @@ fn scrolling_recycles_rows_as_fresh_blanks() {
             assert_eq!(t.scrollback_len(), 0);
         }
     }
+}
+
+/// Every row's cells from `occupied()` on must equal its last cell, or a bounded
+/// `Row::reset` would leave stale cells behind.
+fn assert_occupancy(t: &Terminal, step: usize) {
+    let rows = t.primary.lines.iter().chain(&t.primary.scrollback);
+    for (i, row) in rows.chain(&t.alternate.lines).enumerate() {
+        let tail = &row.cells[row.occupied()..];
+        assert!(
+            tail.iter().all(|c| Some(c) == row.cells.last()),
+            "step {step} row {i}: {:?}",
+            row.text()
+        );
+    }
+}
+
+#[test]
+fn row_occupancy_tracks_every_write() {
+    const OPS: &[&str] = &[
+        "y",
+        "abcdefghij",
+        "界",
+        "\r\n",
+        "\n",
+        "\r",
+        "\x08",
+        "\x1b[5D",
+        "\x1b[9G",
+        "\x1bM",
+        "\x1b[K",
+        "\x1b[1K",
+        "\x1b[2K",
+        "\x1b[J",
+        "\x1b[1J",
+        "\x1b[2J",
+        "\x1b[3J",
+        "\x1b[3@",
+        "\x1b[2P",
+        "\x1b[4X",
+        "\x1b[2L",
+        "\x1b[2M",
+        "\x1b[2S",
+        "\x1b[2T",
+        "\x1b[4h",
+        "\x1b[4l",
+        "\x1b[?7l",
+        "\x1b[?7h",
+        "\x1b[44m",
+        "\x1b[48;5;200m",
+        "\x1b[0m",
+        "\x1b[7m",
+        "\x1b#8",
+        "\x1b[?1049h",
+        "\x1b[?1049l",
+        "\x1b[r",
+        "\x1b[2;4r",
+        "\x1b[H",
+    ];
+    let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut next = |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    for cols in [6, 40, 300] {
+        let mut t = Terminal::new(cols, 6);
+        t.set_scrollback_limit(4);
+        for step in 0..20_000 {
+            if next(40) == 0 {
+                let (c, r) = (2 + next(cols + 20), 1 + next(8));
+                t.resize(c, r);
+            }
+            // Several ops per `advance`, so prints and cursor moves land in one batch.
+            let mut batch = String::new();
+            for _ in 0..1 + next(4) {
+                match next(OPS.len() + 5) {
+                    0..=3 => {
+                        let (r, c) = (1 + next(8), 1 + next(cols + 2));
+                        batch.push_str(&format!("\x1b[{r};{c}H"));
+                    }
+                    4 => batch.extend((0..next(2 * cols)).map(|_| 'x')),
+                    op => batch.push_str(OPS[op - 5]),
+                }
+            }
+            t.advance(batch.as_bytes());
+            assert_occupancy(&t, step);
+        }
+    }
+}
+
+#[test]
+fn bounded_reset_blanks_short_rows_in_a_scroll_region() {
+    let mut t = Terminal::new(300, 6);
+    t.advance(b"\x1b[?1049h\x1b[1;3r\x1b[3;1H");
+    for i in 0..10 {
+        t.advance(format!("{i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b[44m\n\x1b[0m\n");
+    let rows = &t.screen().lines;
+    assert_eq!(rows[0], t.blank_row());
+    let colored = Row::new(
+        300,
+        &Cell::blank(&Cell {
+            bg: Color::Indexed(4),
+            ..Cell::default()
+        }),
+    );
+    assert_eq!(rows[1], colored);
+    assert_eq!(rows[2], t.blank_row());
+    assert_eq!(rows[2].occupied(), 0);
 }
 
 #[test]
@@ -174,7 +285,7 @@ fn signed_viewport_clamps_to_retained_lines() {
 fn prints_and_wraps() {
     let t = term(5, 3, "hello world");
     assert_eq!(screen(&t), ["hello", " worl", "d"]);
-    assert!(t.viewport_row(0).wrapped);
+    assert!(t.viewport_row(0).wrapped());
     assert_eq!(t.cursor_position(), Some((2, 1)));
 }
 
@@ -884,7 +995,7 @@ fn printing_in_insert_mode_preserves_width_colors_and_wrap() {
     let t = term(6, 2, "abcde\x1b[4hZQ");
     assert_eq!(screen(&t), ["abcdeZ", "Q"]);
     assert_eq!(t.cursor_position(), Some((1, 1)));
-    assert!(t.viewport_row(0).wrapped);
+    assert!(t.viewport_row(0).wrapped());
     assert_eq!(t.viewport_row(1).cells.len(), 6);
 }
 
@@ -1103,6 +1214,19 @@ mod bench {
         })
     }
 
+    /// One-character lines scrolling the top half of the alternate screen, like vtebench
+    /// `scrolling_bottom_small_region`.
+    fn scroll_region() -> Vec<u8> {
+        let mut first = true;
+        fill(|_, out| {
+            if first {
+                out.extend(format!("\x1b[?1049h\x1b[1;{}r\x1b[{}H", ROWS / 2, ROWS / 2).bytes());
+                first = false;
+            }
+            out.extend_from_slice(b"y\r\n");
+        })
+    }
+
     /// Wide CJK characters, emoji and accented Latin mixed with ASCII.
     fn unicode() -> Vec<u8> {
         const WORDS: &[&str] = &[
@@ -1194,6 +1318,7 @@ mod bench {
         ("cursor_motion", Kind::Throughput(cursor_motion, usize::MAX)),
         ("alt_screen", Kind::Throughput(alt_screen, usize::MAX)),
         ("unicode", Kind::Throughput(unicode, usize::MAX)),
+        ("scroll_region", Kind::Throughput(scroll_region, usize::MAX)),
         (
             "dense_ascii_macos",
             Kind::Throughput(dense_ascii, MACOS_BATCH),
@@ -1213,6 +1338,10 @@ mod bench {
         ),
         ("unicode_macos", Kind::Throughput(unicode, MACOS_BATCH)),
         (
+            "scroll_region_macos",
+            Kind::Throughput(scroll_region, MACOS_BATCH),
+        ),
+        (
             "dense_ascii_linux",
             Kind::Throughput(dense_ascii, LINUX_BATCH),
         ),
@@ -1230,6 +1359,10 @@ mod bench {
             Kind::Throughput(alt_screen, LINUX_BATCH),
         ),
         ("unicode_linux", Kind::Throughput(unicode, LINUX_BATCH)),
+        (
+            "scroll_region_linux",
+            Kind::Throughput(scroll_region, LINUX_BATCH),
+        ),
         ("keystroke_latency", Kind::Keystrokes),
         ("images", Kind::Images),
         ("search_dense_10k", Kind::Search(10_000, "a")),

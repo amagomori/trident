@@ -272,11 +272,11 @@ impl Terminal {
             return None;
         }
         let mut first = point.line;
-        while first > self.first_line() && self.line(first - 1).wrapped {
+        while first > self.first_line() && self.line(first - 1).wrapped() {
             first -= 1;
         }
         let mut last = point.line;
-        while last + 1 < self.history + self.rows as u64 && self.line(last).wrapped {
+        while last + 1 < self.history + self.rows as u64 && self.line(last).wrapped() {
             last += 1;
         }
         let index = self.line(point.line).cells[point.col].hyperlink;

@@ -312,7 +312,7 @@ impl Terminal {
             return;
         };
         let start_col = self.line(start).output_col as usize;
-        let start_col = if start_col <= self.cols || self.line(start).wrapped {
+        let start_col = if start_col <= self.cols || self.line(start).wrapped() {
             start_col.min(self.cols)
         } else {
             0
@@ -412,7 +412,10 @@ impl Terminal {
                         .iter()
                         .rposition(|cell| cell.c != ' ' || cell.flags.contains(Flags::WIDE_SPACER))
                         .map_or(0, |col| col + 1);
-                    (row.cells[..used].to_vec(), row.wrapped && input_line < line)
+                    (
+                        row.cells[..used].to_vec(),
+                        row.wrapped() && input_line < line,
+                    )
                 } else {
                     (Vec::new(), false)
                 };
@@ -637,7 +640,7 @@ impl Terminal {
                     self.shell.output_ends.push(OutputEnd {
                         line: absolute,
                         cells: line.cells[..end.min(line.cells.len())].to_vec(),
-                        wrapped: line.wrapped,
+                        wrapped: line.wrapped(),
                     });
                     line.flags.insert(RowFlags::OUTPUT_END);
                     line.prompt_col = u32::try_from(end).unwrap_or(u32::MAX - 1);
@@ -753,6 +756,7 @@ impl Terminal {
             None => self.advance_bytes(&mut parser, bytes),
         }
         self.parser = parser;
+        self.sync_cursor_row();
         self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
         self.print_state.disarm_clear();
     }
@@ -1195,7 +1199,9 @@ impl Terminal {
             let row = self.line(line);
             let (from, to) = self.selection_columns((start, end), line)?;
             let cells = self.selection_cells(line);
-            let wrapped = self.output_end(line).map_or(row.wrapped, |end| end.wrapped);
+            let wrapped = self
+                .output_end(line)
+                .map_or(row.wrapped(), |end| end.wrapped);
             let mut text: String = cells[from..=to]
                 .iter()
                 .filter(|c| !c.flags.contains(Flags::WIDE_SPACER))
@@ -1358,6 +1364,14 @@ impl Terminal {
         }
     }
 
+    /// Records `put_char`'s writes in the cursor row's occupancy. Prints only move the cursor
+    /// right within a row, so this runs before anything else can move it or read occupancy.
+    pub(crate) fn sync_cursor_row(&mut self) {
+        let end = self.cursor.col + usize::from(self.cursor.pending_wrap);
+        let row = self.cursor.row;
+        self.lines_mut()[row].touch(end);
+    }
+
     fn put_char(&mut self, c: char) {
         let c = match self.charsets[self.active_charset] {
             Charset::DecSpecial => dec_special(c),
@@ -1371,8 +1385,9 @@ impl Terminal {
         }
 
         if self.cursor.pending_wrap && self.modes.autowrap {
+            self.sync_cursor_row();
             let row = self.cursor.row;
-            self.lines_mut()[row].wrapped = true;
+            self.lines_mut()[row].set_wrapped(true);
             self.cursor.col = 0;
             self.linefeed();
         }
@@ -1384,7 +1399,8 @@ impl Terminal {
                 let line = &mut self.lines_mut()[row];
                 line.cells[col] = blank;
                 line.cells[col].flags.insert(Flags::WIDE_WRAP);
-                line.wrapped = true;
+                line.touch(col + 1);
+                line.set_wrapped(true);
                 self.cursor.col = 0;
                 self.linefeed();
             } else {
@@ -1399,6 +1415,7 @@ impl Terminal {
         let line = &mut self.lines_mut()[row];
         if insert {
             insert_printed_cells(line, col, cols, width, &template);
+            line.touch_all();
         }
         clear_wide_pair(&mut line.cells, col);
         if width == 2 {
@@ -1473,12 +1490,19 @@ impl Terminal {
         let blank = Cell::blank(&self.cursor.template);
         let to = to.min(self.cols);
         let line = &mut self.lines_mut()[row];
-        if from < to {
-            clear_wide_pair(&mut line.cells, from);
-            clear_wide_pair(&mut line.cells, to - 1);
+        let to = to.min(line.cells.len());
+        if from >= to {
+            return;
         }
-        for cell in line.cells.iter_mut().take(to).skip(from) {
-            *cell = blank;
+        let to_end = to == line.cells.len();
+        let tail_kept = to_end && line.occupied() <= from && line.cells.last() == Some(&blank);
+        clear_wide_pair(&mut line.cells, from);
+        clear_wide_pair(&mut line.cells, to - 1);
+        line.cells[from..to].fill(blank);
+        if !to_end {
+            line.touch(to);
+        } else if !tail_kept {
+            line.set_blank_from(from);
         }
     }
 
@@ -1498,7 +1522,7 @@ impl Terminal {
         match mode {
             0 => {
                 self.erase_cells(row, col, self.cols);
-                self.lines_mut()[row].wrapped = false;
+                self.lines_mut()[row].set_wrapped(false);
                 self.lines_mut()[row].clear_hidden();
                 if !self.screen().placements.is_empty() {
                     self.erase_placements(row, row, self.cols, usize::MAX);
@@ -1582,7 +1606,7 @@ impl Terminal {
         match mode {
             0 => {
                 self.erase_cells(row, col, self.cols);
-                self.lines_mut()[row].wrapped = false;
+                self.lines_mut()[row].set_wrapped(false);
                 self.lines_mut()[row].clear_hidden();
                 if !self.screen().placements.is_empty() {
                     self.erase_placements(row, row, self.cols, usize::MAX);
@@ -1616,6 +1640,7 @@ impl Terminal {
             line.cells.insert(col, blank);
         }
         line.cells.truncate(cols);
+        line.touch_all();
         if line.cells[cols - 1].flags.contains(Flags::WIDE) {
             line.cells[cols - 1] = blank;
         }
@@ -1635,6 +1660,7 @@ impl Terminal {
         clear_wide_pair(&mut line.cells, col + n - 1);
         line.cells.drain(col..col + n);
         line.cells.resize(cols, blank);
+        line.touch_all();
         self.cursor.pending_wrap = false;
     }
 
