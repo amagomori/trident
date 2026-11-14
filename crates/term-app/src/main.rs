@@ -1172,6 +1172,7 @@ impl App {
             && let Some(s) = &mut self.session
         {
             if s.since_frame >= DEFER_AFTER
+                && s.output.waiting_since.is_none()
                 && s.drawable_wait
                     .is_none_or(|since| since.elapsed() < MAX_DEFER)
                 && present_macos::wait_for_drawable()
