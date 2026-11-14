@@ -2219,6 +2219,14 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    /// A macOS app quit ends the process from AppKit without returning from the event loop,
+    /// so the latency log is written here instead of when the session drops.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(s) = &mut self.session {
+            s.latency.take();
+        }
+    }
+
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             #[cfg(target_os = "linux")]
