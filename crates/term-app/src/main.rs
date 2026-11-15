@@ -182,9 +182,9 @@ impl Options {
 
 fn usage() -> ! {
     println!(
-        "{} {} - a fast GPU-rendered terminal emulator\n\n\
-         USAGE: terminal [OPTIONS] [-e COMMAND [ARGS...]]\n       \
-         terminal show [--width N] [--height N] [--fit] FILE...\n\n\
+        "{bin} {} - a fast GPU-rendered terminal emulator\n\n\
+         USAGE: {bin} [OPTIONS] [-e COMMAND [ARGS...]]\n       \
+         {bin} show [--width N] [--height N] [--fit] FILE...\n\n\
          OPTIONS:\n  \
            --config <PATH>     Override the TOML config file location\n  \
            --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)\n  \
@@ -196,10 +196,10 @@ fn usage() -> ! {
            --install-terminfo  Install the xterm-trident terminfo entry with tic\n  \
            -h, --help          Show this help\n  \
            -V, --version       Show the version\n\n\
-         `terminal show` draws images and prints text files in the terminal it runs in\n\
-         (see terminal show --help).",
-        env!("CARGO_BIN_NAME"),
-        env!("CARGO_PKG_VERSION")
+         `{bin} show` draws images and prints text files in the terminal it runs in\n\
+         (see {bin} show --help).",
+        env!("CARGO_PKG_VERSION"),
+        bin = env!("CARGO_BIN_NAME"),
     );
     std::process::exit(0);
 }
