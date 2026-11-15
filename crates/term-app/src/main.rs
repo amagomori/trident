@@ -255,6 +255,9 @@ struct Session {
     scroll: PixelScroll,
     pty_cell: (f32, f32),
     window: Arc<Window>,
+    /// The window's inner size from its last `Resized` event; on X11
+    /// `Window::inner_size` is a blocking server round trip.
+    size: PhysicalSize<u32>,
     renderer: Renderer,
     fonts: Fonts,
     term: Terminal,
@@ -1048,6 +1051,7 @@ impl App {
             ime_cursor_area: None,
             scroll: PixelScroll::default(),
             pty_cell: cell,
+            size,
             latency,
             window,
             renderer,
@@ -1805,8 +1809,8 @@ impl App {
     fn update_ime_cursor_area(&mut self) {
         let Some(s) = &mut self.session else { return };
         let m = s.fonts.metrics;
+        let size = s.size;
         let area = if let Some(search) = &self.search {
-            let size = s.window.inner_size();
             term_render::search_layout(
                 search.cursor_column(),
                 search.preedit_columns(),
@@ -1827,14 +1831,13 @@ impl App {
                 layout.caret.unwrap_or(layout.column)
             });
             let pad = self.config.padding * s.window.scale_factor() as f32;
-            let size = s.window.inner_size();
-            [
-                (pad + col as f32 * m.width).min((size.width as f32 - m.width).max(0.0)),
-                (pad + row as f32 * m.height + s.scroll.offset as f32)
-                    .min((size.height as f32 - m.height).max(0.0)),
-                m.width,
-                m.height,
-            ]
+            cursor_area(
+                size,
+                pad,
+                (row, col),
+                s.scroll.offset as f32,
+                (m.width, m.height),
+            )
         };
         if s.ime_cursor_area == Some(area) {
             return;
@@ -1876,7 +1879,7 @@ impl App {
         if pointer_in_search_bar(
             self.search.is_some(),
             self.mouse_pos,
-            s.window.inner_size(),
+            s.size,
             (s.fonts.metrics.width, s.fonts.metrics.height),
         ) {
             return None;
@@ -2198,6 +2201,22 @@ fn pointer_in_grid(
         && pos.y < padding + grid.1 as f64 * cell.1 as f64
 }
 
+/// Where the IME candidate window goes for the cell at `(row, col)`, kept inside `size`.
+fn cursor_area(
+    size: PhysicalSize<u32>,
+    pad: f32,
+    (row, col): (usize, usize),
+    offset: f32,
+    (width, height): (f32, f32),
+) -> [f32; 4] {
+    [
+        (pad + col as f32 * width).min((size.width as f32 - width).max(0.0)),
+        (pad + row as f32 * height + offset).min((size.height as f32 - height).max(0.0)),
+        width,
+        height,
+    ]
+}
+
 fn grid_size(window: &Window, fonts: &Fonts, padding: f32) -> (usize, usize) {
     grid_size_for(window.inner_size(), window.scale_factor(), fonts, padding)
 }
@@ -2493,6 +2512,7 @@ impl ApplicationHandler<UserEvent> for App {
                     search.dirty = true;
                 }
                 if let Some(s) = &mut self.session {
+                    s.size = size;
                     s.renderer.resize(size.width, size.height);
                     s.resize.schedule(Instant::now());
                     s.window.request_redraw();
@@ -3852,6 +3872,27 @@ mod tests {
         assert!(options.copy_on_select);
         assert!(options.option_as_alt);
         assert_eq!(options.command, ["echo", "--copy-on-select"]);
+    }
+
+    #[test]
+    fn cursor_area_follows_cell_and_stays_inside_cached_size() {
+        let size = PhysicalSize::new(800, 600);
+        assert_eq!(
+            cursor_area(size, 4.0, (2, 3), 0.0, (10.0, 20.0)),
+            [34.0, 44.0, 10.0, 20.0]
+        );
+        assert_eq!(
+            cursor_area(size, 4.0, (2, 3), 6.5, (10.0, 20.0)),
+            [34.0, 50.5, 10.0, 20.0]
+        );
+        assert_eq!(
+            cursor_area(size, 4.0, (100, 200), 0.0, (10.0, 20.0)),
+            [790.0, 580.0, 10.0, 20.0]
+        );
+        assert_eq!(
+            cursor_area(PhysicalSize::new(5, 5), 4.0, (0, 0), 0.0, (10.0, 20.0)),
+            [0.0, 0.0, 10.0, 20.0]
+        );
     }
 
     #[test]
