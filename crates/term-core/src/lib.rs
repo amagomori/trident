@@ -17,10 +17,12 @@ mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod perform;
 mod reflow;
+mod rerun;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
+pub use rerun::{ROW_CHANGED, ROW_REMOVED_ABOVE};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -45,6 +47,7 @@ struct ShellState {
     input_start: Option<(u64, usize)>,
     commands: VecDeque<Command>,
     budget: budget::Budget,
+    runs: rerun::Runs,
     notifications: notifications::Notifications,
     progress: Option<Progress>,
     progress_changed: bool,
@@ -97,6 +100,8 @@ pub struct Command {
     pub(crate) output_line: u64,
     /// Where output dropped by the scrollback budget was replaced by one row.
     pub(crate) gap: Option<budget::Gap>,
+    /// Lines that differ from the previous run of the same command text.
+    pub(crate) rerun: Option<Box<rerun::Marks>>,
 }
 
 impl Command {
@@ -440,6 +445,7 @@ impl Terminal {
                     last.next_prompt = Some(line);
                     self.note_command_ended(self.shell.commands.len() - 1);
                     self.shell.budget.limit = u64::MAX;
+                    self.compare_with_last_run(self.shell.commands.len() - 1);
                 }
                 self.shell.prompt_line = Some(line);
                 self.shell.input_start = None;
@@ -470,10 +476,12 @@ impl Terminal {
                 self.drop_overwritten_commands(prompt_line);
                 let first = self.first_line();
                 let commands = &mut self.shell.commands;
+                let mut ended = false;
                 if let Some(last) = commands.back_mut()
                     && last.next_prompt.is_none()
                 {
                     last.next_prompt = Some(prompt_line);
+                    ended = true;
                 }
                 while commands.len() >= MAX_COMMANDS
                     || commands
@@ -494,9 +502,13 @@ impl Terminal {
                     exit_code: None,
                     output_line: line,
                     gap: None,
+                    rerun: None,
                 });
-                if let Some(ended) = self.shell.commands.len().checked_sub(2) {
-                    self.note_command_ended(ended);
+                if let Some(index) = self.shell.commands.len().checked_sub(2) {
+                    self.note_command_ended(index);
+                    if ended {
+                        self.compare_with_last_run(index);
+                    }
                 }
                 self.refresh_budget_limit();
             }
@@ -565,6 +577,7 @@ impl Terminal {
                 continue;
             };
             command.input_line = input_line;
+            command.rerun = None;
             command.prompt_line = shift(command.prompt_line).unwrap_or(input_line);
             command.output_line = shift(command.output_line).unwrap_or(bottom + 1);
             command.next_prompt = command
@@ -753,6 +766,7 @@ impl Terminal {
                 input_start: None,
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
+                runs: rerun::Runs::default(),
                 notifications: Default::default(),
                 progress: None,
                 progress_changed: false,

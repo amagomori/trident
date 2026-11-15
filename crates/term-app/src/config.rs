@@ -16,6 +16,7 @@ pub struct Config {
     pub desktop_notifications: bool,
     pub drop_preview: bool,
     pub paste_protection: bool,
+    pub compare_runs: bool,
     pub confirm_close: bool,
     pub vsync: bool,
     pub shell: Vec<String>,
@@ -38,6 +39,7 @@ impl Default for Config {
             desktop_notifications: true,
             drop_preview: true,
             paste_protection: true,
+            compare_runs: true,
             confirm_close: true,
             vsync: true,
             shell: Vec::new(),
@@ -60,6 +62,7 @@ struct Raw {
     desktop_notifications: Option<bool>,
     drop_preview: Option<bool>,
     paste_protection: Option<bool>,
+    compare_runs: Option<bool>,
     confirm_close: Option<bool>,
     vsync: Option<bool>,
     shell: Option<Shell>,
@@ -421,6 +424,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         font: raw.font,
         drop_preview: raw.drop_preview.unwrap_or(true),
         paste_protection: raw.paste_protection.unwrap_or(true),
+        compare_runs: raw.compare_runs.unwrap_or(true),
         confirm_close: raw.confirm_close.unwrap_or(true),
         desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
@@ -973,6 +977,8 @@ mod tests {
         assert!(parse_text("").unwrap().drop_preview);
         assert!(!parse_text("drop_preview = false").unwrap().drop_preview);
         assert!(parse_text("").unwrap().paste_protection);
+        assert!(parse_text("").unwrap().compare_runs);
+        assert!(!parse_text("compare_runs = false").unwrap().compare_runs);
         assert!(
             !parse_text("paste_protection = false")
                 .unwrap()

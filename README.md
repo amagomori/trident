@@ -114,6 +114,7 @@ padding = 6.0               # 0..=1000 logical pixels
 scrollback = 10000          # retained lines; 0 disables history (or use the [scrollback] table below)
 drop_preview = true         # false: file drops insert only the shell-quoted path
 paste_protection = true     # false: never confirm multi-line or control-character pastes
+compare_runs = true         # false: don't mark output lines that differ from the command's last run
 confirm_close = true        # false: close the window at once even while a program runs
 desktop_notifications = true # false: ignore OSC 9/777/99 notification requests
 vsync = true                # false: present without waiting for vblank (lower latency, may tear)

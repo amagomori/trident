@@ -1,0 +1,408 @@
+//! Compare with last run: when a command ends, its output is diffed line by line against
+//! the previous run of the same command text, and the lines that differ are kept on the
+//! command (in absolute lines, like its OSC 133 marks) for the renderer to mark. Runs only
+//! when a command ends; nothing here touches the output path.
+
+use std::collections::{HashMap, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::Range;
+
+use crate::{Command, Flags, Terminal};
+
+/// A viewport row whose output differs from the previous run of its command.
+pub const ROW_CHANGED: u8 = 1;
+/// Lines of the previous run are missing just above this row.
+pub const ROW_REMOVED_ABOVE: u8 = 2;
+
+/// Runs longer than this many lines are neither stored nor compared.
+const MAX_LINES: usize = 20_000;
+/// Total lines kept across all remembered commands; the oldest command goes first.
+const MAX_STORED: usize = 200_000;
+/// Edits past which the diff gives up and marks the whole differing middle.
+const MAX_EDITS: usize = 1_000;
+
+pub(crate) struct Runs {
+    pub enabled: bool,
+    /// Line hashes of each command's latest run, by command text.
+    last: HashMap<String, Vec<u64>>,
+    /// Command texts, least recently run first.
+    order: VecDeque<String>,
+    stored: usize,
+}
+
+impl Default for Runs {
+    fn default() -> Self {
+        Runs {
+            enabled: true,
+            last: HashMap::new(),
+            order: VecDeque::new(),
+            stored: 0,
+        }
+    }
+}
+
+impl Runs {
+    /// Stores `hashes` as `key`'s latest run and returns the run it replaces.
+    fn replace(&mut self, key: String, hashes: Vec<u64>) -> Option<Vec<u64>> {
+        if let Some(i) = self.order.iter().position(|k| *k == key) {
+            self.order.remove(i);
+        }
+        self.stored += hashes.len();
+        let previous = self.last.insert(key.clone(), hashes);
+        self.stored -= previous.as_ref().map_or(0, Vec::len);
+        self.order.push_back(key);
+        while self.stored > MAX_STORED && self.order.len() > 1 {
+            let oldest = self.order.pop_front().unwrap();
+            self.stored -= self.last.remove(&oldest).map_or(0, |h| h.len());
+        }
+        previous
+    }
+}
+
+/// Where one run differs from the previous one, in absolute lines.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Marks {
+    pub changed: Vec<Range<u64>>,
+    pub removed: Vec<u64>,
+}
+
+impl Marks {
+    pub(crate) fn map(&mut self, f: impl Fn(u64) -> u64) {
+        for range in &mut self.changed {
+            *range = f(range.start)..f(range.end);
+        }
+        for line in &mut self.removed {
+            *line = f(*line);
+        }
+    }
+
+    /// `f` maps single lines, so an exclusive end is mapped through its last line.
+    pub(crate) fn map_inclusive(&mut self, f: impl Fn(u64) -> u64) {
+        for range in &mut self.changed {
+            *range = f(range.start)..f(range.end - 1) + 1;
+        }
+        for line in &mut self.removed {
+            *line = f(*line);
+        }
+    }
+}
+
+fn command_text(c: &Command) -> String {
+    let text: String = c
+        .cells
+        .get(c.input_col..)
+        .unwrap_or_default()
+        .iter()
+        .filter(|cell| !cell.flags.contains(Flags::WIDE_SPACER))
+        .map(|cell| cell.c)
+        .collect();
+    text.trim().to_owned()
+}
+
+impl Terminal {
+    /// Turns compare-with-last-run on or off. Turning it off forgets stored runs and marks.
+    pub fn set_compare_runs(&mut self, enabled: bool) {
+        let shell = &mut *self.shell;
+        if shell.runs.enabled == enabled {
+            return;
+        }
+        shell.runs = Runs {
+            enabled,
+            ..Runs::default()
+        };
+        if !enabled {
+            for c in &mut shell.commands {
+                c.rerun = None;
+            }
+        }
+    }
+
+    pub fn compare_runs(&self) -> bool {
+        self.shell.runs.enabled
+    }
+
+    /// Diffs the command at `index`, which just ended, against its previous run.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn compare_with_last_run(&mut self, index: usize) {
+        if !self.shell.runs.enabled {
+            return;
+        }
+        let Some(c) = self.shell.commands.get(index) else {
+            return;
+        };
+        let Some(end) = c.next_prompt else { return };
+        let key = command_text(c);
+        if key.is_empty() || c.output_line < self.first_line() || c.gap.is_some() {
+            return;
+        }
+        let end = end.min(self.history + self.rows as u64);
+        let mut starts = Vec::new();
+        let mut hashes = Vec::new();
+        let mut text = String::new();
+        for line in c.output_line..end {
+            if text.is_empty() && starts.len() == hashes.len() {
+                starts.push(line);
+            }
+            let row = self.line(line);
+            text.extend(
+                row.cells
+                    .iter()
+                    .filter(|cell| !cell.flags.contains(Flags::WIDE_SPACER))
+                    .map(|cell| cell.c),
+            );
+            if !row.wrapped() || line + 1 == end {
+                text.truncate(text.trim_end().len());
+                let mut h = DefaultHasher::new();
+                text.hash(&mut h);
+                hashes.push(h.finish());
+                text.clear();
+                if hashes.len() > MAX_LINES {
+                    return;
+                }
+            }
+        }
+        let Some(previous) = self.shell.runs.replace(key, hashes.clone()) else {
+            return;
+        };
+        let diff = diff(&previous, &hashes);
+        let line_of = |i: usize| starts.get(i).copied().unwrap_or(end);
+        let marks = Marks {
+            changed: diff
+                .changed
+                .iter()
+                .map(|r| line_of(r.start)..line_of(r.end))
+                .collect(),
+            removed: diff.removed.iter().map(|&i| line_of(i)).collect(),
+        };
+        self.shell.commands[index].rerun =
+            (!marks.changed.is_empty() || !marks.removed.is_empty()).then(|| Box::new(marks));
+    }
+
+    /// Compare-with-last-run marks (`ROW_CHANGED`, `ROW_REMOVED_ABOVE`) for viewport rows
+    /// `first..rows`, where `first` is -1 while a partial row shows above the grid.
+    pub fn rerun_marks(&self, first: isize, out: &mut Vec<u8>) {
+        out.clear();
+        let count = (self.rows as isize - first).max(0) as usize;
+        out.resize(count, 0);
+        let commands = &self.shell.commands;
+        if self.alt_active || commands.is_empty() {
+            return;
+        }
+        let Some(top) =
+            (self.history - self.display_offset as u64).checked_add_signed(first as i64)
+        else {
+            return;
+        };
+        let bottom = top + count as u64;
+        let start = commands.partition_point(|c| c.next_prompt.is_some_and(|next| next < top));
+        for c in commands.range(start..) {
+            if c.prompt_line >= bottom {
+                break;
+            }
+            let Some(marks) = &c.rerun else { continue };
+            for range in &marks.changed {
+                let (from, to) = (range.start.max(top), range.end.min(bottom));
+                for line in from..to {
+                    out[(line - top) as usize] |= ROW_CHANGED;
+                }
+            }
+            for &line in &marks.removed {
+                if (top..bottom).contains(&line) {
+                    out[(line - top) as usize] |= ROW_REMOVED_ABOVE;
+                }
+            }
+        }
+    }
+}
+
+/// Lines of `new` that are not in `old` (as runs) and indices of `new` before which lines
+/// of `old` were dropped with nothing in their place.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Diff {
+    pub changed: Vec<Range<usize>>,
+    pub removed: Vec<usize>,
+}
+
+/// Myers' diff, after trimming the common head and tail.
+pub(crate) fn diff(old: &[u64], new: &[u64]) -> Diff {
+    let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let a = &old[head..old.len() - tail];
+    let b = &new[head..new.len() - tail];
+    let mut out = Diff::default();
+    if a.is_empty() && b.is_empty() {
+        return out;
+    }
+    if a.is_empty() || b.is_empty() {
+        if b.is_empty() {
+            out.removed.push(head);
+        } else {
+            out.changed.push(head..head + b.len());
+        }
+        return out;
+    }
+    let Some(edits) = edit_script(a, b) else {
+        out.changed.push(head..head + b.len());
+        return out;
+    };
+    // Walk the edits from the start: an insertion extends a changed run; a deletion that
+    // no insertion replaces leaves a removal mark.
+    let mut pending_delete = None;
+    for edit in edits {
+        match edit {
+            Edit::Insert(j) => {
+                pending_delete = None;
+                let j = head + j;
+                match out.changed.last_mut() {
+                    Some(run) if run.end == j => run.end += 1,
+                    _ => out.changed.push(j..j + 1),
+                }
+            }
+            Edit::Delete(j) => pending_delete = Some(head + j),
+            Edit::Keep => {
+                if let Some(j) = pending_delete.take()
+                    && !out.changed.last().is_some_and(|run| run.end == j)
+                    && out.removed.last() != Some(&j)
+                {
+                    out.removed.push(j);
+                }
+            }
+        }
+    }
+    if let Some(j) = pending_delete
+        && !out.changed.last().is_some_and(|run| run.end == j)
+    {
+        out.removed.push(j);
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edit {
+    Keep,
+    /// `new[j]` was inserted.
+    Insert(usize),
+    /// An `old` line was deleted before `new[j]`.
+    Delete(usize),
+}
+
+/// The edits turning `a` into `b`, in order; `None` past `MAX_EDITS`.
+fn edit_script(a: &[u64], b: &[u64]) -> Option<Vec<Edit>> {
+    let (n, m) = (a.len() as isize, b.len() as isize);
+    let max = (n + m) as usize;
+    let off = max as isize + 1;
+    let mut v = vec![0isize; 2 * max + 3];
+    // `trace[d]` is `v[-d..=d]` as it was before step `d`.
+    let mut trace: Vec<Vec<isize>> = Vec::new();
+    for d in 0..=max.min(MAX_EDITS) as isize {
+        trace.push(v[(off - d) as usize..=(off + d) as usize].to_vec());
+        for k in (-d..=d).step_by(2) {
+            let i = (off + k) as usize;
+            let mut x = if k == -d || (k != d && v[i - 1] < v[i + 1]) {
+                v[i + 1]
+            } else {
+                v[i - 1] + 1
+            };
+            let mut y = x - k;
+            while x < n && y < m && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
+            }
+            v[i] = x;
+            if x >= n && y >= m {
+                return Some(backtrack(&trace, n, m));
+            }
+        }
+    }
+    None
+}
+
+fn backtrack(trace: &[Vec<isize>], n: isize, m: isize) -> Vec<Edit> {
+    let mut edits = Vec::new();
+    let (mut x, mut y) = (n, m);
+    for d in (1..trace.len() as isize).rev() {
+        let v = &trace[d as usize];
+        let get = |k: isize| v[(k + d) as usize];
+        let k = x - y;
+        let prev_k = if k == -d || (k != d && get(k - 1) < get(k + 1)) {
+            k + 1
+        } else {
+            k - 1
+        };
+        let prev_x = get(prev_k);
+        let prev_y = prev_x - prev_k;
+        while x > prev_x && y > prev_y {
+            edits.push(Edit::Keep);
+            x -= 1;
+            y -= 1;
+        }
+        if prev_k == k + 1 {
+            edits.push(Edit::Insert(prev_y as usize));
+        } else {
+            edits.push(Edit::Delete(prev_y as usize));
+        }
+        (x, y) = (prev_x, prev_y);
+    }
+    edits.extend(std::iter::repeat_n(Edit::Keep, x as usize));
+    edits.reverse();
+    edits
+}
+
+#[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
+mod tests {
+    use super::{Diff, diff};
+
+    fn d(old: &[u64], new: &[u64]) -> Diff {
+        diff(old, new)
+    }
+
+    #[test]
+    fn identical_runs_have_no_marks() {
+        assert_eq!(d(&[1, 2, 3], &[1, 2, 3]), Diff::default());
+    }
+
+    #[test]
+    fn a_changed_line_is_marked() {
+        let diff = d(&[1, 2, 3, 4], &[1, 9, 3, 4]);
+        assert_eq!(diff.changed, [1..2]);
+        assert!(diff.removed.is_empty());
+    }
+
+    #[test]
+    fn inserted_lines_do_not_shift_the_rest() {
+        let diff = d(&[1, 2, 3, 4, 5], &[1, 2, 7, 8, 3, 4, 5]);
+        assert_eq!(diff.changed, [2..4]);
+        assert!(diff.removed.is_empty());
+    }
+
+    #[test]
+    fn removed_lines_mark_the_line_after() {
+        let diff = d(&[1, 2, 3, 4, 5], &[1, 4, 5]);
+        assert!(diff.changed.is_empty());
+        assert_eq!(diff.removed, [1]);
+        assert_eq!(d(&[1, 2, 3], &[1]).removed, [1]);
+    }
+
+    #[test]
+    fn scattered_edits() {
+        let diff = d(&[1, 2, 3, 4, 5, 6, 7, 8], &[1, 20, 3, 4, 6, 7, 80, 8, 9]);
+        assert_eq!(diff.changed, [1..2, 6..7, 8..9]);
+        assert_eq!(diff.removed, [4]);
+    }
+
+    #[test]
+    fn too_many_edits_mark_the_differing_middle() {
+        let old: Vec<u64> = (0..5000).collect();
+        let new: Vec<u64> = (0..5000)
+            .map(|i| if i == 0 || i == 4999 { i } else { i + 10_000 })
+            .collect();
+        assert_eq!(d(&old, &new).changed, [1..4999]);
+    }
+}

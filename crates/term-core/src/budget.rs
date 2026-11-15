@@ -80,6 +80,9 @@ impl Terminal {
             if let Some(gap) = &mut c.gap {
                 gap.line = f(gap.line);
             }
+            if let Some(marks) = &mut c.rerun {
+                marks.map(&f);
+            }
         }
         for line in &mut shell.budget.pending {
             *line = f(*line);
@@ -301,6 +304,9 @@ impl Terminal {
             c.next_prompt = c.next_prompt.map(|line| cut.map(line));
             if let Some(gap) = &mut c.gap {
                 gap.line = cut.map(gap.line);
+            }
+            if let Some(marks) = &mut c.rerun {
+                marks.map_inclusive(|line| cut.map(line));
             }
         }
         for line in &mut shell.budget.pending {
