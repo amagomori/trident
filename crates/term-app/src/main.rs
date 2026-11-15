@@ -74,10 +74,14 @@ const REMOVE_ON_EXIT: &str = "TERMINAL_REMOVE_ON_EXIT";
 /// A file this window removes when it exits, such as the output a pager window shows.
 static REMOVE_ON_EXIT_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-fn exit(code: i32) -> ! {
+fn remove_on_exit() {
     if let Some(path) = REMOVE_ON_EXIT_PATH.get() {
         let _ = std::fs::remove_file(path);
     }
+}
+
+fn exit(code: i32) -> ! {
+    remove_on_exit();
     std::process::exit(code)
 }
 /// Bounds how long startup waits for the portal's color scheme before the
@@ -3776,12 +3780,13 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     /// A macOS app quit ends the process from AppKit without returning from the event loop,
-    /// so the latency log is written here instead of when the session drops.
+    /// so the latency log is written and the pager file removed here as well.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(s) = &mut self.session {
             s.latency.take();
         }
         self.save_window_state();
+        remove_on_exit();
     }
 
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
