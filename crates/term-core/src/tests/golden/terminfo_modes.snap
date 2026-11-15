@@ -1,0 +1,6 @@
+BE: bracketed_paste=true synchronized_output=false title=None text="     "
+BD: bracketed_paste=false synchronized_output=false title=None text="     "
+Sync 1: bracketed_paste=false synchronized_output=true title=None text="     "
+Sync 0: bracketed_paste=false synchronized_output=false title=None text="     "
+tsl fsl: bracketed_paste=false synchronized_output=false title=Some("vim") text="     "
+dsl: bracketed_paste=false synchronized_output=false title=Some("") text="     "

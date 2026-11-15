@@ -420,6 +420,10 @@ impl Terminal {
                     }
                 }
                 49 => t.bg = Color::DefaultBg,
+                // Underline color is not drawn yet; consume its arguments.
+                58 => {
+                    extended_color(param, &mut iter);
+                }
                 v @ 90..=97 => t.fg = Color::Indexed((v - 90 + 8) as u8),
                 v @ 100..=107 => t.bg = Color::Indexed((v - 100 + 8) as u8),
                 _ => {}

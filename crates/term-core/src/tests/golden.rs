@@ -841,6 +841,24 @@ fn cases() -> Vec<Case> {
             b"1\r\n2\r\n3\r\n4\x1b[2;1H\x1b[L\x1b[M",
         ),
         ("unsupported_sequences", 6, 2, b"a\x1b[999z\x1b[9999mb"),
+        (
+            "terminfo_truecolor",
+            6,
+            2,
+            b"\x1b[38;2;1;2;3m\x1b[48;2;4;5;6mab\x1b[39;49mc",
+        ),
+        (
+            "terminfo_styled_underlines",
+            8,
+            2,
+            b"\x1b[4:1ma\x1b[4:2mb\x1b[4:3mc\x1b[4:4md\x1b[4:5me\x1b[4:0mf",
+        ),
+        (
+            "sgr_underline_color_ignored",
+            8,
+            2,
+            b"\x1b[1;31m\x1b[58:2::1:2:3ma\x1b[58;2;0;0;0mb\x1b[58;5;4mc\x1b[59md",
+        ),
         ("invalid_utf8", 6, 2, b"a\xffb\r\nZ"),
     ];
     let mut cases: Vec<_> = inputs
@@ -1007,6 +1025,65 @@ fn golden_keypad_modes() {
             expected == actual,
             "{}",
             difference("keypad_modes", &expected, &actual)
+        );
+    }
+}
+
+/// Runs each string the terminfo entry adds that changes modes or the title.
+#[test]
+fn golden_terminfo_modes() {
+    let source = include_str!("../../../term-app/terminfo/xterm-terminal.terminfo");
+    let steps: &[(&str, &str, &[u8])] = &[
+        ("BE", "BE=\\E[?2004h", b"\x1b[?2004h"),
+        ("BD", "BD=\\E[?2004l", b"\x1b[?2004l"),
+        (
+            "Sync 1",
+            "Sync=\\E[?2026%?%p1%{1}%-%tl%eh%;",
+            b"\x1b[?2026h",
+        ),
+        ("Sync 0", "Sync=", b"\x1b[?2026l"),
+        ("tsl fsl", "tsl=\\E]2;", b"\x1b]2;vim\x07"),
+        ("dsl", "dsl=\\E]2;\\007", b"\x1b]2;\x07"),
+    ];
+    let run = |bytewise: bool| {
+        let mut term = Terminal::new(5, 2);
+        let mut out = String::new();
+        for &(label, cap, bytes) in steps {
+            assert!(source.contains(cap), "terminfo entry lacks {cap}");
+            if bytewise {
+                for byte in bytes.chunks(1) {
+                    term.advance(byte);
+                }
+            } else {
+                term.advance(bytes);
+            }
+            let title = term.take_title();
+            writeln!(
+                out,
+                "{label}: bracketed_paste={} synchronized_output={} title={title:?} text={:?}",
+                term.modes.bracketed_paste,
+                term.modes.synchronized_output,
+                term.primary.lines[0]
+                    .cells
+                    .iter()
+                    .map(|c| c.c)
+                    .collect::<String>(),
+            )
+            .unwrap();
+        }
+        out
+    };
+    let actual = run(false);
+    assert_eq!(actual, run(true));
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden/terminfo_modes.snap");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(path, &actual).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(path).unwrap();
+        assert!(
+            expected == actual,
+            "{}",
+            difference("terminfo_modes", &expected, &actual)
         );
     }
 }

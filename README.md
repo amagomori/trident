@@ -48,9 +48,18 @@ terminal [OPTIONS] [-e COMMAND [ARGS...]]
   --option-as-alt     On macOS, make Option act as Alt/Meta
   --copy-on-select    Copy selected text to the clipboard on mouse release
   -e, --command ...   Run this command instead of your shell
+  --install-terminfo  Install the xterm-terminal terminfo entry with tic
 ```
 
-It starts your login shell (`$SHELL`) with `TERM=xterm-256color`.
+It starts your login shell (`$SHELL`) with `TERM=xterm-terminal` when that
+terminfo entry is installed, and `TERM=xterm-256color` otherwise. The entry
+([crates/term-app/terminfo/xterm-terminal.terminfo](crates/term-app/terminfo/xterm-terminal.terminfo))
+extends xterm-256color with truecolor (`Tc`, `setrgbf`/`setrgbb`), styled
+underlines (`Smulx`), bracketed paste (`BE`/`BD`/`PS`/`PE`), synchronized
+output (`Sync`) and the window title (`tsl`/`fsl`), and drops the xterm
+features terminal lacks. Install it once with `terminal --install-terminfo`
+(or `tic -x` on that file); copy it to a remote host with
+`infocmp -x xterm-terminal | ssh host -- tic -x /dev/stdin`.
 
 | Action | macOS | Linux |
 | --- | --- | --- |
