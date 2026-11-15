@@ -1202,6 +1202,18 @@ fn desktop_notification_sequences() {
         ),
         (b"\x1b]99;e=1;SGk7dGhlcmU=\x1b\\", vec![n("Hi;there", "")]),
         (b"\x1b]99;e=1;!!\x1b\\", vec![]),
+        (
+            b"\x1b]99;i=s:d=0:e=1;SGk7\x1b\\\x1b]99;i=s:d=0:e=1;dGhl\x1b\\\x1b]99;i=s:e=1;cmU=\x1b\\",
+            vec![n("Hi;there", "")],
+        ),
+        (
+            b"\x1b]99;i=s:d=0:e=1;SG\x1b\\\x1b]99;i=s:d=0:e=1;k7dGh\x1b\\\x1b]99;i=s:e=1;lcmU\x1b\\",
+            vec![n("Hi;there", "")],
+        ),
+        (
+            b"\x1b]99;i=s:d=0:e=1;w6\x1b\\\x1b]99;i=s:e=1;k=\x1b\\\x1b]99;i=t:d=0;\xc3\x1b\\\x1b]99;i=t;\xa9\x1b\\",
+            vec![n("\u{e9}", ""), n("\u{e9}", "")],
+        ),
         (b"\x1b]99;p=close;x\x07\x1b]99;p=icon;x\x07", vec![]),
         (b"\x1b]99;;a\x08b\tc\x07", vec![n("abc", "")]),
         (b"\x1b]9;one\x07\x1bc", vec![n("", "one")]),

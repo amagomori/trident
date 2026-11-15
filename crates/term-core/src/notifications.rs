@@ -11,6 +11,8 @@ const MAX_QUEUED: usize = 16;
 const MAX_PENDING: usize = 8;
 /// Characters kept from a title or body; the rest is cut off.
 const MAX_CHARS: usize = 1024;
+/// Bytes buffered per field of a chunked notification, enough for [`MAX_CHARS`] of UTF-8.
+const MAX_BYTES: usize = MAX_CHARS * 4;
 const MAX_ID: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,7 +46,21 @@ pub struct Notification {
 pub(crate) struct Notifications {
     queue: Vec<Notification>,
     /// OSC 99 notifications sent with `d=0`, by identifier.
-    pending: Vec<(Vec<u8>, Notification)>,
+    pending: Vec<Pending>,
+}
+
+/// A chunked OSC 99 notification. Text stays as bytes until the last chunk, so a UTF-8
+/// character split between chunks survives.
+#[derive(Default)]
+struct Pending {
+    id: Vec<u8>,
+    urgency: Urgency,
+    occasion: Occasion,
+    title: Vec<u8>,
+    body: Vec<u8>,
+    /// Base64 past the last complete quartet, decoded with the next chunk of the same field.
+    carry: Vec<u8>,
+    carry_title: bool,
 }
 
 impl Notifications {
@@ -147,42 +163,62 @@ impl Notifications {
         if kind != b"title" && kind != b"body" {
             return None;
         }
+        let slot = self.pending.iter().position(|pending| pending.id == id);
+        let mut pending = match slot {
+            Some(slot) => self.pending.remove(slot),
+            None => Pending {
+                id: id.to_vec(),
+                ..Pending::default()
+            },
+        };
+        if let Some(urgency) = urgency {
+            pending.urgency = urgency;
+        }
+        if let Some(occasion) = occasion {
+            pending.occasion = occasion;
+        }
+        let is_title = kind == b"title";
         let decoded;
         let payload: &[u8] = if base64 {
-            match crate::kitty::BASE64.decode(&*payload) {
-                Ok(bytes) => {
-                    decoded = bytes;
-                    &decoded
-                }
+            let mut data = std::mem::take(&mut pending.carry);
+            if pending.carry_title != is_title {
+                data.clear();
+            }
+            data.extend_from_slice(&payload);
+            let whole = if done {
+                data.len()
+            } else {
+                data.len() - data.len() % 4
+            };
+            match crate::kitty::BASE64.decode(&data[..whole]) {
+                Ok(bytes) => decoded = bytes,
                 Err(_) => return None,
             }
+            pending.carry = data[whole..].to_vec();
+            pending.carry_title = is_title;
+            &decoded
         } else {
             &payload
         };
-        let slot = self.pending.iter().position(|(pending, _)| pending == id);
-        let mut notification = match slot {
-            Some(slot) => self.pending.remove(slot).1,
-            None => Notification::default(),
-        };
-        if let Some(urgency) = urgency {
-            notification.urgency = urgency;
-        }
-        if let Some(occasion) = occasion {
-            notification.occasion = occasion;
-        }
-        let field = if kind == b"title" {
-            &mut notification.title
+        let field = if is_title {
+            &mut pending.title
         } else {
-            &mut notification.body
+            &mut pending.body
         };
-        append(field, payload);
+        let room = MAX_BYTES.saturating_sub(field.len());
+        field.extend_from_slice(&payload[..payload.len().min(room)]);
         if done {
-            self.push(notification);
+            self.push(Notification {
+                title: text(&pending.title),
+                body: text(&pending.body),
+                urgency: pending.urgency,
+                occasion: pending.occasion,
+            });
         } else {
             if self.pending.len() == MAX_PENDING {
                 self.pending.remove(0);
             }
-            self.pending.push((id.to_vec(), notification));
+            self.pending.push(pending);
         }
         None
     }
