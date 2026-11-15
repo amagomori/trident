@@ -812,7 +812,11 @@ fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) 
     (repeat || held_at_focus)
         && matches!(
             action,
-            Action::NewWindow | Action::NewTab | Action::CloseTab | Action::ToggleFullscreen
+            Action::NewWindow
+                | Action::NewTab
+                | Action::CloseTab
+                | Action::ToggleFullscreen
+                | Action::ShowLastCommandOutput
         )
 }
 
@@ -824,6 +828,97 @@ fn toggled_fullscreen(current: Option<Fullscreen>) -> Option<Fullscreen> {
         Some(_) => None,
         None => Some(Fullscreen::Borderless(None)),
     }
+}
+
+/// Starts another window of this executable with `args`, reporting its startup errors
+/// and exit status under `label`, then removes `remove_after` once it exits.
+fn open_window(
+    label: &'static str,
+    args: Vec<std::ffi::OsString>,
+    working_directory: Option<PathBuf>,
+    remove_after: Option<PathBuf>,
+) {
+    let cleanup = remove_after.clone();
+    let spawned = std::thread::Builder::new()
+        .name(label.replace(' ', "-"))
+        .spawn(move || {
+            let result = std::env::current_exe().and_then(|exe| {
+                let (stderr, startup_stderr) = new_window_stderr();
+                let mut command = std::process::Command::new(exe);
+                command
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(stderr);
+                if startup_stderr {
+                    command.env(STARTUP_STDERR, "1");
+                }
+                if let Some(dir) = working_directory {
+                    command.env(WORKING_DIRECTORY, dir);
+                }
+                command.spawn()
+            });
+            match result {
+                Ok(mut child) => {
+                    if let Some(stderr) = child.stderr.take()
+                        && let Err(error) = forward_new_window_stderr(stderr, std::io::stderr())
+                    {
+                        let _ = writeln!(std::io::stderr(), "{label}: {error}");
+                    }
+                    match child.wait() {
+                        Ok(status) if !status.success() => {
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "trident: {label} exited with {status}"
+                            );
+                        }
+                        Err(error) => {
+                            let _ = writeln!(std::io::stderr(), "{label}: {error}");
+                        }
+                        Ok(_) => {}
+                    }
+                }
+                Err(error) => {
+                    let _ = writeln!(std::io::stderr(), "{label}: {error}");
+                }
+            }
+            if let Some(path) = remove_after {
+                let _ = std::fs::remove_file(path);
+            }
+        });
+    if let Err(error) = spawned {
+        let _ = writeln!(std::io::stderr(), "{label}: {error}");
+        if let Some(path) = cleanup {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Writes `text` to a new private file for a pager window to read.
+fn write_pager_file(text: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let path = std::env::temp_dir().join(format!(
+        "trident-output-{}-{nanos}-{}.txt",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    if let Err(error) = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+    {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(path)
 }
 
 /// The directory a new window should start in: the shell's OSC 7 directory when it is
@@ -2984,62 +3079,32 @@ impl App {
                     .session
                     .as_ref()
                     .and_then(|s| local_working_directory(s.term.working_directory()));
-                let cells = self
+                open_window(
+                    "new window",
+                    new_window_args(std::env::args_os().skip(1)),
+                    working_directory,
+                    None,
+                );
+            }
+            Action::ShowLastCommandOutput => {
+                let Some(output) = self
                     .session
                     .as_ref()
-                    .map(|s| window_state::format_cells((s.term.cols(), s.term.rows())));
-                if let Err(error) =
-                    std::thread::Builder::new()
-                        .name("new-window".into())
-                        .spawn(move || {
-                            let result = std::env::current_exe().and_then(|exe| {
-                                let (stderr, startup_stderr) = new_window_stderr();
-                                let mut command = std::process::Command::new(exe);
-                                command
-                                    .args(new_window_args(std::env::args_os().skip(1)))
-                                    .stdin(Stdio::null())
-                                    .stdout(Stdio::null())
-                                    .stderr(stderr);
-                                if startup_stderr {
-                                    command.env(STARTUP_STDERR, "1");
-                                }
-                                if let Some(dir) = working_directory {
-                                    command.env(WORKING_DIRECTORY, dir);
-                                }
-                                if let Some(cells) = cells {
-                                    command.env(WINDOW_CELLS, cells);
-                                }
-                                command.spawn()
-                            });
-                            match result {
-                                Ok(mut child) => {
-                                    if let Some(stderr) = child.stderr.take()
-                                        && let Err(error) =
-                                            forward_new_window_stderr(stderr, std::io::stderr())
-                                    {
-                                        let _ = writeln!(std::io::stderr(), "new window: {error}");
-                                    }
-                                    match child.wait() {
-                                        Ok(status) if !status.success() => {
-                                            let _ = writeln!(
-                                                std::io::stderr(),
-                                                "trident: new window exited with {status}"
-                                            );
-                                        }
-                                        Err(error) => {
-                                            let _ =
-                                                writeln!(std::io::stderr(), "new window: {error}");
-                                        }
-                                        Ok(_) => {}
-                                    }
-                                }
-                                Err(error) => {
-                                    let _ = writeln!(std::io::stderr(), "new window: {error}");
-                                }
-                            }
-                        })
-                {
-                    let _ = writeln!(std::io::stderr(), "new window: {error}");
+                    .and_then(|s| s.term.last_command_output())
+                else {
+                    return false;
+                };
+                match write_pager_file(&output) {
+                    Ok(path) => {
+                        let mut args = new_window_args(std::env::args_os().skip(1));
+                        args.push("-e".into());
+                        args.extend(self.config.pager.iter().map(Into::into));
+                        args.push(path.clone().into());
+                        open_window("pager", args, None, Some(path));
+                    }
+                    Err(error) => {
+                        let _ = writeln!(std::io::stderr(), "pager: {error}");
+                    }
                 }
             }
             Action::ToggleFullscreen => {
@@ -4525,13 +4590,14 @@ mod tests {
     }
 
     #[test]
-    fn only_new_window_suppresses_shortcut_repeats() {
+    fn only_window_opening_shortcuts_suppress_repeats() {
         for action in [
             Action::NewWindow,
             Action::NewTab,
             Action::CloseTab,
             Action::NextTab,
             Action::SelectTab(0),
+            Action::ShowLastCommandOutput,
             Action::LineUp,
             Action::LineDown,
             Action::Increase,
@@ -4550,6 +4616,7 @@ mod tests {
                             | Action::NewTab
                             | Action::CloseTab
                             | Action::ToggleFullscreen
+                            | Action::ShowLastCommandOutput
                     )
                 );
             }
@@ -4563,6 +4630,53 @@ mod tests {
             Some(Fullscreen::Borderless(None))
         ));
         assert!(toggled_fullscreen(Some(Fullscreen::Borderless(None))).is_none());
+    }
+
+    #[test]
+    fn pager_window_keeps_options_but_not_the_command() {
+        let options = |args: &[&str]| {
+            new_window_args(args.iter().map(std::ffi::OsString::from))
+                .into_iter()
+                .map(|arg| arg.into_string().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert!(options(&[]).is_empty());
+        assert_eq!(
+            options(&[
+                "--config",
+                "-e",
+                "--font-size",
+                "20",
+                "--copy-on-select",
+                "-e",
+                "vim",
+                "--font",
+                "x"
+            ]),
+            ["--config", "-e", "--font-size", "20", "--copy-on-select"]
+        );
+        assert_eq!(
+            options(&["--scrollback", "5", "--font", "/f.ttf", "--command", "top"]),
+            ["--scrollback", "5", "--font", "/f.ttf"]
+        );
+    }
+
+    #[test]
+    fn pager_file_is_private_and_ends_with_a_newline() {
+        use std::os::unix::fs::PermissionsExt;
+        let first = write_pager_file("\x1b[0;1mbold\x1b[0m\nplain").unwrap();
+        let second = write_pager_file("").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "\x1b[0;1mbold\x1b[0m\nplain\n"
+        );
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "\n");
+        let mode = std::fs::metadata(&first).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        for path in [first, second] {
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]

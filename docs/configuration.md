@@ -39,6 +39,7 @@ menu_bar_icon = true        # macOS: false hides the menu bar item
 auto_secure_input = true    # macOS: false never turns on Secure Keyboard Entry at password prompts
 hide_mouse_when_typing = true # false: keep the mouse pointer shown while you type
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
+pager = ["less", "-R", "+G"] # opens the last command's output (file path appended); also accepts a string
 term = "xterm-256color"     # "xterm-trident" once installed (falls back if not found)
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
@@ -108,7 +109,7 @@ A chord maps to one of these:
 | Clipboard and search | `copy`, `paste`, `paste_primary` (primary selection, where supported), `search` |
 | Font size | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
 | Scrolling | `scroll_line_up`, `scroll_line_down`, `scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `clear_scrollback` |
-| Shell integration | `jump_to_prompt_up`, `jump_to_prompt_down`, `select_command_output` |
+| Shell integration | `jump_to_prompt_up`, `jump_to_prompt_down`, `select_command_output`, `show_last_command_output` |
 | Other | `none` removes a default and passes the key to the program. `{ send = "..." }` sends text. |
 
 ## Scrollback
@@ -164,6 +165,10 @@ Shell integration lets your shell mark prompts and commands (OSC 133) and report
 - Jumps between prompts with Cmd+Up/Down on macOS or Ctrl+Shift+Up/Down on Linux, and selects the
   latest command output with Cmd+Shift+A or Ctrl+Shift+A. To rebind these, use
   `jump_to_prompt_up`, `jump_to_prompt_down` and `select_command_output`.
+- Opens the latest command output that isn't empty, wherever you're scrolled, in a new window
+  running `pager`, with Cmd+Shift+G on macOS or Ctrl+Shift+G on Linux. Colors are kept as SGR
+  sequences, so `less` needs `-R`. Quitting the pager closes the window. To rebind it, use
+  `show_last_command_output`.
 - Keeps the screen in scrollback when you clear it at a prompt. `clear_scrollback` still erases
   it.
 - Opens new windows and tabs in the current directory.
