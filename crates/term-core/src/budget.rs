@@ -105,7 +105,7 @@ impl Terminal {
     /// Recomputes when the running command outgrows its share.
     pub(crate) fn refresh_budget_limit(&mut self) {
         let budget = self.budget_lines();
-        let first = self.first_line();
+        let first = self.history - self.primary.scrollback.len() as u64;
         self.shell.budget.limit = match self.shell.commands.back() {
             Some(c) if budget > 0 && c.next_prompt.is_none() && c.output_line >= first => {
                 c.output_line + budget
@@ -193,7 +193,7 @@ impl Terminal {
         if budget == 0 {
             return None;
         }
-        let first = self.first_line();
+        let first = self.history - self.primary.scrollback.len() as u64;
         let history = self.history;
         let c = &self.shell.commands[index];
         let end = c.next_prompt.unwrap_or(history).min(history);

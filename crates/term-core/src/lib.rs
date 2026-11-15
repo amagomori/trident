@@ -1011,6 +1011,7 @@ impl Terminal {
         }
 
         let mut alt_shifted = 0;
+        let mut overflow = Vec::new();
         for alt in [false, true] {
             let is_active = alt == self.alt_active;
             let screen = if alt {
@@ -1039,13 +1040,7 @@ impl Terminal {
                 for _ in 0..excess {
                     let row = screen.lines.remove(0);
                     if !alt {
-                        if self.max_scrollback > 0 {
-                            screen.scrollback.push_back(row);
-                            if screen.scrollback.len() > self.max_scrollback {
-                                screen.scrollback.pop_front();
-                            }
-                        }
-                        self.history += 1;
+                        overflow.push(row);
                     } else {
                         shifted += 1;
                     }
@@ -1072,6 +1067,15 @@ impl Terminal {
             }
             if alt {
                 alt_shifted = shifted;
+            }
+        }
+        // Rows pushed off the top evict like scrolled rows, so command budgets still apply.
+        self.cols = cols;
+        for row in overflow {
+            if self.max_scrollback > 0 {
+                self.push_history(row);
+            } else {
+                self.history += 1;
             }
         }
         if !self.primary.placements.is_empty() {

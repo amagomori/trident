@@ -309,6 +309,29 @@ fn reset_keeps_budget_settings() {
 }
 
 #[test]
+fn shrinking_the_window_trims_the_running_command() {
+    let mut t = Terminal::new(40, 30);
+    t.set_scrollback_limit(100);
+    t.set_command_budget(true, 0.8);
+    for name in ["alpha", "beta", "gamma"] {
+        t.advance(command(name, 3).as_bytes());
+    }
+    let mut running = format!("{PROMPT}make\r\n\x1b]133;C\x07");
+    for i in 0..2000 {
+        running.push_str(&format!("make {i}\r\n"));
+    }
+    t.advance(running.as_bytes());
+    t.resize(30, 5);
+    let lines = lines(&t);
+    assert_eq!(lines[0], "$ alpha", "{lines:?}");
+    assert_eq!(lines[8], "$ gamma");
+    assert_eq!(lines[12], "$ make");
+    let placeholders: Vec<&String> = lines.iter().filter(|l| l.starts_with('\u{2026}')).collect();
+    assert_eq!(placeholders.len(), 1, "{lines:?}");
+    assert!(lines.contains(&"make 1999".to_string()));
+}
+
+#[test]
 fn inserted_lines_move_the_output_start() {
     let mut t = Terminal::new(40, 30);
     t.set_scrollback_limit(32);
