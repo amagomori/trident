@@ -114,6 +114,7 @@ padding = 6.0               # 0..=1000 logical pixels
 scrollback = 10000          # retained lines; 0 disables history (or use the [scrollback] table below)
 drop_preview = true         # false: file drops insert only the shell-quoted path
 paste_protection = true     # false: never confirm multi-line or control-character pastes
+clipboard_read = false      # true: let programs read the clipboard with OSC 52
 confirm_close = true        # false: close the window at once even while a program runs
 desktop_notifications = true # false: ignore OSC 9/777/99 notification requests
 vsync = true                # false: present without waiting for vblank (lower latency, may tear)
@@ -210,6 +211,11 @@ tracking. Older Bash (including macOS `/bin/bash` 3.2) gets prompt marks only,
 not command C/D tracking. Existing `PROMPT_COMMAND` arrays are retained as arrays
 on Bash 5.1+; string hooks and older Bash use a prepended string hook.
 
+The snippets also report the current directory with OSC 7 at each prompt, so a new
+window starts in the directory of the window it was opened from. Any shell or program
+that sends `OSC 7 ; file://host/path` works the same way; directories on other hosts
+(over ssh) and ones that no longer exist are ignored.
+
 New windows launch an independent process with the same command-line options.
 Line-scroll shortcuts leave the prompt-jump chords Cmd+Up/Down and
 Ctrl+Shift+Up/Down available for shell integration.
@@ -276,6 +282,14 @@ Enter and runs the command at once. Such pastes, and pastes containing other con
 characters (tab excepted), first show a banner: Enter pastes, Escape cancels, and other
 keys are ignored while it is shown. With bracketed paste on, text pastes directly with
 every ESC stripped. Set `paste_protection = false` to always paste immediately.
+
+Programs can copy to the clipboard (`c`) or, on Linux, the primary selection (`p`) with
+OSC 52, which also works through ssh and tmux (`set -g set-clipboard on`), for example
+`printf '\e]52;c;%s\a' "$(printf hello | base64)"`. Reading the clipboard back with an
+`OSC 52 ; c ; ?` query is off by default because any program, including one on a remote
+host, could read what you copied; set `clipboard_read = true` to answer such queries.
+On X11 a copy larger than the X server's maximum request size (about 16 MiB with
+BIG-REQUESTS) is ignored and the clipboard keeps its previous contents.
 
 Closing the window at an idle shell prompt quits at once. While another program holds the
 terminal's foreground (vim, ssh, a build), a banner names it and asks first: Enter (or a

@@ -1042,6 +1042,36 @@ fn cases() -> Vec<Case> {
             b"\x1b[1;31m\x1b[58:2::1:2:3ma\x1b[58;2;0;0;0mb\x1b[58;5;4mc\x1b[59md",
         ),
         ("invalid_utf8", 6, 2, b"a\xffb\r\nZ"),
+        (
+            "osc_window_title",
+            6,
+            2,
+            b"a\x1b]2;first\x07b\x1b]0;second;title\x1b\\c",
+        ),
+        (
+            "osc8_hyperlink",
+            8,
+            2,
+            b"a\x1b]8;;https://example.com\x07bc\x1b]8;;\x07d\x1b]8;id=x;file:///tmp\x1b\\e\x1b]8;;\x1b\\f",
+        ),
+        (
+            "osc52_clipboard_store",
+            6,
+            2,
+            b"a\x1b]52;c;aGVsbG8=\x07b\x1b]52;p;d29ybGQ\x1b\\c",
+        ),
+        (
+            "osc52_clipboard_query",
+            6,
+            2,
+            b"a\x1b]52;c;?\x07b\x1b]52;q;aGk=\x07\x1b]52;c;!!\x07c",
+        ),
+        (
+            "osc7_working_directory",
+            6,
+            2,
+            b"a\x1b]7;file://box/home/me/my%20dir\x07b\x1b]7;bogus\x1b\\c",
+        ),
     ];
     let mut cases: Vec<_> = inputs
         .iter()
@@ -1138,6 +1168,12 @@ fn attributes(t: &Terminal, cell: &Cell) -> String {
     if let Some(c) = t.underline_color(cell) {
         write!(out, " underline-color={}", color(c)).unwrap();
     }
+    if t.links
+        .get(cell.hyperlink)
+        .is_some_and(|(_, uri)| !uri.is_empty())
+    {
+        write!(out, " link={}", cell.hyperlink).unwrap();
+    }
     out
 }
 
@@ -1201,6 +1237,26 @@ fn snapshot(t: &Terminal) -> String {
         t.primary.scrollback.iter(),
     );
     rows(&mut out, t, "alternate", t.alternate.lines.iter());
+    if let Some(title) = &t.title {
+        writeln!(out, "title: {title:?}").unwrap();
+    }
+    for index in 1..=t.links.len() as u16 {
+        if let Some((id, uri)) = t.links.get(index).filter(|(_, uri)| !uri.is_empty()) {
+            let (id, uri) = (String::from_utf8_lossy(id), String::from_utf8_lossy(uri));
+            writeln!(out, "link {index}: id={id:?} uri={uri:?}").unwrap();
+        }
+    }
+    for request in &t.shell.clipboard {
+        writeln!(out, "clipboard request: {request:?}").unwrap();
+    }
+    if let Some(cwd) = t.working_directory() {
+        writeln!(
+            out,
+            "working directory: host={:?} path={:?}",
+            cwd.host, cwd.path
+        )
+        .unwrap();
+    }
     out
 }
 

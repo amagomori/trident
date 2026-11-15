@@ -29,16 +29,55 @@ enum Backend {
     Arboard(arboard::Clipboard),
 }
 
+/// The X11 core protocol guarantees every server accepts requests of at least this size.
+#[cfg(target_os = "linux")]
+const X11_MIN_REQUEST_BYTES: usize = 4096;
+
+/// The fixed part of a ChangeProperty request.
+#[cfg(target_os = "linux")]
+const X11_CHANGE_PROPERTY_HEADER: usize = 24;
+
+/// Requests longer than this many bytes need BIG-REQUESTS and its 4-byte length field.
+#[cfg(target_os = "linux")]
+const X11_CORE_REQUEST_BYTES: usize = u16::MAX as usize * 4;
+
+/// Whether `len` bytes fit in the single ChangeProperty request arboard answers X11
+/// selection requests with. It has no INCR transfer, so anything larger never reaches
+/// the requestor.
+#[cfg(target_os = "linux")]
+fn x11_property_fits(len: usize, max_request_bytes: usize) -> bool {
+    len.checked_next_multiple_of(4)
+        .and_then(|len| len.checked_add(X11_CHANGE_PROPERTY_HEADER))
+        .and_then(|total| match total {
+            ..=X11_CORE_REQUEST_BYTES => Some(total),
+            _ => total.checked_add(4),
+        })
+        .is_some_and(|total| total <= max_request_bytes)
+}
+
 #[derive(Default)]
 pub struct Clipboard {
     // Kept alive for the whole session: on X11 and Wayland the contents are served by
     // this process, so dropping it would lose what was copied.
     inner: Option<Backend>,
+    /// On X11, the server's maximum request size once looked up (`Some(None)` if that
+    /// failed); `None` before the first store that needs it, and always off X11.
+    #[cfg(target_os = "linux")]
+    x11_max_request_bytes: Option<Option<usize>>,
+    #[cfg(target_os = "linux")]
+    x11: bool,
     _window: Option<Arc<Window>>,
 }
 
 impl Clipboard {
     pub fn new(window: Arc<Window>) -> Self {
+        #[cfg(target_os = "linux")]
+        let x11 = window.display_handle().is_ok_and(|display| {
+            matches!(
+                display.as_raw(),
+                RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_)
+            )
+        });
         let inner = window
             .display_handle()
             .map_err(|e| e.to_string())
@@ -61,8 +100,29 @@ impl Clipboard {
             .ok();
         Self {
             inner,
+            #[cfg(target_os = "linux")]
+            x11_max_request_bytes: None,
+            #[cfg(target_os = "linux")]
+            x11,
             _window: Some(window),
         }
+    }
+
+    /// Whether the X server can be handed `len` bytes of clipboard text; true off X11
+    /// or when the server's limit can't be read.
+    #[cfg(target_os = "linux")]
+    fn x11_can_serve(&mut self, len: usize) -> bool {
+        if !self.x11 || x11_property_fits(len, X11_MIN_REQUEST_BYTES) {
+            return true;
+        }
+        let max = *self.x11_max_request_bytes.get_or_insert_with(|| {
+            use x11rb::connection::RequestConnection;
+            x11rb::connect(None)
+                .map(|(connection, _)| connection.maximum_request_bytes())
+                .map_err(|e| diag!("terminal: X11 request size unavailable: {e}"))
+                .ok()
+        });
+        max.is_none_or(|max| x11_property_fits(len, max))
     }
 
     pub fn get(&mut self, primary: bool) -> Option<String> {
@@ -93,6 +153,14 @@ impl Clipboard {
     }
 
     pub fn set(&mut self, text: String, primary: bool) {
+        #[cfg(target_os = "linux")]
+        if self.inner.is_some() && !self.x11_can_serve(text.len()) {
+            diag!(
+                "terminal: {} bytes is more than the X server can transfer; clipboard left unchanged",
+                text.len()
+            );
+            return;
+        }
         let Some(backend) = self.inner.as_mut() else {
             return;
         };
@@ -137,6 +205,25 @@ mod tests {
         ] {
             assert_eq!(backend_kind(display), BackendKind::Arboard);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_property_size_limit() {
+        // Xvfb with BIG-REQUESTS: (1 << 22) - 1 words.
+        let big = ((1 << 22) - 1) * 4;
+        assert!(x11_property_fits(12 << 20, big));
+        assert!(x11_property_fits(big - 28, big));
+        assert!(!x11_property_fits(big - 27, big));
+        assert!(!x11_property_fits(16 << 20, big));
+        assert!(!x11_property_fits(24 << 20, big));
+        // A server without BIG-REQUESTS.
+        assert!(x11_property_fits(65535 * 4 - 24, 65535 * 4));
+        assert!(!x11_property_fits(65535 * 4 - 23, 65535 * 4));
+        assert!(x11_property_fits(4096 - 24, X11_MIN_REQUEST_BYTES));
+        assert!(!x11_property_fits(4096 - 20, X11_MIN_REQUEST_BYTES));
+        assert!(x11_property_fits(0, X11_MIN_REQUEST_BYTES));
+        assert!(!x11_property_fits(usize::MAX, usize::MAX));
     }
 
     #[cfg(target_os = "linux")]

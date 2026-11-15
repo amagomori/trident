@@ -44,7 +44,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use term_core::{MouseMode, Point, SelectionKind, Terminal};
+use term_core::{ClipboardRequest, MouseMode, Point, SelectionKind, Terminal};
 #[cfg(test)]
 use term_render::PADDING;
 use term_render::{Fonts, Renderer};
@@ -59,6 +59,7 @@ use winit::window::{Theme, Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
+const WORKING_DIRECTORY: &str = "TERMINAL_WORKING_DIRECTORY";
 /// Bounds how long startup waits for the portal's color scheme before the
 /// first PTY output is parsed; the read overlaps window and GPU setup.
 #[cfg(target_os = "linux")]
@@ -150,6 +151,7 @@ struct Options {
     option_as_alt: bool,
     copy_on_select: bool,
     command: Vec<String>,
+    working_directory: Option<PathBuf>,
 }
 
 impl Options {
@@ -216,6 +218,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
         option_as_alt: !cfg!(target_os = "macos"),
         copy_on_select: false,
         command: Vec::new(),
+        working_directory: None,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -595,6 +598,37 @@ impl HeldAtFocus {
 
 fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) -> bool {
     (repeat || held_at_focus) && matches!(action, Action::NewWindow)
+}
+
+/// The directory a new window should start in: the shell's OSC 7 directory when it is
+/// on this machine and still exists.
+fn local_working_directory(cwd: Option<&term_core::WorkingDirectory>) -> Option<PathBuf> {
+    let cwd = cwd?;
+    let local = cwd.host.is_empty()
+        || cwd.host.eq_ignore_ascii_case("localhost")
+        || hostname().is_some_and(|name| same_host(&name, &cwd.host));
+    let path = PathBuf::from(&cwd.path);
+    (local && path.is_absolute() && path.is_dir()).then_some(path)
+}
+
+fn same_host(a: &str, b: &str) -> bool {
+    let short = |name: &str| {
+        name.split('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+    a.eq_ignore_ascii_case(b) || (!a.contains('.') || !b.contains('.')) && short(a) == short(b)
+}
+
+fn hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for its length; gethostname writes at most that many bytes.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8(buf[..len].to_vec()).ok()
 }
 
 fn inherit_new_window_stderr(kind: Option<FileType>) -> bool {
@@ -991,6 +1025,7 @@ impl App {
         let mut pty = Pty::spawn(
             self.options.command(&self.config),
             &env,
+            self.options.working_directory.as_deref(),
             spawn_cols,
             spawn_rows,
             spawn_cell,
@@ -1231,6 +1266,18 @@ impl App {
         }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
+        for request in s.term.take_clipboard_requests() {
+            match request {
+                ClipboardRequest::Store { primary, text } => self.clipboard.set(text, primary),
+                ClipboardRequest::Load { primary, .. } if self.config.clipboard_read => {
+                    let text = self.clipboard.get(primary).unwrap_or_default();
+                    if let Some(reply) = request.reply(&text) {
+                        s.pty.write(&reply);
+                    }
+                }
+                ClipboardRequest::Load { .. } => {}
+            }
+        }
         let title = s.term.take_title();
         let progress = s.term.take_progress();
         if title.is_some() || progress.is_some() {
@@ -1755,10 +1802,14 @@ impl App {
                 }
             }
             Action::NewWindow => {
+                let working_directory = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| local_working_directory(s.term.working_directory()));
                 if let Err(error) =
                     std::thread::Builder::new()
                         .name("new-window".into())
-                        .spawn(|| {
+                        .spawn(move || {
                             let result = std::env::current_exe().and_then(|exe| {
                                 let (stderr, startup_stderr) = new_window_stderr();
                                 let mut command = std::process::Command::new(exe);
@@ -1769,6 +1820,9 @@ impl App {
                                     .stderr(stderr);
                                 if startup_stderr {
                                     command.env(STARTUP_STDERR, "1");
+                                }
+                                if let Some(dir) = working_directory {
+                                    command.env(WORKING_DIRECTORY, dir);
                                 }
                                 command.spawn()
                             });
@@ -2790,6 +2844,9 @@ fn main() {
     let startup_stderr = std::env::var_os(STARTUP_STDERR).is_some();
     // SAFETY: main has not started any threads or spawned the PTY yet.
     unsafe { std::env::remove_var(STARTUP_STDERR) };
+    let working_directory = std::env::var_os(WORKING_DIRECTORY).map(PathBuf::from);
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(WORKING_DIRECTORY) };
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
@@ -2797,7 +2854,10 @@ fn main() {
         std::process::exit(terminfo::install());
     }
     let options = match parse_args() {
-        Ok(o) => o,
+        Ok(o) => Options {
+            working_directory: working_directory.filter(|dir| dir.is_dir()),
+            ..o
+        },
         Err(e) => {
             diag!("terminal: {e}");
             std::process::exit(2);
@@ -2975,6 +3035,72 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn new_windows_start_in_local_osc7_directories() {
+        let dir = std::env::temp_dir();
+        let cwd = |host: &str, path: &std::path::Path| term_core::WorkingDirectory {
+            host: host.into(),
+            path: path.to_str().unwrap().into(),
+        };
+        let here = super::hostname().unwrap();
+        for host in ["", "localhost", "LOCALHOST", &here, &here.to_uppercase()] {
+            assert_eq!(
+                super::local_working_directory(Some(&cwd(host, &dir))).as_deref(),
+                Some(dir.as_path()),
+                "{host:?}"
+            );
+        }
+        assert_eq!(super::local_working_directory(None), None);
+        let missing = dir.join("terminal-osc7-missing-dir");
+        assert_eq!(
+            super::local_working_directory(Some(&cwd("", &missing))),
+            None
+        );
+        assert_eq!(
+            super::local_working_directory(Some(&cwd("some-other-host.example", &dir))),
+            None
+        );
+        assert!(super::same_host("mac.local", "MAC"));
+        assert!(!super::same_host("mac.local", "box.local"));
+        assert!(!super::same_host("dev.office.example", "dev.cloud.example"));
+    }
+
+    #[test]
+    fn bash_integration_reports_non_ascii_directories() {
+        let dir =
+            std::env::temp_dir().join(format!("terminal-osc7 \u{e9}%x-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../shell-integration/terminal.bash"
+        );
+        let output = std::process::Command::new("bash")
+            .args([
+                "--norc",
+                "-ic",
+                r#"source "$1"; _terminal_report_cwd"#,
+                "bash",
+                script,
+            ])
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let mut terminal = term_core::Terminal::new(10, 2);
+        terminal.advance(&output.stdout);
+        let reported = terminal
+            .working_directory()
+            .and_then(|cwd| std::fs::canonicalize(&cwd.path).ok());
+        let expected = dir.canonicalize().ok();
+        std::fs::remove_dir(&dir).unwrap();
+        assert!(
+            reported.is_some() && reported == expected,
+            "{:?}",
+            String::from_utf8_lossy(&output.stdout)
         );
     }
 
@@ -3261,6 +3387,7 @@ mod tests {
             font: None,
             font_size: super::DEFAULT_FONT_SIZE,
             command: Vec::new(),
+            working_directory: None,
             option_as_alt: true,
             copy_on_select: false,
         };
