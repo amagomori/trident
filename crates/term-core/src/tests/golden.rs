@@ -1248,10 +1248,17 @@ fn desktop_notification_sequences() {
         if input != b"\x1b]9;one\x07\x1bc" {
             assert_eq!(snapshot(&t), before, "{input:?}");
         }
-        assert_eq!(t.take_notifications(), expected, "{input:?}");
+        let mut taken = t.take_notifications();
+        taken.iter_mut().for_each(|n| n.id.clear());
+        assert_eq!(taken, expected, "{input:?}");
         assert!(t.take_notifications().is_empty());
         assert!(t.take_responses().is_empty(), "{input:?}");
     }
+
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]99;i=rep;v1\x07\x1b]99;i=rep:d=0;v\x07\x1b]99;i=rep;2\x07\x1b]9;x\x07");
+    let ids: Vec<_> = t.take_notifications().into_iter().map(|n| n.id).collect();
+    assert_eq!(ids, ["rep", "rep", ""]);
 }
 
 #[test]
@@ -1270,7 +1277,8 @@ fn desktop_notification_query_and_limits() {
     }
     let queued = t.take_notifications();
     assert_eq!(queued.len(), 16);
-    assert_eq!(queued[0].body, "24x");
+    assert_eq!(queued[0].body, "0x");
+    assert_eq!(queued[15].body, "15x");
 
     t.advance(format!("\x1b]99;;{}\x07", "a".repeat(5000)).as_bytes());
     assert_eq!(t.take_notifications()[0].title.chars().count(), 1024);
@@ -1288,10 +1296,12 @@ fn desktop_notification_query_and_limits() {
         t.take_notifications(),
         vec![
             Notification {
+                id: "p0".into(),
                 title: "!".into(),
                 ..Notification::default()
             },
             Notification {
+                id: "p19".into(),
                 title: "19!".into(),
                 ..Notification::default()
             },

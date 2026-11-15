@@ -1190,14 +1190,21 @@ impl App {
             s.window
                 .request_user_attention(Some(winit::window::UserAttentionType::Informational));
         }
+        let visible = std::cell::OnceCell::new();
         for notification in s.term.take_notifications() {
             if self.config.desktop_notifications
                 && osc_notify::wanted(notification.occasion, self.focused, || {
-                    if self.occluded {
-                        Some(false)
-                    } else {
-                        s.window.is_minimized().map(|minimized| !minimized)
-                    }
+                    *visible.get_or_init(|| {
+                        if self.occluded {
+                            return Some(false);
+                        }
+                        let shown = s.window.is_minimized().map(|minimized| !minimized);
+                        #[cfg(target_os = "macos")]
+                        if shown == Some(true) && osc_notify::covered(&s.window) {
+                            return Some(false);
+                        }
+                        shown
+                    })
                 })
                 && self.notification_throttle.allow(Instant::now())
             {

@@ -5,7 +5,8 @@
 
 use base64::Engine;
 
-/// Queued notifications kept until the app takes them; older ones are dropped first.
+/// Queued notifications kept until the app takes them; later ones are dropped, so a flood
+/// keeps its first notifications, as the app's rate limit does.
 const MAX_QUEUED: usize = 16;
 /// Chunked OSC 99 notifications still waiting for their last chunk.
 const MAX_PENDING: usize = 8;
@@ -36,6 +37,8 @@ pub enum Occasion {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Notification {
+    /// OSC 99 `i`: a later notification with the same id replaces this one. Empty for none.
+    pub id: String,
     pub title: String,
     pub body: String,
     pub urgency: Urgency,
@@ -80,10 +83,9 @@ impl Notifications {
         if notification.title.is_empty() && notification.body.is_empty() {
             return;
         }
-        if self.queue.len() == MAX_QUEUED {
-            self.queue.remove(0);
+        if self.queue.len() < MAX_QUEUED {
+            self.queue.push(notification);
         }
-        self.queue.push(notification);
     }
 
     /// OSC 9 ; message. ConEmu's numbered OSC 9 commands (progress, tab title...) are
@@ -207,6 +209,7 @@ impl Notifications {
         extend(pending.field(is_title), payload);
         if done {
             self.push(Notification {
+                id: String::from_utf8_lossy(&pending.id).into_owned(),
                 title: text(&pending.title),
                 body: text(&pending.body),
                 urgency: pending.urgency,
