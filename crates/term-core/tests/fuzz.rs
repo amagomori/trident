@@ -2,14 +2,16 @@
 //! seeds) plus seeded random escape-sequence soup, with the fuzz target's memory check.
 //! `TERM_FUZZ_CASES` and `TERM_FUZZ_SEED` widen the random part.
 
-use term_core::fuzz::{self, CountingAlloc};
+mod harness;
+
+use harness::CountingAlloc;
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
 fn run(name: &str, data: &[u8]) {
     let base = CountingAlloc::live();
-    fuzz::run_with(data, |_, budget| {
+    harness::run_with(data, |_, budget| {
         let held = CountingAlloc::live().saturating_sub(base);
         assert!(
             held <= budget,

@@ -2,7 +2,7 @@
 
 `terminal` feeds arbitrary bytes through `term_core::Terminal` (the parser and the grid),
 mixed with resizes, scrolling, selections and searches, and fails on any panic, broken
-grid invariant or heap growth past the budget in `crates/term-core/src/fuzz.rs`.
+grid invariant or heap growth past the budget in `crates/term-core/tests/harness/mod.rs`.
 
 ```sh
 cargo install cargo-fuzz

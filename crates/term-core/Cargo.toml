@@ -7,10 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-# Exposes the shared fuzz harness to fuzz/ and tests/fuzz.rs.
-fuzz = []
-
 [dependencies]
 regex.workspace = true
 base64.workspace = true
@@ -22,6 +18,3 @@ vte.workspace = true
 
 [target."cfg(unix)".dependencies]
 libc.workspace = true
-
-[dev-dependencies]
-term-core = { path = ".", features = ["fuzz"] }

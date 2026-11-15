@@ -1874,7 +1874,3 @@ fn dec_special(c: char) -> char {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(feature = "fuzz")]
-#[doc(hidden)]
-pub mod fuzz;

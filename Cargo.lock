@@ -2640,7 +2640,6 @@ dependencies = [
  "memchr",
  "png",
  "regex",
- "term-core",
  "unicode-width",
  "vte",
 ]

@@ -10,10 +10,13 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::{Cell, Row, SelectionKind, Terminal};
+use term_core::{Cell, Row, SelectionKind, Terminal};
 
 /// Decoded image bytes the harness lets the store keep.
-pub const IMAGE_QUOTA: usize = 1 << 20;
+const IMAGE_QUOTA: usize = 1 << 20;
+
+/// Command records term-core keeps at most (`MAX_COMMANDS` in its lib.rs).
+const MAX_COMMANDS: usize = 1024;
 
 /// Bytes a terminal may hold beyond its grid, scrollback, images and input-sized state.
 const FIXED_BUDGET: usize = 2 << 20;
@@ -39,10 +42,6 @@ impl Rng {
 }
 
 /// Runs `data` through a terminal, panicking on any broken invariant.
-pub fn run(data: &[u8]) {
-    run_with(data, |_, _| {});
-}
-
 /// Like [`run`], calling `check(terminal, budget)` after every step, where `budget` is the
 /// most heap memory, in bytes, the terminal may hold at that point.
 pub fn run_with(data: &[u8], mut check: impl FnMut(&Terminal, usize)) {
@@ -161,7 +160,7 @@ impl Fuzz {
             }
             _ => {
                 let dark = rng.below(2) == 0;
-                let mut palette = crate::colors::Palette::default();
+                let mut palette = term_core::colors::Palette::default();
                 if !dark {
                     std::mem::swap(&mut palette.foreground, &mut palette.background);
                 }
@@ -206,7 +205,7 @@ impl Fuzz {
     fn budget(&self) -> usize {
         // Both screens, the scrollback and saved prompt rows, each up to the widest grid
         // seen (narrowing keeps cut cells), at twice their size for growth slack.
-        let rows = 2 * self.max_rows + self.scrollback + 1 + crate::MAX_COMMANDS;
+        let rows = 2 * self.max_rows + self.scrollback + 1 + MAX_COMMANDS;
         let row_bytes = std::mem::size_of::<Row>() + self.max_cols * std::mem::size_of::<Cell>();
         FIXED_BUDGET + 2 * rows * row_bytes + 2 * IMAGE_QUOTA + BYTES_PER_INPUT * self.fed
     }
