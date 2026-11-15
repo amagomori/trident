@@ -400,6 +400,9 @@ fn advance_all(term: &mut Terminal, batch: pty::Output) -> usize {
     start
 }
 
+#[cfg(target_os = "macos")]
+type QuitChecks = std::rc::Rc<std::cell::RefCell<Vec<(u64, Box<dyn Fn() -> bool>)>>>;
+
 #[derive(Default)]
 struct PendingOutput {
     bytes: Vec<u8>,
@@ -1027,6 +1030,10 @@ struct App {
     tab_click: bool,
     /// The tab a close confirmation is for; none when it is for the window.
     pending_close_tab: Option<u64>,
+    /// Per tab pane id, whether a program other than the shell runs there; asked before
+    /// the app quits.
+    #[cfg(target_os = "macos")]
+    quit_checks: QuitChecks,
     font_size: f32,
     modifiers: ModifiersState,
     held_at_focus: HeldAtFocus,
@@ -1120,6 +1127,8 @@ impl App {
             tab_pointer: PhysicalPosition::default(),
             tab_click: false,
             pending_close_tab: None,
+            #[cfg(target_os = "macos")]
+            quit_checks: QuitChecks::default(),
             modifiers: ModifiersState::empty(),
             held_at_focus: HeldAtFocus::default(),
             focused: true,
@@ -1411,6 +1420,10 @@ impl App {
         term.set_scrollback_limit(self.options.scrollback(&self.config));
         term.set_command_budget(self.config.command_budget, self.config.command_share);
         term.set_cell_pixel_size(cell.0, cell.1);
+        #[cfg(target_os = "macos")]
+        self.quit_checks
+            .borrow_mut()
+            .push((id, Box::new(pty.running_program_check())));
         let index = (self.active_tab + 1).min(self.tabs.len());
         self.tabs
             .insert(index, Some(Pane::new(id, term, pty, cell)));
@@ -1487,6 +1500,12 @@ impl App {
         let removed = self.tabs.remove(index);
         if index < self.active_tab {
             self.active_tab -= 1;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(pane) = &removed {
+            self.quit_checks
+                .borrow_mut()
+                .retain(|(id, _)| *id != pane.id);
         }
         drop(removed);
         self.tab_hover = None;
@@ -2221,6 +2240,12 @@ impl App {
             let responses = s.term.take_responses();
             s.pty.write(&responses);
             s.window.request_redraw();
+            for pane in self.tabs.iter_mut().flatten() {
+                pane.term
+                    .set_palette(self.config.themes.palette(appearance).clone());
+                let responses = pane.term.take_responses();
+                pane.pty.write(&responses);
+            }
         }
     }
 
@@ -2286,6 +2311,19 @@ impl App {
                     search.dirty = true;
                 }
                 release_freed_memory(&mut s.term);
+                for pane in self.tabs.iter_mut().flatten() {
+                    pane.pty
+                        .set_command_notifications(self.config.notify_long_commands_after != 0)?;
+                    pane.term
+                        .set_palette(self.config.themes.palette(self.appearance).clone());
+                    let responses = pane.term.take_responses();
+                    pane.pty.write(&responses);
+                    pane.term
+                        .set_scrollback_limit(self.options.scrollback(&self.config));
+                    pane.term
+                        .set_command_budget(self.config.command_budget, self.config.command_share);
+                    release_freed_memory(&mut pane.term);
+                }
                 if next_vsync_off {
                     warn_vsync_unsupported(&self.config, &s.renderer);
                 }
@@ -3001,10 +3039,14 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(target_os = "macos")]
                 close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
                 #[cfg(target_os = "macos")]
-                close_confirm::route_app_quit_through_close(
-                    &session.window,
-                    session.pty.running_program_check(),
-                );
+                close_confirm::route_app_quit_through_close(&session.window, {
+                    let checks = self.quit_checks.clone();
+                    move || checks.borrow().iter().any(|(_, running)| running())
+                });
+                #[cfg(target_os = "macos")]
+                self.quit_checks
+                    .borrow_mut()
+                    .push((session.pane, Box::new(session.pty.running_program_check())));
                 #[cfg(target_os = "macos")]
                 ime::set_command_chords(&self.config.bindings);
                 #[cfg(target_os = "macos")]
