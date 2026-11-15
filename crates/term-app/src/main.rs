@@ -1642,6 +1642,7 @@ impl App {
         };
         match event {
             WindowEvent::Focused(true) => {
+                self.cancel_prompts();
                 self.select_tab(index);
                 self.window_event(event_loop, id, WindowEvent::Focused(true));
             }
@@ -1726,9 +1727,27 @@ impl App {
             self.close_requested(event_loop);
             return;
         }
+        let id = if index == self.active_tab {
+            self.session.as_ref().map(|s| s.pane)
+        } else {
+            self.tabs
+                .get(index)
+                .and_then(Option::as_ref)
+                .map(|pane| pane.id)
+        };
+        // While a prompt is up only the tab it asks about closes, a second close confirming it.
+        if self.pending_close.is_some() || self.pending_paste.is_some() {
+            if id.is_none() || id != self.pending_close_tab {
+                return;
+            }
+            self.pending_close = None;
+            self.pending_close_tab = None;
+            self.remove_tab(index);
+            return;
+        }
         let running = self
             .tab_pty(index)
-            .filter(|_| self.config.confirm_close && self.pending_close.is_none())
+            .filter(|_| self.config.confirm_close)
             .and_then(Pty::running_program);
         if let Some(pid) = running {
             self.select_tab(index);
@@ -1740,6 +1759,16 @@ impl App {
             return;
         }
         self.remove_tab(index);
+    }
+
+    /// Drops a pending paste or close prompt as Escape would, since AppKit moved to another
+    /// tab and the prompt belongs to the one it left.
+    #[cfg(target_os = "macos")]
+    fn cancel_prompts(&mut self) {
+        self.pending_paste = None;
+        if self.pending_close.take().is_some() && self.pending_close_tab.take().is_none() {
+            close_confirm::answer_quit(false);
+        }
     }
 
     /// Drops tab `index` and its PTY; the others keep running.
