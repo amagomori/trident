@@ -100,6 +100,15 @@ class Linux(Base):
             self.assertIn(name, listing)
         self.assertNotIn("./usr/share/doc/trident/LICENSE", listing)
 
+    @unittest.skipUnless(HAS_DEB, "needs dpkg-deb and tic")
+    def test_deb_prerelease_sorts_before_release(self):
+        release.linux(self.binary, "1.2.3-rc.1", "x86_64", self.tmp / "dist")
+        deb = self.tmp / "dist/Trident-1.2.3-rc.1-linux-amd64.deb"
+        version = subprocess.run(["dpkg-deb", "-f", str(deb), "Version"], check=True,
+                                 capture_output=True, text=True).stdout.strip()
+        self.assertEqual(version, "1.2.3~rc.1")
+        subprocess.run(["dpkg", "--compare-versions", version, "lt", "1.2.3"], check=True)
+
     def test_appdir_layout(self):
         root = self.tmp / "Trident.AppDir"
         release.appdir(self.binary, root)

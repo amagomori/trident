@@ -176,7 +176,7 @@ def deb(binary, version, arch, out):
         depends.insert(0, f"libc6 (>= {glibc})" if glibc else "libc6")
         (root / "DEBIAN").mkdir()
         (root / "DEBIAN/control").write_text(
-            f"Package: {PACKAGE}\nVersion: {version}\nArchitecture: {DEB_ARCH[arch]}\n"
+            f"Package: {PACKAGE}\nVersion: {version.replace('-', '~', 1)}\nArchitecture: {DEB_ARCH[arch]}\n"
             f"Maintainer: {NAME} developers <noreply@github.com>\n"
             f"Installed-Size: {(size + 1023) // 1024}\n"
             f"Depends: {', '.join(depends)}\nRecommends: {', '.join(DEB_RECOMMENDS)}\n"
