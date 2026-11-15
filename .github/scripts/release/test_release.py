@@ -177,7 +177,7 @@ class Desktop(unittest.TestCase):
     def test_entry(self):
         text = release.DESKTOP.read_text()
         for line in ("[Desktop Entry]", "Type=Application", "Name=Trident", "Exec=trident",
-                     "TryExec=trident", "Icon=trident", "StartupWMClass=trident",
+                     "Icon=trident", "StartupWMClass=trident",
                      "Categories=System;TerminalEmulator;"):
             self.assertIn(line, text.splitlines())
         if shutil.which("desktop-file-validate"):

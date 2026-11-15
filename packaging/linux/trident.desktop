@@ -3,7 +3,6 @@ Type=Application
 Name=Trident
 GenericName=Terminal
 Comment=Fast, GPU-rendered terminal emulator
-TryExec=trident
 Exec=trident
 Icon=trident
 Terminal=false
