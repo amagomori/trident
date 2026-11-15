@@ -33,9 +33,13 @@ enum Backend {
 #[cfg(target_os = "linux")]
 const X11_MIN_REQUEST_BYTES: usize = 4096;
 
-/// A ChangeProperty request's fixed part plus the BIG-REQUESTS extended length field.
+/// The fixed part of a ChangeProperty request.
 #[cfg(target_os = "linux")]
-const X11_CHANGE_PROPERTY_OVERHEAD: usize = 28;
+const X11_CHANGE_PROPERTY_HEADER: usize = 24;
+
+/// Requests longer than this many bytes need BIG-REQUESTS and its 4-byte length field.
+#[cfg(target_os = "linux")]
+const X11_CORE_REQUEST_BYTES: usize = u16::MAX as usize * 4;
 
 /// Whether `len` bytes fit in the single ChangeProperty request arboard answers X11
 /// selection requests with. It has no INCR transfer, so anything larger never reaches
@@ -43,7 +47,11 @@ const X11_CHANGE_PROPERTY_OVERHEAD: usize = 28;
 #[cfg(target_os = "linux")]
 fn x11_property_fits(len: usize, max_request_bytes: usize) -> bool {
     len.checked_next_multiple_of(4)
-        .and_then(|len| len.checked_add(X11_CHANGE_PROPERTY_OVERHEAD))
+        .and_then(|len| len.checked_add(X11_CHANGE_PROPERTY_HEADER))
+        .and_then(|total| match total {
+            ..=X11_CORE_REQUEST_BYTES => Some(total),
+            _ => total.checked_add(4),
+        })
         .is_some_and(|total| total <= max_request_bytes)
 }
 
@@ -210,8 +218,10 @@ mod tests {
         assert!(!x11_property_fits(16 << 20, big));
         assert!(!x11_property_fits(24 << 20, big));
         // A server without BIG-REQUESTS.
-        assert!(x11_property_fits(65535 * 4 - 28, 65535 * 4));
-        assert!(!x11_property_fits(65535 * 4, 65535 * 4));
+        assert!(x11_property_fits(65535 * 4 - 24, 65535 * 4));
+        assert!(!x11_property_fits(65535 * 4 - 23, 65535 * 4));
+        assert!(x11_property_fits(4096 - 24, X11_MIN_REQUEST_BYTES));
+        assert!(!x11_property_fits(4096 - 20, X11_MIN_REQUEST_BYTES));
         assert!(x11_property_fits(0, X11_MIN_REQUEST_BYTES));
         assert!(!x11_property_fits(usize::MAX, usize::MAX));
     }
