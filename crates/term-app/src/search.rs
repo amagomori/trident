@@ -176,17 +176,17 @@ impl Search {
     pub fn resize(search: Option<&Self>, term: &mut Terminal, cols: usize, rows: usize) {
         let shown = search
             .and_then(Self::selected)
-            .map(|found| found.start.line)
-            .filter(|&line| term.line_visible(line));
+            .filter(|found| term.line_visible(found.start.line));
         term.resize(cols, rows);
-        if let Some(line) = shown {
-            term.reveal_line(line);
+        if let Some(found) = shown {
+            term.reveal_lines(found.start.line, found.end.line);
         }
     }
 
     fn reveal(&self, term: &mut Terminal) {
         if let Some(i) = self.current {
-            term.reveal_line(self.matches[i].start.line);
+            let found = self.matches[i];
+            term.reveal_lines(found.start.line, found.end.line);
         }
     }
 
@@ -482,6 +482,44 @@ mod tests {
         search.advance(&mut term, None);
         assert_eq!(search.matches[search.current.unwrap()].start.line, line);
         assert!(term.line_visible(line));
+    }
+
+    #[test]
+    fn shrink_and_step_keep_whole_wrapped_match_in_view() {
+        let mut term = Terminal::new(10, 6);
+        term.set_scrollback_limit(1_000);
+        for i in 0..200 {
+            term.advance(if i == 100 {
+                b"aaaaaaSPANHIT\r\n"
+            } else {
+                b"hay\r\n"
+            });
+        }
+        let mut search = Search::default();
+        search.insert("SPANHIT", &mut term);
+        search.advance(&mut term, None);
+        let found = search.matches[search.current.unwrap()];
+        let (start, end) = (found.start.line, found.end.line);
+        assert_eq!(end, start + 1);
+
+        // Both rows shown, the second on the bottom row; one row fewer drops it.
+        term.scroll_to_line(start - 4);
+        assert!(term.line_visible(start) && term.line_visible(end));
+        Search::resize(Some(&search), &mut term, 10, 5);
+        assert!(term.line_visible(start) && term.line_visible(end));
+        Search::resize(Some(&search), &mut term, 10, 2);
+        assert_eq!(term.viewport_to_point(0, 0).line, start);
+        assert!(term.line_visible(end));
+        Search::resize(Some(&search), &mut term, 10, 1);
+        assert!(term.line_visible(start));
+
+        // Stepping to a match whose first row is already on the bottom row.
+        Search::resize(Some(&search), &mut term, 10, 5);
+        term.scroll_to_line(start - 4);
+        assert!(!term.line_visible(end));
+        search.step(&mut term, true);
+        assert_eq!(search.matches[search.current.unwrap()], found);
+        assert!(term.line_visible(start) && term.line_visible(end));
     }
 
     #[test]

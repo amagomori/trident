@@ -394,6 +394,19 @@ impl Terminal {
                 .min(self.scrollback_len() as u64) as usize;
         }
     }
+
+    /// Bring history lines `start..=end` into view as [`Self::reveal_line`] does for `start`,
+    /// then scroll just far enough to show `end` too, keeping `start` on screen.
+    pub fn reveal_lines(&mut self, start: u64, end: u64) {
+        self.reveal_line(start);
+        if !self.line_visible(end) {
+            let top = (end + 1).saturating_sub(self.rows as u64).min(start);
+            self.display_offset = self
+                .history
+                .saturating_sub(top)
+                .min(self.scrollback_len() as u64) as usize;
+        }
+    }
 }
 
 #[cfg(test)]
