@@ -1507,14 +1507,21 @@ impl Terminal {
         let blank = Cell::blank(&self.cursor.template);
         let to = to.min(self.cols);
         let line = &mut self.lines_mut()[row];
-        let to = to.min(line.cells.len());
+        let mut to = to.min(line.cells.len());
         if from >= to {
             return;
         }
+        // Like xterm, a wide character split by the erase is blanked whole
+        // with the current background.
+        let mut from = from;
+        if from > 0 && line.cells[from].flags.contains(Flags::WIDE_SPACER) {
+            from -= 1;
+        }
+        if to < line.cells.len() && line.cells[to - 1].flags.contains(Flags::WIDE) {
+            to += 1;
+        }
         let to_end = to == line.cells.len();
         let tail_kept = to_end && line.occupied() <= from && line.cells.last() == Some(&blank);
-        clear_wide_pair(&mut line.cells, from);
-        clear_wide_pair(&mut line.cells, to - 1);
         line.cells[from..to].fill(blank);
         if !to_end {
             line.touch(to);
