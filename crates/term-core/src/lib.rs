@@ -438,8 +438,12 @@ impl Terminal {
         }
         let cursor = cursor?;
         // An autosuggestion (zsh-autosuggestions, fish) is drawn greyed past the end of
-        // the real input, and Right at that end accepts it, so stop where it starts.
-        let input_end = faint_run.map_or(text_end, |(start, _)| start);
+        // the real input, and Right at that end accepts it, so stop where it starts. The
+        // cursor never sits inside a suggestion, so a run holding it is typed input.
+        let input_end = match faint_run {
+            Some((start, _)) if cursor <= start => start,
+            _ => text_end,
+        };
         let target = click?.min(input_end.max(cursor));
         Some(PromptClick::Move(target as isize - cursor as isize))
     }

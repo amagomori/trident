@@ -2823,6 +2823,14 @@ fn prompt_click_stops_before_a_greyed_autosuggestion() {
         "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[90m#x\x1b[m ab\x1b[4D",
     );
     assert_eq!(click(&t, 0, 20), Some(PromptClick::Move(4)));
+    // A trailing grey run holding the cursor (a typed comment) is typed input too.
+    let t = term(
+        30,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07echo \x1b[90m# hello\x1b[m\x1b[4D",
+    );
+    assert_eq!(click(&t, 0, 20), Some(PromptClick::Move(4)));
+    assert_eq!(click(&t, 0, 8), Some(PromptClick::Move(-2)));
 }
 
 #[test]
