@@ -7,9 +7,6 @@ pub mod search;
 
 mod ascii;
 mod cell;
-#[cfg(feature = "fuzz")]
-#[doc(hidden)]
-pub mod fuzz;
 mod ghost;
 mod kitty;
 mod links;
@@ -1877,3 +1874,7 @@ fn dec_special(c: char) -> char {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "fuzz")]
+#[doc(hidden)]
+pub mod fuzz;
