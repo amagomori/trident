@@ -9,6 +9,9 @@ Silicon needs to run it at all; there is no Developer ID signature or notarizati
                     [--appimagetool T --runtime R]   and --runtime) an AppImage
   release.py macos --binary B --version V --out D    Trident.app and, where hdiutil exists, a .dmg
   release.py checksums D                            SHA256SUMS for every file in D
+  release.py newest --version V --released F        true unless F lists a newer stable tag
+  release.py packages --version V --sums S --out D  Homebrew cask (D/trident.rb) and AUR
+                    [--base-url URL]                 trident-bin (D/aur/PKGBUILD, .SRCINFO)
   release.py changelog --tag T [--since PREV]       release notes from the PRs merged since PREV
 
 Stdlib only; needs dpkg-deb (and tic, for the compiled terminfo entry) for the .deb. Tests:
@@ -43,18 +46,11 @@ DEB_DEPENDS = ["libgcc-s1", "libfontconfig1", "libxkbcommon0"]
 DEB_RECOMMENDS = ["libxkbcommon-x11-0", "libx11-xcb1", "libxcursor1", "libxi6",
                   "libwayland-client0", "libwayland-egl1", "libegl1", "libvulkan1"]
 
-DESKTOP = f"""[Desktop Entry]
-Type=Application
-Name={NAME}
-GenericName=Terminal
-Comment={SUMMARY}
-Exec={PACKAGE}
-Icon={PACKAGE}
-Terminal=false
-Categories=System;TerminalEmulator;
-Keywords=shell;prompt;command;commandline;terminal;
-StartupWMClass={PACKAGE}
-"""
+DESKTOP = ROOT / "packaging/linux/trident.desktop"
+ICON = "tide"
+ICON_SIZES = [16, 24, 32, 48, 64, 128, 256, 512]
+AUR_PACKAGE = f"{PACKAGE}-bin"
+RELEASES = f"{HOMEPAGE}/releases/download"
 
 APPRUN = f"""#!/bin/sh
 here=$(dirname "$(readlink -f "$0")")
@@ -94,9 +90,10 @@ def glibc_minimum(binary):
 
 def share_files(prefix):
     """(source, destination under prefix, mode) for everything installed beside the binary."""
-    out = [(ROOT / "assets/icons/tide-256.png",
-            f"{prefix}share/icons/hicolor/256x256/apps/{PACKAGE}.png", 0o644),
-           (None, f"{prefix}share/applications/{PACKAGE}.desktop", 0o644),
+    out = [(ROOT / f"assets/icons/{ICON}-{size}.png",
+            f"{prefix}share/icons/hicolor/{size}x{size}/apps/{PACKAGE}.png", 0o644)
+           for size in ICON_SIZES]
+    out += [(DESKTOP, f"{prefix}share/applications/{PACKAGE}.desktop", 0o644),
            (ROOT / "crates/term-app/terminfo/xterm-trident.terminfo",
             f"{prefix}share/{PACKAGE}/terminfo/xterm-trident.terminfo", 0o644),
            (ROOT / "LICENSE", f"{prefix}share/doc/{PACKAGE}/LICENSE", 0o644),
@@ -115,10 +112,7 @@ def stage(root, binary, prefix):
     for source, dest, mode in files:
         target = root / dest
         target.parent.mkdir(parents=True, exist_ok=True)
-        if source is None:
-            target.write_text(DESKTOP)
-        else:
-            shutil.copyfile(source, target)
+        shutil.copyfile(source, target)
         target.chmod(mode)
 
 
@@ -203,8 +197,8 @@ def deb(binary, version, arch, out):
 def appdir(binary, path):
     path = Path(path)
     stage(path, binary, "usr/")
-    (path / f"{PACKAGE}.desktop").write_text(DESKTOP)
-    shutil.copyfile(ROOT / "assets/icons/tide-256.png", path / f"{PACKAGE}.png")
+    shutil.copyfile(DESKTOP, path / f"{PACKAGE}.desktop")
+    shutil.copyfile(ROOT / f"assets/icons/{ICON}-256.png", path / f"{PACKAGE}.png")
     (path / ".DirIcon").symlink_to(f"{PACKAGE}.png")
     (path / "AppRun").write_text(APPRUN)
     (path / "AppRun").chmod(0o755)
@@ -274,7 +268,7 @@ def app_bundle(binary, version, path):
     exe.chmod(0o755)
     shutil.copyfile(ROOT / "assets/icons/tide.icns", resources / f"{PACKAGE}.icns")
     for source, dest, mode in share_files(""):
-        if source is not None and dest.startswith(f"share/{PACKAGE}/"):
+        if dest.startswith(f"share/{PACKAGE}/"):
             target = resources / dest.removeprefix(f"share/{PACKAGE}/")
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
@@ -314,6 +308,156 @@ def checksums(directory):
         lines.append(f"{digest}  {path.name}\n")
     (directory / "SHA256SUMS").write_text("".join(lines))
     return lines
+
+
+def dmg_name(version):
+    return f"{NAME}-{version}-macos-universal.dmg"
+
+
+def tarball_name(version, arch="x86_64"):
+    return f"{NAME}-{version}-linux-{arch}.tar.gz"
+
+
+def sha256_of(sums, name):
+    """The checksum of name in a SHA256SUMS file."""
+    for line in Path(sums).read_text().splitlines():
+        digest, _, file = line.partition("  ")
+        if file == name:
+            return digest
+    raise ReleaseError(f"{name} is not in {sums}")
+
+
+def cask(version, sha256, base=None):
+    """The Homebrew cask for the .dmg: Casks/trident.rb in amagomori/homebrew-tap."""
+    base = base or f"{RELEASES}/v#{{version}}"
+    return f"""cask "{PACKAGE}" do
+  version "{version}"
+  sha256 "{sha256}"
+
+  url "{base}/{dmg_name('#{version}')}"
+  name "{NAME}"
+  desc "{SUMMARY}"
+  homepage "{HOMEPAGE}"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  depends_on :macos
+
+  app "{NAME}.app"
+  binary "#{{appdir}}/{NAME}.app/Contents/MacOS/{PACKAGE}"
+
+  # Only ad-hoc signed, so Gatekeeper refuses to open a quarantined copy.
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{{{appdir}}}}/{NAME}.app"]
+  end
+
+  zap trash: [
+    "~/.config/{PACKAGE}",
+    "~/Library/Saved Application State/{BUNDLE_ID}.savedState",
+  ]
+end
+"""
+
+
+def aur_version(version):
+    """pkgver for a version: makepkg forbids '-', and vercmp sorts 1.2.3rc.1 before 1.2.3."""
+    return version.replace("-", "")
+
+
+AUR_DEPENDS = ["glibc", "gcc-libs", "fontconfig", "libxkbcommon", "hicolor-icon-theme"]
+AUR_OPTDEPENDS = ["wayland: Wayland support", "libxkbcommon-x11: X11 support",
+                  "libxcursor: X11 cursors", "libxi: X11 input", "libglvnd: OpenGL",
+                  "vulkan-icd-loader: Vulkan"]
+
+
+def aur_source(version, base=None):
+    """(file name, url) of the tarball, with version as given (a literal or ${_tag})."""
+    name = tarball_name(version)
+    return name, f"{base or RELEASES + '/v' + version}/{name}"
+
+
+def pkgbuild(version, sha256, base=None):
+    """PKGBUILD for the AUR's trident-bin, which installs the Linux tarball."""
+    words = lambda items: " ".join(f"'{item}'" for item in items)
+    name, url = aur_source("${_tag}", base)
+    return f"""# Maintainer: {NAME} developers <noreply@github.com>
+
+pkgname={AUR_PACKAGE}
+_tag={version}
+pkgver={aur_version(version)}
+pkgrel=1
+pkgdesc='{SUMMARY}'
+arch=('x86_64')
+url='{HOMEPAGE}'
+license=('MIT' 'OFL-1.1')
+depends=({words(AUR_DEPENDS)})
+makedepends=('ncurses')
+optdepends=({words(AUR_OPTDEPENDS)})
+provides=('{PACKAGE}')
+conflicts=('{PACKAGE}')
+options=('!debug')
+source=("{name}::{url}")
+sha256sums=('{sha256}')
+
+package() {{
+  cd "{NAME}-${{_tag}}-linux-x86_64"
+  install -Dm755 bin/{PACKAGE} "$pkgdir/usr/bin/{PACKAGE}"
+  cp -r --no-preserve=ownership share "$pkgdir/usr/"
+  install -dm755 "$pkgdir/usr/share/terminfo" "$pkgdir/usr/share/licenses/$pkgname"
+  tic -x -o "$pkgdir/usr/share/terminfo" share/{PACKAGE}/terminfo/xterm-trident.terminfo
+  mv "$pkgdir"/usr/share/doc/{PACKAGE}/{{LICENSE,OFL.txt}} "$pkgdir/usr/share/licenses/$pkgname/"
+}}
+"""
+
+
+def srcinfo(version, sha256, base=None):
+    """.SRCINFO for pkgbuild(), as `makepkg --printsrcinfo` writes it."""
+    name, url = aur_source(version, base)
+    fields = [("pkgdesc", SUMMARY), ("pkgver", aur_version(version)), ("pkgrel", "1"),
+              ("url", HOMEPAGE), ("arch", "x86_64"), ("license", "MIT"),
+              ("license", "OFL-1.1")]
+    fields += [("makedepends", "ncurses")] + [("depends", d) for d in AUR_DEPENDS]
+    fields += [("optdepends", d) for d in AUR_OPTDEPENDS]
+    fields += [("provides", PACKAGE), ("conflicts", PACKAGE), ("options", "!debug"),
+               ("source", f"{name}::{url}"),
+               ("sha256sums", sha256)]
+    lines = [f"pkgbase = {AUR_PACKAGE}"] + [f"\t{k} = {v}" for k, v in fields]
+    return "\n".join(lines + ["", f"pkgname = {AUR_PACKAGE}", ""])
+
+
+def is_newest(version, tags):
+    """Whether no stable release among tags (v-prefixed) is newer than the stable version."""
+    def key(v):
+        return tuple(int(part) for part in v.split("."))
+    stable = re.compile(r"v(\d+\.\d+\.\d+)")
+    newer = [t for t in tags if (m := stable.fullmatch(t.strip())) and key(m[1]) > key(version)]
+    return not newer
+
+
+def packages(version, sums, out, base=None):
+    """Writes the cask and AUR files for the release artifacts listed in SHA256SUMS.
+
+    Each is skipped when its artifact is missing, e.g. a dist built on one platform.
+    """
+    out = Path(out)
+    listed = {line.partition("  ")[2] for line in Path(sums).read_text().splitlines()}
+    made = []
+    if dmg_name(version) in listed:
+        made.append(out / f"{PACKAGE}.rb")
+        out.mkdir(parents=True, exist_ok=True)
+        made[-1].write_text(cask(version, sha256_of(sums, dmg_name(version)), base))
+    if tarball_name(version) in listed:
+        tar_sha = sha256_of(sums, tarball_name(version))
+        (out / "aur").mkdir(parents=True, exist_ok=True)
+        made += [out / "aur/PKGBUILD", out / "aur/.SRCINFO"]
+        made[-2].write_text(pkgbuild(version, tar_sha, base))
+        made[-1].write_text(srcinfo(version, tar_sha, base))
+    if not made:
+        raise ReleaseError(f"{sums} lists neither {dmg_name(version)} nor {tarball_name(version)}")
+    return made
 
 
 def git(*args, cwd=ROOT):
@@ -387,6 +531,14 @@ def main(argv=None):
     sub.choices["macos"].add_argument("--no-dmg", action="store_true")
     p = sub.add_parser("checksums")
     p.add_argument("dir", type=Path)
+    p = sub.add_parser("packages")
+    p.add_argument("--version", required=True)
+    p.add_argument("--sums", required=True, type=Path, help="the release's SHA256SUMS")
+    p.add_argument("--out", required=True, type=Path)
+    p.add_argument("--base-url", help="download from here instead of the GitHub release")
+    p = sub.add_parser("newest")
+    p.add_argument("--version", required=True)
+    p.add_argument("--released", required=True, type=Path, help="published tags, one per line")
     p = sub.add_parser("changelog")
     p.add_argument("--tag", required=True, help="release tag (HEAD stands in until it exists)")
     p.add_argument("--since", help="previous tag (default: the last v* tag before --tag)")
@@ -403,6 +555,12 @@ def main(argv=None):
         elif args.command == "macos":
             for path in macos(args.binary, args.version, args.out, not args.no_dmg):
                 print(path)
+        elif args.command == "packages":
+            for path in packages(args.version, args.sums, args.out, args.base_url):
+                print(path)
+        elif args.command == "newest":
+            newest = is_newest(args.version, args.released.read_text().splitlines())
+            print("true" if newest else "false")
         elif args.command == "checksums":
             sys.stdout.write("".join(checksums(args.dir)))
         else:

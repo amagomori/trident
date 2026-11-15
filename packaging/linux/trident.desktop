@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Trident
+GenericName=Terminal
+Comment=Fast, GPU-rendered terminal emulator
+Exec=trident
+Icon=trident
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;console;
+StartupNotify=true
+StartupWMClass=trident
