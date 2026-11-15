@@ -1455,6 +1455,91 @@ mod bench {
         Images,
         /// Search over this many history lines of `a`s for the query.
         Search(usize, &'static str),
+        /// The second of two OSC 133 runs of one command near the compare and budget caps,
+        /// with compare-with-last-run on or off; every line differs when `rewrite`.
+        Rerun {
+            compare: bool,
+            rewrite: bool,
+        },
+        /// `COMMANDS` short OSC 133 commands, all distinct or all the same command text,
+        /// with compare-with-last-run on or off.
+        Commands {
+            compare: bool,
+            distinct: bool,
+        },
+    }
+
+    /// Enough commands that compare-with-last-run's stored runs reach `rerun::MAX_STORED`.
+    const COMMANDS: usize = 20_000;
+
+    /// `COMMANDS` 12-line runs with a timestamp, PID, duration and temp path on every line;
+    /// every third run fails one test.
+    fn commands_output(distinct: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        for run in 0..COMMANDS {
+            let command = if distinct {
+                format!("./job {run}")
+            } else {
+                "make test".to_owned()
+            };
+            out.extend_from_slice(
+                format!("\x1b]133;A\x07$ \x1b]133;B\x07{command}\r\n\x1b]133;C\x07").as_bytes(),
+            );
+            for i in 0..12 {
+                let result = if i == 5 && run % 3 == 0 {
+                    "FAILED"
+                } else {
+                    "ok"
+                };
+                out.extend_from_slice(
+                    format!(
+                        "[2026-11-15T07:{:02}:{:02}.{:03}Z] pid {} case_{i} ... {result} ({}.{:03}s) /tmp/tmp.{run:06}\r\n",
+                        run % 60,
+                        i % 60,
+                        run % 1000,
+                        1000 + run,
+                        run % 7,
+                        (run * 7 + i) % 1000
+                    )
+                    .as_bytes(),
+                );
+            }
+            out.extend_from_slice(b"\x1b]133;D;0\x07");
+        }
+        out.extend_from_slice(b"\x1b]133;A\x07$ ");
+        out
+    }
+
+    /// Output lines per run: just under `rerun::MAX_LINES` and the 20,000-line per-command
+    /// share of a 40,000-line history.
+    const RERUN_LINES: usize = 19_500;
+
+    /// One `cargo test`-like run: every line has a timestamp and a duration, and every
+    /// 500th line's result depends on `run` (or every line, when `rewrite`).
+    fn rerun_output(run: usize, rewrite: bool) -> Vec<u8> {
+        let mut out = b"\x1b]133;A\x07$ \x1b]133;B\x07cargo test\r\n\x1b]133;C\x07".to_vec();
+        for i in 0..RERUN_LINES {
+            let result = if rewrite || (i % 500 == 0 && run % 2 == 1) {
+                "FAILED"
+            } else {
+                "ok"
+            };
+            let line = if rewrite {
+                format!("[run {run}] test suite::case_{i} ... {result}\r\n")
+            } else {
+                format!(
+                    "[2026-11-15T07:{:02}:{:02}.{:03}Z] test suite::case_{i} ... {result} ({}.{:03}s)\r\n",
+                    run % 60,
+                    i % 60,
+                    i % 1000,
+                    run,
+                    (i * 7 + run) % 1000
+                )
+            };
+            out.extend_from_slice(line.as_bytes());
+        }
+        out.extend_from_slice(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        out
     }
 
     const WORKLOADS: &[(&str, Kind)] = &[
@@ -1465,6 +1550,55 @@ mod bench {
         ("alt_screen", Kind::Throughput(alt_screen, usize::MAX)),
         ("unicode", Kind::Throughput(unicode, usize::MAX)),
         ("scroll_region", Kind::Throughput(scroll_region, usize::MAX)),
+        (
+            "osc133_rerun",
+            Kind::Rerun {
+                compare: true,
+                rewrite: false,
+            },
+        ),
+        (
+            "osc133_rerun_off",
+            Kind::Rerun {
+                compare: false,
+                rewrite: false,
+            },
+        ),
+        (
+            "osc133_rerun_rewrite",
+            Kind::Rerun {
+                compare: true,
+                rewrite: true,
+            },
+        ),
+        (
+            "osc133_distinct",
+            Kind::Commands {
+                compare: true,
+                distinct: true,
+            },
+        ),
+        (
+            "osc133_distinct_off",
+            Kind::Commands {
+                compare: false,
+                distinct: true,
+            },
+        ),
+        (
+            "osc133_repeat",
+            Kind::Commands {
+                compare: true,
+                distinct: false,
+            },
+        ),
+        (
+            "osc133_repeat_off",
+            Kind::Commands {
+                compare: false,
+                distinct: false,
+            },
+        ),
         (
             "dense_ascii_macos",
             Kind::Throughput(dense_ascii, MACOS_BATCH),
@@ -1560,6 +1694,36 @@ mod bench {
                             let mut term = Terminal::new(COLS, ROWS);
                             let start = Instant::now();
                             measured_advance(&mut term, &input, *batch);
+                            start.elapsed().as_secs_f64()
+                        })
+                        .collect();
+                    ("bytes", input.len(), secs)
+                }
+                Kind::Rerun { compare, rewrite } => {
+                    let first = rerun_output(0, *rewrite);
+                    let second = rerun_output(1, *rewrite);
+                    let secs: Vec<f64> = (0..iters)
+                        .map(|_| {
+                            let mut term = Terminal::new(COLS, ROWS);
+                            term.set_scrollback_limit(2 * 20_000);
+                            term.set_command_budget(true, 0.5);
+                            term.set_compare_runs(*compare);
+                            term.advance(&first);
+                            let start = Instant::now();
+                            measured_advance(&mut term, &second, LINUX_BATCH);
+                            start.elapsed().as_secs_f64()
+                        })
+                        .collect();
+                    ("bytes", second.len(), secs)
+                }
+                Kind::Commands { compare, distinct } => {
+                    let input = commands_output(*distinct);
+                    let secs: Vec<f64> = (0..iters)
+                        .map(|_| {
+                            let mut term = Terminal::new(COLS, ROWS);
+                            term.set_compare_runs(*compare);
+                            let start = Instant::now();
+                            measured_advance(&mut term, &input, LINUX_BATCH);
                             start.elapsed().as_secs_f64()
                         })
                         .collect();
@@ -2398,4 +2562,167 @@ fn resize_while_editing_mid_line_leaves_no_stale_tail() {
             "{cols}x{rows}"
         );
     }
+}
+
+fn run(cmd: &str, output: &[&str]) -> String {
+    let mut s = format!("\x1b]133;A\x07$ \x1b]133;B\x07{cmd}\r\n\x1b]133;C\x07");
+    for line in output {
+        s.push_str(line);
+        s.push_str("\r\n");
+    }
+    s.push_str("\x1b]133;D;0\x07");
+    s
+}
+
+fn marked_rows(t: &Terminal) -> Vec<(String, u8)> {
+    let mut marks = Vec::new();
+    t.rerun_marks(0, &mut marks);
+    (0..t.rows())
+        .filter(|&r| marks[r] != 0)
+        .map(|r| (t.viewport_row(r).text(), marks[r]))
+        .collect()
+}
+
+#[test]
+fn rerun_marks_lines_that_differ_from_the_last_run() {
+    let mut input = run("make", &["build a", "took 1.2s", "ok"]);
+    input.push_str(&run("ls", &["x"]));
+    input.push_str(&run("make", &["build a", "warning: b", "took 1.4s", "ok"]));
+    input.push_str("\x1b]133;A\x07$ \x1b]133;B\x07");
+    let t = term(20, 20, &input);
+    assert_eq!(
+        marked_rows(&t),
+        [("warning: b".to_owned(), crate::ROW_CHANGED)]
+    );
+}
+
+fn cargo_test(results: &[&str], secs: &str, pid: u32) -> Vec<String> {
+    let mut out = vec![
+        format!("   Compiling app v0.1.0 at 2026-11-15T07:02:{secs}Z"),
+        format!("    Finished `test` profile in {secs}.5s"),
+        format!("     Running /tmp/cargo-{pid}/deps/app-1a2b (pid {pid})"),
+    ];
+    out.extend(results.iter().map(|r| format!("test {r}")));
+    out.push(format!("test result: ok. finished in 0.{secs}s"));
+    out
+}
+
+#[test]
+fn rerun_ignores_timing_but_marks_a_changed_test_result() {
+    let rerun = |a: Vec<String>, b: Vec<String>, ignore: &crate::Ignore| {
+        let mut t = Terminal::new(80, 20);
+        t.set_compare_ignore(ignore);
+        let a: Vec<&str> = a.iter().map(String::as_str).collect();
+        let b: Vec<&str> = b.iter().map(String::as_str).collect();
+        t.advance(run("cargo test", &a).as_bytes());
+        t.advance(run("cargo test", &b).as_bytes());
+        t.advance(b"\x1b]133;A\x07$ ");
+        marked_rows(&t)
+    };
+    let defaults = crate::Ignore::default();
+    let first = cargo_test(&["a ... ok", "b ... ok"], "11", 4242);
+    let timing_only = cargo_test(&["a ... ok", "b ... ok"], "37", 5151);
+    assert!(rerun(first.clone(), timing_only.clone(), &defaults).is_empty());
+    let failed = cargo_test(&["a ... ok", "b ... FAILED"], "37", 5151);
+    assert_eq!(
+        rerun(first.clone(), failed, &defaults),
+        [("test b ... FAILED".to_owned(), crate::ROW_CHANGED)]
+    );
+    // With no patterns, every volatile line lights up.
+    let none = crate::Ignore::new::<&str>(&[]).unwrap();
+    assert_eq!(rerun(first, timing_only, &none).len(), 4);
+}
+
+#[test]
+fn rerun_compares_combining_marks_and_skips_wrapped_commands() {
+    let mut t = Terminal::new(40, 20);
+    t.advance(run("echo", &["cafe\u{301} ok"]).as_bytes());
+    t.advance(run("echo", &["cafe\u{300} ok"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(marked_rows(&t).len(), 1);
+    // Only the first row of a wrapped command is kept, so its runs aren't compared.
+    let long = "x".repeat(50);
+    let mut t = Terminal::new(40, 20);
+    t.advance(run(&long, &["a"]).as_bytes());
+    t.advance(run(&long, &["b"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert!(marked_rows(&t).is_empty());
+}
+
+#[test]
+fn reset_keeps_compare_settings() {
+    let mut t = Terminal::new(40, 20);
+    t.set_compare_runs(false);
+    t.advance(b"\x1bc");
+    assert!(!t.compare_runs());
+    let builds = crate::Ignore::new(&[r"#\d+"]).unwrap();
+    t.set_compare_runs(true);
+    t.set_compare_ignore(&builds);
+    t.advance(b"\x1bc");
+    t.advance(run("make", &["build #1"]).as_bytes());
+    t.advance(run("make", &["build #2"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert!(marked_rows(&t).is_empty());
+}
+
+#[test]
+fn new_ignore_patterns_forget_stored_runs_but_keep_marks() {
+    let mut t = Terminal::new(40, 20);
+    t.advance(run("make", &["build #1", "ok"]).as_bytes());
+    t.advance(run("make", &["build #2", "ok"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(
+        marked_rows(&t),
+        [("build #2".to_owned(), crate::ROW_CHANGED)]
+    );
+    let builds = crate::Ignore::new(&[r"#\d+"]).unwrap();
+    t.set_compare_ignore(&builds);
+    assert_eq!(marked_rows(&t).len(), 1);
+    // The run before the change isn't compared with the next one.
+    t.advance(run("make", &["build #3", "failed"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(marked_rows(&t).len(), 1);
+    t.advance(run("make", &["build #4", "failed"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(marked_rows(&t).len(), 1);
+    // Setting the same patterns again keeps the stored runs.
+    t.set_compare_ignore(&crate::Ignore::new(&[r"#\d+"]).unwrap());
+    t.advance(run("make", &["build #5", "ok"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    let marked: Vec<String> = marked_rows(&t).into_iter().map(|(text, _)| text).collect();
+    assert_eq!(marked, ["build #2", "ok"]);
+}
+
+#[test]
+fn rerun_marks_removed_lines_and_ignores_first_runs() {
+    let mut input = run("test", &["a", "b", "c"]);
+    let t = term(20, 20, &format!("{input}\x1b]133;A\x07$ "));
+    assert!(marked_rows(&t).is_empty());
+    input.push_str(&run("test", &["a", "c"]));
+    input.push_str(&run("test", &["a", "c"]));
+    let t = term(20, 20, &format!("{input}\x1b]133;A\x07$ "));
+    // The second run keeps its mark; the unchanged third run adds none.
+    let removed = |text: &str| (text.to_owned(), crate::ROW_REMOVED_ABOVE);
+    assert_eq!(marked_rows(&t), [removed("c")]);
+    let mut t = term(20, 20, &input);
+    t.advance(run("test", &["a"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(marked_rows(&t), [removed("c"), removed("$")]);
+}
+
+#[test]
+fn rerun_marks_follow_reflow_and_can_be_turned_off() {
+    let mut input = run("cat", &["0123456789", "same"]);
+    input.push_str(&run("cat", &["0123456789abcdefghij", "same"]));
+    input.push_str("\x1b]133;A\x07$ ");
+    let mut t = term(30, 10, &input);
+    assert_eq!(
+        marked_rows(&t),
+        [("0123456789abcdefghij".to_owned(), crate::ROW_CHANGED)]
+    );
+    t.resize(10, 10);
+    let marked: Vec<String> = marked_rows(&t).into_iter().map(|(text, _)| text).collect();
+    assert_eq!(marked, ["0123456789", "abcdefghij"]);
+    t.set_compare_runs(false);
+    assert!(marked_rows(&t).is_empty());
 }

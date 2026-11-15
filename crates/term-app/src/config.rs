@@ -18,6 +18,8 @@ pub struct Config {
     pub drop_preview: bool,
     pub paste_protection: bool,
     pub clipboard_read: bool,
+    pub compare_runs: bool,
+    pub compare_ignore: term_core::Ignore,
     pub confirm_close: bool,
     pub vsync: bool,
     pub app_icon: AppIcon,
@@ -45,6 +47,8 @@ impl Default for Config {
             drop_preview: true,
             paste_protection: true,
             clipboard_read: false,
+            compare_runs: true,
+            compare_ignore: term_core::Ignore::default(),
             confirm_close: true,
             vsync: true,
             app_icon: AppIcon::default(),
@@ -71,6 +75,7 @@ struct Raw {
     drop_preview: Option<bool>,
     paste_protection: Option<bool>,
     clipboard_read: Option<bool>,
+    compare_runs: Option<CompareRunsEntry>,
     confirm_close: Option<bool>,
     vsync: Option<bool>,
     app_icon: Option<String>,
@@ -135,6 +140,43 @@ impl<'de> Deserialize<'de> for Scrollback {
         deserializer.deserialize_any(Visitor)
     }
 }
+
+/// `compare_runs = true`, or a `[compare_runs]` table that also sets the ignore patterns.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompareRuns {
+    enabled: Option<bool>,
+    default_ignore: Option<bool>,
+    ignore: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for CompareRunsEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = CompareRunsEntry;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("true, false or a [compare_runs] table")
+            }
+            fn visit_bool<E: serde::de::Error>(self, enabled: bool) -> Result<CompareRunsEntry, E> {
+                Ok(CompareRunsEntry(CompareRuns {
+                    enabled: Some(enabled),
+                    ..CompareRuns::default()
+                }))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<CompareRunsEntry, A::Error> {
+                CompareRuns::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(CompareRunsEntry)
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+struct CompareRunsEntry(CompareRuns);
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -498,6 +540,16 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
             }
             config.command_share = share;
         }
+    }
+    if let Some(CompareRunsEntry(compare)) = raw.compare_runs {
+        config.compare_runs = compare.enabled.unwrap_or(true);
+        let mut patterns: Vec<&str> = Vec::new();
+        if compare.default_ignore.unwrap_or(true) {
+            patterns.extend(term_core::DEFAULT_IGNORE);
+        }
+        patterns.extend(compare.ignore.iter().map(String::as_str));
+        config.compare_ignore =
+            term_core::Ignore::new(&patterns).map_err(|e| error("compare_runs.ignore", &e))?;
     }
     if let Some(seconds) = raw.notify_long_commands_after {
         config.notify_long_commands_after = seconds;
@@ -1065,6 +1117,25 @@ mod tests {
         assert!(parse_text("").unwrap().paste_protection);
         assert!(!parse_text("").unwrap().clipboard_read);
         assert!(parse_text("clipboard_read = true").unwrap().clipboard_read);
+        assert!(parse_text("").unwrap().compare_runs);
+        assert!(!parse_text("compare_runs = false").unwrap().compare_runs);
+        assert_eq!(
+            parse_text("").unwrap().compare_ignore,
+            term_core::Ignore::default()
+        );
+        let custom = parse_text("[compare_runs]\nignore = ['build #\\d+']").unwrap();
+        assert!(custom.compare_runs);
+        let mut patterns = term_core::DEFAULT_IGNORE.to_vec();
+        patterns.push(r"build #\d+");
+        assert_eq!(
+            custom.compare_ignore,
+            term_core::Ignore::new(&patterns).unwrap()
+        );
+        let only = parse_text("[compare_runs]\ndefault_ignore = false\nignore = ['x']").unwrap();
+        assert_eq!(only.compare_ignore, term_core::Ignore::new(&["x"]).unwrap());
+        let off = parse_text("[compare_runs]\nenabled = false").unwrap();
+        assert!(!off.compare_runs);
+        assert_eq!(off.compare_ignore, term_core::Ignore::default());
         assert!(
             !parse_text("paste_protection = false")
                 .unwrap()
@@ -1192,6 +1263,22 @@ bright_white = "#fefdfc"
                 "unknown field",
             ),
             ("font_size = 'large'", "font_size", "invalid type"),
+            ("compare_runs = 1", "compare_runs", "invalid type"),
+            (
+                "[compare_runs]\nignore = ['ok', '(unclosed']",
+                "compare_runs.ignore",
+                "invalid pattern \"(unclosed\"",
+            ),
+            (
+                "[compare_runs]\nignored = []",
+                "compare_runs.ignored",
+                "unknown field",
+            ),
+            (
+                "[compare_runs]\nignore = 'x'",
+                "compare_runs.ignore",
+                "invalid type",
+            ),
             ("unknown = 1", "unknown", "unknown field"),
             (
                 "[colors]\nbackground = 'blu'",

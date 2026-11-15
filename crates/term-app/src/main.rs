@@ -1112,6 +1112,8 @@ impl App {
         term.set_palette(self.config.themes.palette(self.appearance).clone());
         term.set_scrollback_limit(self.options.scrollback(&self.config));
         term.set_command_budget(self.config.command_budget, self.config.command_share);
+        term.set_compare_runs(self.config.compare_runs);
+        term.set_compare_ignore(&self.config.compare_ignore);
         term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
         let cell = (fonts.metrics.width, fonts.metrics.height);
         if (cols, rows, cell) != (spawn_cols, spawn_rows, spawn_cell) {
@@ -1808,6 +1810,8 @@ impl App {
                     .set_scrollback_limit(self.options.scrollback(&self.config));
                 s.term
                     .set_command_budget(self.config.command_budget, self.config.command_share);
+                s.term.set_compare_runs(self.config.compare_runs);
+                s.term.set_compare_ignore(&self.config.compare_ignore);
                 if let Some(search) = &mut self.search {
                     search.dirty = true;
                 }

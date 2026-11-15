@@ -41,12 +41,15 @@ pub(crate) struct Frame<'a> {
     pub atlas: u64,
     /// Whether blinking cells show their text this frame.
     pub blink_visible: bool,
+    /// Compare-with-last-run marks of each drawn row, from `Terminal::rerun_marks`.
+    pub rerun: &'a [u8],
 }
 
 #[derive(Default)]
 struct RowState {
     cells: Vec<Cell>,
     cursor: Option<usize>,
+    rerun: u8,
 }
 
 #[derive(Default)]
@@ -120,9 +123,16 @@ impl Damage {
                     .cells
                     .iter()
                     .any(|cell| cell.flags.contains(Flags::BLINK));
-            if all || blinked || state.cursor != cursor || state.cells != *cells {
+            let rerun = frame.rerun.get(i).copied().unwrap_or(0) & term_core::ROW_CHANGED;
+            if all
+                || blinked
+                || state.cursor != cursor
+                || state.rerun != rerun
+                || state.cells != *cells
+            {
                 state.cells.clone_from(cells);
                 state.cursor = cursor;
+                state.rerun = rerun;
                 damaged[i] = true;
             }
         }
@@ -179,6 +189,7 @@ mod tests {
             hover: None,
             atlas: 0,
             blink_visible: true,
+            rerun: &[],
         }
     }
 
