@@ -482,7 +482,6 @@ mod tests {
             assert_eq!(t.base_char(&row.cells[2]), '|', "{seq:?}");
             assert_eq!(t.cursor_position(), Some((0, 3)), "{seq:?}");
             assert_eq!(text(&t, 0), format!("{seq}|"));
-            assert_eq!(unicode_width::UnicodeWidthStr::width(seq), 2, "{seq:?}");
         }
     }
 

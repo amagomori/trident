@@ -45,8 +45,6 @@ struct ShellState {
     line_editor: bool,
     /// Bytes still to parse before a line editor's output starts (`set_line_editing`).
     editor_after: Option<usize>,
-    /// The user sent a line since the last line feed (`line_sent`).
-    line_sent: bool,
     command_finished: Vec<CommandFinished>,
     mark_line: Option<u64>,
     output_ends: Vec<OutputEnd>,
@@ -340,6 +338,8 @@ pub struct Terminal {
     /// Set by a resize while a line editor owns the cursor's line, until the next line feed:
     /// its redraw erases cells without deleting the placements under them (as in kitty).
     prompt_redraw: bool,
+    /// The user sent a line since the last line feed (`line_sent`).
+    line_sent: bool,
     /// Cell size in pixels, as reported by the app.
     cell_pixels: (f32, f32),
     kitty: kitty::Kitty,
@@ -374,11 +374,12 @@ impl Terminal {
     /// Tells the terminal the user sent a line (Enter, or a paste with one): the editor's next
     /// line feed accepts it, and what follows is the command's output.
     pub fn line_sent(&mut self) {
-        self.shell.line_sent = true;
+        self.line_sent = true;
     }
 
     fn feed_line(&mut self) {
-        if std::mem::take(&mut self.shell.line_sent) {
+        if self.line_sent {
+            self.line_sent = false;
             self.shell.line_editor = false;
         }
     }
@@ -842,7 +843,6 @@ impl Terminal {
                 marks_seen: false,
                 line_editor: false,
                 editor_after: None,
-                line_sent: false,
                 command_finished: Vec::new(),
                 mark_line: None,
                 output_ends: Vec::new(),
@@ -901,6 +901,7 @@ impl Terminal {
             bell: false,
             images: images::ImageStore::new(),
             prompt_redraw: false,
+            line_sent: false,
             cell_pixels: (8.0, 16.0),
             kitty: kitty::Kitty::default(),
             parser: vte::Parser::new(),
