@@ -350,6 +350,14 @@ class Changelog(unittest.TestCase):
                          ["- KAN-1: First feature ([#1](https://github.com/o/r/pull/1))"])
         self.assertNotIn("compare", notes)
 
+    def test_untagged_release_previews_head(self):
+        self.commit("KAN-4: Unreleased feature (#4)")
+        notes = release.changelog("v0.3.0", cwd=self.repo, repo="o/r")
+        self.assertIn("## Trident 0.3.0", notes)
+        self.assertEqual(re.findall(r"^- .*$", notes, re.M),
+                         ["- KAN-4: Unreleased feature ([#4](https://github.com/o/r/pull/4))"])
+        self.assertIn("https://github.com/o/r/compare/v0.2.0...v0.3.0", notes)
+
 
 class Workflow(unittest.TestCase):
     def test_release_runs_only_on_tags(self):
