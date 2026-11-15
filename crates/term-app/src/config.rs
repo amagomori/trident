@@ -13,6 +13,7 @@ pub struct Config {
     pub notify_long_commands_after: u64,
     pub drop_preview: bool,
     pub paste_protection: bool,
+    pub confirm_close: bool,
     pub vsync: bool,
     pub shell: Vec<String>,
     pub env: BTreeMap<String, String>,
@@ -30,6 +31,7 @@ impl Default for Config {
             notify_long_commands_after: 10,
             drop_preview: true,
             paste_protection: true,
+            confirm_close: true,
             vsync: true,
             shell: Vec::new(),
             env: BTreeMap::new(),
@@ -49,6 +51,7 @@ struct Raw {
     notify_long_commands_after: Option<u64>,
     drop_preview: Option<bool>,
     paste_protection: Option<bool>,
+    confirm_close: Option<bool>,
     vsync: Option<bool>,
     shell: Option<Shell>,
     env: BTreeMap<String, String>,
@@ -355,6 +358,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         font: raw.font,
         drop_preview: raw.drop_preview.unwrap_or(true),
         paste_protection: raw.paste_protection.unwrap_or(true),
+        confirm_close: raw.confirm_close.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
         ..Config::default()
     };
@@ -890,6 +894,9 @@ mod tests {
                 .unwrap()
                 .paste_protection
         );
+        assert!(parse_text("").unwrap().confirm_close);
+        assert!(!parse_text("confirm_close = false").unwrap().confirm_close);
+        assert!(parse_text("confirm_close = 1").is_err());
         assert!(parse_text("").unwrap().vsync);
         assert!(!parse_text("vsync = false").unwrap().vsync);
         assert!(parse_text("vsync = 0").is_err());

@@ -44,9 +44,31 @@ struct Probe {
     #[cfg(unix)]
     fd: Option<std::os::fd::OwnedFd>,
     shell: Option<u32>,
+    /// The first child was an explicit command (`terminal -e vim`), which counts as a
+    /// running program while it holds the foreground, unless it is (or became) a shell.
+    command: bool,
 }
 
 impl Probe {
+    /// The foreground process group, when it is a program rather than an idle shell.
+    #[cold]
+    fn program(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            let fd = self.fd.as_ref()?;
+            // SAFETY: fd is a PTY master descriptor owned by this probe.
+            let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+            let shell = self.shell?;
+            let running = group as u32 != shell
+                || (self.command
+                    && !crate::close_confirm::process_args(group)
+                        .is_some_and(|args| is_idle_shell(&args)));
+            (group > 0 && running).then_some(group)
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
     fn shell(&self) -> Option<bool> {
         #[cfg(unix)]
         {
@@ -212,6 +234,147 @@ fn size(cols: usize, rows: usize, cell_w: f32, cell_h: f32) -> PtySize {
     }
 }
 
+/// How a shell's argv asks it to run something other than its prompt.
+struct ShellArgs {
+    /// The short option that runs a command string (`-c`).
+    command: char,
+    /// Short options that take a value (`-o vi`).
+    short_values: &'static str,
+    /// Whether a short option's value may follow it in the same argument (getopt's `-Ccmd`);
+    /// otherwise it is always the next argument and the cluster goes on (bash's `-oc vi cmd`).
+    attached_values: bool,
+    /// Long options (without `--`) that run a command string.
+    long_commands: &'static [&'static str],
+    /// Long options (without `--`) that take a value, after `=` or as the next argument.
+    long_values: &'static [&'static str],
+}
+
+const POSIX_SHELL_ARGS: ShellArgs = ShellArgs {
+    command: 'c',
+    short_values: "o",
+    attached_values: false,
+    long_commands: &[],
+    long_values: &[],
+};
+
+/// The argv grammar of the shells whose options are modelled.
+fn shell_args(shell: &str) -> Option<ShellArgs> {
+    Some(match shell {
+        "bash" => ShellArgs {
+            short_values: "oO",
+            long_values: &["rcfile", "init-file"],
+            ..POSIX_SHELL_ARGS
+        },
+        "zsh" => ShellArgs {
+            long_values: &["emulate"],
+            ..POSIX_SHELL_ARGS
+        },
+        "sh" | "ash" | "dash" | "ksh" | "mksh" | "oksh" | "yash" | "osh" | "ysh" => {
+            POSIX_SHELL_ARGS
+        }
+        "fish" => ShellArgs {
+            command: 'c',
+            short_values: "Cdo",
+            attached_values: true,
+            long_commands: &["command"],
+            long_values: &[
+                "init-command",
+                "debug",
+                "debug-output",
+                "features",
+                "profile",
+                "profile-startup",
+            ],
+        },
+        _ => return None,
+    })
+}
+
+/// Whether `args` (argv) is a shell started for its prompt rather than for a command string
+/// (`-c`, also inside a cluster such as `-lc`, or fish's `--command`) or a script operand
+/// (`bash build.sh`, anything after `--`). Options are case-sensitive, and the values of
+/// options that take one (`-o vi`, `-O extglob`, `--rcfile f`, fish `-C cmd`) are skipped.
+/// Shells whose options are not modelled count as idle only with no options other than
+/// `-l`, `-i`, `--login` and `--interactive`.
+fn is_idle_shell(args: &[String]) -> bool {
+    let Some((program, options)) = args.split_first() else {
+        return false;
+    };
+    let Some(shell) = shell_name(program) else {
+        return false;
+    };
+    let Some(grammar) = shell_args(shell) else {
+        return options
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "-l" | "-i" | "--login" | "--interactive"));
+    };
+    let mut options = options.iter();
+    while let Some(arg) = options.next() {
+        if arg == "--" || arg == "-" {
+            return options.next().is_none();
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, value) = long
+                .split_once('=')
+                .map_or((long, None), |(n, v)| (n, Some(v)));
+            if grammar.long_commands.contains(&name) {
+                return false;
+            }
+            if grammar.long_values.contains(&name) && value.is_none() && options.next().is_none() {
+                return false;
+            }
+            continue;
+        }
+        let Some(flags) = arg.strip_prefix(['-', '+']) else {
+            return false;
+        };
+        for (at, flag) in flags.char_indices() {
+            if flag == grammar.command {
+                return false;
+            }
+            if grammar.short_values.contains(flag) {
+                if grammar.attached_values && at + flag.len_utf8() < flags.len() {
+                    break;
+                }
+                if options.next().is_none() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The shell `program` names (`/bin/bash`, `-zsh` for a login shell), if it is one.
+fn shell_name(program: &str) -> Option<&str> {
+    let name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .trim_start_matches('-');
+    matches!(
+        name,
+        "sh" | "ash"
+            | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "ksh"
+            | "mksh"
+            | "oksh"
+            | "yash"
+            | "csh"
+            | "tcsh"
+            | "nu"
+            | "elvish"
+            | "xonsh"
+            | "pwsh"
+            | "osh"
+            | "ysh"
+    )
+    .then_some(name)
+}
+
 impl Pty {
     /// Starts `command` (the user's login shell when empty). `wake` is called from the
     /// reader thread when output is ready, and with `true` once the shell exits.
@@ -279,6 +442,7 @@ impl Pty {
                 #[cfg(unix)]
                 fd: foreground_fd,
                 shell: shell_pid,
+                command: !command.is_empty(),
             },
             ..Default::default()
         });
@@ -421,6 +585,28 @@ impl Pty {
         Ok(())
     }
 
+    /// The process group of a program running in the foreground instead of the shell.
+    pub fn running_program(&self) -> Option<i32> {
+        self.output.probe.program()
+    }
+
+    /// Whether a program holds the foreground, as a check that outlives this borrow, for the
+    /// macOS app quit hook.
+    #[cfg(target_os = "macos")]
+    pub fn running_program_check(&self) -> impl Fn() -> bool + 'static {
+        let probe = Probe {
+            fd: self
+                .output
+                .probe
+                .fd
+                .as_ref()
+                .and_then(|fd| fd.try_clone().ok()),
+            shell: self.output.probe.shell,
+            command: self.output.probe.command,
+        };
+        move || probe.program().is_some()
+    }
+
     /// Everything the shell wrote since the last call.
     pub fn take_output(&mut self) -> Output {
         let mut p = self.output.pending.lock().unwrap();
@@ -551,6 +737,237 @@ mod tests {
         assert!(pty.watcher.is_none());
         pty.set_command_notifications(true).unwrap();
         assert!(pty.watcher.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_program_is_reported_only_away_from_the_shell() {
+        let mut pty = Pty::spawn(
+            &[
+                "bash".into(),
+                "--norc".into(),
+                "--noprofile".into(),
+                "--noediting".into(),
+                "-i".into(),
+            ],
+            &Default::default(),
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let wait_for = |pty: &mut Pty, running: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                pty.take_output();
+                let program = pty.running_program();
+                if program.is_some() == running {
+                    return program;
+                }
+                assert!(Instant::now() < deadline, "running stayed {}", !running);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for(&mut pty, false);
+        pty.write(b"sleep 30\r");
+        let group = wait_for(&mut pty, true).unwrap();
+        assert_eq!(
+            crate::close_confirm::process_name(group).as_deref(),
+            Some("sleep")
+        );
+        pty.write(b"\x03");
+        wait_for(&mut pty, false);
+    }
+
+    /// Every argv form QA tried on #71 and #60 (as the shell sees it after `env` or a path),
+    /// plus the option forms the parser models.
+    #[test]
+    fn shell_argv_is_idle_only_at_a_prompt() {
+        #[rustfmt::skip]
+        let cases: &[(bool, &[&str])] = &[
+            (true, &["bash"]),
+            (true, &["-bash"]),
+            (true, &["/opt/homebrew/bin/bash"]),
+            (true, &["bash", "--norc"]),
+            (true, &["bash", "--norc", "--noprofile", "--noediting", "-i"]),
+            (true, &["bash", "-l"]),
+            (true, &["bash", "--login"]),
+            (true, &["bash", "-i"]),
+            (true, &["bash", "-il"]),
+            (true, &["bash", "--rcfile", "rc"]),
+            (true, &["bash", "--rcfile=rc"]),
+            (true, &["bash", "--init-file", "rc", "-i"]),
+            (true, &["bash", "-O", "extglob", "-i"]),
+            (true, &["bash", "+O", "extglob"]),
+            (true, &["bash", "-o", "vi"]),
+            (true, &["bash", "-o", "vi", "-i"]),
+            (true, &["bash", "+o", "vi"]),
+            (true, &["bash", "-io", "vi"]),
+            (true, &["bash", "-C"]),
+            (true, &["bash", "-Ci"]),
+            (true, &["bash", "--"]),
+            (true, &["sh"]),
+            (true, &["/bin/sh"]),
+            (true, &["sh", "-i"]),
+            (true, &["dash"]),
+            (true, &["dash", "-l"]),
+            (true, &["zsh"]),
+            (true, &["-zsh"]),
+            (true, &["zsh", "-l"]),
+            (true, &["/bin/zsh", "-l"]),
+            (true, &["zsh", "-C"]),
+            (true, &["zsh", "-o", "nonomatch"]),
+            (true, &["zsh", "--emulate", "sh"]),
+            (true, &["fish"]),
+            (true, &["/usr/bin/fish", "-l"]),
+            (true, &["fish", "--login"]),
+            (true, &["fish", "-i"]),
+            (true, &["fish", "-C", "set x 1"]),
+            (true, &["fish", "--init-command=set x 1"]),
+            (true, &["fish", "--init-command", "set x 1"]),
+            (true, &["fish", "--no-config"]),
+            (true, &["fish", "-Ctrue"]),
+            (true, &["fish", "-iCtrue"]),
+            (true, &["fish", "-d3"]),
+            (true, &["nu"]),
+            (true, &["pwsh", "-l"]),
+            (false, &[]),
+            (false, &["vim"]),
+            (false, &["bashtop"]),
+            (false, &["sh", "-c", "sleep 30"]),
+            (false, &["/bin/sh", "-c", "sleep 603 | cat"]),
+            (false, &["bash", "-c", "sleep 605 && echo done"]),
+            (false, &["bash", "-lc", "sleep 607; echo done"]),
+            (false, &["bash", "-ic", "make"]),
+            (false, &["bash", "-Cc", "make"]),
+            (false, &["bash", "-C", "-c", "make"]),
+            (false, &["bash", "-i", "-c", "make"]),
+            (false, &["bash", "-O", "extglob", "-c", "make"]),
+            (false, &["bash", "-o", "vi", "-c", "make"]),
+            (false, &["bash", "-o", "pipefail", "-c", "sleep 610 | cat"]),
+            (false, &["bash", "--rcfile", "rc", "-c", "make"]),
+            (false, &["bash", "--norc", "-c", "make"]),
+            (false, &["bash", "s.sh"]),
+            (false, &["bash", "/home/u/qa71/h/s.sh"]),
+            (false, &["bash", "-o", "vi", "s.sh"]),
+            (false, &["bash", "--", "s.sh"]),
+            (false, &["bash", "-", "s.sh"]),
+            (false, &["bash", "-O"]),
+            (false, &["bash", "--rcfile"]),
+            (false, &["sh", "s.sh"]),
+            (false, &["sh", "./qa71s.sh"]),
+            (false, &["dash", "-c", "make"]),
+            (false, &["zsh", "-c", "sleep 608; echo done"]),
+            (false, &["zsh", "-o", "nonomatch", "-c", "make"]),
+            (false, &["zsh", "-C", "-c", "make"]),
+            (false, &["zsh", "-lc", "make"]),
+            (false, &["zsh", "s.zsh"]),
+            (false, &["fish", "-c", "make"]),
+            (false, &["fish", "-ic", "make"]),
+            (false, &["fish", "--command=make"]),
+            (false, &["fish", "--command", "make"]),
+            (false, &["fish", "-C", "set x 1", "-c", "make"]),
+            (false, &["fish", "s.fish"]),
+            (false, &["fish", "-Ctrue", "build.fish"]),
+            (false, &["fish", "-d3", "build.fish"]),
+            (false, &["fish", "-C", "true", "build.fish"]),
+            (false, &["nu", "-c", "ls"]),
+            (false, &["pwsh", "-Command", "ls"]),
+        ];
+        for &(idle, argv) in cases {
+            let argv: Vec<String> = argv.iter().map(|&a| a.to_owned()).collect();
+            assert_eq!(is_idle_shell(&argv), idle, "{argv:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_running_a_command_counts_as_running() {
+        for shell in ["sh", "bash"] {
+            let mut pty = Pty::spawn(
+                &[shell.into(), "-c".into(), "sleep 30; true".into()],
+                &Default::default(),
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // Before exec the child still carries the test binary's arguments.
+            loop {
+                pty.take_output();
+                let args = pty
+                    .running_program()
+                    .and_then(crate::close_confirm::process_args);
+                if args.as_ref().and_then(|a| a.first()).map(String::as_str) == Some(shell) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{shell} -c never counted as running: {args:?}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    #[test]
+    fn a_direct_command_counts_as_running() {
+        assert_eq!(shell_name("/bin/bash"), Some("bash"));
+        assert_eq!(shell_name("-zsh"), Some("zsh"));
+        assert!(shell_name("vim").is_none() && shell_name("/usr/bin/ssh").is_none());
+        let mut wrapped = Pty::spawn(
+            &[
+                "env".into(),
+                "bash".into(),
+                "--norc".into(),
+                "--noprofile".into(),
+                "-i".into(),
+            ],
+            &Default::default(),
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while wrapped.running_program().is_some() {
+            wrapped.take_output();
+            assert!(
+                Instant::now() < deadline,
+                "env bash still counted as running"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mut pty = Pty::spawn(
+            &["sleep".into(), "30".into()],
+            &Default::default(),
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Before exec the child still carries the test thread's name.
+        loop {
+            pty.take_output();
+            let name = pty
+                .running_program()
+                .and_then(crate::close_confirm::process_name);
+            if name.as_deref() == Some("sleep") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "sleep never counted as running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

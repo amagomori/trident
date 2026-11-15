@@ -8,6 +8,7 @@ macro_rules! diag {
 #[cfg(target_os = "linux")]
 mod appearance;
 mod clipboard;
+mod close_confirm;
 mod command_notify;
 mod config;
 mod drop_files;
@@ -803,6 +804,8 @@ struct App {
     clipboard: clipboard::Clipboard,
     /// Clipboard text waiting for the user to confirm (paste protection).
     pending_paste: Option<String>,
+    /// Set while a window close waits for confirmation, with the running program's name.
+    pending_close: Option<Option<String>>,
     error: Option<String>,
     exit_deadline: Option<Instant>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -869,6 +872,7 @@ impl App {
             scroll_accum: 0.0,
             clipboard: clipboard::Clipboard::default(),
             pending_paste: None,
+            pending_close: None,
             error: None,
             exit_deadline: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1269,6 +1273,10 @@ impl App {
             Some(text) => Some(paste::banner(text, banner)),
             None => banner,
         };
+        let banner = match &self.pending_close {
+            Some(program) => Some(close_confirm::banner(program.as_deref(), banner)),
+            None => banner,
+        };
         let started = Instant::now();
         #[cfg(target_os = "linux")]
         let exit_target = (self.exit_deadline.is_some()
@@ -1391,6 +1399,52 @@ impl App {
         }
     }
 
+    /// Closes at once unless a program other than the shell holds the foreground; then
+    /// the banner asks first, and a second close request confirms.
+    #[cold]
+    fn close_requested(&mut self, event_loop: &ActiveEventLoop) {
+        let running = self
+            .session
+            .as_ref()
+            .filter(|_| self.config.confirm_close && self.pending_close.is_none())
+            .and_then(|s| s.pty.running_program());
+        match (running, &self.session) {
+            (Some(pid), Some(s)) => {
+                self.pending_close = Some(close_confirm::process_name(pid));
+                if s.window.is_minimized() == Some(true) {
+                    s.window.set_minimized(false);
+                }
+                s.window.request_redraw();
+            }
+            _ => {
+                if !close_confirm::answer_quit(true) {
+                    event_loop.exit();
+                }
+            }
+        }
+    }
+
+    /// Enter closes the window and Escape keeps it; other keys are ignored.
+    #[cold]
+    fn confirm_close_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        use winit::keyboard::NamedKey;
+        match event.logical_key {
+            Key::Named(NamedKey::Enter) => {
+                if !close_confirm::answer_quit(true) {
+                    event_loop.exit();
+                }
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.pending_close = None;
+                close_confirm::answer_quit(false);
+                if let Some(s) = &self.session {
+                    s.window.request_redraw();
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn dropped_file(&mut self, path: PathBuf) {
         if self.pending_paste.is_some() {
             return;
@@ -1490,6 +1544,8 @@ impl App {
             }
             let next_vsync_off = !next.vsync && self.config.vsync;
             self.config = next;
+            #[cfg(target_os = "macos")]
+            close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
             self.watch_appearance();
             if let Some(s) = &mut self.session {
                 s.pty
@@ -2154,6 +2210,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match self.start(event_loop) {
             Ok(session) => {
+                #[cfg(target_os = "macos")]
+                close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
+                #[cfg(target_os = "macos")]
+                close_confirm::route_app_quit_through_close(
+                    &session.window,
+                    session.pty.running_program_check(),
+                );
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
                 self.process_output();
@@ -2162,6 +2225,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.error = Some(e);
                 event_loop.exit();
             }
+        }
+    }
+
+    /// A macOS app quit ends the process from AppKit without returning from the event loop,
+    /// so the latency log is written here instead of when the session drops.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(s) = &mut self.session {
+            s.latency.take();
         }
     }
 
@@ -2401,7 +2472,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.close_requested(event_loop),
             WindowEvent::Resized(size) => {
                 if let Some(search) = &mut self.search {
                     search.dirty = true;
@@ -2446,6 +2517,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                if self.pending_close.is_some() {
+                    self.confirm_close_key(&event, event_loop);
+                    return;
+                }
                 if self.pending_paste.is_some() {
                     self.confirm_paste_key(&event);
                     return;
@@ -2480,7 +2555,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
-                if self.pending_paste.is_some() {
+                if self.pending_paste.is_some() || self.pending_close.is_some() {
                     // Like typed keys, committed text never reaches the shell past the banner.
                 } else if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
                     search.insert(&text, &mut s.term);
@@ -2518,6 +2593,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if let Ime::Commit(text) = event
                     && self.pending_paste.is_none()
+                    && self.pending_close.is_none()
                 {
                     self.write_input(text.as_bytes());
                 }
