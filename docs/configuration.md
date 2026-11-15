@@ -168,7 +168,9 @@ Shell integration lets your shell mark prompts and commands (OSC 133) and report
 - Opens the latest command output that isn't empty, wherever you're scrolled, in a new window
   running `pager`, with Cmd+Shift+G on macOS or Ctrl+Shift+G on Linux. Colors are kept as SGR
   sequences, so `less` needs `-R`. Quitting the pager closes the window. To rebind it, use
-  `show_last_command_output`.
+  `show_last_command_output`. The pager gets a UTF-8 `LC_CTYPE` when its environment names no
+  locale (an app opened from Finder has none). If `pager` isn't on `PATH`, Trident shows a banner
+  instead of a window, so on macOS give Homebrew pagers by full path.
 - Keeps the screen in scrollback when you clear it at a prompt. `clear_scrollback` still erases
   it.
 - Opens new windows and tabs in the current directory.

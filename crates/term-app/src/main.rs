@@ -84,6 +84,34 @@ fn exit(code: i32) -> ! {
     remove_on_exit();
     std::process::exit(code)
 }
+
+/// Removes `path` when SIGTERM, SIGHUP or SIGINT ends this window, which skips `exit`.
+fn remove_on_signal(path: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt;
+    static PATH: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
+    extern "C" fn remove_and_reraise(signal: libc::c_int) {
+        // SAFETY: unlink, signal and raise are async-signal-safe, and the path is set
+        // before the handler is installed.
+        unsafe {
+            if let Some(path) = PATH.get() {
+                libc::unlink(path.as_ptr());
+            }
+            libc::signal(signal, libc::SIG_DFL);
+            libc::raise(signal);
+        }
+    }
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    if PATH.set(path).is_err() {
+        return;
+    }
+    let handler = remove_and_reraise as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        // SAFETY: the handler only makes async-signal-safe calls.
+        unsafe { libc::signal(signal, handler) };
+    }
+}
 /// Bounds how long startup waits for the portal's color scheme before the
 /// first PTY output is parsed; the read overlaps window and GPU setup.
 #[cfg(target_os = "linux")]
@@ -169,6 +197,7 @@ enum UserEvent {
     Output(u64),
     /// The PTY of the tab with this pane id exited.
     Exit(u64),
+    PagerFailed(String),
     #[cfg(target_os = "macos")]
     Presented,
     /// The native tab bar's + button was clicked.
@@ -845,16 +874,24 @@ fn toggled_fullscreen(current: Option<Fullscreen>) -> Option<Fullscreen> {
     }
 }
 
+/// A pager window: the output file it shows, the locale it needs, and where to report
+/// that it failed.
+struct PagerWindow {
+    file: PathBuf,
+    locale: Option<&'static str>,
+    failed: EventLoopProxy<UserEvent>,
+}
+
 /// Starts another window of this executable with `args`, reporting its startup errors
-/// and exit status under `label`. The window removes `remove_on_exit` when it exits, so
-/// the file outlives this window.
+/// and exit status under `label`. A pager window removes its file when it exits, so the
+/// file outlives this window; this window removes it too once the pager window is gone.
 fn open_window(
     label: &'static str,
     args: Vec<std::ffi::OsString>,
     working_directory: Option<PathBuf>,
-    remove_on_exit: Option<PathBuf>,
+    pager: Option<PagerWindow>,
 ) {
-    let cleanup = remove_on_exit.clone();
+    let cleanup = pager.as_ref().map(|pager| pager.file.clone());
     let spawned = std::thread::Builder::new()
         .name(label.replace(' ', "-"))
         .spawn(move || {
@@ -872,8 +909,11 @@ fn open_window(
                 if let Some(dir) = working_directory {
                     command.env(WORKING_DIRECTORY, dir);
                 }
-                if let Some(path) = &remove_on_exit {
-                    command.env(REMOVE_ON_EXIT, path);
+                if let Some(pager) = &pager {
+                    command.env(REMOVE_ON_EXIT, &pager.file);
+                    if let Some(locale) = pager.locale {
+                        command.env("LC_CTYPE", locale);
+                    }
                 }
                 command.spawn()
             });
@@ -884,23 +924,22 @@ fn open_window(
                     {
                         let _ = writeln!(std::io::stderr(), "{label}: {error}");
                     }
-                    match child.wait() {
-                        Ok(status) if !status.success() => {
-                            let _ = writeln!(
-                                std::io::stderr(),
-                                "trident: {label} exited with {status}"
-                            );
-                        }
-                        Err(error) => {
-                            let _ = writeln!(std::io::stderr(), "{label}: {error}");
-                        }
-                        Ok(_) => {}
+                    let failure = wait_window(
+                        label,
+                        &mut child,
+                        pager.as_ref().map(|pager| pager.file.as_path()),
+                    );
+                    if let (Some(failure), Some(pager)) = (failure, &pager) {
+                        let _ = pager.failed.send_event(UserEvent::PagerFailed(failure));
                     }
                 }
                 Err(error) => {
                     let _ = writeln!(std::io::stderr(), "{label}: {error}");
-                    if let Some(path) = remove_on_exit {
-                        let _ = std::fs::remove_file(path);
+                    if let Some(pager) = pager {
+                        let _ = std::fs::remove_file(&pager.file);
+                        let _ = pager
+                            .failed
+                            .send_event(UserEvent::PagerFailed(format!("{label}: {error}")));
                     }
                 }
             }
@@ -911,6 +950,72 @@ fn open_window(
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// Waits for the window `child` and removes `remove` once it is gone, however it ended.
+/// Returns a message when the window failed rather than exiting or being killed.
+fn wait_window(
+    label: &str,
+    child: &mut std::process::Child,
+    remove: Option<&std::path::Path>,
+) -> Option<String> {
+    let status = child.wait();
+    if let Some(path) = remove {
+        let _ = std::fs::remove_file(path);
+    }
+    match status {
+        Ok(status) if !status.success() => {
+            let _ = writeln!(std::io::stderr(), "trident: {label} exited with {status}");
+            status
+                .code()
+                .map(|_| format!("{label}: window exited with {status}"))
+        }
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "{label}: {error}");
+            Some(format!("{label}: {error}"))
+        }
+        Ok(_) => None,
+    }
+}
+
+/// Checks that a window can start `program`, looking it up on `path` as the PTY does.
+fn find_program(program: &str, path: Option<&std::ffi::OsStr>) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let runnable = |candidate: &std::path::Path| {
+        std::fs::metadata(candidate)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    };
+    if program.contains('/') {
+        return if runnable(std::path::Path::new(program)) {
+            Ok(())
+        } else {
+            Err(format!("pager: cannot run {program}"))
+        };
+    }
+    if path
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .any(|dir| runnable(&dir.join(program)))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "pager: {program} is not on PATH; set pager to its full path"
+        ))
+    }
+}
+
+/// A UTF-8 character type for a pager window whose environment names no locale, as an
+/// app opened from Finder has none; the output file is always UTF-8.
+fn pager_locale(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<&'static str> {
+    let named = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .any(|name| var(name).is_some_and(|value| !value.is_empty()));
+    (!named).then_some(if cfg!(target_os = "macos") {
+        "UTF-8"
+    } else {
+        "C.UTF-8"
+    })
 }
 
 /// Writes `text` to a new private file for a pager window to read.
@@ -1220,6 +1325,8 @@ struct App {
     /// The window's latest size in cells while neither maximized nor fullscreen; on macOS,
     /// each native tab's window keeps its own, swapped in with the tab.
     normal_cells: (usize, usize),
+    /// Why the last pager window could not open, shown until the next input.
+    pager_error: Option<String>,
     icons: app_icon::Shown,
     /// Until the startup icons are set up: the latest time to do it.
     icons_latest: Option<Instant>,
@@ -1331,6 +1438,7 @@ impl App {
             config,
             config_error,
             normal_cells: window_state::DEFAULT_CELLS,
+            pager_error: None,
             icons: app_icon::Shown::default(),
             icons_latest: None,
             output_at: Instant::now(),
@@ -2589,6 +2697,11 @@ impl App {
             (Some(error), None) => Some(error.to_owned()),
             (None, flow) => flow,
         };
+        let banner = match (&self.pager_error, banner) {
+            (Some(error), Some(banner)) => Some(format!("{error} | {banner}")),
+            (Some(error), None) => Some(error.clone()),
+            (None, banner) => banner,
+        };
         let banner = match &self.pending_paste {
             Some(text) => Some(paste::banner(text, banner)),
             None => banner,
@@ -2686,6 +2799,9 @@ impl App {
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
+        if self.pager_error.is_some() {
+            self.clear_pager_error();
+        }
         let Some(s) = &mut self.session else { return };
         if let Some(log) = &mut s.latency {
             log.input(Instant::now());
@@ -2698,6 +2814,23 @@ impl App {
             || s.cursor_blink_at.is_none() && s.term.cursor_blink
         {
             s.request_frame();
+        }
+    }
+
+    #[cold]
+    fn clear_pager_error(&mut self) {
+        self.pager_error = None;
+        if let Some(s) = &self.session {
+            s.window.request_redraw();
+        }
+    }
+
+    #[cold]
+    fn show_pager_error(&mut self, error: String) {
+        let _ = writeln!(std::io::stderr(), "trident: {error}");
+        self.pager_error = Some(error);
+        if let Some(s) = &self.session {
+            s.window.request_redraw();
         }
     }
 
@@ -3113,17 +3246,30 @@ impl App {
                 else {
                     return false;
                 };
-                match write_pager_file(&output) {
-                    Ok(path) => {
+                let env = &self.config.env;
+                let var = |name: &str| {
+                    env.get(name)
+                        .map(Into::into)
+                        .or_else(|| std::env::var_os(name))
+                };
+                let opened =
+                    find_program(&self.config.pager[0], var("PATH").as_deref()).and_then(|()| {
+                        write_pager_file(&output).map_err(|error| format!("pager: {error}"))
+                    });
+                match opened {
+                    Ok(file) => {
                         let mut args = new_window_args(std::env::args_os().skip(1));
                         args.push("-e".into());
                         args.extend(self.config.pager.iter().map(Into::into));
-                        args.push(path.clone().into());
-                        open_window("pager", args, None, Some(path));
+                        args.push(file.clone().into());
+                        let pager = PagerWindow {
+                            file,
+                            locale: pager_locale(var),
+                            failed: self.proxy.clone(),
+                        };
+                        open_window("pager", args, None, Some(pager));
                     }
-                    Err(error) => {
-                        let _ = writeln!(std::io::stderr(), "pager: {error}");
-                    }
+                    Err(error) => self.show_pager_error(error),
                 }
             }
             Action::ToggleFullscreen => {
@@ -3811,6 +3957,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ConfigChanged => self.reload_config(),
+            UserEvent::PagerFailed(error) => self.show_pager_error(error),
             UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
                 self.output_ready()
             }
@@ -4279,6 +4426,7 @@ fn main() {
         std::env::remove_var(WINDOW_CELLS);
     }
     if let Some(path) = std::env::var_os(REMOVE_ON_EXIT) {
+        remove_on_signal(path.as_ref());
         let _ = REMOVE_ON_EXIT_PATH.set(path.into());
         // SAFETY: as above.
         unsafe { std::env::remove_var(REMOVE_ON_EXIT) };
@@ -4685,6 +4833,126 @@ mod tests {
             options(&["--scrollback", "5", "--font", "/f.ttf", "--command", "top"]),
             ["--scrollback", "5", "--font", "/f.ttf"]
         );
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("trident-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pager_window_file_is_removed_however_the_window_ends() {
+        let dir = scratch_dir("wait-window");
+        for (script, failed) in [
+            ("exit 0", false),
+            ("kill -TERM $$", false),
+            ("kill -KILL $$", false),
+            ("exit 1", true),
+        ] {
+            let file = dir.join("output.txt");
+            std::fs::write(&file, "out\n").unwrap();
+            let mut child = std::process::Command::new("/bin/sh")
+                .args(["-c", script])
+                .spawn()
+                .unwrap();
+            let failure = wait_window("pager", &mut child, Some(&file));
+            assert!(!file.exists(), "{script}");
+            assert_eq!(failure.is_some(), failed, "{script}: {failure:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    const SIGNAL_TEST_FILE: &str = "TRIDENT_SIGNAL_TEST_FILE";
+    const SIGNAL_TEST_SIGNAL: &str = "TRIDENT_SIGNAL_TEST_SIGNAL";
+
+    /// Run by `pager_signal_removes_the_file_and_still_ends_the_window` in a process of
+    /// its own: installs the handler for the file it is given, then raises the signal.
+    #[test]
+    fn raise_with_remove_on_signal() {
+        let (Some(file), Some(signal)) = (
+            std::env::var_os(SIGNAL_TEST_FILE),
+            std::env::var(SIGNAL_TEST_SIGNAL)
+                .ok()
+                .and_then(|s| s.parse::<libc::c_int>().ok()),
+        ) else {
+            return;
+        };
+        remove_on_signal(file.as_ref());
+        // SAFETY: raising a signal in this process has no memory effects.
+        unsafe { libc::raise(signal) };
+        unreachable!("signal {signal} did not end the process");
+    }
+
+    #[test]
+    fn pager_signal_removes_the_file_and_still_ends_the_window() {
+        use std::os::unix::process::ExitStatusExt;
+        let dir = scratch_dir("remove-on-signal");
+        for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+            let file = dir.join(format!("output-{signal}.txt"));
+            std::fs::write(&file, "out\n").unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::raise_with_remove_on_signal",
+                    "--test-threads=1",
+                ])
+                .env(SIGNAL_TEST_FILE, &file)
+                .env(SIGNAL_TEST_SIGNAL, signal.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), Some(signal), "{status}");
+            assert!(!file.exists(), "{signal}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_or_unrunnable_pager_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("find-program");
+        let runnable = dir.join("pager");
+        let plain = dir.join("notes");
+        std::fs::write(&runnable, "#!/bin/sh\n").unwrap();
+        std::fs::write(&plain, "").unwrap();
+        std::fs::set_permissions(&runnable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let path = std::env::join_paths(["/nonexistent".as_ref(), dir.as_path()]).unwrap();
+        assert_eq!(find_program("pager", Some(&path)), Ok(()));
+        assert_eq!(find_program(runnable.to_str().unwrap(), None), Ok(()));
+        for (program, path) in [
+            ("pager", None),
+            ("notes", Some(path.as_os_str())),
+            ("missing", Some(path.as_os_str())),
+            (plain.to_str().unwrap(), Some(path.as_os_str())),
+            (dir.to_str().unwrap(), Some(path.as_os_str())),
+            ("/nonexistent/less", Some(path.as_os_str())),
+        ] {
+            let error = find_program(program, path).unwrap_err();
+            assert!(
+                error.starts_with("pager: ") && error.contains(program),
+                "{error}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pager_gets_a_utf8_locale_only_when_none_is_named() {
+        let utf8 = if cfg!(target_os = "macos") {
+            "UTF-8"
+        } else {
+            "C.UTF-8"
+        };
+        assert_eq!(pager_locale(|_| None), Some(utf8));
+        assert_eq!(pager_locale(|_| Some("".into())), Some(utf8));
+        for name in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            let var = |n: &str| (n == name).then(|| "en_US.UTF-8".into());
+            assert_eq!(pager_locale(var), None, "{name}");
+        }
     }
 
     #[test]
