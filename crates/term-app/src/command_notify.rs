@@ -285,7 +285,8 @@ fn notify_macos(message: Message) {
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert,
+            // Without Badge, macOS hides the Dock badge (OSC 9;4 progress) once authorized.
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Badge,
             &authorized,
         );
     // The first request may wait on the user answering the permission prompt.
