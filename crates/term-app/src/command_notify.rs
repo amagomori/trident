@@ -114,13 +114,10 @@ pub fn show(title: String, body: String, urgency: term_core::Urgency) {
                     }
                 }
                 #[cfg(target_os = "macos")]
-                {
-                    let _ = urgency;
-                    if body.is_empty() {
-                        notify_macos("terminal", &title);
-                    } else {
-                        notify_macos(&title, &body);
-                    }
+                if body.is_empty() {
+                    notify_macos("terminal", &title, urgency);
+                } else {
+                    notify_macos(&title, &body, urgency);
                 }
             });
     }
@@ -142,13 +139,13 @@ fn applescript_string(value: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn notify_macos(title: &str, message: &str) {
+fn notify_macos(title: &str, message: &str, urgency: term_core::Urgency) {
     use block2::RcBlock;
-    use objc2::runtime::Bool;
+    use objc2::runtime::{Bool, NSObjectProtocol};
     use objc2_foundation::{NSBundle, NSError, NSString, NSUUID};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-        UNUserNotificationCenter,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationInterruptionLevel,
+        UNNotificationRequest, UNUserNotificationCenter,
     };
 
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
@@ -180,6 +177,14 @@ fn notify_macos(title: &str, message: &str) {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(&title));
         content.setBody(&NSString::from_str(&message));
+        // macOS 12+; `osascript` above has no equivalent, so urgency is only a hint there.
+        if content.respondsToSelector(objc2::sel!(setInterruptionLevel:)) {
+            content.setInterruptionLevel(match urgency {
+                term_core::Urgency::Low => UNNotificationInterruptionLevel::Passive,
+                term_core::Urgency::Normal => UNNotificationInterruptionLevel::Active,
+                term_core::Urgency::Critical => UNNotificationInterruptionLevel::TimeSensitive,
+            });
+        }
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSUUID::UUID().UUIDString(),
             &content,
