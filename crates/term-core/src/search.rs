@@ -530,6 +530,8 @@ mod tests {
     #[test]
     fn resized_wide_wrap_padding_stays_synthetic() {
         let mut t = Terminal::new(4, 2);
+        // Rows are cut, not rewrapped, on the alternate screen.
+        t.advance(b"\x1b[?1049h");
         t.advance("abc界".as_bytes());
         for cols in [6, 4, 3, 6] {
             t.resize(cols, 2);
@@ -543,6 +545,7 @@ mod tests {
             assert!(t.search("c 界", false).unwrap().is_empty());
         }
         let mut t = Terminal::new(4, 2);
+        t.advance(b"\x1b[?1049h");
         t.advance(b"abcde");
         t.resize(6, 2);
         assert_eq!(
@@ -558,6 +561,8 @@ mod tests {
     #[test]
     fn narrowed_wrapped_trailing_space_is_restored() {
         let mut t = Terminal::new(4, 2);
+        // Rows are cut, not rewrapped, on the alternate screen.
+        t.advance(b"\x1b[?1049h");
         t.advance(b"abc e");
         let expected = t.search("c e", false).unwrap();
         assert_eq!(expected.len(), 1);
@@ -591,8 +596,12 @@ mod tests {
             }
             for width in [cols + 4, cols, cols + 8, cols] {
                 t.resize(width, 3);
-                assert_eq!(t.search(query, false).unwrap(), expected);
-                assert_eq!(t.search(&regex::escape(query), true).unwrap(), expected);
+                let found = t.search(query, false).unwrap();
+                assert_eq!(found.len(), 1);
+                if width == cols {
+                    assert_eq!(found, expected);
+                }
+                assert_eq!(t.search(&regex::escape(query), true).unwrap(), found);
                 assert!(t.search("absent", false).unwrap().is_empty());
                 assert!(t.search("[", true).is_err());
             }
@@ -623,6 +632,8 @@ mod tests {
     #[test]
     fn widened_wrap_padding_is_not_highlighted() {
         let mut t = Terminal::new(10, 3);
+        // Rows are cut, not rewrapped, on the alternate screen.
+        t.advance(b"\x1b[?1049h");
         t.advance(b"zzzzzzWRAPSPAN");
         let expected = points(&[
             (0, 6),
@@ -641,6 +652,8 @@ mod tests {
         }
 
         let mut t = Terminal::new(4, 2);
+
+        t.advance(b"\x1b[?1049h");
         t.advance("abc界".as_bytes());
         for cols in [4, 6] {
             t.resize(cols, 2);
@@ -656,6 +669,8 @@ mod tests {
     #[test]
     fn narrowed_rows_search_their_hidden_cells() {
         let mut t = Terminal::new(6, 3);
+        // Rows are cut, not rewrapped, on the alternate screen.
+        t.advance(b"\x1b[?1049h");
         t.advance("abcdefGHIJ\r\nshort line here\r\nab界".as_bytes());
         let queries = ["cdef", "fG", "ce", "line here", "b界", "ab", "e$", "J$"];
         let expected: Vec<_> = queries
@@ -688,6 +703,8 @@ mod tests {
             ("\x1b[4hX", "Xabc  界"),
         ] {
             let mut t = Terminal::new(4, 2);
+            // Rows are cut, not rewrapped, on the alternate screen.
+            t.advance(b"\x1b[?1049h");
             t.advance("abc界".as_bytes());
             t.resize(6, 2);
             t.advance(b"\x1b[1;1H");

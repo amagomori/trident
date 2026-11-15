@@ -14,6 +14,7 @@ mod kitty;
 mod links;
 pub use links::Link;
 mod perform;
+mod reflow;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
@@ -1020,6 +1021,11 @@ impl Terminal {
         if cols < self.cols || rows < self.rows {
             self.shrunk = true;
         }
+        // The primary screen rewraps its lines; the alternate one is redrawn by its app.
+        let reflow = cols != self.cols;
+        if reflow {
+            self.reflow_primary(cols);
+        }
 
         let mut alt_shifted = 0;
         let mut overflow = Vec::new();
@@ -1030,8 +1036,10 @@ impl Terminal {
             } else {
                 &mut self.primary
             };
-            for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
-                row.resize(cols);
+            if alt || !reflow {
+                for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
+                    row.resize(cols);
+                }
             }
             // The inactive screen's cursor is the one saved when switching away from it.
             let mut cursor_row = if is_active {
@@ -1100,7 +1108,9 @@ impl Terminal {
         self.rows = rows;
         self.cursor.row = self.cursor.row.min(rows - 1);
         self.cursor.col = self.cursor.col.min(cols - 1);
-        self.cursor.pending_wrap = false;
+        if self.alt_active || !reflow {
+            self.cursor.pending_wrap = false;
+        }
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
         self.tabs = default_tabs(cols);

@@ -1,0 +1,328 @@
+//! Rewrapping the primary screen and its scrollback to a new width.
+
+use crate::{Cell, Flags, Row, RowFlags, Terminal};
+
+/// Where an old row went: its logical line became new rows `first..first + count`,
+/// and the row's cells start `base` cells into that line.
+#[derive(Clone, Copy)]
+struct OldRow {
+    first: usize,
+    count: usize,
+    base: usize,
+    /// Cells the row contributes to its line; columns past them belong to the next row,
+    /// except on the line's last row (`usize::MAX`).
+    len: usize,
+}
+
+/// Maps positions in the old rows to positions in the rewrapped ones.
+struct Map {
+    old: Vec<OldRow>,
+    /// The offset of each new row's first cell in its logical line.
+    starts: Vec<usize>,
+    old_first: u64,
+    old_len: usize,
+    new_len: usize,
+}
+
+impl Map {
+    /// The new row and column of old row `i`, column `col`. With `end`, a column just past
+    /// a full row stays at that row's end instead of the start of the next one.
+    fn point(&self, i: usize, col: usize, end: bool) -> (usize, usize) {
+        let o = self.old[i];
+        let at = o.base + col.min(o.len);
+        let starts = &self.starts[o.first..o.first + o.count];
+        let mut k = starts.partition_point(|&s| s <= at).saturating_sub(1);
+        if end && k > 0 && starts[k] == at {
+            k -= 1;
+        }
+        (o.first + k, at - starts[k])
+    }
+
+    /// The new absolute line and column of an absolute old position.
+    fn line(&self, line: u64, col: usize, end: bool) -> (u64, usize) {
+        let Some(i) = line.checked_sub(self.old_first).map(|i| i as usize) else {
+            return (line, col);
+        };
+        if i >= self.old_len {
+            return (line - self.old_len as u64 + self.new_len as u64, col);
+        }
+        let (row, col) = self.point(i, col, end);
+        (self.old_first + row as u64, col)
+    }
+}
+
+fn wide_wrap_blank() -> Cell {
+    let mut blank = Cell::default();
+    blank.flags.insert(Flags::WIDE_WRAP);
+    blank
+}
+
+/// Copies the shell marks of an old row onto the rewrapped rows its cells went to.
+fn move_marks(
+    rows: &mut [Row],
+    map: &Map,
+    i: usize,
+    flags: RowFlags,
+    prompt_col: u32,
+    output_col: u16,
+    len: usize,
+) {
+    if flags.contains(RowFlags::PROMPT) {
+        let from = map.point(i, 0, false).0;
+        let to = map.point(i, len, true).0;
+        for row in &mut rows[from..=to] {
+            row.flags.insert(RowFlags::PROMPT);
+        }
+    }
+    if flags.contains(RowFlags::OUTPUT_START) {
+        let (row, col) = map.point(i, output_col as usize, false);
+        rows[row].flags.insert(RowFlags::OUTPUT_START);
+        rows[row].output_col = u16::try_from(col).unwrap_or(u16::MAX);
+    }
+    let output_end = flags.contains(RowFlags::OUTPUT_END);
+    if output_end || flags.contains(RowFlags::PROMPT_START) {
+        // Without an output end on the row, `prompt_col` is where the prompt starts.
+        let (row, col) = map.point(i, prompt_col as usize, output_end);
+        let row = &mut rows[row];
+        for flag in [
+            RowFlags::OUTPUT_END,
+            RowFlags::PROMPT_START,
+            RowFlags::OUTPUT_BEFORE_PROMPT,
+            RowFlags::FAILED,
+            RowFlags::SUCCEEDED,
+        ] {
+            if flags.contains(flag) {
+                row.flags.insert(flag);
+            }
+        }
+        row.prompt_col = u32::try_from(col).unwrap_or(u32::MAX - 1);
+    }
+}
+
+impl Terminal {
+    /// Rejoins the soft-wrapped lines of the primary screen and its scrollback and wraps
+    /// them again at `cols`, keeping the cursor on the cell it was on. The screen keeps
+    /// its height; the caller adjusts that afterwards.
+    pub(crate) fn reflow_primary(&mut self, cols: usize) {
+        let rows = self.rows;
+        let old_first = self.history - self.primary.scrollback.len() as u64;
+        let back = self.primary.scrollback.len();
+        // The primary cursor: the live one, or the one saved when the alternate screen
+        // was entered. A cursor past the end of its row keeps the blanks before it, so
+        // text typed after the resize lands where it would have.
+        let cursor = if self.alt_active {
+            self.primary.saved.map(|s| s.cursor)
+        } else {
+            Some(self.cursor)
+        };
+        let anchor = cursor.map_or((rows - 1, 0, false), |c| (c.row, c.col, c.pending_wrap));
+        let cursor_index = back + anchor.0;
+        let cursor_at = anchor.1 + usize::from(anchor.2);
+        // A cursor past the end of its line is wrapped like the text before it: at the
+        // end of a full row it waits there to wrap, as if the line had been typed anew.
+        let mut cursor_end = false;
+
+        let mut old: Vec<Row> = std::mem::take(&mut self.primary.scrollback).into();
+        old.append(&mut self.primary.lines);
+        let old_len = old.len();
+
+        let mut new: Vec<Row> = Vec::with_capacity(old_len);
+        let mut starts = Vec::with_capacity(old_len);
+        let mut map_rows = Vec::with_capacity(old_len);
+        // Shell marks to move once their rows exist: (old index, flags, prompt_col, output_col, len).
+        let mut marks = Vec::new();
+        let mut line = Vec::new();
+        let mut rows_iter = old.into_iter().enumerate().peekable();
+        while let Some((i, mut row)) = rows_iter.next() {
+            let has_cursor = cursor.is_some() && i == cursor_index;
+            if !row.wrapped() && !row.has_hidden() {
+                let used = row
+                    .cells
+                    .iter()
+                    .rposition(|c| *c != Cell::default())
+                    .map_or(0, |c| c + 1)
+                    .max(if has_cursor { cursor_at } else { 0 });
+                if used <= cols {
+                    // A line that fits in one row keeps its row and marks.
+                    row.resize(cols);
+                    map_rows.push(OldRow {
+                        first: new.len(),
+                        count: 1,
+                        base: 0,
+                        len: usize::MAX,
+                    });
+                    starts.push(0);
+                    new.push(row);
+                    continue;
+                }
+            }
+
+            // Gather the whole logical line.
+            let first = new.len();
+            let first_old = map_rows.len();
+            line.clear();
+            let mut next = Some((i, row));
+            while let Some((i, mut row)) = next.take() {
+                let wrapped = row.wrapped();
+                let flags = row.flags;
+                let (prompt_col, output_col) = (row.prompt_col, row.output_col);
+                let mut cells = row.take_cells();
+                let len = if wrapped {
+                    while cells
+                        .last()
+                        .is_some_and(|c| c.flags.contains(Flags::WIDE_WRAP))
+                    {
+                        cells.pop();
+                    }
+                    cells.len()
+                } else {
+                    let used = cells
+                        .iter()
+                        .rposition(|c| *c != Cell::default() && !c.flags.contains(Flags::WIDE_WRAP))
+                        .map_or(0, |c| c + 1);
+                    cells.truncate(used);
+                    if cursor.is_some() && i == cursor_index && cells.len() <= cursor_at {
+                        cells.resize(cursor_at, Cell::default());
+                        cursor_end = true;
+                    }
+                    usize::MAX
+                };
+                let row_len = cells.len();
+                map_rows.push(OldRow {
+                    first,
+                    count: 0,
+                    base: line.len(),
+                    len,
+                });
+                line.append(&mut cells);
+                let mut flags = flags;
+                flags.remove(RowFlags::WRAPPED);
+                if flags != RowFlags::default() {
+                    marks.push((i, flags, prompt_col, output_col, row_len));
+                }
+                if wrapped {
+                    next = rows_iter.next();
+                }
+            }
+
+            // Wrap it at the new width.
+            let mut pos = 0;
+            loop {
+                let mut end = (pos + cols).min(line.len());
+                let wide_cut = end < line.len() && line[end - 1].flags.contains(Flags::WIDE);
+                if wide_cut {
+                    end -= 1;
+                }
+                let mut cells = line[pos..end].to_vec();
+                if wide_cut {
+                    cells.push(wide_wrap_blank());
+                }
+                cells.resize(cols, Cell::default());
+                let mut row = Row::from_cells(cells, RowFlags::default());
+                row.set_wrapped(end < line.len());
+                starts.push(pos);
+                new.push(row);
+                if end >= line.len() {
+                    break;
+                }
+                pos = end;
+            }
+            let count = new.len() - first;
+            for o in &mut map_rows[first_old..] {
+                o.count = count;
+            }
+        }
+
+        let map = Map {
+            old: map_rows,
+            starts,
+            old_first,
+            old_len,
+            new_len: new.len(),
+        };
+        for (i, flags, prompt_col, output_col, len) in marks.drain(..) {
+            move_marks(&mut new, &map, i, flags, prompt_col, output_col, len);
+        }
+
+        // The screen keeps its top line and grows or shrinks below it, as long as the
+        // cursor stays on screen; a cursor on the bottom row stays there.
+        let (cursor_row, cursor_col) = map.point(cursor_index, cursor_at, cursor_end);
+        let lowest = (cursor_row + 1).saturating_sub(rows);
+        let mut top = if anchor.0 == rows - 1 {
+            lowest
+        } else {
+            map.point(back, 0, false).0.clamp(lowest, cursor_row)
+        };
+        // Pull the screen up to keep rows below the cursor, as far as the cursor allows.
+        let used = new
+            .iter()
+            .rposition(|r| !r.is_blank() || r.flags != RowFlags::default())
+            .map_or(0, |r| r + 1);
+        if used > top + rows {
+            top = (used - rows).min(cursor_row);
+        }
+        let mut lines = new.split_off(top);
+        lines.truncate(rows);
+        lines.resize_with(rows, || Row::new(cols, &Cell::default()));
+        let drop = if self.max_scrollback == 0 {
+            new.len()
+        } else {
+            new.len().saturating_sub(self.max_scrollback)
+        };
+        new.drain(..drop);
+        self.primary.scrollback = new.into();
+        self.primary.lines = lines;
+        self.history = old_first + top as u64;
+
+        let screen_row = cursor_row - top;
+        let (col, pending) = if cursor_col >= cols {
+            (cols - 1, true)
+        } else {
+            (cursor_col, false)
+        };
+        if self.alt_active {
+            if let Some(saved) = &mut self.primary.saved {
+                saved.cursor.row = screen_row;
+                saved.cursor.col = col;
+                saved.cursor.pending_wrap = pending;
+            }
+        } else {
+            self.cursor.row = screen_row;
+            self.cursor.col = col;
+            self.cursor.pending_wrap = pending;
+            if let Some(saved) = &mut self.primary.saved {
+                let (row, col) = map.point(
+                    back + saved.cursor.row.min(rows - 1),
+                    saved.cursor.col,
+                    false,
+                );
+                saved.cursor.row = row.saturating_sub(top).min(rows - 1);
+                saved.cursor.col = col.min(cols - 1);
+                saved.cursor.pending_wrap = false;
+            }
+        }
+
+        let shell = &mut self.shell;
+        shell.mark_line = shell.mark_line.map(|l| map.line(l, 0, false).0);
+        shell.prompt_line = shell.prompt_line.map(|l| map.line(l, 0, false).0);
+        shell.input_start = shell.input_start.map(|(l, c)| map.line(l, c, false));
+        for command in &mut shell.commands {
+            command.prompt_line = map.line(command.prompt_line, 0, false).0;
+            (command.input_line, command.input_col) =
+                map.line(command.input_line, command.input_col, false);
+            command.next_prompt = command.next_prompt.map(|l| map.line(l, 0, false).0);
+        }
+        if !self.primary.placements.is_empty() {
+            for p in &mut self.primary.placements {
+                let (line, col) = map.line(p.line, p.col, false);
+                p.line = line;
+                p.col = col;
+            }
+            self.images.generation += 1;
+        }
+        if drop > 0 {
+            self.shrunk = true;
+            self.drop_placements_before(old_first + drop as u64);
+        }
+    }
+}

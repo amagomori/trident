@@ -501,8 +501,9 @@ fn erase_display_all_keeps_images_and_hidden_cells() {
     let mut t = term(12, 3, "     hidden");
     t.resize(5, 3);
     t.advance(b"\x1b[2J");
-    assert_eq!(t.scrollback_len(), 1);
+    assert_eq!(t.scrollback_len(), 3);
     t.resize(12, 3);
+    assert_eq!(t.scrollback_len(), 1);
     t.scroll_display(1);
     assert_eq!(t.viewport_row(0).text(), "     hidden");
 
@@ -953,7 +954,7 @@ fn selection_text_joins_wrapped_lines() {
 
 #[test]
 fn selection_text_skips_padding_of_widened_wrapped_lines() {
-    let mut t = term(5, 3, "hello world");
+    let mut t = term(5, 3, "\x1b[?1049hhello world");
     t.resize(8, 3);
     t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
     t.update_selection(t.viewport_to_point(2, 7));
@@ -1169,7 +1170,7 @@ fn shrinking_on_alternate_screen_keeps_primary_prompt() {
 
 #[test]
 fn narrowing_keeps_cut_off_text_for_widening() {
-    let mut t = term(24, 3, "BEGIN-0123456789-END\r\n$ ");
+    let mut t = term(24, 3, "\x1b[?1049hBEGIN-0123456789-END\r\n$ ");
     t.resize(8, 3);
     assert_eq!(screen(&t), ["BEGIN-01", "$", ""]);
     t.resize(14, 3);
@@ -1189,7 +1190,7 @@ fn narrowing_keeps_cut_off_text_in_scrollback() {
 
 #[test]
 fn narrowing_through_a_wide_character_brings_it_back() {
-    let mut t = term(6, 1, "ab\u{4f60}cd");
+    let mut t = term(6, 1, "\x1b[?1049hab\u{4f60}cd");
     t.resize(3, 1);
     assert_eq!(t.viewport_row(0).text(), "ab");
     t.resize(6, 1);
@@ -1200,7 +1201,7 @@ fn narrowing_through_a_wide_character_brings_it_back() {
     t.resize(6, 1);
     assert_eq!(t.viewport_row(0).text(), "abx cd");
     // Even with a plain space.
-    let mut t = term(6, 1, "ab\u{4f60}cd");
+    let mut t = term(6, 1, "\x1b[?1049hab\u{4f60}cd");
     t.resize(3, 1);
     t.advance(b"\x1b[1;3H ");
     t.resize(6, 1);
@@ -1218,7 +1219,7 @@ fn erasing_to_end_of_line_drops_cut_off_text() {
 
 #[test]
 fn erasing_backward_keeps_cut_off_text() {
-    let mut t = term(10, 1, "0123456789");
+    let mut t = term(10, 1, "\x1b[?1049h0123456789");
     t.resize(4, 1);
     t.advance(b"\x1b[1;4H\x1b[1K");
     t.resize(10, 1);
@@ -1916,4 +1917,144 @@ fn inserted_lines_drop_commands_pushed_out_of_the_region() {
     );
     let two = commands.back().unwrap();
     assert_eq!(two.cells.iter().map(|c| c.c).collect::<String>(), "$ two");
+}
+
+fn primary_rows(t: &Terminal) -> Vec<(String, Vec<Cell>, bool)> {
+    t.primary
+        .scrollback
+        .iter()
+        .chain(&t.primary.lines)
+        .map(|row| (row.text(), row.cells.clone(), row.wrapped()))
+        .collect()
+}
+
+#[test]
+fn reflow_matches_printing_at_the_new_width() {
+    let inputs = [
+        "0123456789abcdefghij\r\nshort\r\n\x1b[1;31mstyled text that wraps around\x1b[m",
+        "ab\u{754c}cd\u{4f60}\u{597d}efg\r\n\u{754c}\u{754c}\u{754c}\u{754c}\u{754c}x",
+        "\x1b]8;;https://example.com\x07a link that wraps\x1b]8;;\x07 after\r\n\r\nend",
+        "exactly8",
+        "a\u{301}bcde\u{301}fghij",
+    ];
+    for input in inputs {
+        for from in 2..=12 {
+            let mut t = Terminal::new(from, 4);
+            t.advance(input.as_bytes());
+            for to in (2..=12).chain([7, 3, 11, 2]) {
+                t.resize(to, 4);
+                let mut fresh = Terminal::new(to, 4);
+                fresh.advance(input.as_bytes());
+                let context = format!("{input:?} from {from} to {to}");
+                let (rows, expected) = (primary_rows(&t), primary_rows(&fresh));
+                for (i, (row, expected)) in rows.iter().zip(&expected).enumerate() {
+                    assert_eq!(row, expected, "{context}: row {i}");
+                }
+                assert_eq!(rows.len(), expected.len(), "{context}");
+                assert_eq!(t.cursor_position(), fresh.cursor_position(), "{context}");
+                assert_eq!(
+                    t.cursor.pending_wrap, fresh.cursor.pending_wrap,
+                    "{context}"
+                );
+                assert_eq!(t.history, fresh.history, "{context}");
+            }
+        }
+    }
+}
+
+#[test]
+fn reflow_keeps_the_cursor_on_its_cell() {
+    // On a wrapped line, the cursor stays on the character it was on.
+    let mut t = term(10, 3, "abcdefghijkl\x1b[1;4H");
+    t.resize(4, 3);
+    assert_eq!(screen(&t), ["abcd", "efgh", "ijkl"]);
+    assert_eq!(t.cursor_position(), Some((0, 3)));
+    t.advance(b"X");
+    t.resize(12, 3);
+    assert_eq!(screen(&t), ["abcXefghijkl", "", ""]);
+    assert_eq!(t.cursor_position(), Some((0, 4)));
+
+    // Past the end of the text it keeps the blanks before it.
+    let mut t = term(10, 3, "abc\x1b[1;7H");
+    t.resize(4, 3);
+    assert_eq!(t.cursor_position(), Some((1, 2)));
+    t.advance(b"X");
+    t.resize(10, 3);
+    assert_eq!(screen(&t), ["abc   X", "", ""]);
+
+    // A pending wrap survives at the end of a full row.
+    let mut t = term(8, 2, "abcdefgh");
+    t.resize(4, 2);
+    assert!(t.cursor.pending_wrap);
+    t.advance(b"i");
+    assert_eq!(screen(&t), ["efgh", "i"]);
+    assert!(t.viewport_row(0).wrapped());
+}
+
+#[test]
+fn reflow_moves_lines_through_scrollback() {
+    let mut t = term(8, 2, "aaaabbbbccccdddd\r\n$ ");
+    assert_eq!(screen(&t), ["ccccdddd", "$"]);
+    assert_eq!(t.scrollback_len(), 1);
+    t.resize(16, 2);
+    assert_eq!(screen(&t), ["aaaabbbbccccdddd", "$"]);
+    assert_eq!(t.scrollback_len(), 0);
+    t.resize(4, 2);
+    assert_eq!(screen(&t), ["dddd", "$"]);
+    assert_eq!(t.scrollback_len(), 3);
+    assert_eq!(t.cursor_position(), Some((1, 2)));
+    t.scroll_display(3);
+    assert_eq!(screen(&t), ["aaaa", "bbbb"]);
+
+    // Rows past the scrollback limit are dropped.
+    let mut t = term(8, 2, "aaaabbbbccccdddd\r\n$ ");
+    t.set_scrollback_limit(2);
+    t.resize(4, 2);
+    assert_eq!(t.scrollback_len(), 2);
+    t.scroll_display(2);
+    assert_eq!(screen(&t), ["bbbb", "cccc"]);
+}
+
+#[test]
+fn reflow_keeps_the_screen_top_while_the_cursor_fits() {
+    // Rows below the cursor take the new rows before anything scrolls off.
+    let mut t = term(8, 4, "0123456789\r\n$ ");
+    t.resize(4, 4);
+    assert_eq!(screen(&t), ["0123", "4567", "89", "$"]);
+    assert_eq!(t.scrollback_len(), 0);
+    t.resize(8, 4);
+    assert_eq!(screen(&t), ["01234567", "89", "$", ""]);
+    assert_eq!(t.cursor_position(), Some((2, 2)));
+
+    // Text below the cursor stays on screen while the cursor does.
+    let mut t = term(8, 3, "top\r\nmiddle\r\n0123456789\x1b[2;1H");
+    assert_eq!(screen(&t), ["middle", "01234567", "89"]);
+    t.resize(4, 3);
+    assert_eq!(screen(&t), ["0123", "4567", "89"]);
+    assert_eq!(t.cursor_position(), Some((0, 0)));
+}
+
+#[test]
+fn reflow_restores_the_saved_cursor() {
+    let mut t = term(10, 3, "0123456789abc\x1b7\r\n");
+    t.resize(5, 3);
+    assert_eq!(screen(&t), ["56789", "abc", ""]);
+    t.advance(b"\x1b8X");
+    assert_eq!(screen(&t), ["56789", "abcX", ""]);
+}
+
+#[test]
+fn reflow_leaves_the_alternate_screen_cut() {
+    let mut t = term(10, 3, "0123456789abc\x1b[?1049h\x1b[Hfullscreen");
+    t.resize(5, 3);
+    assert_eq!(screen(&t), ["fulls", "", ""]);
+    t.resize(10, 3);
+    assert_eq!(screen(&t), ["fullscreen", "", ""]);
+    t.resize(4, 3);
+    t.advance(b"\x1b[?1049l!");
+    assert_eq!(screen(&t), ["4567", "89ab", "c!"]);
+    assert_eq!(t.scrollback_len(), 1);
+    assert_eq!(t.cursor_position(), Some((2, 2)));
+    t.resize(13, 3);
+    assert_eq!(screen(&t), ["0123456789abc", "!", ""]);
 }
