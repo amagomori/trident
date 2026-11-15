@@ -140,7 +140,8 @@ impl Terminal {
         old.append(&mut self.primary.lines);
         let old_len = old.len();
         // A line editor redraws its line by moving up the rows it had at the old width, so
-        // that line keeps its rows, cut to the new width, for the editor to rewrap.
+        // that line keeps its rows, cut to the new width, for the editor to rewrap. The cut
+        // cells stay hidden, so text the editor does not redraw is not lost.
         let kept = (keep_cursor_line && !self.alt_active).then(|| {
             let mut start = cursor_index;
             while start > 0 && old[start - 1].wrapped() {
@@ -177,7 +178,6 @@ impl Terminal {
             }
             if kept.as_ref().is_some_and(|k| k.contains(&i)) {
                 row.resize(cols);
-                row.clear_hidden();
                 map_rows.push(OldRow {
                     first: new.len(),
                     count: 1,

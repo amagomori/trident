@@ -209,8 +209,11 @@ impl Row {
         self.flags.contains(RowFlags::WRAPPED)
     }
 
+    /// Marks the row as autowrapped into the next one; cells cut off past its edge no longer
+    /// follow its text, so they are dropped.
     pub fn set_wrapped(&mut self, wrapped: bool) {
         if wrapped {
+            self.hidden = None;
             self.flags.insert(RowFlags::WRAPPED);
         } else {
             self.flags.remove(RowFlags::WRAPPED);

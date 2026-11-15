@@ -2206,6 +2206,32 @@ fn resize_while_editing_lets_the_editor_redraw_its_line_once() {
 }
 
 #[test]
+fn resize_while_editing_keeps_text_no_editor_redraws() {
+    // Output with no newline before the prompt, or a silent `read`: nothing redraws it.
+    let out = format!("{}{}", "0123456789".repeat(15), "bash$ half");
+    let mut t = term(100, 6, &format!("top\r\n{out}"));
+    let before = primary_rows(&t);
+    t.resize_while_editing(60, 6, &mut []);
+    assert_eq!(screen(&t)[1], out[..60]);
+    assert_eq!(screen(&t)[2], out[100..]);
+    t.resize_while_editing(100, 6, &mut []);
+    assert_eq!(primary_rows(&t), before);
+    t.resize_while_editing(60, 6, &mut []);
+    t.resize(40, 6);
+    assert_eq!(screen(&t), screen(&term(40, 6, &format!("top\r\n{out}"))));
+}
+
+#[test]
+fn autowrap_drops_cells_cut_off_the_row() {
+    let mut t = term(10, 3, "\x1b[?1049h0123456789");
+    t.resize(6, 3);
+    t.advance(b"\rUVWXYZ+");
+    t.resize(10, 3);
+    assert_eq!(screen(&t)[0], "UVWXYZ");
+    assert_eq!(screen(&t)[1], "+");
+}
+
+#[test]
 fn resize_rewraps_the_cursor_line_without_an_editor() {
     let line = half_typed_command();
     let mut t = term(100, 8, &format!("out\r\n{line}"));
