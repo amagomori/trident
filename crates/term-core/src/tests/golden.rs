@@ -1150,7 +1150,10 @@ fn attributes(t: &Terminal, cell: &Cell) -> String {
     if let Some(c) = t.underline_color(cell) {
         write!(out, " underline-color={}", color(c)).unwrap();
     }
-    if cell.hyperlink != 0 {
+    if t.links
+        .get(cell.hyperlink)
+        .is_some_and(|(_, uri)| !uri.is_empty())
+    {
         write!(out, " link={}", cell.hyperlink).unwrap();
     }
     out
@@ -1220,7 +1223,7 @@ fn snapshot(t: &Terminal) -> String {
         writeln!(out, "title: {title:?}").unwrap();
     }
     for index in 1..=t.links.len() as u16 {
-        if let Some((id, uri)) = t.links.get(index) {
+        if let Some((id, uri)) = t.links.get(index).filter(|(_, uri)| !uri.is_empty()) {
             let (id, uri) = (String::from_utf8_lossy(id), String::from_utf8_lossy(uri));
             writeln!(out, "link {index}: id={id:?} uri={uri:?}").unwrap();
         }
