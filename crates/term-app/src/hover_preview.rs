@@ -31,6 +31,8 @@ const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_LINES: usize = 14;
 const THUMBNAILER_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(not(target_os = "macos"))]
+static NEXT_PAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn enabled(value: Option<&OsStr>) -> bool {
     value.and_then(OsStr::to_str).is_some_and(|v| {
@@ -569,6 +571,12 @@ fn pdf_page(path: &Path, max: (u32, u32)) -> Option<(u32, u32, Vec<u8>)> {
     };
     #[cfg(not(target_os = "macos"))]
     let png = {
+        // pdftoppm 22 writes `-singlefile` output to `<root>.png` even for root `-`.
+        let root = std::env::temp_dir().join(format!(
+            "terminal-hover-{}-{}",
+            std::process::id(),
+            NEXT_PAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let mut command = Command::new("pdftoppm");
         command
             .args([
@@ -582,8 +590,13 @@ fn pdf_page(path: &Path, max: (u32, u32)) -> Option<(u32, u32, Vec<u8>)> {
                 &side,
             ])
             .arg(path)
-            .arg("-");
-        run(&mut command, THUMBNAILER_TIMEOUT)?
+            .arg(&root);
+        let out = root.with_extension("png");
+        let ran = run(&mut command, THUMBNAILER_TIMEOUT);
+        let png = std::fs::read(&out).ok();
+        let _ = std::fs::remove_file(&out);
+        ran?;
+        png?
     };
     let page = image::load_from_memory(&png).ok()?;
     let page = if page.width() > max.0 || page.height() > max.1 {
@@ -1351,6 +1364,56 @@ mod tests {
 
         let listing = content(&dir, None, body_room(1.0)).unwrap();
         assert_eq!(listing.detail, "2 items");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A one-page PDF with a filled square, small enough to write inline.
+    fn tiny_pdf() -> Vec<u8> {
+        let stream = "0 0 1 rg 0 0 200 200 re f\n";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len()),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend(format!("{} 0 obj\n{object}\nendobj\n", i + 1).bytes());
+        }
+        let xref = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+        for offset in offsets {
+            out.extend(format!("{offset:010} 00000 n \n").bytes());
+        }
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .bytes(),
+        );
+        out
+    }
+
+    #[test]
+    fn pdfs_show_their_first_page() {
+        if Command::new("pdftoppm").arg("-v").output().is_err() {
+            eprintln!("skipping: no pdftoppm");
+            return;
+        }
+        let dir = scratch();
+        let pdf = dir.join("page.pdf");
+        std::fs::write(&pdf, tiny_pdf()).unwrap();
+        let page = content(&pdf, None, body_room(1.0)).unwrap();
+        assert!(page.detail.starts_with("PDF · "), "{}", page.detail);
+        let Body::Image(w, h, pixels) = page.body else {
+            panic!("page");
+        };
+        assert!(w == h && w <= 420, "{w}×{h}");
+        let centre = ((h / 2 * w + w / 2) * 4) as usize;
+        assert_eq!(&pixels[centre..centre + 3], &[0, 0, 255]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
