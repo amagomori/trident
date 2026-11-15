@@ -25,7 +25,7 @@ Both write `rows.json` (every run) and `summary.json` into `--out`. Report the t
 `ab.py` prints: only `wayland-presentation` is verified presentation; `x11-present`,
 `metal-presented` and `present-return` are labelled unverified. Where every presentation
 callback is a skip (the macOS VM's paravirtual Metal), `ab.py` reports present-return and
-marks fps/wasted n/a; it exits 2 if it gets no echo p50 at all. `vs_alacritty.py` measures
+marks fps/wasted n/a; it exits 2 if it gets no echo p50 at all, or if runs mix timing sources. `vs_alacritty.py` measures
 until the pixels change in the captured screen, not photons at the panel.
 
 macOS Alacritty: the Homebrew cask is disabled (Gatekeeper), so use the release DMG:

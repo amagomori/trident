@@ -112,6 +112,10 @@ def main():
     if missing:
         print(f"ERROR: no {', '.join(missing)} result for at least 3 complete rounds", file=sys.stderr)
         return 2
+    if len(timings) > 1:
+        print(f"ERROR: mixed timing sources ({', '.join(sorted(timings))}); verdicts compare different "
+              "endpoints, rerun", file=sys.stderr)
+        return 2
     return 1 if any(m["verdict"] == "REGRESSION" for m in summary["metrics"].values()) else 0
 
 
