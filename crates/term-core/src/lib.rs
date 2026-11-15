@@ -1087,19 +1087,13 @@ impl Terminal {
     }
 
     /// Resizes like [`Terminal::resize_tracking`] while a line editor (readline, zle) edits
-    /// the cursor's line. It redraws after SIGWINCH by moving up as many rows as the line had
-    /// at the old width, so that line keeps its rows, cut to the new width.
+    /// the cursor's line. It redraws after SIGWINCH by moving up as many rows as the cursor
+    /// was below the line's start at the old width, so the cursor keeps that row.
     pub fn resize_while_editing(&mut self, cols: usize, rows: usize, points: &mut [Point]) {
         self.resize_keeping(cols, rows, points, true);
     }
 
-    fn resize_keeping(
-        &mut self,
-        cols: usize,
-        rows: usize,
-        points: &mut [Point],
-        editor_line: bool,
-    ) {
+    fn resize_keeping(&mut self, cols: usize, rows: usize, points: &mut [Point], editing: bool) {
         let cols = cols.max(2);
         let rows = rows.max(1);
         if cols == self.cols && rows == self.rows {
@@ -1118,7 +1112,7 @@ impl Terminal {
         // The primary screen rewraps its lines; the alternate one is redrawn by its app.
         let reflow = cols != self.cols;
         if reflow {
-            anchor = self.reflow_primary(cols, rows, anchor, editor_line);
+            anchor = self.reflow_primary(cols, rows, anchor, editing);
         }
 
         let mut alt_shifted = 0;

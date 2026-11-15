@@ -102,15 +102,16 @@ fn move_marks(
 impl Terminal {
     /// Rejoins the soft-wrapped lines of the primary screen and its scrollback and wraps
     /// them again at `cols`, keeping the cursor on the cell it was on (on a line being
-    /// edited, on its row in the line), and sizes the screen to `rows`. `view_top` is
-    /// the viewport's top line when scrolled back; returns where that line went. `points`
-    /// are moved to where their cells went.
+    /// edited, on its row in the line), and sizes the screen to `rows`. `editing` is
+    /// whether a line editor owns the cursor's line. `view_top` is the viewport's top line
+    /// when scrolled back; returns where that line went. `points` are moved to where
+    /// their cells went.
     pub(crate) fn reflow_primary(
         &mut self,
         cols: usize,
         rows: usize,
         view_top: Option<u64>,
-        keep_cursor_line: bool,
+        editing: bool,
     ) -> Option<u64> {
         let old_rows = self.rows;
         let old_first = self.history - self.primary.scrollback.len() as u64;
@@ -139,20 +140,6 @@ impl Terminal {
         old.extend(self.primary.scrollback.drain(..));
         old.append(&mut self.primary.lines);
         let old_len = old.len();
-        // A line editor redraws its line by moving up the rows it had at the old width, so
-        // that line keeps its rows, cut to the new width, for the editor to rewrap. The cut
-        // cells stay hidden, so text the editor does not redraw is not lost.
-        let kept = (keep_cursor_line && !self.alt_active).then(|| {
-            let mut start = cursor_index;
-            while start > 0 && old[start - 1].wrapped() {
-                start -= 1;
-            }
-            let mut end = cursor_index;
-            while end + 1 < old_len && old[end].wrapped() {
-                end += 1;
-            }
-            start..=end
-        });
 
         let mut new: Vec<Row> = Vec::with_capacity(old_len);
         let mut starts = Vec::with_capacity(old_len);
@@ -160,7 +147,8 @@ impl Terminal {
         // Shell marks to move once their rows exist: (old index, flags, prompt_col, output_col, len).
         let mut marks = Vec::new();
         // The cursor's wrapped line: its first old row, and whether a line editor is
-        // editing it (text after the cursor, or the shell's input zone).
+        // editing it (one owns the terminal, text after the cursor, or the shell's input
+        // zone).
         let mut cursor_line = None;
         let mut line = Vec::new();
         let mut rows_iter = old.into_iter().enumerate().peekable();
@@ -174,18 +162,6 @@ impl Terminal {
                 });
                 starts.push(0);
                 new.push(crate::budget::placeholder_row(cols, &text));
-                continue;
-            }
-            if kept.as_ref().is_some_and(|k| k.contains(&i)) {
-                row.resize(cols);
-                map_rows.push(OldRow {
-                    first: new.len(),
-                    count: 1,
-                    base: 0,
-                    len: usize::MAX,
-                });
-                starts.push(0);
-                new.push(row);
                 continue;
             }
             let has_cursor = cursor.is_some() && i == cursor_index;
@@ -264,7 +240,10 @@ impl Terminal {
                 let text_after = line
                     .get(at..)
                     .is_some_and(|rest| rest.iter().any(|c| *c != Cell::default()));
-                cursor_line = Some((first_old, text_after || self.shell.zone == Zone::Input));
+                cursor_line = Some((
+                    first_old,
+                    editing || text_after || self.shell.zone == Zone::Input,
+                ));
             }
             // Wrap it at the new width.
             let mut pos = 0;
@@ -347,7 +326,7 @@ impl Terminal {
 
         let screen_row = cursor_row - top;
         let (col, pending) = if cursor_col >= cols {
-            (cols - 1, kept.is_none())
+            (cols - 1, true)
         } else {
             (cursor_col, false)
         };
