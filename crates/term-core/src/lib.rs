@@ -6,8 +6,10 @@ pub mod images;
 pub mod search;
 
 mod ascii;
+mod budget;
 mod cell;
 mod ghost;
+pub mod grapheme;
 mod kitty;
 mod links;
 pub use links::Link;
@@ -39,6 +41,7 @@ struct ShellState {
     prompt_line: Option<u64>,
     input_start: Option<(u64, usize)>,
     commands: VecDeque<Command>,
+    budget: budget::Budget,
 }
 
 /// Commands kept for the pinned header; older ones lose it first.
@@ -61,6 +64,10 @@ pub struct Command {
     pub started: Instant,
     pub finished: Option<Instant>,
     pub exit_code: Option<i32>,
+    /// Line of the command start mark (`C`); its output runs from here to `next_prompt`.
+    pub(crate) output_line: u64,
+    /// Where output dropped by the scrollback budget was replaced by one row.
+    pub(crate) gap: Option<budget::Gap>,
 }
 
 impl Command {
@@ -226,6 +233,7 @@ impl PrintState {
 
 pub struct Terminal {
     links: links::LinkTable,
+    graphemes: grapheme::Graphemes,
     pub palette: colors::Palette,
     cols: usize,
     rows: usize,
@@ -394,6 +402,8 @@ impl Terminal {
                     && last.next_prompt.is_none()
                 {
                     last.next_prompt = Some(line);
+                    self.note_command_ended(self.shell.commands.len() - 1);
+                    self.shell.budget.limit = u64::MAX;
                 }
                 self.shell.prompt_line = Some(line);
                 self.shell.input_start = None;
@@ -446,7 +456,13 @@ impl Terminal {
                     started: Instant::now(),
                     finished: None,
                     exit_code: None,
+                    output_line: line,
+                    gap: None,
                 });
+                if let Some(ended) = self.shell.commands.len().checked_sub(2) {
+                    self.note_command_ended(ended);
+                }
+                self.refresh_budget_limit();
             }
             b"D" if self.shell.zone == Zone::Output => {
                 if let Some(last) = self.shell.commands.back_mut()
@@ -472,6 +488,7 @@ impl Terminal {
             .is_some_and(|c| c.prompt_line >= prompt_line)
         {
             self.shell.commands.pop_back();
+            self.shell.budget.limit = u64::MAX;
         }
         if let Some(last) = self.shell.commands.back_mut()
             && let Some(next) = &mut last.next_prompt
@@ -503,17 +520,23 @@ impl Terminal {
         let mut i = commands.partition_point(|c| c.next_prompt.is_some_and(|next| next < top));
         while i < commands.len() {
             let command = &mut commands[i];
-            let Some(input_line) = shift(command.input_line) else {
+            let running = command.next_prompt.is_none();
+            // A running command keeps its budget when its prompt is pushed off: its
+            // output still follows, from just below the region.
+            let Some(input_line) = shift(command.input_line).or(running.then_some(bottom + 1))
+            else {
                 commands.remove(i);
                 continue;
             };
             command.input_line = input_line;
             command.prompt_line = shift(command.prompt_line).unwrap_or(input_line);
+            command.output_line = shift(command.output_line).unwrap_or(bottom + 1);
             command.next_prompt = command
                 .next_prompt
                 .map(|next| shift(next).unwrap_or(bottom + 1));
             i += 1;
         }
+        self.refresh_budget_limit();
     }
 
     /// The command that owns the viewport's top row (`-1` while a partial row shows
@@ -693,8 +716,10 @@ impl Terminal {
                 prompt_line: None,
                 input_start: None,
                 commands: VecDeque::new(),
+                budget: budget::Budget::default(),
             }),
             links: Default::default(),
+            graphemes: Default::default(),
             palette: colors::Palette::default(),
             cols,
             rows,
@@ -850,6 +875,7 @@ impl Terminal {
             self.shrunk = true;
         }
         self.max_scrollback = lines;
+        self.refresh_budget_pending();
         let excess = self.primary.scrollback.len().saturating_sub(lines);
         if excess == 0 {
             return;
@@ -988,12 +1014,15 @@ impl Terminal {
         }
         self.invalidate_output_ends();
         self.selection = None;
+        // A scrolled-back view keeps its top line; one at the bottom follows the bottom.
+        let anchor = (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
         self.display_offset = 0;
         if cols < self.cols || rows < self.rows {
             self.shrunk = true;
         }
 
         let mut alt_shifted = 0;
+        let mut overflow = Vec::new();
         for alt in [false, true] {
             let is_active = alt == self.alt_active;
             let screen = if alt {
@@ -1022,13 +1051,7 @@ impl Terminal {
                 for _ in 0..excess {
                     let row = screen.lines.remove(0);
                     if !alt {
-                        if self.max_scrollback > 0 {
-                            screen.scrollback.push_back(row);
-                            if screen.scrollback.len() > self.max_scrollback {
-                                screen.scrollback.pop_front();
-                            }
-                        }
-                        self.history += 1;
+                        overflow.push(row);
                     } else {
                         shifted += 1;
                     }
@@ -1057,6 +1080,15 @@ impl Terminal {
                 alt_shifted = shifted;
             }
         }
+        // Rows pushed off the top evict like scrolled rows, so command budgets still apply.
+        self.cols = cols;
+        for row in overflow {
+            if self.max_scrollback > 0 {
+                self.push_history(row);
+            } else {
+                self.history += 1;
+            }
+        }
         if !self.primary.placements.is_empty() {
             let first = self.history - self.primary.scrollback.len() as u64;
             self.drop_placements_before(first);
@@ -1078,6 +1110,9 @@ impl Terminal {
         {
             saved.cursor.row = saved.cursor.row.min(rows - 1);
             saved.cursor.col = saved.cursor.col.min(cols - 1);
+        }
+        if let Some(top) = anchor {
+            self.scroll_to_line(top);
         }
     }
 
@@ -1176,16 +1211,17 @@ impl Terminal {
         let row = self.line(point.line);
         let is_word = |c: char| !c.is_whitespace() && !"\"'`()[]{}<>|,;".contains(c);
         let col = point.col.min(self.cols - 1);
-        if !is_word(row.cells[col].c) {
+        let is_word = |cell: &Cell| is_word(self.base_char(cell));
+        if !is_word(&row.cells[col]) {
             return point;
         }
         let mut col = col;
         if forward {
-            while col + 1 < self.cols && is_word(row.cells[col + 1].c) {
+            while col + 1 < self.cols && is_word(&row.cells[col + 1]) {
                 col += 1;
             }
         } else {
-            while col > 0 && is_word(row.cells[col - 1].c) {
+            while col > 0 && is_word(&row.cells[col - 1]) {
                 col -= 1;
             }
         }
@@ -1210,11 +1246,12 @@ impl Terminal {
             } else {
                 Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
             };
-            let mut text: String = cells[from..=to]
-                .iter()
-                .filter(|c| !c.flags.intersects(skip))
-                .map(|c| c.c)
-                .collect();
+            let mut text = String::new();
+            for cell in &cells[from..=to] {
+                if !cell.flags.intersects(skip) {
+                    self.push_cell_text(cell, &mut text);
+                }
+            }
             if !block && !(wrapped && line != end.line) {
                 text.truncate(text.trim_end().len());
             }
@@ -1330,11 +1367,19 @@ impl Terminal {
         self.history += 1;
         let mut evicted = None;
         if self.primary.scrollback.len() > self.max_scrollback {
-            evicted = self.primary.scrollback.pop_front();
+            if self.budget_armed()
+                && let Some(spare) = self.evict_from_command()
+            {
+                evicted = spare;
+            } else {
+                evicted = self.primary.scrollback.pop_front();
+            }
             if !self.primary.placements.is_empty() {
                 let first = self.history - self.primary.scrollback.len() as u64;
                 self.drop_placements_before(first);
             }
+        } else if self.history > self.shell.budget.limit {
+            evicted = self.cap_command();
         }
         if self.display_offset > 0 {
             self.display_offset = (self.display_offset + 1).min(self.primary.scrollback.len());
@@ -1404,8 +1449,8 @@ impl Terminal {
         };
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
-            // Combining marks and other zero-width characters are not rendered.
             self.print_state.disarm_clear();
+            self.join_zero_width(c);
             return;
         }
 
@@ -1448,7 +1493,8 @@ impl Terminal {
         }
         let mut cell = template;
         cell.c = c;
-        cell.flags.remove(Flags::WIDE | Flags::WIDE_SPACER);
+        cell.flags
+            .remove(Flags::WIDE | Flags::WIDE_SPACER | Flags::GRAPHEME);
         if width == 2 {
             cell.flags.insert(Flags::WIDE);
             let mut spacer = template;
@@ -1811,7 +1857,9 @@ impl Terminal {
         fresh.palette = self.palette.clone();
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
+        let (enabled, share) = self.command_budget();
         *self = fresh;
+        self.set_command_budget(enabled, share);
         self.title_changed = true;
     }
 }
@@ -1843,7 +1891,7 @@ fn clear_wide_pair(cells: &mut [Cell], col: usize) {
         cells[col].flags.remove(Flags::WIDE);
     } else if cell.flags.contains(Flags::WIDE_SPACER) && col > 0 {
         cells[col - 1].c = ' ';
-        cells[col - 1].flags.remove(Flags::WIDE);
+        cells[col - 1].flags.remove(Flags::WIDE | Flags::GRAPHEME);
         cells[col].flags.remove(Flags::WIDE_SPACER);
     }
 }

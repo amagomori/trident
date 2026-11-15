@@ -346,10 +346,10 @@ impl Terminal {
             {
                 continue;
             }
-            for _ in 0..cell.c.len_utf8() {
+            for _ in 0..self.cell_text_len(cell) {
                 positions.push(p);
             }
-            text.push(cell.c);
+            self.push_cell_text(cell, &mut text);
         }
         for (offset, _) in text.char_indices() {
             let tail = &text[offset..];

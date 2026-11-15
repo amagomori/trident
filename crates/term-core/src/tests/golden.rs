@@ -663,6 +663,72 @@ fn cases() -> Vec<Case> {
         ("empty", 5, 2, b""),
         ("printable_trailing_spaces", 6, 2, b"ab  "),
         ("utf8", 8, 2, "caf\u{e9}".as_bytes()),
+        ("combining_mark", 6, 2, "e\u{301}x".as_bytes()),
+        (
+            "combining_marks_stacked",
+            6,
+            2,
+            "a\u{323}\u{302}b".as_bytes(),
+        ),
+        (
+            "combining_backspace_overwrite",
+            6,
+            2,
+            "e\u{301}\x08a".as_bytes(),
+        ),
+        (
+            "combining_delete",
+            6,
+            2,
+            "e\u{301}xy\x1b[1G\x1b[P".as_bytes(),
+        ),
+        (
+            "combining_erase",
+            6,
+            2,
+            "e\u{301}xy\x1b[1G\x1b[X".as_bytes(),
+        ),
+        (
+            "combining_insert_mode",
+            6,
+            2,
+            "e\u{301}\x1b[4h\x1b[1Gx".as_bytes(),
+        ),
+        ("combining_at_line_start", 6, 2, "\u{301}a".as_bytes()),
+        ("combining_after_cr", 6, 2, "ab\r\u{301}".as_bytes()),
+        ("combining_at_pending_wrap", 3, 2, "abc\u{301}d".as_bytes()),
+        ("combining_on_wide", 6, 2, "\u{4e2d}\u{301}x".as_bytes()),
+        (
+            "combining_on_wide_at_edge",
+            4,
+            2,
+            "ab\u{4e2d}\u{301}".as_bytes(),
+        ),
+        (
+            "combining_overwrite_wide_half",
+            6,
+            2,
+            "\u{4e2d}\u{301}\x1b[2Gx".as_bytes(),
+        ),
+        (
+            "emoji_zwj_sequence",
+            8,
+            2,
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}".as_bytes(),
+        ),
+        (
+            "emoji_variation_selector",
+            6,
+            2,
+            "\u{2764}\u{fe0f}x".as_bytes(),
+        ),
+        ("emoji_skin_tone", 6, 2, "\u{1f44d}\u{1f3fd}x".as_bytes()),
+        (
+            "emoji_tag_sequence",
+            6,
+            2,
+            "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}x".as_bytes(),
+        ),
         ("carriage_return", 6, 2, b"abcd\rXY"),
         ("linefeed", 6, 3, b"ab\ncd"),
         ("crlf", 6, 3, b"ab\r\ncd"),
@@ -735,6 +801,30 @@ fn cases() -> Vec<Case> {
             8,
             2,
             b"\x1b[91;104mA\x1b[38;5;200;48;5;236mB\x1b[38;2;1;2;3;48:2::4:5:6mC\x1b[39;49mD",
+        ),
+        (
+            "sgr_extended_color_forms",
+            8,
+            2,
+            b"\x1b[48;2;7;8;9mA\x1b[38:5:100mB\x1b[48:5:17mC\x1b[38:2:10:20:30mD\x1b[48:2:40:50:60mE\x1b[38:2::70:80:90;49mF\x1b[0mG",
+        ),
+        (
+            "sgr_bright_colors",
+            10,
+            2,
+            b"\x1b[90;100mA\x1b[97;107mB\x1b[93;41mC\x1b[32;103mD\x1b[39mE\x1b[49mF\x1b[21mG\x1b[mH",
+        ),
+        (
+            "sgr_blink",
+            8,
+            2,
+            b"\x1b[5mA\x1b[25mB\x1b[6mC\x1b[0mD\x1b[1;5;31mE\x1b[22;25mF\x1b[5m\x1b[mG",
+        ),
+        (
+            "sgr_blink_combining",
+            6,
+            2,
+            "\x1b[5me\u{301}\x1b[25ma\u{308}".as_bytes(),
         ),
         ("cjk_wrap", 5, 3, "a你好b".as_bytes()),
         ("cjk_edge", 4, 2, "abc你".as_bytes()),
@@ -878,12 +968,14 @@ fn attributes(cell: &Cell) -> String {
         (Flags::DIM, "dim"),
         (Flags::ITALIC, "italic"),
         (Flags::UNDERLINE, "underline"),
+        (Flags::BLINK, "blink"),
         (Flags::INVERSE, "inverse"),
         (Flags::HIDDEN, "hidden"),
         (Flags::STRIKE, "strike"),
         (Flags::WIDE, "wide"),
         (Flags::WIDE_SPACER, "wide-spacer"),
         (Flags::PAD, "pad"),
+        (Flags::GRAPHEME, "grapheme"),
     ]
     .into_iter()
     .filter_map(|(flag, name)| cell.flags.contains(flag).then_some(name))
@@ -896,10 +988,13 @@ fn attributes(cell: &Cell) -> String {
     )
 }
 
-fn rows<'a>(out: &mut String, label: &str, rows: impl IntoIterator<Item = &'a Row>) {
+fn rows<'a>(out: &mut String, t: &Terminal, label: &str, rows: impl IntoIterator<Item = &'a Row>) {
     writeln!(out, "{label}:").unwrap();
     for (index, row) in rows.into_iter().enumerate() {
-        let text: String = row.cells.iter().map(|cell| cell.c).collect();
+        let mut text = String::new();
+        for cell in &row.cells {
+            t.push_cell_text(cell, &mut text);
+        }
         writeln!(out, "  row {index} wrap={} text={text:?}", row.wrapped()).unwrap();
         let mut start = 0;
         while start < row.cells.len() {
@@ -937,13 +1032,14 @@ fn snapshot(t: &Terminal) -> String {
         t.scroll_top, t.scroll_bottom, t.history, t.display_offset
     )
     .unwrap();
-    rows(&mut out, "primary", t.primary.lines.iter());
+    rows(&mut out, t, "primary", t.primary.lines.iter());
     rows(
         &mut out,
+        t,
         "scrollback (oldest first)",
         t.primary.scrollback.iter(),
     );
-    rows(&mut out, "alternate", t.alternate.lines.iter());
+    rows(&mut out, t, "alternate", t.alternate.lines.iter());
     out
 }
 
@@ -1110,5 +1206,45 @@ fn golden_terminal_state() {
                 difference(case.name, &actual, &bytewise)
             );
         }
+    }
+}
+
+#[test]
+fn golden_command_budget() {
+    let mut input = String::new();
+    for (name, lines) in [("alpha", 3), ("beta", 3), ("gamma", 3), ("make", 20_000)] {
+        input.push_str(&format!(
+            "\x1b]133;A\x07$ \x1b]133;B\x07{name}\r\n\x1b]133;C\x07"
+        ));
+        for i in 0..lines {
+            input.push_str(&format!("{name} {i}\r\n"));
+        }
+        input.push_str("\x1b]133;D;0\x07");
+    }
+    input.push_str("\x1b]133;A\x07$ \x1b]133;B\x07");
+    let run = |bytewise: bool| {
+        let mut t = Terminal::new(40, 4);
+        t.set_scrollback_limit(100);
+        if bytewise {
+            for byte in input.as_bytes().chunks(1) {
+                t.advance(byte);
+            }
+        } else {
+            t.advance(input.as_bytes());
+        }
+        snapshot(&t)
+    };
+    let actual = run(false);
+    assert!(actual == run(true), "bytewise differs");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden/command_budget.snap");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(path, &actual).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(path).unwrap();
+        assert!(
+            expected == actual,
+            "{}",
+            difference("command_budget", &expected, &actual)
+        );
     }
 }

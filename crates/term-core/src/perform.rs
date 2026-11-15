@@ -398,6 +398,8 @@ impl Terminal {
                         t.flags.insert(Flags::UNDERLINE);
                     }
                 }
+                // Like xterm, rapid blink (6) blinks at the slow rate.
+                5 | 6 => t.flags.insert(Flags::BLINK),
                 7 => t.flags.insert(Flags::INVERSE),
                 8 => t.flags.insert(Flags::HIDDEN),
                 9 => t.flags.insert(Flags::STRIKE),
@@ -405,6 +407,7 @@ impl Terminal {
                 22 => t.flags.remove(Flags::BOLD | Flags::DIM),
                 23 => t.flags.remove(Flags::ITALIC),
                 24 => t.flags.remove(Flags::UNDERLINE),
+                25 => t.flags.remove(Flags::BLINK),
                 27 => t.flags.remove(Flags::INVERSE),
                 28 => t.flags.remove(Flags::HIDDEN),
                 29 => t.flags.remove(Flags::STRIKE),

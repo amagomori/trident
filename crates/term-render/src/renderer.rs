@@ -8,8 +8,16 @@ use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
 use std::sync::Arc;
 use term_core::colors::Rgb;
-use term_core::{CursorShape, Flags, Terminal};
+use term_core::{Cell, CursorShape, Flags, Terminal, grapheme};
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
+
+/// Whether `cell` draws something that SGR 5 blinks. The character under a block
+/// cursor stays visible in the hidden phase, as in xterm.
+fn blinks(cell: &Cell, under_block_cursor: bool) -> bool {
+    let drawn = (cell.c != ' ' && !cell.flags.contains(Flags::HIDDEN))
+        || cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKE);
+    drawn && cell.flags.contains(Flags::BLINK) && !under_block_cursor
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -57,6 +65,9 @@ pub struct Renderer {
     backgrounds: Vec<Instance>,
     glyphs: Vec<Instance>,
     overlays: Vec<Instance>,
+    /// Whether blinking cells show their text this frame.
+    pub blink_visible: bool,
+    blinking: bool,
 }
 
 fn present_mode(vsync: bool) -> wgpu::PresentMode {
@@ -259,6 +270,8 @@ impl Renderer {
             backgrounds: Vec::new(),
             glyphs: Vec::new(),
             overlays: Vec::new(),
+            blink_visible: true,
+            blinking: false,
         })
     }
 
@@ -277,6 +290,11 @@ impl Renderer {
             self.config.present_mode = mode;
             self.surface.configure(&self.device, &self.config);
         }
+    }
+
+    /// Whether the last frame drew text or decorations that blink.
+    pub fn blinking(&self) -> bool {
+        self.blinking
     }
 
     /// Glyph rasterizations depend on the font size, so drop them when it changes.
@@ -399,6 +417,7 @@ impl Renderer {
         let cursor = term.cursor_position().filter(|_| preedit.is_none());
         let block_cursor = focused && term.cursor_shape == CursorShape::Block;
         let mut ok = true;
+        self.blinking = false;
 
         'rows: for row in -isize::from(pixel_offset > 0.0)..term.rows() as isize {
             let line = term.viewport_row_signed(row);
@@ -445,38 +464,68 @@ impl Renderer {
                     backgrounds.push(self.rect(x, y, cw * cells as f32, ch, bg));
                 }
 
-                if cell.c != ' ' && !cell.flags.contains(Flags::HIDDEN) {
-                    let key = GlyphKey {
-                        c: cell.c,
-                        style: Style::new(
-                            cell.flags.contains(Flags::BOLD),
-                            cell.flags.contains(Flags::ITALIC),
-                        ),
-                        cells: cells as u8,
-                    };
-                    match self.atlas.get(key, fonts, &self.device, &self.queue) {
-                        Ok(Some(g)) => glyphs.push(Instance {
-                            pos: [x + g.left, y + g.top],
-                            size: [g.width, g.height],
-                            // A negative width selects the color atlas.
-                            uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
-                            color: self.color(fg, 1.0),
-                        }),
-                        Ok(None) => {}
-                        Err(_) => {
-                            ok = false;
-                            break 'rows;
+                let blinked_off = blinks(cell, is_cursor && block_cursor) && {
+                    self.blinking = true;
+                    !self.blink_visible
+                };
+                if !blinked_off && !cell.flags.contains(Flags::HIDDEN) {
+                    let style = Style::new(
+                        cell.flags.contains(Flags::BOLD),
+                        cell.flags.contains(Flags::ITALIC),
+                    );
+                    let cluster = term.grapheme(cell);
+                    let base = term.base_char(cell);
+                    let marks = cluster.into_iter().flat_map(grapheme::overlay_marks);
+                    for (index, c) in std::iter::once(base).chain(marks).enumerate() {
+                        if index == 0 && c == ' ' {
+                            continue;
+                        }
+                        let key = GlyphKey {
+                            c,
+                            style,
+                            cells: if index == 0 { cells as u8 } else { 0 },
+                        };
+                        match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                            Ok(Some(g)) => {
+                                // Center marks over a wide base. Fonts often draw a
+                                // combining mark left of its origin, over the glyph before
+                                // it; those move one more cell right.
+                                let left = match index {
+                                    0 => g.left,
+                                    _ if g.left + g.width / 2.0 < 0.0 => {
+                                        g.left + cw * (cells as f32 + 1.0) / 2.0
+                                    }
+                                    _ => g.left + cw * (cells as f32 - 1.0) / 2.0,
+                                };
+                                glyphs.push(Instance {
+                                    pos: [x + left, y + g.top],
+                                    size: [g.width, g.height],
+                                    // A negative width selects the color atlas.
+                                    uv: [
+                                        g.x,
+                                        g.y,
+                                        if g.color { -g.width } else { g.width },
+                                        g.height,
+                                    ],
+                                    color: self.color(fg, 1.0),
+                                });
+                            }
+                            Ok(None) => {}
+                            Err(_) => {
+                                ok = false;
+                                break 'rows;
+                            }
                         }
                     }
                 }
-                if cell.flags.contains(Flags::UNDERLINE)
+                if (!blinked_off && cell.flags.contains(Flags::UNDERLINE))
                     || hover
                         .is_some_and(|link| link.contains(term.viewport_to_point_signed(row, col)))
                 {
                     let w = cw * cells as f32;
                     overlays.push(self.rect(x, y + underline_offset, w, stroke, fg));
                 }
-                if cell.flags.contains(Flags::STRIKE) {
+                if !blinked_off && cell.flags.contains(Flags::STRIKE) {
                     let w = cw * cells as f32;
                     overlays.push(self.rect(x, y + (ch / 2.0).round(), w, stroke, fg));
                 }
@@ -774,7 +823,7 @@ impl Renderer {
         for (col, cell) in command.cells[..layout.command_columns].iter().enumerate() {
             if cell.flags.contains(Flags::WIDE_SPACER)
                 || cell.flags.contains(Flags::HIDDEN)
-                || cell.c == ' '
+                || term.base_char(cell) == ' '
             {
                 continue;
             }
@@ -800,7 +849,7 @@ impl Renderer {
                 cell.flags.contains(Flags::BOLD),
                 cell.flags.contains(Flags::ITALIC),
             );
-            glyphs.push((col, cell.c, cells as u8, style, fg));
+            glyphs.push((col, term.base_char(cell), cells as u8, style, fg));
         }
         if let Some(col) = layout.ellipsis {
             glyphs.push((col, '\u{2026}', 1, Style::new(false, false), dim));
@@ -1017,4 +1066,28 @@ fn create_bind_group(
             },
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(c: char, flags: Flags) -> Cell {
+        Cell {
+            c,
+            flags,
+            ..Cell::default()
+        }
+    }
+
+    #[test]
+    fn blink_keeps_the_character_under_a_block_cursor() {
+        let b = cell('B', Flags::BLINK);
+        assert!(blinks(&b, false));
+        assert!(!blinks(&b, true));
+        assert!(blinks(&cell(' ', Flags::BLINK | Flags::UNDERLINE), false));
+        assert!(!blinks(&cell(' ', Flags::BLINK), false));
+        assert!(!blinks(&cell('B', Flags::BLINK | Flags::HIDDEN), false));
+        assert!(!blinks(&cell('B', Flags::default()), false));
+    }
 }

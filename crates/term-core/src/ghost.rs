@@ -3,7 +3,7 @@
 //! point out of scrollback again before the batch ends. So the part before it is parsed only
 //! for what outlives it (cursor, pen, line count), and only the rest builds rows.
 
-use super::{Charset, Terminal, kitty::Scan};
+use super::{Charset, Row, Terminal, kitty::Scan};
 use vte::{Params, Perform};
 
 const ESC: u8 = 0x1b;
@@ -28,6 +28,7 @@ impl Terminal {
             || self.modes.insert
             || self.charsets[self.active_charset] != Charset::Ascii
             || !self.primary.placements.is_empty()
+            || (self.budget_armed() && !self.budget_allows_ghost())
         {
             return None;
         }
@@ -54,6 +55,26 @@ impl Terminal {
     /// Account for `n` lines scrolled into scrollback whose content no longer matters.
     fn skip_history(&mut self, n: usize) {
         if n == 0 || self.max_scrollback == 0 {
+            return;
+        }
+        if self.budget_armed() {
+            // Same evictions as building the rows, so commands lose the same middle rows.
+            let mut spare = None;
+            for _ in 0..n {
+                let row = match spare.take() {
+                    Some(mut row) => {
+                        Row::reset(
+                            &mut row,
+                            self.cols,
+                            &self.cursor.template,
+                            &mut self.recycled_memory_freed,
+                        );
+                        row
+                    }
+                    None => self.blank_row(),
+                };
+                spare = self.push_history(row);
+            }
             return;
         }
         self.history += n as u64;

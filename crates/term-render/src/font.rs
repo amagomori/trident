@@ -110,9 +110,9 @@ pub struct Fonts {
     /// each file's font is in `fallbacks`.
     fallbacks: Vec<Option<Fallback>>,
     files: HashMap<FontFile, usize>,
-    /// The fallback picked for each character and emoji preference, so the system lookup
-    /// runs once per character rather than on every rasterization (atlas resets included).
-    picked: HashMap<(char, bool), Option<usize>>,
+    /// The fallback picked per character, emoji preference and text-only flag, so the system
+    /// lookup runs once per character rather than on every rasterization.
+    picked: HashMap<(char, bool, bool), Option<usize>>,
     pub px: f32,
     pub metrics: CellMetrics,
 }
@@ -179,19 +179,21 @@ impl Fonts {
         };
     }
 
-    fn fallback_for(&mut self, c: char, emoji: bool) -> Option<&Fallback> {
-        let index = match self.picked.get(&(c, emoji)) {
+    /// The first system font that can draw `c`; with `text_only`, skipping color fonts.
+    fn fallback_for(&mut self, c: char, emoji: bool, text_only: bool) -> Option<&Fallback> {
+        let key = (c, emoji, text_only);
+        let index = match self.picked.get(&key) {
             Some(&index) => index,
             None => {
-                let index = self.pick_fallback(c, emoji);
-                self.picked.insert((c, emoji), index);
+                let index = self.pick_fallback(c, emoji, text_only);
+                self.picked.insert(key, index);
                 index
             }
         }?;
         self.fallbacks[index].as_ref()
     }
 
-    fn pick_fallback(&mut self, c: char, emoji: bool) -> Option<usize> {
+    fn pick_fallback(&mut self, c: char, emoji: bool, text_only: bool) -> Option<usize> {
         self.system.lookup(c, emoji).into_iter().find_map(|file| {
             let index = *self.files.entry(file).or_insert_with_key(|file| {
                 self.fallbacks.push(load_fallback(file));
@@ -199,21 +201,25 @@ impl Fonts {
             });
             self.fallbacks[index]
                 .as_ref()
-                .is_some_and(|f| f.can_draw(c))
+                .is_some_and(|f| f.can_draw(c) && !(text_only && f.face.is_some()))
                 .then_some(index)
         })
     }
 
-    /// Rasterizes `c` to fit `cells` cells; `None` for blank glyphs.
+    /// Rasterizes `c` to fit `cells` cells; `None` for blank glyphs. `cells == 0` is a mark
+    /// drawn over another glyph: one cell wide, from text fonts only (an opaque color glyph,
+    /// such as the emoji keycap for U+20E3, would hide its base), and `None` if none has it.
     pub fn rasterize(&mut self, c: char, style: Style, cells: usize) -> Option<RasterizedGlyph> {
         let metrics = self.metrics;
         let px = self.px;
+        let mark = cells == 0;
+        let cells = cells.max(1);
         let face = &self.faces[style as usize];
-        let emoji = fallback::prefers_emoji(c, cells);
+        let emoji = !mark && fallback::prefers_emoji(c, cells);
         let font = if face.glyph_id(c) != GlyphId(0) && !emoji {
             face.clone()
         } else {
-            match self.fallback_for(c, emoji) {
+            match self.fallback_for(c, emoji, mark) {
                 Some(Fallback {
                     face: Some(color_face),
                     ..
@@ -228,9 +234,10 @@ impl Fonts {
                     if let Some(glyph) = color::rasterize(color_face, id, target) {
                         return Some(glyph);
                     }
-                    self.fallback_for(c, emoji)?.font.clone()
+                    self.fallback_for(c, emoji, mark)?.font.clone()
                 }
                 Some(f) => f.font.clone(),
+                None if mark => return None,
                 None => self.faces[style as usize].clone(),
             }
         };
@@ -287,7 +294,7 @@ mod tests {
     fn emoji_render_in_color_within_two_cells() {
         let mut fonts = fonts();
         if fonts
-            .fallback_for('😀', true)
+            .fallback_for('😀', true, false)
             .is_none_or(|f| f.face.is_none())
         {
             eprintln!("no color emoji font on this system; skipping");
@@ -307,11 +314,41 @@ mod tests {
         assert!(colorful, "emoji has no saturated pixels");
     }
 
+    /// A keycap mark (U+20E3) only a color emoji font covers must not draw as an opaque
+    /// emoji box over its base. Needs such a font (Noto Color Emoji); skipped without one.
+    #[test]
+    fn marks_never_draw_from_color_fonts() {
+        let mut fonts = fonts();
+        let keycap = '\u{20e3}';
+        if fonts
+            .fallback_for(keycap, false, false)
+            .is_none_or(|f| f.face.is_none())
+        {
+            eprintln!("no color font draws U+20E3 on this system; skipping");
+            return;
+        }
+        assert!(
+            fonts
+                .rasterize(keycap, Style::Regular, 1)
+                .expect("keycap")
+                .color
+        );
+        assert!(
+            fonts
+                .rasterize(keycap, Style::Regular, 0)
+                .is_none_or(|g| !g.color)
+        );
+        let acute = fonts
+            .rasterize('\u{301}', Style::Regular, 0)
+            .expect("acute");
+        assert!(!acute.color);
+    }
+
     /// Needs a system font covering CJK; skipped without one.
     #[test]
     fn missing_glyphs_come_from_system_fonts() {
         let mut fonts = fonts();
-        if fonts.fallback_for('中', false).is_none() {
+        if fonts.fallback_for('中', false, false).is_none() {
             eprintln!("no CJK font on this system; skipping");
             return;
         }

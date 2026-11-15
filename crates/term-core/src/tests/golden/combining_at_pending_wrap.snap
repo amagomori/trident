@@ -1,0 +1,16 @@
+size=3x2 active=primary
+cursor row=1 col=1 visible=true shape=block pending_wrap=false
+cursor attributes: fg=default-fg bg=default-bg flags=[]
+scroll_region=0..=1 history=0 display_offset=0
+primary:
+  row 0 wrap=true text="abc\u{301}"
+    cells 0..2: fg=default-fg bg=default-bg flags=[]
+    cells 2..3: fg=default-fg bg=default-bg flags=[grapheme]
+  row 1 wrap=false text="d  "
+    cells 0..3: fg=default-fg bg=default-bg flags=[]
+scrollback (oldest first):
+alternate:
+  row 0 wrap=false text="   "
+    cells 0..3: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="   "
+    cells 0..3: fg=default-fg bg=default-bg flags=[]
