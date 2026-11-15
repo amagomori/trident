@@ -251,9 +251,23 @@ struct PrintState(u32);
 impl PrintState {
     const EMPTY: Self = Self(0x110000);
     const CLEAR_ARMED: u32 = 1 << 31;
+    /// A zero width joiner was joined since the last printed character.
+    const JOINER: u32 = 1 << 30;
 
     fn last(&self) -> Option<char> {
-        char::from_u32(self.0 & !Self::CLEAR_ARMED)
+        char::from_u32(self.0 & !(Self::CLEAR_ARMED | Self::JOINER))
+    }
+
+    /// Whether `c` may continue an emoji sequence (see `grapheme::continues_sequence`): it
+    /// follows a joiner, or lies in the range of regional indicators and skin tones.
+    fn may_join(&self, c: char) -> bool {
+        (self.0 & Self::JOINER != 0) | ((c as u32).wrapping_sub(0x1F1E6) <= 0x1F3FF - 0x1F1E6)
+    }
+
+    fn joined(&mut self, c: char) {
+        if c == '\u{200D}' {
+            self.0 |= Self::JOINER;
+        }
     }
 
     fn clear_armed(&self) -> bool {
@@ -1595,10 +1609,11 @@ impl Terminal {
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
             self.print_state.disarm_clear();
+            self.print_state.joined(c);
             self.join_zero_width(c);
             return;
         }
-        if c as u32 >= 0x80 && self.join_sequence(c) {
+        if c as u32 >= 0x80 && self.print_state.may_join(c) && self.join_sequence(c) {
             self.print_state = PrintState(c as u32);
             return;
         }

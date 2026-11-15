@@ -116,11 +116,11 @@ fn joins(c: char) -> bool {
     !c.is_control()
 }
 
-fn regional(c: char) -> bool {
+pub(crate) fn regional(c: char) -> bool {
     matches!(c as u32, 0x1F1E6..=0x1F1FF)
 }
 
-fn skin_tone(c: char) -> bool {
+pub(crate) fn skin_tone(c: char) -> bool {
     matches!(c as u32, 0x1F3FB..=0x1F3FF)
 }
 
@@ -266,6 +266,8 @@ impl Terminal {
     /// Joins a printing character that continues the emoji sequence before the cursor (see
     /// `continues_sequence`) to it rather than giving it cells of its own. A flag spans two
     /// columns, so its second regional indicator widens the first one's cell.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn join_sequence(&mut self, c: char) -> bool {
         if !(pictographic(c) || regional(c)) {
             return false;
@@ -274,8 +276,16 @@ impl Terminal {
             return false;
         };
         let cell = self.screen().lines[row].cells[col];
-        if !cell.flags.contains(Flags::GRAPHEME) && !regional(cell.c) && !pictographic(cell.c) {
-            return false;
+        if !cell.flags.contains(Flags::GRAPHEME) {
+            // A lone character only continues as a skin-toned emoji or a flag.
+            let joins = if regional(c) {
+                regional(cell.c)
+            } else {
+                skin_tone(c) && pictographic(cell.c)
+            };
+            if !joins {
+                return false;
+            }
         }
         let mut text = String::new();
         self.push_cell_text(&cell, &mut text);
