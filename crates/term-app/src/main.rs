@@ -193,7 +193,7 @@ fn usage() -> ! {
            --scrollback <LINES> History lines (default: 10000; 0 disables; max: 1000000)\n  \
            --copy-on-select    Copy selected text to the clipboard on mouse release\n  \
            -e, --command ...   Run this command instead of your shell\n  \
-           --install-terminfo  Install the xterm-terminal terminfo entry with tic\n  \
+           --install-terminfo  Install the xterm-trident terminfo entry with tic\n  \
            -h, --help          Show this help\n  \
            -V, --version       Show the version\n\n\
          `terminal show` draws images and prints text files in the terminal it runs in\n\

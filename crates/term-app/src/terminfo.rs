@@ -1,13 +1,15 @@
-//! The `xterm-terminal` terminfo entry: TERM selection and installation.
+//! The `xterm-trident` terminfo entry: TERM selection and installation.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub const NAME: &str = "xterm-terminal";
+pub const NAME: &str = "xterm-trident";
+/// The entry's pre-rename name, kept as an alias.
+pub const OLD_NAME: &str = "xterm-terminal";
 pub const FALLBACK: &str = "xterm-256color";
-pub const SOURCE: &str = include_str!("../terminfo/xterm-terminal.terminfo");
+pub const SOURCE: &str = include_str!("../terminfo/xterm-trident.terminfo");
 
 /// The TERM value for a child with `env` applied: `wanted` (the config's
 /// `term`) when the system ncurses resolves it in that environment, else
@@ -128,6 +130,7 @@ mod tests {
         if term(NAME, &only(&empty)) == FALLBACK {
             tic(&["-o".as_ref(), dir.as_os_str()]).unwrap();
             assert_eq!(term(NAME, &only(&dir)), NAME);
+            assert_eq!(term(OLD_NAME, &only(&dir)), OLD_NAME);
             assert_eq!(term(NAME, &only(&empty)), FALLBACK);
             assert_eq!(term(FALLBACK, &only(&dir)), FALLBACK);
         } else {
