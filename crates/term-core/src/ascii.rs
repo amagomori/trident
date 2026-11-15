@@ -132,6 +132,11 @@ impl Writer<'_> {
         if self.chars_len > 0 {
             self.flush_chars();
         }
+        self.flush_bytes();
+    }
+
+    #[inline(always)]
+    fn flush_bytes(&mut self) {
         match self.len {
             0 => {}
             // A lone byte costs less through the per-character path.
@@ -164,7 +169,7 @@ impl Perform for Writer<'_> {
                 self.term.put_ascii_run(&self.bytes);
             }
         } else {
-            self.flush();
+            self.flush_bytes();
             self.chars[self.chars_len as usize] = c;
             self.chars_len += 1;
             if self.chars_len as usize == self.chars.len() {
