@@ -818,6 +818,7 @@ impl Terminal {
     /// Feed bytes from the shell.
     pub fn advance(&mut self, bytes: &[u8]) {
         let mut parser = std::mem::take(&mut self.parser);
+        let ground = self.parser_ground;
         let mut rest = bytes;
         let mut split = None;
         match self.ghost_plan(bytes) {
@@ -841,7 +842,7 @@ impl Terminal {
         }
         self.parser = parser;
         self.sync_cursor_row();
-        self.parser_ground = ghost::ends_in_ground(self.parser_ground, rest);
+        self.parser_ground = ghost::ends_in_ground(ground, bytes);
         self.print_state.disarm_clear();
     }
 

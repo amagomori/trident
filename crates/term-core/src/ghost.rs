@@ -623,6 +623,17 @@ mod tests {
     }
 
     #[test]
+    fn a_tail_that_ends_a_sequence_leaves_batching_on() {
+        let mut t = Terminal::new(20, 5);
+        t.max_scrollback = 10;
+        t.advance(format!("ab\n\x1b[1\n2m{}", "y\n".repeat(100)).as_bytes());
+        assert!(t.parser_ground);
+        let before = ADVANCES.get();
+        t.advance("y\n".repeat(100).as_bytes());
+        assert_eq!(ADVANCES.get() - before, 1);
+    }
+
+    #[test]
     fn region_batches_match_built() {
         let mut rng = Rng(0x0bad_cafe_f00d_1234);
         for (case, setup) in [
