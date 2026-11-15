@@ -1581,6 +1581,9 @@ impl Terminal {
             self.rotate_region_up(top, bottom, n);
             return;
         }
+        if self.max_scrollback == 0 {
+            self.shift_prompt_bounds_up(bottom, n);
+        }
         for _ in 0..n {
             let row = self.lines_mut().remove(top);
             let spare = if to_history {
@@ -1603,15 +1606,26 @@ impl Terminal {
         }
     }
 
+    /// Without scrollback lines stay screen rows, so prompt bounds in the scrolled rows
+    /// move up with their text; bounds scrolled off the top are dropped.
+    #[cold]
+    fn shift_prompt_bounds_up(&mut self, bottom: usize, n: usize) {
+        let (history, n) = (self.history, n as u64);
+        let shift = |line: u64| {
+            if line > history + bottom as u64 {
+                Some(line)
+            } else {
+                line.checked_sub(n).filter(|&l| l >= history)
+            }
+        };
+        let shell = &mut self.shell;
+        shell.prompt_line = shell.prompt_line.and_then(shift);
+        shell.input_start = shell.input_start.and_then(|(l, c)| Some((shift(l)?, c)));
+    }
+
     /// Returns the row evicted from the far end of scrollback, if any, for reuse.
     fn push_history(&mut self, row: Row) -> Option<Row> {
         if self.max_scrollback == 0 {
-            // Lines stay screen rows here, so the prompt's bounds move up with the text.
-            let shell = &mut self.shell;
-            shell.prompt_line = shell.prompt_line.and_then(|l| l.checked_sub(1));
-            shell.input_start = shell
-                .input_start
-                .and_then(|(l, c)| Some((l.checked_sub(1)?, c)));
             return Some(row);
         }
         self.primary.scrollback.push_back(row);

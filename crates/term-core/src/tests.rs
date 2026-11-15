@@ -2834,4 +2834,7 @@ fn prompt_click_works_without_scrollback() {
     t.advance(b"\r\n\r\n\r\n\x1b]133;A\x07$ \x1b]133;B\x07echo hello there, wrap");
     assert_eq!(click(&t, 2, 2), Some(PromptClick::Move(-22)));
     assert_eq!(click(&t, 3, 0), Some(PromptClick::Move(-4)));
+    // A top-aligned region above the prompt scrolls without moving it.
+    t.advance(b"\r\n\x1b]133;A\x07$ \x1b]133;B\x07ab\x1b7\x1b[1;2r\x1b[2H\n\x1b[r\x1b8");
+    assert_eq!(click(&t, 3, 2), Some(PromptClick::Move(-2)));
 }
