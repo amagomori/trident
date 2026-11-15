@@ -235,23 +235,34 @@ fn size(cols: usize, rows: usize, cell_w: f32, cell_h: f32) -> PtySize {
 }
 
 /// Whether `args` (argv) is a shell started for its prompt: no `-c` command (alone or in a
-/// short option cluster such as `-lc`, or `--command`) and no script or other operand. Such a
-/// shell holding the foreground sits at its prompt; `sh -c make` or `bash build.sh` runs a
-/// command.
+/// short option cluster such as `-lc`, or `--command`) and no script or other operand, apart
+/// from the values of the shell options that take one (`-o vi`, `-O extglob`, `--rcfile f`).
+/// Such a shell holding the foreground sits at its prompt; `sh -c make` or `bash build.sh`
+/// runs a command.
 fn is_idle_shell(args: &[String]) -> bool {
     let Some((program, options)) = args.split_first() else {
         return false;
     };
-    is_shell(program)
-        && options.iter().all(|arg| {
-            let arg = arg.to_ascii_lowercase();
-            match arg.strip_prefix("--") {
-                Some(long) => !long.starts_with("command"),
-                None => arg
-                    .strip_prefix(['-', '+'])
-                    .is_some_and(|short| !short.is_empty() && !short.contains('c')),
-            }
-        })
+    if !is_shell(program) {
+        return false;
+    }
+    let mut options = options.iter().map(|arg| arg.to_ascii_lowercase());
+    while let Some(arg) = options.next() {
+        let takes_value = matches!(
+            arg.as_str(),
+            "-o" | "+o" | "--rcfile" | "--init-file" | "--config"
+        );
+        let option = match arg.strip_prefix("--") {
+            Some(long) => !long.starts_with("command"),
+            None => arg
+                .strip_prefix(['-', '+'])
+                .is_some_and(|short| !short.is_empty() && !short.contains('c')),
+        };
+        if !option || (takes_value && options.next().is_none()) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether `program` names a shell, which sitting at its prompt runs nothing.
@@ -697,6 +708,7 @@ mod tests {
             &["bash", "--norc", "--noprofile", "-i"][..],
             &["-zsh"],
             &["/usr/bin/fish", "-l"],
+            &["bash", "-O", "extglob", "-o", "vi", "--rcfile", "rc", "-i"],
         ] {
             assert!(is_idle_shell(&args(idle)), "{idle:?}");
         }
@@ -704,6 +716,8 @@ mod tests {
             &["sh", "-c", "sleep 30"][..],
             &["bash", "-lc", "make"],
             &["bash", "build.sh"],
+            &["bash", "-o", "vi", "build.sh"],
+            &["bash", "-O"],
             &["fish", "--command=ls"],
             &["vim"],
             &[],
