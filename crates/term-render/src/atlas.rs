@@ -263,6 +263,8 @@ pub struct Atlas {
     pub color: Option<Page>,
     pub textures_changed: bool,
     srgb: bool,
+    /// Bumped by `clear`, which invalidates every glyph handed out before.
+    pub generation: u64,
     glyphs: HashMap<GlyphKey, Option<AtlasGlyph>>,
 }
 
@@ -276,11 +278,13 @@ impl Atlas {
             color: None,
             textures_changed: false,
             srgb,
+            generation: 0,
             glyphs: HashMap::new(),
         }
     }
 
     pub fn clear(&mut self) {
+        self.generation += 1;
         self.glyphs.clear();
         self.mono.clear();
         if let Some(page) = &mut self.color {

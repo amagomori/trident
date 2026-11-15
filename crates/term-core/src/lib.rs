@@ -46,6 +46,31 @@ struct ShellState {
     commands: VecDeque<Command>,
     budget: budget::Budget,
     notifications: notifications::Notifications,
+    progress: Option<Progress>,
+    progress_changed: bool,
+}
+
+/// Progress a program reports with ConEmu's `OSC 9 ; 4 ; state ; percent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// State 1: running, at this percentage.
+    Normal(u8),
+    /// State 2: failed, with the last percentage if one is known.
+    Error(Option<u8>),
+    /// State 3: running, with no percentage.
+    Indeterminate,
+    /// State 4: paused, with the last percentage if one is known.
+    Paused(Option<u8>),
+}
+
+impl Progress {
+    fn percent(&self) -> Option<u8> {
+        match *self {
+            Progress::Normal(percent) => Some(percent),
+            Progress::Error(percent) | Progress::Paused(percent) => percent,
+            Progress::Indeterminate => None,
+        }
+    }
 }
 
 /// Commands kept for the pinned header; older ones lose it first.
@@ -729,6 +754,8 @@ impl Terminal {
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
                 notifications: Default::default(),
+                progress: None,
+                progress_changed: false,
             }),
             links: Default::default(),
             graphemes: Default::default(),
@@ -911,6 +938,12 @@ impl Terminal {
         } else {
             None
         }
+    }
+
+    /// The progress report, when it changed since the last call; `Some(None)` once it
+    /// is removed.
+    pub fn take_progress(&mut self) -> Option<Option<Progress>> {
+        std::mem::take(&mut self.shell.progress_changed).then_some(self.shell.progress)
     }
 
     pub fn is_alt_screen(&self) -> bool {
@@ -1874,6 +1907,7 @@ impl Terminal {
         let (cols, rows) = (self.cols, self.rows);
         let max_scrollback = self.max_scrollback;
         let mut fresh = Terminal::new(cols, rows);
+        fresh.shell.progress_changed = self.shell.progress.is_some() || self.shell.progress_changed;
         fresh.max_scrollback = max_scrollback;
         fresh.shrunk = self.shrunk || !self.primary.scrollback.is_empty();
         fresh.recycled_memory_freed = self.recycled_memory_freed;
