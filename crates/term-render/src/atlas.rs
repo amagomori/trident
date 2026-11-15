@@ -79,6 +79,59 @@ impl Shelves {
     }
 }
 
+/// Glyphs placed side by side on one shelf since the last flush. Uploading them as one
+/// rectangle costs one staging buffer instead of one per glyph.
+#[derive(Debug, Default)]
+struct Run {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    /// x offset in the run, width, height and offset in `data` of each glyph.
+    glyphs: Vec<(u32, u32, u32, usize)>,
+    data: Vec<u8>,
+}
+
+impl Run {
+    /// Adds a glyph placed right after the last one; `false` if it is elsewhere.
+    fn push(&mut self, (x, y): (u32, u32), w: u32, h: u32, data: &[u8]) -> bool {
+        if self.glyphs.is_empty() {
+            (self.x, self.y, self.width, self.height) = (x, y, 0, 0);
+        } else if y != self.y || x != self.x + self.width + 1 {
+            return false;
+        }
+        let offset = x - self.x;
+        self.glyphs.push((offset, w, h, self.data.len()));
+        self.data.extend_from_slice(data);
+        self.width = offset + w;
+        self.height = self.height.max(h);
+        true
+    }
+
+    /// Lays the glyphs out in one `width` x `height` image; the gaps between and below them
+    /// are unused atlas space.
+    fn compose(&self, bytes_per_pixel: u32, out: &mut Vec<u8>) {
+        let row = (self.width * bytes_per_pixel) as usize;
+        out.clear();
+        out.resize(row * self.height as usize, 0);
+        for &(dx, w, h, offset) in &self.glyphs {
+            let (dx, len) = (
+                (dx * bytes_per_pixel) as usize,
+                (w * bytes_per_pixel) as usize,
+            );
+            for r in 0..h as usize {
+                let src = &self.data[offset + r * len..][..len];
+                out[r * row + dx..][..len].copy_from_slice(src);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.glyphs.clear();
+        self.data.clear();
+    }
+}
+
 pub struct Page {
     pub size: u32,
     pub texture: wgpu::Texture,
@@ -87,6 +140,8 @@ pub struct Page {
     /// The page doubles in size up to this rather than being cleared when it fills.
     max_size: u32,
     shelves: Shelves,
+    run: Run,
+    staging: Vec<u8>,
 }
 
 fn texture(device: &wgpu::Device, size: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -119,11 +174,14 @@ impl Page {
             bytes_per_pixel: format.block_copy_size(None).unwrap_or(1),
             max_size: max_size.min(limit),
             shelves: Shelves::new(size),
+            run: Run::default(),
+            staging: Vec::new(),
         }
     }
 
     fn clear(&mut self) {
         self.shelves = Shelves::new(self.size);
+        self.run.clear();
     }
 
     fn place(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
@@ -136,6 +194,7 @@ impl Page {
         if size <= self.size {
             return false;
         }
+        self.flush(queue);
         let texture = texture(device, size, self.format);
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_texture(
@@ -154,7 +213,26 @@ impl Page {
         true
     }
 
-    fn upload(&self, queue: &wgpu::Queue, (x, y): (u32, u32), w: u32, h: u32, data: &[u8]) {
+    fn upload(&mut self, queue: &wgpu::Queue, at: (u32, u32), w: u32, h: u32, data: &[u8]) {
+        if !self.run.push(at, w, h, data) {
+            self.flush(queue);
+            self.run.push(at, w, h, data);
+        }
+    }
+
+    /// Writes the pending run to the texture.
+    fn flush(&mut self, queue: &wgpu::Queue) {
+        if self.run.glyphs.is_empty() {
+            return;
+        }
+        let run = &self.run;
+        let data = if run.glyphs.len() == 1 {
+            &run.data
+        } else {
+            run.compose(self.bytes_per_pixel, &mut self.staging);
+            &self.staging
+        };
+        let (x, y, w, h) = (run.x, run.y, run.width, run.height);
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -174,6 +252,7 @@ impl Page {
                 depth_or_array_layers: 1,
             },
         );
+        self.run.clear();
     }
 }
 
@@ -206,6 +285,14 @@ impl Atlas {
         self.mono.clear();
         if let Some(page) = &mut self.color {
             page.clear();
+        }
+    }
+
+    /// Uploads the glyphs added since the last flush; call before drawing with them.
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        self.mono.flush(queue);
+        if let Some(page) = &mut self.color {
+            page.flush(queue);
         }
     }
 
@@ -270,7 +357,38 @@ impl Atlas {
 
 #[cfg(test)]
 mod tests {
-    use super::Shelves;
+    use super::{Run, Shelves};
+
+    #[test]
+    fn a_run_lays_out_adjacent_glyphs_in_one_image() {
+        let mut run = Run::default();
+        assert!(run.push((10, 4), 2, 2, &[1, 2, 3, 4]));
+        assert!(run.push((13, 4), 1, 3, &[5, 6, 7]));
+        assert!(!run.push((16, 4), 1, 1, &[8]));
+        assert!(!run.push((14, 9), 1, 1, &[8]));
+        assert_eq!((run.x, run.y, run.width, run.height), (10, 4, 4, 3));
+        let mut image = Vec::new();
+        run.compose(1, &mut image);
+        #[rustfmt::skip]
+        assert_eq!(image, [
+            1, 2, 0, 5,
+            3, 4, 0, 6,
+            0, 0, 0, 7,
+        ]);
+    }
+
+    #[test]
+    fn a_run_composes_multi_byte_pixels() {
+        let mut run = Run::default();
+        run.push((0, 0), 1, 1, &[1, 1]);
+        run.push((2, 0), 1, 1, &[2, 2]);
+        let mut image = Vec::new();
+        run.compose(2, &mut image);
+        assert_eq!(image, [1, 1, 0, 0, 2, 2]);
+        run.clear();
+        assert!(run.push((7, 7), 1, 1, &[3, 3]));
+        assert_eq!((run.x, run.y, run.width, run.height), (7, 7, 1, 1));
+    }
 
     #[test]
     fn grown_shelves_fill_the_new_area_without_overlapping() {
