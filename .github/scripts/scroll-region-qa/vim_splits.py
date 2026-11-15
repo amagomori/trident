@@ -28,7 +28,7 @@ import zlib
 MAC = platform.system() == "Darwin"
 sys.stdout.reconfigure(line_buffering=True)
 p = argparse.ArgumentParser()
-p.add_argument("--bin", action="append", required=True, help="LABEL=PATH, e.g. main=../t-main/target/release/terminal")
+p.add_argument("--bin", action="append", required=True, help="LABEL=PATH, e.g. main=../t-main/target/release/trident")
 p.add_argument("--out", default="vim-splits")
 p.add_argument("--vim", default=shutil.which("vim") or "/usr/bin/vim")
 p.add_argument("--settle", type=float, default=0.8, help="seconds to let a frame render before capture")

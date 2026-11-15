@@ -1,6 +1,6 @@
 //! Rewrapping the primary screen and its scrollback to a new width.
 
-use crate::{Cell, Flags, Row, RowFlags, Terminal};
+use crate::{Cell, Flags, Row, RowFlags, Terminal, Zone};
 
 /// Where an old row went: its logical line became new rows `first..first + count`,
 /// and the row's cells start `base` cells into that line.
@@ -101,9 +101,10 @@ fn move_marks(
 
 impl Terminal {
     /// Rejoins the soft-wrapped lines of the primary screen and its scrollback and wraps
-    /// them again at `cols`, keeping the cursor on the cell it was on, and sizes the
-    /// screen to `rows`. `view_top` is the viewport's top line when scrolled back; returns
-    /// where that line went. `points` are moved to where their cells went.
+    /// them again at `cols`, keeping the cursor on the cell it was on (on a line being
+    /// edited, on its row in the line), and sizes the screen to `rows`. `view_top` is
+    /// the viewport's top line when scrolled back; returns where that line went. `points`
+    /// are moved to where their cells went.
     pub(crate) fn reflow_primary(
         &mut self,
         cols: usize,
@@ -143,6 +144,9 @@ impl Terminal {
         let mut map_rows = Vec::with_capacity(old_len);
         // Shell marks to move once their rows exist: (old index, flags, prompt_col, output_col, len).
         let mut marks = Vec::new();
+        // The cursor's wrapped line: its first old row, and whether a line editor is
+        // editing it (text after the cursor, or the shell's input zone).
+        let mut cursor_line = None;
         let mut line = Vec::new();
         let mut rows_iter = old.into_iter().enumerate().peekable();
         while let Some((i, mut row)) = rows_iter.next() {
@@ -228,6 +232,13 @@ impl Terminal {
                 }
             }
 
+            if !self.alt_active && (first_old..map_rows.len()).contains(&cursor_index) {
+                let at = map_rows[cursor_index].base + cursor_at;
+                let text_after = line
+                    .get(at..)
+                    .is_some_and(|rest| rest.iter().any(|c| *c != Cell::default()));
+                cursor_line = Some((first_old, text_after || self.shell.zone == Zone::Input));
+            }
             // Wrap it at the new width.
             let mut pos = 0;
             loop {
@@ -272,7 +283,20 @@ impl Terminal {
 
         // The screen keeps its top line and grows or shrinks below it, as long as the
         // cursor stays on screen; a cursor on the bottom row stays there.
-        let (cursor_row, cursor_col) = map.point(cursor_index, cursor_at, cursor_end);
+        let (mut cursor_row, mut cursor_col) = map.point(cursor_index, cursor_at, cursor_end);
+        // A line editor redraws the line it is editing after a resize, moving up from the
+        // cursor as many rows as the cursor was below the line's start. On the last line
+        // being edited, the cursor keeps that row and its column so the redraw starts on
+        // the line's first row instead of leaving a stale tail.
+        if let Some((first_old, true)) = cursor_line {
+            let OldRow { first, count, .. } = map.old[cursor_index];
+            let row = first + (cursor_index - first_old);
+            if row != cursor_row && new[first + count..].iter().all(Row::is_blank) {
+                cursor_row = row;
+                cursor_col = anchor.1.min(cols - 1);
+                new.resize_with(new.len().max(row + 1), || Row::new(cols, &Cell::default()));
+            }
+        }
         let lowest = (cursor_row + 1).saturating_sub(rows);
         let mut top = if anchor.0 == old_rows - 1 {
             lowest

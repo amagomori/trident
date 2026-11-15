@@ -1,6 +1,6 @@
 # Trident documentation
 
-- [Usage](usage.md): command line, terminfo, keyboard and mouse, search, selection, pasting, close confirmation, desktop notifications, app icons, dropping files, and `terminal show`.
+- [Usage](usage.md): command line, terminfo, keyboard and mouse, search, selection, pasting, close confirmation, desktop notifications, app icons, dropping files, and `trident show`.
 - [Configuration](configuration.md): the config file and every setting, key bindings, scrollback budgets, shell integration, live reload, and color themes.
 - [Development](development.md): crate layout, tests, latency measurement, and comparisons against other terminals.
 

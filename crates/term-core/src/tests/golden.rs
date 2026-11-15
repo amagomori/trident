@@ -1327,7 +1327,7 @@ fn golden_keypad_modes() {
 /// Runs each string the terminfo entry adds that changes modes or the title.
 #[test]
 fn golden_terminfo_modes() {
-    let source = include_str!("../../../term-app/terminfo/xterm-terminal.terminfo");
+    let source = include_str!("../../../term-app/terminfo/xterm-trident.terminfo");
     let steps: &[(&str, &str, &[u8])] = &[
         ("BE", "BE=\\E[?2004h", b"\x1b[?2004h"),
         ("BD", "BD=\\E[?2004l", b"\x1b[?2004l"),

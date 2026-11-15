@@ -1,7 +1,9 @@
 # Configuration
 
-The optional config file is `$XDG_CONFIG_HOME/terminal/config.toml`, or
-`~/.config/terminal/config.toml` when XDG_CONFIG_HOME is unset (on Linux and macOS).
+The optional config file is `$XDG_CONFIG_HOME/trident/config.toml`, or
+`~/.config/trident/config.toml` when XDG_CONFIG_HOME is unset (on Linux and macOS).
+A config at the pre-rename `terminal/config.toml` path is still read while the new one
+doesn't exist.
 `--config <PATH>` overrides this location. A missing file uses defaults.
 `--font`, `--font-size`, `--scrollback`, and `-e` override the corresponding config
 values, including on reload.
@@ -21,7 +23,7 @@ vsync = true                # false: present without waiting for vblank (lower l
 app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset (see App icons in usage.md)
 menu_bar_icon = true        # macOS: false hides the menu bar item
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
-term = "xterm-256color"     # "xterm-terminal" once installed (falls back if not found)
+term = "xterm-256color"     # "xterm-trident" once installed (falls back if not found)
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
 EDITOR = "vim"

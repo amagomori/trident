@@ -55,7 +55,7 @@ LIVE = set()
 def default_bins():
     target = Path(os.environ.get("CARGO_TARGET_DIR", REPO / "target"))
     return {
-        "terminal": str(target / "release/terminal"),
+        "terminal": str(target / "release/trident"),
         "alacritty": "alacritty",
         "kitty": "kitty",
         "wezterm": "wezterm",

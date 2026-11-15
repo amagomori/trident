@@ -11,7 +11,7 @@ Every round launches head, main, an identical main copy (A/A) and Alacritty in a
 shuffled order; reports per-label median-of-medians and p99, and per-round paired deltas
 with 95% bootstrap CIs.
 
-  python3 .github/scripts/latency-qa/vs_alacritty.py --head H/release/terminal --main M/release/terminal \
+  python3 .github/scripts/latency-qa/vs_alacritty.py --head H/release/trident --main M/release/trident \
       --rounds 6 --probes 200 --out ~/kan89/vs-x11
   Alacritty is found on PATH, else in /Applications or ~/Applications (macOS); --alacritty overrides.
   add --load to also run with `cat`-ing a 100 MiB file in the background of the same shell.

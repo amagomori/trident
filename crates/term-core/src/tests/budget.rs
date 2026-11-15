@@ -526,3 +526,33 @@ fn resize_tracking_follows_lines_moved_by_a_budget_cut() {
     assert_eq!(points[0].line, line_of(&t, "gamma 1"));
     assert_eq!(points[0].col, 2);
 }
+
+/// Region scrolls never reach scrollback, so the budget's head rows can't stop a batch there.
+#[test]
+fn region_batches_skip_rows_with_the_budget_armed() {
+    let prefix = command("alpha", 3)
+        + "\x1b]133;A\x07$ \x1b]133;B\x07vtebench\r\n\x1b]133;C\x07\x1b[?1049h\x1b[2;4r\x1b[4H";
+    let batch = "y\n".repeat(200);
+    let mut batched = Terminal::new(30, 4);
+    let mut bytes = Terminal::new(30, 4);
+    for t in [&mut batched, &mut bytes] {
+        t.set_scrollback_limit(1_000);
+    }
+    batched.advance(prefix.as_bytes());
+    assert!(batched.budget_armed() && !batched.budget_allows_ghost());
+    let before = crate::ghost::ADVANCES.get();
+    batched.advance(batch.as_bytes());
+    assert_eq!(crate::ghost::ADVANCES.get() - before, 1);
+    for b in prefix.bytes().chain(batch.bytes()) {
+        bytes.advance(&[b]);
+    }
+    let screen = |t: &Terminal| (0..4).map(|r| t.viewport_row(r).text()).collect::<Vec<_>>();
+    assert_eq!(screen(&batched), screen(&bytes));
+    assert_eq!(batched.cursor_position(), bytes.cursor_position());
+    for t in [&mut batched, &mut bytes] {
+        t.advance(b"\x1b[r\x1b[?1049l");
+        t.advance(PROMPT.as_bytes());
+    }
+    assert_eq!(lines(&batched), lines(&bytes));
+    assert_eq!(batched.history, bytes.history);
+}

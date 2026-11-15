@@ -16,27 +16,54 @@ thread_local! {
 impl Terminal {
     /// Where the part of `bytes` that has to be built starts, when everything before it
     /// can be skipped.
+    ///
+    /// On the primary screen with no scroll region, lines go to scrollback, so a line is gone
+    /// once `rows + max_scrollback` linefeeds follow it. Anywhere else a region scroll drops
+    /// the line it pushes out, so with the cursor inside the region, `bottom - top + 1`
+    /// linefeeds move every row written before them out of it.
     pub(crate) fn ghost_split(&self, bytes: &[u8]) -> Option<usize> {
-        let needed = self.rows + self.max_scrollback;
+        match self.ghost_plan(bytes) {
+            Plan::Ghost(split) => Some(split),
+            Plan::Tail(_) | Plan::Built => None,
+        }
+    }
+
+    /// [`Terminal::ghost_split`], or where the linear tail of a batch that is long enough
+    /// for one but not linear starts.
+    pub(crate) fn ghost_plan(&self, bytes: &[u8]) -> Plan {
+        let needed = if self.scrolls_to_history() {
+            self.rows + self.max_scrollback
+        } else if (self.alt_active || self.scroll_top != 0)
+            && (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row)
+        {
+            self.scroll_bottom - self.scroll_top + 1
+        } else {
+            return Plan::Built;
+        };
         if bytes.len() <= needed
             || !self.parser_ground
             || self.kitty.scan != Scan::Ground
-            || self.alt_active
-            || self.scroll_top != 0
-            || self.scroll_bottom != self.rows - 1
             || !self.modes.autowrap
             || self.modes.insert
             || self.charsets[self.active_charset] != Charset::Ascii
-            || !self.primary.placements.is_empty()
-            || (self.budget_armed() && !self.budget_allows_ghost())
+            || !self.screen().placements.is_empty()
+            || (self.scrolls_to_history() && self.budget_armed() && !self.budget_allows_ghost())
         {
-            return None;
+            return Plan::Built;
         }
         // The built part starts after the linefeed with `needed` more after it. Splitting
         // right after a linefeed leaves no partial UTF-8 in the parser, which vte would
         // decode differently across the split.
-        let split = memchr::memrchr_iter(b'\n', bytes).nth(needed)? + 1;
-        linear(bytes).then_some(split)
+        let Some(lf) = memchr::memrchr_iter(b'\n', bytes).nth(needed) else {
+            return Plan::Built;
+        };
+        if linear(bytes) {
+            Plan::Ghost(lf + 1)
+        } else if bytes.len() >= TAIL_MIN {
+            linear_tail(bytes).map_or(Plan::Built, Plan::Tail)
+        } else {
+            Plan::Built
+        }
     }
 
     /// Parse `bytes` (from [`Terminal::ghost_split`]) without writing any row.
@@ -49,7 +76,15 @@ impl Terminal {
         };
         parser.advance(&mut ghost, bytes);
         let scrolls = ghost.scrolls;
-        self.skip_history(scrolls);
+        if self.scrolls_to_history() {
+            self.skip_history(scrolls);
+        }
+    }
+
+    /// Whether a linefeed at the bottom pushes the top row into scrollback with nothing
+    /// below it on the screen, the case `skip_history` accounts for.
+    fn scrolls_to_history(&self) -> bool {
+        !self.alt_active && self.scroll_top == 0 && self.scroll_bottom == self.rows - 1
     }
 
     /// Account for `n` lines scrolled into scrollback whose content no longer matters.
@@ -177,6 +212,46 @@ fn linear(bytes: &[u8]) -> bool {
             None => return false,
         }
     }
+}
+
+/// How [`Terminal::advance`] takes a batch.
+pub(crate) enum Plan {
+    /// Skip writing the rows before this split.
+    Ghost(usize),
+    /// Build the bytes before this offset, then plan the rest again.
+    Tail(usize),
+    Built,
+}
+
+/// Batches at least this long that `linear` rejects are worth scanning for a linear tail.
+pub(crate) const TAIL_MIN: usize = if cfg!(test) { 1 } else { 64 * 1024 };
+
+/// Start of the longest suffix of `bytes` that follows a linefeed and is `linear`, when
+/// something before it isn't: vtebench's sample boundaries end batches of plain output.
+/// Walks back from the end, so it reads only the suffix and the escape before it.
+pub(crate) fn linear_tail(bytes: &[u8]) -> Option<usize> {
+    let mut end = bytes.len();
+    let bad_end = loop {
+        let esc = memchr::memrchr(ESC, &bytes[..end]);
+        let sgr = esc.and_then(|e| sgr_len(&bytes[e..]));
+        let start = match (esc, sgr) {
+            (None, _) => 0,
+            (Some(e), Some(len)) => e + len,
+            (Some(e), None) => e + 1,
+        };
+        let run = &bytes[start..end];
+        if !plain(run) {
+            let last = run.iter().rposition(|b| !plain(std::slice::from_ref(b)));
+            break start + last.map_or(0, |i| i + 1);
+        }
+        match (esc, sgr) {
+            (None, _) => return None,
+            (Some(e), Some(_)) => end = e,
+            (Some(e), None) => break e + 1,
+        }
+    };
+    let tail = bad_end + memchr::memchr(b'\n', &bytes[bad_end..])? + 1;
+    (tail < bytes.len()).then_some(tail)
 }
 
 fn plain(run: &[u8]) -> bool {
@@ -451,13 +526,23 @@ mod tests {
     }
 
     #[test]
-    fn stays_off_outside_plain_primary_output() {
+    fn stays_off_outside_plain_linear_output() {
         let batch = "line\r\n".repeat(20_000);
         let on = Terminal::new(80, 24);
         assert!(on.ghost_split(batch.as_bytes()).is_some());
         for setup in [
             &b"\x1b[?1049h"[..],
-            b"\x1b[2;10r",
+            b"\x1b[2;10r\x1b[5H",
+            b"\x1b[?1049h\x1b[1;10r\x1b[10H",
+        ] {
+            let mut t = Terminal::new(80, 24);
+            t.advance(setup);
+            assert!(t.ghost_split(batch.as_bytes()).is_some(), "{setup:?}");
+        }
+        for setup in [
+            &b"\x1b[2;10r"[..],
+            b"\x1b[1;10r\x1b[5H",
+            b"\x1b[?1049h\x1b[2;10r\x1b[12H",
             b"\x1b[4h",
             b"\x1b[?7l",
             b"\x1b(0",
@@ -480,6 +565,117 @@ mod tests {
         for bad in ["\x1b[H", "\x07", "\x1b[2J", "\x1b]0;t\x07", "\x0e"] {
             let batch = format!("{batch}{bad}");
             assert!(on.ghost_split(batch.as_bytes()).is_none(), "{bad:?}");
+        }
+    }
+
+    /// vtebench's region workloads and a primary-screen region below the top: lines leave the
+    /// region instead of entering scrollback, so the batch path skips them too.
+    #[test]
+    fn linear_tail_starts_after_the_last_rejected_line() {
+        assert_eq!(linear_tail(b"plain\r\nmore\n"), None);
+        assert_eq!(linear_tail(b"\x1b[31mred\n\x1b[0m"), None);
+        assert_eq!(linear_tail(b"\x1b[Hab\ncd\n"), Some(6));
+        assert_eq!(linear_tail(b"a\x07b\ncd\x1b[1mx\n"), Some(4));
+        assert_eq!(linear_tail(b"\x1b[2J\x1b[H"), None);
+        assert_eq!(linear_tail(b"ab\ncd\x1b[A\n"), None);
+        assert_eq!(linear_tail(b"\x1b]0;t\x07\nok\n"), Some(7));
+        assert_eq!(linear_tail(b"\x1b"), None);
+    }
+
+    /// vtebench resets the screen between samples, so a batch can open with escapes that
+    /// keep the rest of it off the batch path.
+    #[test]
+    fn tails_after_sample_boundaries_match_bytewise() {
+        let lines = "y\n".repeat(3000);
+        for (scrollback, boundary) in [
+            (100, "\x1b[2J\x1b[H"),
+            (0, "\x1bc"),
+            (100, "\x1b[?1049h\x1b[2;4r\x1b[4H"),
+            (100, "\x1b[?1049h\x1b[1;3r\x1b[3H"),
+            (100, "\x1b[r\x1b[?1049l\x07\x1b[3;1H"),
+            (100, "\x1b]0;mid\x1b\\"),
+        ] {
+            let batch = format!("{lines}{boundary}{lines}");
+            let mut fast = Terminal::new(20, 5);
+            let mut slow = Terminal::new(20, 5);
+            fast.max_scrollback = scrollback;
+            slow.max_scrollback = scrollback;
+            let before = ADVANCES.get();
+            fast.advance(batch.as_bytes());
+            assert_eq!(ADVANCES.get() - before, 1, "{boundary:?}");
+            bytewise(&mut slow, batch.as_bytes());
+            assert!(snapshot(&fast) == snapshot(&slow), "{boundary:?}");
+        }
+    }
+
+    #[test]
+    fn tails_stay_off_inside_unfinished_sequences() {
+        for boundary in ["\x1b[\n", "\x1b]0;t\n", "\x1bP\n"] {
+            let batch = format!("ab\n{boundary}{}", "y\n".repeat(100));
+            let mut fast = Terminal::new(20, 5);
+            let mut slow = Terminal::new(20, 5);
+            let before = ADVANCES.get();
+            fast.advance(batch.as_bytes());
+            assert_eq!(ADVANCES.get(), before, "{boundary:?}");
+            bytewise(&mut slow, batch.as_bytes());
+            assert!(snapshot(&fast) == snapshot(&slow), "{boundary:?}");
+        }
+    }
+
+    #[test]
+    fn a_tail_that_ends_a_sequence_leaves_batching_on() {
+        let mut t = Terminal::new(20, 5);
+        t.max_scrollback = 10;
+        t.advance(format!("ab\n\x1b[1\n2m{}", "y\n".repeat(100)).as_bytes());
+        assert!(t.parser_ground);
+        let before = ADVANCES.get();
+        t.advance("y\n".repeat(100).as_bytes());
+        assert_eq!(ADVANCES.get() - before, 1);
+    }
+
+    #[test]
+    fn region_batches_match_built() {
+        let mut rng = Rng(0x0bad_cafe_f00d_1234);
+        for (case, setup) in [
+            &b"\x1b[?1049h"[..],
+            b"\x1b[?1049h\x1b[1;23r\x1b[23H",
+            b"\x1b[?1049h\x1b[1;12r\x1b[12H",
+            b"\x1b[?1049h\x1b[2;24r",
+            b"\x1b[?1049h\x1b[12;24r\x1b[13H",
+            b"top\r\nbottom\x1b[5;20r\x1b[7Hmid",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut input = Vec::new();
+            while input.len() < 50_000 {
+                if rng.below(4) == 0 {
+                    input.extend_from_slice(b"y\n");
+                } else {
+                    piece(&mut rng, usize::MAX, &mut input);
+                }
+            }
+            let mut fast = Terminal::new(30, 24);
+            let mut slow = Terminal::new(30, 24);
+            fast.max_scrollback = 50;
+            slow.max_scrollback = 50;
+            fast.advance(b"\x1b[33mfill\r\n\r\nmore\x1b[24Hlast");
+            advance_built(&mut slow, b"\x1b[33mfill\r\n\r\nmore\x1b[24Hlast");
+            fast.advance(setup);
+            advance_built(&mut slow, setup);
+            let before = [0, 3, 20, 23].map(|row| fast.viewport_row(row).text());
+            let mut ghosted = 0;
+            for chunk in input.chunks(1 + rng.below(4000)) {
+                ghosted += usize::from(fast.ghost_split(chunk).is_some());
+                fast.advance(chunk);
+                advance_built(&mut slow, chunk);
+                assert!(snapshot(&fast) == snapshot(&slow), "case {case}");
+            }
+            assert!(ghosted > 0, "case {case}: batch path not taken");
+            if !fast.alt_active {
+                let outside = |t: &Terminal| [0, 3, 20, 23].map(|row| t.viewport_row(row).text());
+                assert_eq!(outside(&fast), before, "case {case}");
+            }
         }
     }
 

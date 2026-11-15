@@ -1,18 +1,19 @@
-# terminfo entry for terminal (https://github.com/amagomori/terminal).
-# Install: `terminal --install-terminfo`, or `tic -x xterm-terminal.terminfo`.
-# Without it, terminal sets TERM=xterm-256color.
+# terminfo entry for Trident (https://github.com/amagomori/terminal).
+# Install: `trident --install-terminfo`, or `tic -x xterm-trident.terminfo`.
+# Without it, Trident sets TERM=xterm-256color. `xterm-terminal`, the name
+# before the rename, is kept as an alias so existing configs keep working.
 #
 # Based on xterm-256color. Added: truecolor (Tc, setrgbf, setrgbb), styled
 # underlines (Smulx; every style is drawn as a single underline for now),
 # bracketed paste (BE, BD, PS, PE), synchronized output (Sync) and window
-# title (hs, tsl, fsl, dsl). Removed: xterm features terminal does not
+# title (hs, tsl, fsl, dsl). Removed: xterm features Trident does not
 # implement (blink, flash, palette and cursor color changes, OSC 52, meta
 # mode, left/right margins, printer and memory lock).
 # Cursor visibility leaves blinking (mode 12) alone: cnorm only shows the
 # cursor, so a blinking DECSCUSR style set before it (tmux sends Ss, then
 # cnorm on every cursor show) keeps blinking. cvvis is dropped because its
 # ?12h would outlive cnorm.
-xterm-terminal|terminal GPU-rendered terminal emulator,
+xterm-trident|xterm-terminal|Trident GPU-rendered terminal emulator,
 	Tc, hs,
 	BD=\E[?2004l, BE=\E[?2004h, PE=\E[201~, PS=\E[200~,
 	Smulx=\E[4:%p1%dm,

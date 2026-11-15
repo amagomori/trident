@@ -7,7 +7,7 @@ round. Reports the median of per-round paired deltas (head-main, copy-main) with
 bootstrap CI. Linux (X11 :0, nested Weston, --xvfb smoke) and macOS.
 
   python3 .github/scripts/latency-qa/ab.py \
-      --main ~/kan89/t-main/release/terminal --head ~/kan89/t-head/release/terminal \
+      --main ~/kan89/t-main/release/trident --head ~/kan89/t-head/release/trident \
       --rounds 8 --out ~/kan89/ab-x11
 """
 import argparse, hashlib, json, os, random, shutil, statistics, subprocess, sys, tempfile

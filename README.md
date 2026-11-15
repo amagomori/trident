@@ -20,7 +20,7 @@ cd terminal
 cargo run --release
 ```
 
-Or install the `terminal` binary into `~/.cargo/bin`:
+Or install the `trident` binary into `~/.cargo/bin`:
 
 ```sh
 cargo install --path crates/term-app
@@ -32,10 +32,10 @@ driver, and an X11 or Wayland session).
 ## Quick start
 
 ```sh
-terminal                       # your login shell
-terminal -e htop               # run a command instead
-terminal show photo.png        # view an image or file inline
-terminal --install-terminfo    # optional: install the xterm-terminal terminfo entry
+trident                        # your login shell
+trident -e htop                # run a command instead
+trident show photo.png         # view an image or file inline
+trident --install-terminfo     # optional: install the xterm-trident terminfo entry
 ```
 
 ## Features
@@ -49,7 +49,7 @@ terminal --install-terminfo    # optional: install the xterm-terminal terminfo e
 
 ## Configuration
 
-Settings live in `~/.config/terminal/config.toml` (or `$XDG_CONFIG_HOME/terminal/config.toml`),
+Settings live in `~/.config/trident/config.toml` (or `$XDG_CONFIG_HOME/trident/config.toml`),
 and every entry is optional. See [docs/configuration.md](docs/configuration.md).
 
 ## Documentation

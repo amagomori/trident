@@ -1992,6 +1992,99 @@ fn reflow_keeps_the_cursor_on_its_cell() {
 }
 
 #[test]
+fn reflow_lets_bash_redraw_a_wrapped_command_line() {
+    // Recorded from bash 5 with a coloured prompt: a wrapping command, the cursor moved
+    // back into it, the window narrowed step by step, text inserted, widened, Enter.
+    // On each resize readline moves up as many rows as its cursor was below the
+    // prompt at the old width, then redraws the whole command.
+    let prompt = "\x1b[01;32muser@host\x1b[00m:\x1b[01;34m~\x1b[00m$ ";
+    let command =
+        "echo word00 word01 word02 word03 word04 word05 word06 word07 word08 word09 word10 word11";
+    let inserted = command.replace("word07", "wordQQ07");
+    let right = |n| "\x1b[C".repeat(n);
+    let redraw = |up: usize, text: &str, tail: String| {
+        format!("\r\n\r\r\x1b[K{}{prompt}{text}{tail}", "\x1b[A".repeat(up))
+    };
+    let steps = [
+        (None, format!("\x1b[?2004h{prompt}{command}")),
+        (
+            None,
+            format!(
+                "{}\r\x1b[A{}{}",
+                "\x08".repeat(20),
+                right(40),
+                "\x08".repeat(8)
+            ),
+        ),
+        (Some(36), redraw(2, command, format!("\x1b[A{}", right(6)))),
+        (Some(32), redraw(2, command, format!("\x1b[A{}", right(2)))),
+        (Some(28), redraw(3, command, "\x1b[A\x08\x08".into())),
+        (
+            Some(24),
+            redraw(3, command, format!("\x1b[A\x1b[A{}", right(18))),
+        ),
+        (
+            None,
+            "QQ07 word08 word09 word10 word11\x1b[A\r\x1b[C".into(),
+        ),
+        (
+            Some(40),
+            redraw(4, &inserted, format!("\x1b[A{}", right(10))),
+        ),
+    ];
+    let mut t = Terminal::new(40, 10);
+    for (cols, output) in steps {
+        if let Some(cols) = cols {
+            t.resize(cols, 10);
+        }
+        t.advance(output.as_bytes());
+        let screen = screen(&t);
+        let joined: String = screen.concat();
+        assert_eq!(joined.matches("user@host").count(), 1, "{screen:#?}");
+        assert_eq!(joined.matches("word11").count(), 1, "{screen:#?}");
+    }
+    t.advance(
+        format!(
+            "\r\n\r\r\n\x1b[?2004l\r{}\r\n\x1b[?2004h{prompt}",
+            &inserted[5..]
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        screen(&t),
+        [
+            "user@host:~$ echo word00 word01 word02 w",
+            "ord03 word04 word05 word06 wordQQ07 word",
+            "08 word09 word10 word11",
+            "word00 word01 word02 word03 word04 word0",
+            "5 word06 wordQQ07 word08 word09 word10 w",
+            "ord11",
+            "user@host:~$",
+            "",
+            "",
+            "",
+        ]
+    );
+}
+
+#[test]
+fn reflow_keeps_the_row_of_a_cursor_in_shell_input() {
+    // At the end of a wrapped command in the shell's input zone, the cursor keeps its
+    // row in the line, where the line editor will redraw from.
+    let input = "\x1b]133;A\x07$ \x1b]133;B\x070123456789abc";
+    let mut t = term(8, 4, input);
+    assert_eq!(t.cursor_position(), Some((1, 7)));
+    t.resize(16, 4);
+    assert_eq!(screen(&t), ["$ 0123456789abc", "", "", ""]);
+    assert_eq!(t.cursor_position(), Some((1, 7)));
+
+    // Without the shell's marks it stays after the text.
+    let mut t = term(8, 4, &input.replace("\x1b]133;B\x07", ""));
+    t.resize(16, 4);
+    assert_eq!(t.cursor_position(), Some((0, 15)));
+}
+
+#[test]
 fn reflow_moves_lines_through_scrollback() {
     let mut t = term(8, 2, "aaaabbbbccccdddd\r\n$ ");
     assert_eq!(screen(&t), ["ccccdddd", "$"]);

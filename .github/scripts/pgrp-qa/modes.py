@@ -22,8 +22,8 @@ Scenarios and what must hold on both builds (`report` = measured, not pass/fail)
 Linux: X11 (xdotool, xclip; xmessage as the focus-away window). macOS: CoreGraphics events
 through ctypes and osascript; the runner needs Accessibility permission.
 
-  python3 .github/scripts/pgrp-qa/modes.py --main ../t-main/target/release/terminal \
-      --head ../t-head/target/release/terminal --runs 5 --out modes
+  python3 .github/scripts/pgrp-qa/modes.py --main ../t-main/target/release/trident \
+      --head ../t-head/target/release/trident --runs 5 --out modes
 """
 import argparse, ctypes, ctypes.util, json, os, platform, random, shutil, signal, subprocess
 import sys, tempfile, time
