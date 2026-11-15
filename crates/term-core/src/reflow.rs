@@ -1,6 +1,6 @@
 //! Rewrapping the primary screen and its scrollback to a new width.
 
-use crate::{Cell, Flags, Point, Row, RowFlags, Terminal};
+use crate::{Cell, Flags, Row, RowFlags, Terminal};
 
 /// Where an old row went: its logical line became new rows `first..first + count`,
 /// and the row's cells start `base` cells into that line.
@@ -109,7 +109,6 @@ impl Terminal {
         cols: usize,
         rows: usize,
         view_top: Option<u64>,
-        points: &mut [Point],
     ) -> Option<u64> {
         let old_rows = self.rows;
         let old_first = self.history - self.primary.scrollback.len() as u64;
@@ -264,7 +263,7 @@ impl Terminal {
             old_len,
             new_len: new.len(),
         };
-        for point in points.iter_mut() {
+        for point in &mut self.tracked {
             (point.line, point.col) = map.line(point.line, point.col, false);
         }
         for (i, flags, prompt_col, output_col, len) in marks.drain(..) {

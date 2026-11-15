@@ -291,6 +291,8 @@ pub struct Terminal {
     /// How many lines the view is scrolled back from the bottom.
     display_offset: usize,
     pub selection: Option<Selection>,
+    /// Positions [`Self::resize_tracking`] moves along with the lines while it runs.
+    tracked: Vec<Point>,
     title: Option<String>,
     title_changed: bool,
     /// Replies (device attributes, cursor reports...) to write back to the shell.
@@ -791,6 +793,7 @@ impl Terminal {
             print_state: PrintState::EMPTY,
             display_offset: 0,
             selection: None,
+            tracked: Vec::new(),
             title: None,
             title_changed: false,
             responses: Vec::new(),
@@ -1057,7 +1060,7 @@ impl Terminal {
     }
 
     /// [`Self::resize`], moving `points` (absolute primary-screen positions) along with
-    /// the text when the primary screen rewraps.
+    /// the text when the primary screen rewraps or the command budget cuts lines.
     pub fn resize_tracking(&mut self, cols: usize, rows: usize, points: &mut [Point]) {
         let cols = cols.max(2);
         let rows = rows.max(1);
@@ -1066,6 +1069,7 @@ impl Terminal {
         }
         self.invalidate_output_ends();
         self.selection = None;
+        self.tracked.extend_from_slice(points);
         // A scrolled-back view keeps its top line; one at the bottom follows the bottom.
         let mut anchor =
             (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
@@ -1076,7 +1080,7 @@ impl Terminal {
         // The primary screen rewraps its lines; the alternate one is redrawn by its app.
         let reflow = cols != self.cols;
         if reflow {
-            anchor = self.reflow_primary(cols, rows, anchor, points);
+            anchor = self.reflow_primary(cols, rows, anchor);
         }
 
         let mut alt_shifted = 0;
@@ -1176,6 +1180,9 @@ impl Terminal {
         }
         if let Some(top) = anchor {
             self.scroll_to_line(top);
+        }
+        for (point, tracked) in points.iter_mut().zip(self.tracked.drain(..)) {
+            *point = tracked;
         }
     }
 

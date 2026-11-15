@@ -497,3 +497,32 @@ fn reflow_trimming_the_budget_moves_a_view_in_the_cut_to_the_placeholder() {
         t.viewport_row(0).text()
     );
 }
+
+#[test]
+fn resize_tracking_follows_lines_moved_by_a_budget_cut() {
+    let mut t = Terminal::new(40, 5);
+    t.set_scrollback_limit(100);
+    t.set_command_budget(true, 0.8);
+    for name in ["alpha", "beta", "gamma"] {
+        t.advance(command(name, 3).as_bytes());
+    }
+    let mut running = format!("{PROMPT}make\r\n\x1b]133;C\x07");
+    for i in 0..60 {
+        running.push_str(&format!("make {i:02} {}\r\n", "y".repeat(30)));
+    }
+    t.advance(running.as_bytes());
+    let mut points = [Point {
+        line: line_of(&t, "gamma 1"),
+        col: 2,
+    }];
+    t.resize_tracking(20, 5, &mut points);
+    assert_eq!(
+        lines(&t)
+            .iter()
+            .filter(|l| l.starts_with('\u{2026}'))
+            .count(),
+        1
+    );
+    assert_eq!(points[0].line, line_of(&t, "gamma 1"));
+    assert_eq!(points[0].col, 2);
+}
