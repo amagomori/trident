@@ -190,11 +190,11 @@ mod macos {
     }
 
     define_class!(
-        /// Target of the menu bar item's "Show terminal", which brings back a minimized or
+        /// Target of the menu bar item's "Show Trident", which brings back a minimized or
         /// hidden window; `activate` alone leaves a minimized window in the Dock.
         #[unsafe(super(NSObject))]
         #[thread_kind = MainThreadOnly]
-        #[name = "TerminalMenuBarShow"]
+        #[name = "TridentMenuBarShow"]
         struct ShowTarget;
 
         unsafe impl NSObjectProtocol for ShowTarget {}
@@ -277,13 +277,13 @@ mod macos {
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
         if let Some(button) = item.button(mtm) {
             button.setImage(Some(&image));
-            button.setToolTip(Some(&NSString::from_str("terminal")));
+            button.setToolTip(Some(&NSString::from_str("Trident")));
         }
         let app = NSApplication::sharedApplication(mtm);
         let show = ShowTarget::new(mtm);
         let menu = NSMenu::new(mtm);
-        menu.addItem(&menu_item(mtm, "Show terminal", sel!(show:), &show));
-        menu.addItem(&menu_item(mtm, "Quit terminal", sel!(terminate:), &app));
+        menu.addItem(&menu_item(mtm, "Show Trident", sel!(show:), &show));
+        menu.addItem(&menu_item(mtm, "Quit Trident", sel!(terminate:), &app));
         item.setMenu(Some(&menu));
         Some(StatusItem { item, _show: show })
     }
