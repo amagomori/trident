@@ -25,7 +25,7 @@ the screen back. Keys typed by `vtrun` are raw bytes, not the app's key encoder.
 
 ## esctest results
 
-xterm expectations, VT level 4: **294 passed**, 26 xterm known bugs skipped, 230 failed.
+xterm expectations, VT level 4: **294 passed**, 43 xterm known bugs skipped, 230 failed.
 [esctest-pass.txt](conformance/esctest-pass.txt) is the pass list;
 [esctest-fail.txt](conformance/esctest-fail.txt) lists every failure under its ticket.
 
