@@ -75,6 +75,23 @@ impl Probe {
         None
     }
 
+    /// Whether the foreground process group is an idle shell, the login one or another.
+    #[cold]
+    fn idle_foreground(&self) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            let fd = self.fd.as_ref()?;
+            // SAFETY: fd is a PTY master descriptor owned by this probe.
+            let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+            if group <= 0 {
+                return None;
+            }
+            crate::close_confirm::process_args(group).map(|args| self.idle(&args))
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
     fn idle(&self, args: &[String]) -> bool {
         is_idle_shell(args) || (self.login.is_some() && args == self.login.as_slice())
     }
@@ -775,11 +792,17 @@ impl Pty {
         });
     }
 
-    /// Whether a line editor (readline, zle) owns the terminal: echo and canonical input are
-    /// off while signals stay on, unlike the raw mode of full-screen apps and ssh. A shell's
-    /// own silent `read` (bash `read -rsn1`, zsh `read -sk1`) sets the same local modes but
-    /// never redraws; it maps CR to NL alone, where readline maps neither and zle both.
+    /// Whether the shell's line editor (readline, zle) owns the terminal: echo and canonical
+    /// input are off while signals stay on, unlike the raw mode of full-screen apps and ssh,
+    /// and the foreground is a shell rather than a program, since a cbreak program in the same
+    /// mode need not redraw its output on a resize. A shell's own silent `read` (bash
+    /// `read -rsn1`, zsh `read -sk1`) sets the same local modes but never redraws; it maps CR
+    /// to NL alone, where readline maps neither and zle both.
     pub fn line_editing(&self) -> bool {
+        self.editor_modes() && self.output.probe.idle_foreground() != Some(false)
+    }
+
+    fn editor_modes(&self) -> bool {
         #[cfg(unix)]
         {
             let Some(fd) = self.master.as_raw_fd() else {
@@ -1272,6 +1295,61 @@ mod tests {
         wait_for(&mut pty, true);
         drop(pty);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_shell_at_its_prompt_is_line_editing() {
+        let mut pty = Pty::spawn(
+            &[
+                "bash".into(),
+                "--norc".into(),
+                "--noprofile".into(),
+                "-i".into(),
+            ],
+            &Default::default(),
+            None,
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let wait_for = |pty: &mut Pty, check: &dyn Fn(&Pty) -> bool, what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !check(pty) {
+                assert!(Instant::now() < deadline, "never {what}");
+                pty.take_output();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for(&mut pty, &Pty::line_editing, "line editing at the prompt");
+        // A cbreak program sets the editor's modes but does not redraw on a resize. This is
+        // Python 3.12's `tty.setcbreak`, which also stops mapping CR to NL as readline does.
+        pty.write(
+            b"python3 -c 'import termios as t, time; a = t.tcgetattr(0); a[0] &= ~t.ICRNL; \
+              a[3] &= ~(t.ECHO | t.ICANON); t.tcsetattr(0, t.TCSANOW, a); time.sleep(30)'\r",
+        );
+        wait_for(
+            &mut pty,
+            &|pty| pty.editor_modes() && pty.running_program().is_some(),
+            "in cbreak mode",
+        );
+        assert!(!pty.line_editing());
+        pty.write(b"\x03");
+        wait_for(
+            &mut pty,
+            &Pty::line_editing,
+            "line editing after the program",
+        );
+        // A shell started from the shell edits its own line.
+        pty.write(b"bash --norc --noprofile -i\r");
+        wait_for(
+            &mut pty,
+            &|pty| pty.line_editing() && pty.running_program().is_some(),
+            "line editing in a nested shell",
+        );
     }
 
     #[cfg(unix)]

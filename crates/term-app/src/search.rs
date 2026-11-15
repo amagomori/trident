@@ -449,6 +449,40 @@ mod tests {
     }
 
     #[test]
+    fn resize_while_editing_keeps_match_and_leaves_no_stale_tail() {
+        let line = format!("$ echo {} CMDMATCH {}", "a".repeat(165), "p".repeat(60));
+        let mut term = Terminal::new(100, 30);
+        for i in 1..=26 {
+            term.advance(format!("output line {i}\r\n").as_bytes());
+        }
+        term.advance(line.as_bytes());
+        let mut search = Search::default();
+        search.insert("CMDMATCH", &mut term);
+        search.advance(&mut term, None);
+        let found = search.matches[search.current.unwrap()].start.line;
+        // Bash's redraw after SIGWINCH: up the rows the cursor was below the line's start.
+        for (cols, rows, up) in [(60, 20, 2), (100, 30, 4)] {
+            Search::resize(Some(&search), &mut term, cols, rows, true);
+            term.advance(format!("\r\x1b[K{}{line}", "\x1b[A".repeat(up)).as_bytes());
+            assert!(term.line_visible(found), "{cols}x{rows}");
+            let shown: Vec<String> = (0..rows)
+                .map(|r| {
+                    let text: String = term.viewport_row(r).cells.iter().map(|c| c.c).collect();
+                    text.trim_end().to_owned()
+                })
+                .collect();
+            let top = shown.iter().position(|r| r.starts_with('$')).unwrap();
+            let used = line.len().div_ceil(cols);
+            assert_eq!(shown.iter().filter(|r| r.contains("CMDMATC")).count(), 1);
+            assert_eq!(shown[top..top + used].concat(), line, "{cols}x{rows}");
+            assert!(
+                shown[top + used..].iter().all(String::is_empty),
+                "{shown:?}"
+            );
+        }
+    }
+
+    #[test]
     fn resize_keeps_shown_match_in_view() {
         let mut term = Terminal::new(20, 6);
         term.set_scrollback_limit(1_000);
