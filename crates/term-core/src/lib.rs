@@ -1606,6 +1606,12 @@ impl Terminal {
     /// Returns the row evicted from the far end of scrollback, if any, for reuse.
     fn push_history(&mut self, row: Row) -> Option<Row> {
         if self.max_scrollback == 0 {
+            // Lines stay screen rows here, so the prompt's bounds move up with the text.
+            let shell = &mut self.shell;
+            shell.prompt_line = shell.prompt_line.and_then(|l| l.checked_sub(1));
+            shell.input_start = shell
+                .input_start
+                .and_then(|(l, c)| Some((l.checked_sub(1)?, c)));
             return Some(row);
         }
         self.primary.scrollback.push_back(row);
