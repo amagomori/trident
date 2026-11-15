@@ -366,6 +366,13 @@ impl Renderer {
         self.row_blinks.contains(&true)
     }
 
+    /// Forgets what the last frame drew, so the next one, which shows a different
+    /// `Terminal`, rebuilds every row and uploads its images.
+    pub fn forget_frame(&mut self) {
+        self.damage.invalidate();
+        self.images.forget();
+    }
+
     /// Glyph rasterizations depend on the font size, so drop them when it changes.
     pub fn clear_glyph_cache(&mut self) {
         self.atlas.clear();

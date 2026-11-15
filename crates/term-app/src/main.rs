@@ -1447,6 +1447,7 @@ impl App {
             s.pty.write(b"\x1b[O");
         }
         s.swap_pane(&mut pane);
+        s.renderer.forget_frame();
         self.tabs[self.active_tab] = Some(pane);
         self.active_tab = index;
         if self.focused && s.term.modes.focus_events {
