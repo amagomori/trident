@@ -326,8 +326,17 @@ impl Terminal {
         } else {
             regex::escape(query)
         };
+        let case_insensitive = !query.chars().any(char::is_uppercase);
+        if regex {
+            // A byte regex accepts patterns that match part of a character; reject them as the
+            // text regex does, so every match covers whole cells.
+            regex::RegexBuilder::new(&pattern)
+                .case_insensitive(case_insensitive)
+                .build()
+                .map_err(|e| e.to_string())?;
+        }
         let re = RegexBuilder::new(&pattern)
-            .case_insensitive(!query.chars().any(char::is_uppercase))
+            .case_insensitive(case_insensitive)
             .build()
             .map_err(|e| e.to_string())?;
         let last = self.history + self.rows as u64 - 1;
@@ -433,6 +442,15 @@ mod tests {
         assert!(t.search("[", true).is_err());
         assert!(t.search("", true).unwrap().is_empty());
         assert!(t.search("absent", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn patterns_matching_part_of_a_character_are_rejected() {
+        let mut t = Terminal::new(10, 2);
+        t.advance("é界".as_bytes());
+        assert!(t.search("(?-u:.)", true).is_err());
+        assert!(t.search(r"(?-u:\xc3)", true).is_err());
+        assert_eq!(t.search("(?s).", true).unwrap().len(), 2);
     }
 
     #[test]
