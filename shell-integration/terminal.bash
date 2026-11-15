@@ -18,7 +18,8 @@ _terminal_report_cwd() {
         c=${path:i:1}
         case $c in
             [a-zA-Z0-9/._~-]) encoded+=$c ;;
-            *) printf -v c '%%%02X' "'$c"; encoded+=$c ;;
+            # Bash 3.2 reads bytes above 0x7F as negative chars, so mask to one byte.
+            *) printf -v c '%d' "'$c"; printf -v c '%%%02X' $(( c & 255 )); encoded+=$c ;;
         esac
     done
     printf '\033]7;file://%s%s\007' "${HOSTNAME-}" "$encoded"

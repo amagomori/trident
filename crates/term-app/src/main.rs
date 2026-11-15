@@ -3069,6 +3069,42 @@ mod tests {
     }
 
     #[test]
+    fn bash_integration_reports_non_ascii_directories() {
+        let dir =
+            std::env::temp_dir().join(format!("terminal-osc7 \u{e9}%x-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../shell-integration/terminal.bash"
+        );
+        let output = std::process::Command::new("bash")
+            .args([
+                "--norc",
+                "-ic",
+                r#"source "$1"; _terminal_report_cwd"#,
+                "bash",
+                script,
+            ])
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let mut terminal = term_core::Terminal::new(10, 2);
+        terminal.advance(&output.stdout);
+        let reported = terminal
+            .working_directory()
+            .and_then(|cwd| std::fs::canonicalize(&cwd.path).ok());
+        let expected = dir.canonicalize().ok();
+        std::fs::remove_dir(&dir).unwrap();
+        assert!(
+            reported.is_some() && reported == expected,
+            "{:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
     fn new_window_stderr_inherits_only_files_and_character_devices() {
         use std::os::unix::net::UnixStream;
         let file = File::open(std::env::current_exe().unwrap()).unwrap();
