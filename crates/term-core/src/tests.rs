@@ -1037,6 +1037,46 @@ fn resize_keeps_content_and_cursor() {
 }
 
 #[test]
+fn resize_keeps_scrolled_back_view_on_its_top_line() {
+    let mut t = Terminal::new(10, 4);
+    for i in 0..20 {
+        t.advance(format!("{i}\r\n").as_bytes());
+    }
+    t.scroll_display(10);
+    let top = t.viewport_to_point(0, 0).line;
+    assert_eq!(t.viewport_row(0).text(), "7");
+    for (cols, rows) in [(10, 2), (6, 7), (20, 4), (20, 9)] {
+        t.resize(cols, rows);
+        assert_eq!(t.viewport_to_point(0, 0).line, top, "{cols}x{rows}");
+        assert_eq!(t.viewport_row(0).text(), "7", "{cols}x{rows}");
+    }
+    t.scroll_to_bottom();
+    t.resize(10, 3);
+    assert_eq!(t.display_offset(), 0);
+    assert_eq!(t.input_cursor_position(), Some((2, 0)));
+}
+
+#[test]
+fn resize_clamps_scrolled_back_view_to_history() {
+    let mut t = Terminal::new(10, 4);
+    t.set_scrollback_limit(5);
+    for i in 0..20 {
+        t.advance(format!("{i}\r\n").as_bytes());
+    }
+    t.scroll_display(5);
+    assert_eq!(t.viewport_row(0).text(), "12");
+    t.resize(10, 2);
+    assert_eq!(t.display_offset(), 5);
+    assert_eq!(t.viewport_row(0).text(), "14");
+    t.scroll_display(-4);
+    t.resize(10, 12);
+    assert_eq!(t.display_offset(), 0);
+    t.advance(b"\x1b[?1049h");
+    t.resize(10, 5);
+    assert_eq!(t.display_offset(), 0);
+}
+
+#[test]
 fn reset_clears_everything() {
     let t = term(5, 2, "abc\x1b[31m\x1bcd");
     assert_eq!(screen(&t), ["d", ""]);
@@ -1610,7 +1650,7 @@ fn shrinking_resize_obeys_scrollback_limit() {
         assert_eq!(t.scrollback_len(), limit.min(4));
         assert_eq!(t.history, 4);
         assert_eq!(t.first_line(), 4 - limit.min(4) as u64);
-        assert_eq!(t.display_offset(), 0);
+        assert_eq!(t.display_offset(), limit.min(4));
         t.scroll_display(100);
         assert_eq!(t.display_offset(), limit.min(4));
         assert_eq!(

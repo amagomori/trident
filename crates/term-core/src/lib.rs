@@ -986,6 +986,8 @@ impl Terminal {
         }
         self.invalidate_output_ends();
         self.selection = None;
+        // A scrolled-back view keeps its top line; one at the bottom follows the bottom.
+        let anchor = (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
         self.display_offset = 0;
         if cols < self.cols || rows < self.rows {
             self.shrunk = true;
@@ -1076,6 +1078,9 @@ impl Terminal {
         {
             saved.cursor.row = saved.cursor.row.min(rows - 1);
             saved.cursor.col = saved.cursor.col.min(cols - 1);
+        }
+        if let Some(top) = anchor {
+            self.scroll_to_line(top);
         }
     }
 

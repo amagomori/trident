@@ -1080,7 +1080,7 @@ impl App {
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         if grid_changed {
-            s.term.resize(cols, rows);
+            search::Search::resize(self.search.as_ref(), &mut s.term, cols, rows);
             release_freed_memory(&mut s.term);
             if let Some(search) = &mut self.search {
                 search.dirty = true;

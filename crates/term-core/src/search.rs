@@ -363,10 +363,15 @@ impl Terminal {
         Ok(job.take_found())
     }
 
+    /// Whether history line `line` is on screen.
+    pub fn line_visible(&self, line: u64) -> bool {
+        let top = self.history - self.display_offset as u64;
+        (top..top + self.rows as u64).contains(&line)
+    }
+
     /// Center an off-screen history line without moving an already visible line.
     pub fn reveal_line(&mut self, line: u64) {
-        let top = self.history - self.display_offset as u64;
-        if line < top || line >= top + self.rows as u64 {
+        if !self.line_visible(line) {
             let top = line
                 .saturating_sub(self.rows as u64 / 2)
                 .max(self.first_line());
