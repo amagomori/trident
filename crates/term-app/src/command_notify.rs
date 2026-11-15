@@ -80,26 +80,113 @@ fn message(finished: &Finished) -> String {
 }
 
 pub fn notify(finished: Finished) {
-    let message = message(&finished);
+    show(Message {
+        title: message(&finished),
+        body: String::new(),
+        urgency: term_core::Urgency::Normal,
+        replace: None,
+    });
+}
+
+/// A desktop notification. With an empty `body`, Linux shows `title` as the summary and
+/// macOS shows it under the app name.
+pub struct Message {
+    pub title: String,
+    pub body: String,
+    pub urgency: term_core::Urgency,
+    /// A later message with the same key replaces this one while it is still shown.
+    pub replace: Option<String>,
+}
+
+/// Queues a desktop notification. One background thread delivers them all, each after the
+/// previous one is handed to the desktop, so they arrive in the order they were shown.
+pub fn show(message: Message) {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let _ = std::thread::Builder::new()
-            .name("command-notification".into())
-            .spawn(move || {
-                #[cfg(target_os = "linux")]
-                if let Err(error) = notify_rust::Notification::new()
-                    .summary(&message)
-                    .appname("terminal")
-                    .show()
-                {
-                    diag!("terminal: notification failed: {error}");
-                }
-                #[cfg(target_os = "macos")]
-                notify_macos(&message);
-            });
+        use std::sync::{OnceLock, mpsc};
+        static WORKER: OnceLock<Option<mpsc::Sender<Message>>> = OnceLock::new();
+        let worker = WORKER.get_or_init(|| {
+            let (sender, receiver) = mpsc::channel::<Message>();
+            std::thread::Builder::new()
+                .name("notifications".into())
+                .spawn(move || {
+                    #[cfg(target_os = "linux")]
+                    let mut shown = ReplaceIds::default();
+                    for message in receiver {
+                        #[cfg(target_os = "linux")]
+                        notify_linux(message, &mut shown);
+                        #[cfg(target_os = "macos")]
+                        notify_macos(message);
+                    }
+                })
+                .ok()?;
+            Some(sender)
+        });
+        if let Some(sender) = worker {
+            let _ = sender.send(message);
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = message;
+}
+
+/// The notification server's ids for the latest notifications with a replace key.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+struct ReplaceIds {
+    ids: std::collections::VecDeque<(String, u32)>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl ReplaceIds {
+    const MAX: usize = 64;
+
+    fn get(&self, key: &str) -> Option<u32> {
+        self.ids.iter().find(|(k, _)| k == key).map(|&(_, id)| id)
+    }
+
+    fn insert(&mut self, key: String, id: u32) {
+        self.ids.retain(|(k, _)| *k != key);
+        if self.ids.len() == Self::MAX {
+            self.ids.pop_front();
+        }
+        self.ids.push_back((key, id));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn notify_linux(message: Message, shown: &mut ReplaceIds) {
+    let mut notification = notify_rust::Notification::new();
+    notification
+        .summary(&message.title)
+        .appname("terminal")
+        .urgency(match message.urgency {
+            term_core::Urgency::Low => notify_rust::Urgency::Low,
+            term_core::Urgency::Normal => notify_rust::Urgency::Normal,
+            term_core::Urgency::Critical => notify_rust::Urgency::Critical,
+        });
+    if !message.body.is_empty() {
+        notification.body(&markup_escape(&message.body));
+    }
+    if let Some(id) = message.replace.as_deref().and_then(|key| shown.get(key)) {
+        notification.id(id);
+    }
+    match notification.show() {
+        Ok(handle) => {
+            if let Some(key) = message.replace {
+                shown.insert(key, handle.id());
+            }
+        }
+        Err(error) => diag!("terminal: notification failed: {error}"),
+    }
+}
+
+/// Notification servers may render body markup; show program-supplied text literally.
+#[cfg(any(target_os = "linux", test))]
+fn markup_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -107,20 +194,42 @@ fn applescript_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Identifies a replaceable notification to Notification Center. Requests outlive the
+/// process, so the key is scoped to it.
+#[cfg(any(target_os = "macos", test))]
+fn request_identifier(pid: u32, key: &str) -> String {
+    format!("terminal-{pid}-{key}")
+}
+
+/// Returns once macOS has accepted the request (or failed it), so the next one queues
+/// behind it.
 #[cfg(target_os = "macos")]
-fn notify_macos(message: &str) {
+fn notify_macos(message: Message) {
     use block2::RcBlock;
-    use objc2::runtime::Bool;
+    use objc2::runtime::{Bool, NSObjectProtocol};
     use objc2_foundation::{NSBundle, NSError, NSString, NSUUID};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-        UNUserNotificationCenter,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationInterruptionLevel,
+        UNNotificationRequest, UNUserNotificationCenter,
+    };
+
+    let Message {
+        title,
+        body,
+        urgency,
+        replace,
+    } = message;
+    let (title, body) = if body.is_empty() {
+        ("terminal".to_owned(), title)
+    } else {
+        (title, body)
     };
 
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
         let script = format!(
-            "display notification {} with title \"terminal\"",
-            applescript_string(message)
+            "display notification {} with title {}",
+            applescript_string(&body),
+            applescript_string(&title)
         );
         match std::process::Command::new("/usr/bin/osascript")
             .args(["-e", &script])
@@ -136,24 +245,40 @@ fn notify_macos(message: &str) {
         return;
     }
 
-    let message = message.to_owned();
+    let identifier = replace.map(|key| request_identifier(std::process::id(), &key));
+    let (done, accepted) = std::sync::mpsc::sync_channel::<()>(1);
     let authorized = RcBlock::new(move |granted: Bool, error: *mut NSError| {
         if !error.is_null() || !granted.as_bool() {
             diag!("terminal: notification authorization denied or failed");
+            let _ = done.try_send(());
             return;
         }
         let content = UNMutableNotificationContent::new();
-        content.setTitle(&NSString::from_str("terminal"));
-        content.setBody(&NSString::from_str(&message));
+        content.setTitle(&NSString::from_str(&title));
+        content.setBody(&NSString::from_str(&body));
+        // macOS 12+; `osascript` above has no equivalent, so urgency is only a hint there.
+        if content.respondsToSelector(objc2::sel!(setInterruptionLevel:)) {
+            content.setInterruptionLevel(match urgency {
+                term_core::Urgency::Low => UNNotificationInterruptionLevel::Passive,
+                term_core::Urgency::Normal => UNNotificationInterruptionLevel::Active,
+                term_core::Urgency::Critical => UNNotificationInterruptionLevel::TimeSensitive,
+            });
+        }
+        let identifier = match &identifier {
+            Some(identifier) => NSString::from_str(identifier),
+            None => NSUUID::UUID().UUIDString(),
+        };
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &NSUUID::UUID().UUIDString(),
+            &identifier,
             &content,
             None,
         );
-        let completed = RcBlock::new(|error: *mut NSError| {
+        let done = done.clone();
+        let completed = RcBlock::new(move |error: *mut NSError| {
             if !error.is_null() {
                 diag!("terminal: notification delivery failed");
             }
+            let _ = done.try_send(());
         });
         UNUserNotificationCenter::currentNotificationCenter()
             .addNotificationRequest_withCompletionHandler(&request, Some(&completed));
@@ -163,6 +288,8 @@ fn notify_macos(message: &str) {
             UNAuthorizationOptions::Alert,
             &authorized,
         );
+    // The first request may wait on the user answering the permission prompt.
+    let _ = accepted.recv_timeout(std::time::Duration::from_secs(60));
 }
 
 #[cfg(target_os = "macos")]
@@ -533,6 +660,27 @@ mod tests {
     }
 
     #[test]
+    fn replace_ids_track_latest_per_key() {
+        let mut ids = ReplaceIds::default();
+        assert_eq!(ids.get("a"), None);
+        ids.insert("a".into(), 1);
+        ids.insert("b".into(), 2);
+        ids.insert("a".into(), 3);
+        assert_eq!((ids.get("a"), ids.get("b")), (Some(3), Some(2)));
+        for n in 0..ReplaceIds::MAX as u32 {
+            ids.insert(n.to_string(), n);
+        }
+        assert_eq!((ids.get("a"), ids.get("b")), (None, None));
+        assert_eq!(ids.get("0"), Some(0));
+    }
+
+    #[test]
+    fn request_identifiers_are_per_process_and_key() {
+        assert_eq!(request_identifier(42, "build"), "terminal-42-build");
+        assert_ne!(request_identifier(42, "a"), request_identifier(43, "a"));
+    }
+
+    #[test]
     fn applescript_literals() {
         for (input, expected) in [
             ("", "\"\""),
@@ -546,6 +694,14 @@ mod tests {
         ] {
             assert_eq!(applescript_string(input), expected);
         }
+    }
+
+    #[test]
+    fn markup_is_escaped() {
+        assert_eq!(
+            markup_escape("<b>a</b> & <a href=\"x\">"),
+            "&lt;b&gt;a&lt;/b&gt; &amp; &lt;a href=\"x\"&gt;"
+        );
     }
 
     #[test]

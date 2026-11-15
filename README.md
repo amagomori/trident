@@ -115,6 +115,7 @@ scrollback = 10000          # retained lines; 0 disables history (or use the [sc
 drop_preview = true         # false: file drops insert only the shell-quoted path
 paste_protection = true     # false: never confirm multi-line or control-character pastes
 confirm_close = true        # false: close the window at once even while a program runs
+desktop_notifications = true # false: ignore OSC 9/777/99 notification requests
 vsync = true                # false: present without waiting for vblank (lower latency, may tear)
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 term = "xterm-256color"     # "xterm-terminal" once installed (falls back if not found)
@@ -283,6 +284,20 @@ shown. A command started with `-e` (`terminal -e vim`, `terminal -e sh -c make`)
 running program too, unless it is a shell at its prompt. On macOS, Cmd-W and every app quit
 (Cmd-Q, the Quit menu, Dock > Quit, logging out) ask the same way. Set `confirm_close = false`
 to always close immediately.
+
+### Desktop notifications
+
+Programs can raise a desktop notification with OSC 9 (`printf '\e]9;Build done\a'`), OSC 777
+(`printf '\e]777;notify;Title;Body\a'`), or the kitty OSC 99 protocol (title and body
+parts, chunking with `d=0`, base64 with `e=1`, urgency `u=0..2`, occasion `o=always`,
+`unfocused` or `invisible`, `p=?` capability queries, and `i=` ids: a notification with the
+same id replaces the earlier one; on macOS only when run from an app bundle, since a bare binary
+posts through `osascript`, which can't replace). Notifications are shown in the order they were sent;
+`invisible` counts a window as hidden when it is minimized, occluded, or on macOS fully covered by
+other apps' windows. ConEmu's numeric OSC 9 commands
+(`9;4;…` progress and the like) are not notifications. At most five are shown per ten
+seconds; title and body are capped at 1024 characters and shown as plain text. Set
+`desktop_notifications = false` to ignore them.
 
 ### Dropping files
 

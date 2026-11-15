@@ -1325,3 +1325,140 @@ fn golden_command_budget() {
         );
     }
 }
+
+#[test]
+fn desktop_notification_sequences() {
+    let n = |title: &str, body: &str| Notification {
+        title: title.into(),
+        body: body.into(),
+        ..Notification::default()
+    };
+    let cases: Vec<(&[u8], Vec<Notification>)> = vec![
+        (b"\x1b]9;Build done\x07", vec![n("", "Build done")]),
+        (b"\x1b]9;a;b\x1b\\", vec![n("", "a;b")]),
+        (b"\x1b]9;\x07", vec![]),
+        (b"\x1b]9;4;1;50\x07\x1b]9;2;box\x07\x1b]9;12\x07", vec![]),
+        (b"\x1b]9;13\x07", vec![n("", "13")]),
+        (
+            b"\x1b]777;notify;Title;Body;more\x07",
+            vec![n("Title", "Body;more")],
+        ),
+        (b"\x1b]777;notify;Title\x07", vec![n("Title", "")]),
+        (b"\x1b]777;other;Title;Body\x07", vec![]),
+        (b"\x1b]99;;Hello\x1b\\", vec![n("Hello", "")]),
+        (
+            b"\x1b]99;i=1:d=0;Hel\x1b\\\x1b]99;i=1:d=0;lo\x1b\\\x1b]99;i=1:p=body;World\x1b\\",
+            vec![n("Hello", "World")],
+        ),
+        (
+            b"\x1b]99;i=a:d=0;A\x07\x1b]99;i=b;B\x07\x1b]99;i=a:p=body;a\x07",
+            vec![n("B", ""), n("A", "a")],
+        ),
+        (b"\x1b]99;e=1;SGk7dGhlcmU=\x1b\\", vec![n("Hi;there", "")]),
+        (b"\x1b]99;e=1;!!\x1b\\", vec![]),
+        (
+            b"\x1b]99;i=s:d=0:e=1;SGk\x1b\\\x1b]99;i=s:p=body;World\x1b\\",
+            vec![n("Hi", "World")],
+        ),
+        (
+            b"\x1b]99;i=s:d=0:e=1;SGk7\x1b\\\x1b]99;i=s:d=0:e=1;dGhl\x1b\\\x1b]99;i=s:e=1;cmU=\x1b\\",
+            vec![n("Hi;there", "")],
+        ),
+        (
+            b"\x1b]99;i=s:d=0:e=1;SG\x1b\\\x1b]99;i=s:d=0:e=1;k7dGh\x1b\\\x1b]99;i=s:e=1;lcmU\x1b\\",
+            vec![n("Hi;there", "")],
+        ),
+        (
+            b"\x1b]99;i=s:d=0:e=1;w6\x1b\\\x1b]99;i=s:e=1;k=\x1b\\\x1b]99;i=t:d=0;\xc3\x1b\\\x1b]99;i=t;\xa9\x1b\\",
+            vec![n("\u{e9}", ""), n("\u{e9}", "")],
+        ),
+        (b"\x1b]99;p=close;x\x07\x1b]99;p=icon;x\x07", vec![]),
+        (b"\x1b]99;;a\x08b\tc\x07", vec![n("abc", "")]),
+        (b"\x1b]9;one\x07\x1bc", vec![n("", "one")]),
+        (
+            b"\x1b]99;i=u:d=0:u=2:o=unfocused;T\x07\x1b]99;i=u;!\x07",
+            vec![Notification {
+                title: "T!".into(),
+                urgency: Urgency::Critical,
+                occasion: Occasion::Unfocused,
+                ..Notification::default()
+            }],
+        ),
+        (
+            b"\x1b]99;u=0:o=invisible;T\x07",
+            vec![Notification {
+                title: "T".into(),
+                urgency: Urgency::Low,
+                occasion: Occasion::Invisible,
+                ..Notification::default()
+            }],
+        ),
+    ];
+    for (input, expected) in cases {
+        let mut t = Terminal::new(20, 3);
+        t.advance(b"x");
+        let before = snapshot(&t);
+        t.advance(input);
+        if input != b"\x1b]9;one\x07\x1bc" {
+            assert_eq!(snapshot(&t), before, "{input:?}");
+        }
+        let mut taken = t.take_notifications();
+        taken.iter_mut().for_each(|n| n.id.clear());
+        assert_eq!(taken, expected, "{input:?}");
+        assert!(t.take_notifications().is_empty());
+        assert!(t.take_responses().is_empty(), "{input:?}");
+    }
+
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]99;i=rep;v1\x07\x1b]99;i=rep:d=0;v\x07\x1b]99;i=rep;2\x07\x1b]9;x\x07");
+    let ids: Vec<_> = t.take_notifications().into_iter().map(|n| n.id).collect();
+    assert_eq!(ids, ["rep", "rep", ""]);
+}
+
+#[test]
+fn desktop_notification_query_and_limits() {
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]99;i=q1:p=?;\x1b\\\x1b]99;p=?\x07");
+    assert_eq!(
+        String::from_utf8(t.take_responses()).unwrap(),
+        "\x1b]99;i=q1:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2\x1b\\\
+         \x1b]99;i=:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2\x07"
+    );
+    assert!(t.take_notifications().is_empty());
+
+    for i in 0..40 {
+        t.advance(format!("\x1b]9;{i}x\x07").as_bytes());
+    }
+    let queued = t.take_notifications();
+    assert_eq!(queued.len(), 16);
+    assert_eq!(queued[0].body, "0x");
+    assert_eq!(queued[15].body, "15x");
+
+    t.advance(format!("\x1b]99;;{}\x07", "a".repeat(5000)).as_bytes());
+    assert_eq!(t.take_notifications()[0].title.chars().count(), 1024);
+    for _ in 0..10 {
+        t.advance(format!("\x1b]99;i=big:d=0;{}\x07", "b".repeat(900)).as_bytes());
+    }
+    t.advance(b"\x1b]99;i=big;\x07");
+    assert_eq!(t.take_notifications()[0].title.len(), 1024);
+
+    for i in 0..20 {
+        t.advance(format!("\x1b]99;i=p{i}:d=0;{i}\x07").as_bytes());
+    }
+    t.advance(b"\x1b]99;i=p0;!\x07\x1b]99;i=p19;!\x07");
+    assert_eq!(
+        t.take_notifications(),
+        vec![
+            Notification {
+                id: "p0".into(),
+                title: "!".into(),
+                ..Notification::default()
+            },
+            Notification {
+                id: "p19".into(),
+                title: "19!".into(),
+                ..Notification::default()
+            },
+        ]
+    );
+}

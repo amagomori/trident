@@ -32,7 +32,7 @@ const SHM_DIR: &str = "/dev/shm";
 #[cfg(unix)]
 const KITTEN_SHM_PREFIX: &str = "kitty-icat-";
 
-const BASE64: GeneralPurpose = GeneralPurpose::new(
+pub(crate) const BASE64: GeneralPurpose = GeneralPurpose::new(
     &base64::alphabet::STANDARD,
     GeneralPurposeConfig::new()
         .with_decode_padding_mode(DecodePaddingMode::Indifferent)

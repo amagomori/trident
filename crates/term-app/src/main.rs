@@ -18,6 +18,7 @@ mod frame_clock;
 mod ime;
 mod input;
 mod latency;
+mod osc_notify;
 mod paste;
 #[cfg(target_os = "macos")]
 mod present_macos;
@@ -824,6 +825,9 @@ struct App {
     modifiers: ModifiersState,
     held_at_focus: HeldAtFocus,
     focused: bool,
+    /// The window is fully hidden (winit `Occluded`), for OSC 99 `o=invisible`.
+    occluded: bool,
+    notification_throttle: osc_notify::Throttle,
     mouse_pos: PhysicalPosition<f64>,
     left_down: bool,
     /// The left press landed on the pinned command header; swallow its release.
@@ -895,6 +899,8 @@ impl App {
             modifiers: ModifiersState::empty(),
             held_at_focus: HeldAtFocus::default(),
             focused: true,
+            occluded: false,
+            notification_throttle: osc_notify::Throttle::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             left_down: false,
             ledger_click: false,
@@ -1190,6 +1196,27 @@ impl App {
         if std::mem::take(&mut s.term.bell) && !self.focused {
             s.window
                 .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        }
+        let visible = std::cell::OnceCell::new();
+        for notification in s.term.take_notifications() {
+            if self.config.desktop_notifications
+                && osc_notify::wanted(notification.occasion, self.focused, || {
+                    *visible.get_or_init(|| {
+                        if self.occluded {
+                            return Some(false);
+                        }
+                        let shown = s.window.is_minimized().map(|minimized| !minimized);
+                        #[cfg(target_os = "macos")]
+                        if shown == Some(true) && osc_notify::covered(&s.window) {
+                            return Some(false);
+                        }
+                        shown
+                    })
+                })
+                && self.notification_throttle.allow(Instant::now())
+            {
+                osc_notify::show(notification);
+            }
         }
         if processed > 0 {
             if let Some(log) = &mut s.latency {
@@ -2562,6 +2589,7 @@ impl ApplicationHandler<UserEvent> for App {
                     s.window.request_redraw();
                 }
             }
+            WindowEvent::Occluded(occluded) => self.occluded = occluded,
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
                 self.refresh_link();
