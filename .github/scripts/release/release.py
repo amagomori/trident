@@ -344,7 +344,7 @@ def cask(version, sha256, base=None):
     strategy :github_latest
   end
 
-  depends_on macos: :big_sur
+  depends_on :macos
 
   app "{NAME}.app"
   binary "#{{appdir}}/{NAME}.app/Contents/MacOS/{PACKAGE}"
