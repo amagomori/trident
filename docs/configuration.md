@@ -23,6 +23,7 @@ desktop_notifications = true # false: ignore OSC 9/777/99 notification requests
 vsync = true                # false: present without waiting for vblank (lower latency, may tear)
 app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset (see App icons in usage.md)
 menu_bar_icon = true        # macOS: false hides the menu bar item
+auto_secure_input = true    # macOS: false never turns on Secure Keyboard Entry at password prompts
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 term = "xterm-256color"     # "xterm-trident" once installed (falls back if not found)
 

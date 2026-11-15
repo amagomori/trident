@@ -91,6 +91,15 @@ running program too, unless it is a shell at its prompt. On macOS, Cmd-W and eve
 (Cmd-Q, the Quit menu, Dock > Quit, logging out) ask the same way. Set `confirm_close = false`
 to always close immediately.
 
+## Secure Keyboard Entry
+
+On macOS, Trident turns on Secure Keyboard Entry while the program in its foreground reads a
+password (echo off with the line still edited by the terminal, as sudo, ssh, passwd and
+`read -s` set it), so other apps can't watch the keystrokes. It is held only while the window
+is focused and is released as soon as the prompt ends. Prompts inside an ssh session or other
+raw-mode programs can't be told apart and are not covered. Set `auto_secure_input = false` to
+never turn it on.
+
 ## Desktop notifications
 
 Programs can raise a desktop notification with OSC 9 (`printf '\e]9;Build done\a'`), OSC 777

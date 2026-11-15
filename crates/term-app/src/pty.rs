@@ -802,6 +802,26 @@ impl Pty {
         self.editor_modes() && self.output.probe.idle_foreground() != Some(false)
     }
 
+    /// Whether the foreground program reads a password: see `secure_input::password_modes`.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn password_input(&self) -> bool {
+        #[cfg(unix)]
+        {
+            let Some(fd) = self.master.as_raw_fd() else {
+                return false;
+            };
+            let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: fd belongs to the live master; tcgetattr initializes attrs on success.
+            if unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) } != 0 {
+                return false;
+            }
+            // SAFETY: tcgetattr succeeded.
+            crate::secure_input::password_modes(unsafe { attrs.assume_init() }.c_lflag)
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
     fn editor_modes(&self) -> bool {
         #[cfg(unix)]
         {
@@ -1350,6 +1370,63 @@ mod tests {
             &|pty| pty.line_editing() && pty.running_program().is_some(),
             "line editing in a nested shell",
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_password_read_is_password_input() {
+        let mut pty = Pty::spawn(
+            &[
+                "bash".into(),
+                "--norc".into(),
+                "--noprofile".into(),
+                "-i".into(),
+            ],
+            &Default::default(),
+            None,
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let wait_for = |pty: &mut Pty, check: &dyn Fn(&Pty) -> bool, what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !check(pty) {
+                assert!(Instant::now() < deadline, "never {what}");
+                pty.take_output();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for(&mut pty, &Pty::line_editing, "line editing at the prompt");
+        assert!(!pty.password_input());
+        pty.write(b"python3 -c 'import getpass; getpass.getpass()'\r");
+        wait_for(&mut pty, &Pty::password_input, "reading a password");
+        pty.write(b"hunter2\r");
+        wait_for(
+            &mut pty,
+            &|pty| pty.line_editing() && !pty.password_input(),
+            "back at the prompt",
+        );
+        // A silent `read -s` is a password read too; a cbreak `read -sn1` is not.
+        pty.write(b"read -s secret\r");
+        wait_for(&mut pty, &Pty::password_input, "in read -s");
+        pty.write(b"x\r");
+        wait_for(&mut pty, &Pty::line_editing, "line editing after read -s");
+        pty.write(b"read -sn1 key\r");
+        let cbreak_read = |pty: &Pty| {
+            let fd = pty.master.as_raw_fd().unwrap();
+            let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: fd belongs to the live master; tcgetattr initializes attrs on success.
+            assert_eq!(unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) }, 0);
+            // SAFETY: tcgetattr succeeded.
+            let attrs = unsafe { attrs.assume_init() };
+            attrs.c_lflag & (libc::ICANON | libc::ECHO) == 0
+                && attrs.c_iflag & (libc::ICRNL | libc::INLCR) == libc::ICRNL
+        };
+        wait_for(&mut pty, &cbreak_read, "in read -sn1");
+        assert!(!pty.password_input());
     }
 
     #[cfg(unix)]
