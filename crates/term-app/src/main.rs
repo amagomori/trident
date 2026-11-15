@@ -141,7 +141,8 @@ impl ResizeThrottle {
 enum UserEvent {
     #[cfg(target_os = "linux")]
     Appearance(u64, Option<Theme>),
-    CommandFinished(command_notify::Finished),
+    /// A long command finished in the tab with this pane id.
+    CommandFinished(u64, command_notify::Finished),
     ConfigChanged,
     /// The PTY of the tab with this pane id has output.
     Output(u64),
@@ -1365,7 +1366,7 @@ impl App {
                 });
             },
             move |finished| {
-                let _ = command_proxy.send_event(UserEvent::CommandFinished(finished));
+                let _ = command_proxy.send_event(UserEvent::CommandFinished(id, finished));
             },
         )?;
         pty.set_command_notifications(self.config.notify_long_commands_after != 0)?;
@@ -3080,9 +3081,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.set_appearance(theme);
                 }
             }
-            UserEvent::CommandFinished(finished) => {
+            UserEvent::CommandFinished(id, finished) => {
+                let watched = self.session.as_ref().is_some_and(|s| s.pane == id);
                 if command_notify::should_notify(
-                    self.focused,
+                    self.focused && watched,
                     finished.duration,
                     self.config.notify_long_commands_after,
                 ) {
