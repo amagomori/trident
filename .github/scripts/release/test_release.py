@@ -29,7 +29,7 @@ def png_size(path):
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         self.binary = self.tmp / "trident"
         self.binary.write_bytes(b"\x7fELF fake GLIBC_2.17\0GLIBC_2.35\0GLIBC_2.3.4\0")
@@ -342,6 +342,7 @@ class Changelog(unittest.TestCase):
                                  "- KAN-2: Second feature ([#2](https://github.com/o/r/pull/2))"])
         self.assertIn("https://github.com/o/r/compare/v0.1.0...v0.2.0", notes)
         self.assertIn("unsigned", notes)
+        self.assertIn("xattr -d com.apple.quarantine Trident-0.2.0-macos-universal.dmg", notes)
 
     def test_first_release_lists_everything(self):
         notes = release.changelog("v0.1.0", cwd=self.repo, repo="o/r")
@@ -364,6 +365,10 @@ class Workflow(unittest.TestCase):
         self.assertIn("if: steps.newest.outputs.newest == 'true' && env.HOMEBREW_TAP_TOKEN != ''", job)
         self.assertIn("if: steps.newest.outputs.newest == 'true' && env.AUR_SSH_KEY != ''", job)
         self.assertNotIn("ssh-keyscan", job)
+
+    def test_linux_files_dated_by_the_tagged_commit(self):
+        text = (release.ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn('echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"', text)
 
 
 if __name__ == "__main__":

@@ -20,12 +20,15 @@
 Or download a build from [Releases](https://github.com/amagomori/terminal/releases):
 
 - **macOS** (11 or newer, Apple silicon and Intel): `Trident-<version>-macos-universal.dmg`; drag
-  Trident to Applications. Builds are unsigned, so the first time right-click Trident.app and
-  choose Open (or run `xattr -dr com.apple.quarantine /Applications/Trident.app`).
+  Trident to Applications. Builds are unsigned, so macOS reports a downloaded .dmg as "damaged";
+  run `xattr -d com.apple.quarantine ~/Downloads/Trident-<version>-macos-universal.dmg` before
+  opening it. An app already copied from a quarantined image needs
+  `xattr -dr com.apple.quarantine /Applications/Trident.app`.
 - **Debian/Ubuntu**: `sudo apt install ./Trident-<version>-linux-amd64.deb`; installing a newer
   .deb the same way upgrades it.
 - **Any Linux** (glibc 2.35 or newer): `chmod +x Trident-<version>-x86_64.AppImage` and run it, or
-  extract `Trident-<version>-linux-x86_64.tar.gz` into `~/.local` (it holds `bin/` and `share/`).
+  unpack the tarball into `~/.local`:
+  `tar xzf Trident-<version>-linux-x86_64.tar.gz -C ~/.local --strip-components=1`.
   The app menu entry runs `trident` from your login `PATH`, so log out and back in if `~/.local/bin`
   was not there before.
 
