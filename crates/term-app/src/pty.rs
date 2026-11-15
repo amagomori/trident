@@ -1173,7 +1173,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let mut pty = Pty::spawn(&[], &env, 80, 24, (8.0, 16.0), |_| {}, |_| {}).unwrap();
+        let mut pty = Pty::spawn(&[], &env, None, 80, 24, (8.0, 16.0), |_| {}, |_| {}).unwrap();
         assert_eq!(pty.output.probe.login.as_deref(), Some("-myshell"));
         let wait_for = |pty: &mut Pty, running: bool| {
             let deadline = Instant::now() + Duration::from_secs(10);
