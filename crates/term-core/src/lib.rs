@@ -824,16 +824,31 @@ impl Terminal {
     /// Feed bytes from the shell.
     pub fn advance(&mut self, bytes: &[u8]) {
         let mut parser = std::mem::take(&mut self.parser);
-        match self.ghost_split(bytes) {
-            Some(split) => {
-                self.advance_ghost(&mut parser, &bytes[..split]);
-                self.advance_bytes(&mut parser, &bytes[split..]);
+        let ground = self.parser_ground;
+        let mut rest = bytes;
+        let mut split = None;
+        match self.ghost_plan(bytes) {
+            ghost::Plan::Ghost(at) => split = Some(at),
+            ghost::Plan::Tail(at) => {
+                let (head, tail) = bytes.split_at(at);
+                self.advance_bytes(&mut parser, head);
+                self.sync_cursor_row();
+                self.parser_ground = ghost::ends_in_ground(self.parser_ground, head);
+                rest = tail;
+                split = self.ghost_split(rest);
             }
-            None => self.advance_bytes(&mut parser, bytes),
+            ghost::Plan::Built => {}
+        }
+        match split {
+            Some(split) => {
+                self.advance_ghost(&mut parser, &rest[..split]);
+                self.advance_bytes(&mut parser, &rest[split..]);
+            }
+            None => self.advance_bytes(&mut parser, rest),
         }
         self.parser = parser;
         self.sync_cursor_row();
-        self.parser_ground = ghost::ends_in_ground(self.parser_ground, bytes);
+        self.parser_ground = ghost::ends_in_ground(ground, bytes);
         self.print_state.disarm_clear();
     }
 
