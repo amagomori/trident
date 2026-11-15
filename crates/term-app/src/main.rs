@@ -69,6 +69,17 @@ const DEFAULT_FONT_SIZE: f32 = 14.0;
 const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
 const WORKING_DIRECTORY: &str = "TERMINAL_WORKING_DIRECTORY";
 const WINDOW_CELLS: &str = "TERMINAL_WINDOW_CELLS";
+const REMOVE_ON_EXIT: &str = "TERMINAL_REMOVE_ON_EXIT";
+
+/// A file this window removes when it exits, such as the output a pager window shows.
+static REMOVE_ON_EXIT_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn exit(code: i32) -> ! {
+    if let Some(path) = REMOVE_ON_EXIT_PATH.get() {
+        let _ = std::fs::remove_file(path);
+    }
+    std::process::exit(code)
+}
 /// Bounds how long startup waits for the portal's color scheme before the
 /// first PTY output is parsed; the read overlaps window and GPU setup.
 #[cfg(target_os = "linux")]
@@ -831,14 +842,15 @@ fn toggled_fullscreen(current: Option<Fullscreen>) -> Option<Fullscreen> {
 }
 
 /// Starts another window of this executable with `args`, reporting its startup errors
-/// and exit status under `label`, then removes `remove_after` once it exits.
+/// and exit status under `label`. The window removes `remove_on_exit` when it exits, so
+/// the file outlives this window.
 fn open_window(
     label: &'static str,
     args: Vec<std::ffi::OsString>,
     working_directory: Option<PathBuf>,
-    remove_after: Option<PathBuf>,
+    remove_on_exit: Option<PathBuf>,
 ) {
-    let cleanup = remove_after.clone();
+    let cleanup = remove_on_exit.clone();
     let spawned = std::thread::Builder::new()
         .name(label.replace(' ', "-"))
         .spawn(move || {
@@ -855,6 +867,9 @@ fn open_window(
                 }
                 if let Some(dir) = working_directory {
                     command.env(WORKING_DIRECTORY, dir);
+                }
+                if let Some(path) = &remove_on_exit {
+                    command.env(REMOVE_ON_EXIT, path);
                 }
                 command.spawn()
             });
@@ -880,10 +895,10 @@ fn open_window(
                 }
                 Err(error) => {
                     let _ = writeln!(std::io::stderr(), "{label}: {error}");
+                    if let Some(path) = remove_on_exit {
+                        let _ = std::fs::remove_file(path);
+                    }
                 }
-            }
-            if let Some(path) = remove_after {
-                let _ = std::fs::remove_file(path);
             }
         });
     if let Err(error) = spawned {
@@ -2640,7 +2655,7 @@ impl App {
             if self.startup_stderr {
                 if let Err(error) = finish_startup_stderr() {
                     let _ = writeln!(std::io::stderr(), "trident: startup stderr: {error}");
-                    std::process::exit(1);
+                    exit(1);
                 }
                 self.startup_stderr = false;
             }
@@ -4258,6 +4273,11 @@ fn main() {
         std::env::remove_var(WORKING_DIRECTORY);
         std::env::remove_var(WINDOW_CELLS);
     }
+    if let Some(path) = std::env::var_os(REMOVE_ON_EXIT) {
+        let _ = REMOVE_ON_EXIT_PATH.set(path.into());
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(REMOVE_ON_EXIT) };
+    }
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
@@ -4272,26 +4292,27 @@ fn main() {
         },
         Err(e) => {
             diag!("trident: {e}");
-            std::process::exit(2);
+            exit(2);
         }
     };
     let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
         Ok(l) => l,
         Err(e) => {
             diag!("trident: cannot start event loop: {e}");
-            std::process::exit(1);
+            exit(1);
         }
     };
     let mut app = App::new(options, event_loop.create_proxy());
     app.startup_stderr = startup_stderr;
     if let Err(e) = event_loop.run_app(&mut app) {
         diag!("trident: {e}");
-        std::process::exit(1);
+        exit(1);
     }
     if let Some(e) = app.error {
         diag!("trident: {e}");
-        std::process::exit(1);
+        exit(1);
     }
+    exit(0);
 }
 
 #[cfg(test)]
