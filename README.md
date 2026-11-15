@@ -22,7 +22,8 @@ Download a build from [Releases](https://github.com/amagomori/terminal/releases)
 - **Debian/Ubuntu**: `sudo apt install ./Trident-<version>-linux-amd64.deb`; installing a newer
   .deb the same way upgrades it.
 - **Any Linux** (glibc 2.35 or newer): `chmod +x Trident-<version>-x86_64.AppImage` and run it, or
-  extract `Trident-<version>-linux-x86_64.tar.gz` into `~/.local` (it holds `bin/` and `share/`).
+  unpack the tarball into `~/.local`:
+  `tar xzf Trident-<version>-linux-x86_64.tar.gz -C ~/.local --strip-components=1`.
 
 `SHA256SUMS` lists every file's checksum (`sha256sum -c SHA256SUMS`).
 
