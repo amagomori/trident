@@ -1,4 +1,4 @@
-use crate::{Flags, Point, Terminal};
+use crate::{Cell, Color, Flags, Point, Terminal};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
@@ -16,7 +16,9 @@ impl Link {
     }
 }
 
-/// OSC 8 `(id, uri)` pairs, indexed from 1, stored in one buffer. Recently seen
+/// OSC 8 `(id, uri)` pairs with the SGR 58 underline color drawn under them, indexed from 1,
+/// stored in one buffer. A cell's `hyperlink` indexes it, so an underline color costs the cell
+/// no space; an entry with an empty URI only colors the underline. Recently seen
 /// pairs are found through a small direct-mapped cache, so repeated links share
 /// an index without a per-sequence hash-table probe; a pair evicted from the
 /// cache may be stored again under a new index. Indices no cell references are
@@ -37,6 +39,7 @@ struct Span {
     start: usize,
     id_len: u32,
     uri_len: u32,
+    underline: Option<Color>,
 }
 
 const RECENT_BITS: u32 = 12;
@@ -59,9 +62,16 @@ struct Slot {
     tag: u32,
 }
 
-fn recent_slot(id: &[u8], uri: &[u8]) -> Slot {
+fn recent_slot(id: &[u8], uri: &[u8], underline: Option<Color>) -> Slot {
     const K: u64 = 0x517c_c1b7_2722_0a95;
-    let mut hash = id.len() as u64;
+    let color = match underline {
+        None => 0,
+        Some(Color::Rgb(r, g, b)) => 1 << 32 | u64::from_le_bytes([r, g, b, 0, 0, 0, 0, 0]),
+        Some(Color::Indexed(i)) => 2 << 32 | u64::from(i),
+        Some(Color::DefaultFg) => 3 << 32,
+        Some(Color::DefaultBg) => 4 << 32,
+    };
+    let mut hash = (id.len() as u64 ^ color.rotate_left(17)).wrapping_mul(K);
     for part in [id, uri] {
         let (words, rest) = part.as_chunks::<8>();
         for word in words {
@@ -99,23 +109,40 @@ impl LinkTable {
         ))
     }
 
-    fn find(&self, id: &[u8], uri: &[u8], slot: Slot) -> Option<u16> {
-        let entry = *self.recent.get(slot.at)?;
-        let index = entry as u16;
-        (entry >> 16 == slot.tag && self.get(index) == Some((id, uri))).then_some(index)
+    /// The underline color of the cells referencing `index`.
+    pub(crate) fn underline(&self, index: u16) -> Option<Color> {
+        self.spans.get((index as usize).checked_sub(1)?)?.underline
     }
 
-    fn position(&mut self, id: &[u8], uri: &[u8], slot: Slot) -> Option<u16> {
-        let index = (1..=self.len() as u16).find(|&index| self.get(index) == Some((id, uri)))?;
+    fn matches(&self, index: u16, id: &[u8], uri: &[u8], underline: Option<Color>) -> bool {
+        self.get(index) == Some((id, uri)) && self.underline(index) == underline
+    }
+
+    fn find(&self, id: &[u8], uri: &[u8], underline: Option<Color>, slot: Slot) -> Option<u16> {
+        let entry = *self.recent.get(slot.at)?;
+        let index = entry as u16;
+        (entry >> 16 == slot.tag && self.matches(index, id, uri, underline)).then_some(index)
+    }
+
+    fn position(
+        &mut self,
+        id: &[u8],
+        uri: &[u8],
+        underline: Option<Color>,
+        slot: Slot,
+    ) -> Option<u16> {
+        let index =
+            (1..=self.len() as u16).find(|&index| self.matches(index, id, uri, underline))?;
         self.recent[slot.at] = slot.tag << 16 | index as u32;
         Some(index)
     }
 
-    fn insert(&mut self, id: &[u8], uri: &[u8], slot: Slot) -> u16 {
+    fn insert(&mut self, id: &[u8], uri: &[u8], underline: Option<Color>, slot: Slot) -> u16 {
         let span = Span {
             start: self.bytes.len(),
             id_len: id.len() as u32,
             uri_len: uri.len() as u32,
+            underline,
         };
         let index = match self.free.pop() {
             Some(index) => {
@@ -149,11 +176,12 @@ impl LinkTable {
                 bytes.extend_from_slice(&self.bytes[span.start..span.start + len]);
                 span.start = start;
             } else {
-                // An empty URI is never interned, so a freed span never matches.
+                // An entry without a URI always has an underline color, so a freed span never matches.
                 *span = Span {
                     start: 0,
                     id_len: 0,
                     uri_len: 0,
+                    underline: None,
                 };
                 self.free.push(at as u16 + 1);
             }
@@ -172,9 +200,10 @@ impl LinkTable {
         for index in 1..=old.len() as u16 {
             if used[index as usize] {
                 let (id, uri) = old.get(index).unwrap();
-                remap[index as usize] = *kept
-                    .entry((id, uri))
-                    .or_insert_with(|| self.insert(id, uri, recent_slot(id, uri)));
+                let underline = old.underline(index);
+                remap[index as usize] = *kept.entry((id, uri, underline)).or_insert_with(|| {
+                    self.insert(id, uri, underline, recent_slot(id, uri, underline))
+                });
             }
         }
         remap
@@ -182,9 +211,20 @@ impl LinkTable {
 }
 
 impl Terminal {
-    pub(crate) fn intern_link(&mut self, id: &[u8], uri: &[u8], limit: usize) -> u16 {
-        let slot = recent_slot(id, uri);
-        if let Some(index) = self.links.find(id, uri, slot) {
+    /// The index cells store for the OSC 8 link `(id, uri)` underlined in `underline`;
+    /// 0 for no link and no underline color, or when the table is full.
+    pub(crate) fn intern_link(
+        &mut self,
+        id: &[u8],
+        uri: &[u8],
+        underline: Option<Color>,
+        limit: usize,
+    ) -> u16 {
+        if uri.is_empty() && underline.is_none() {
+            return 0;
+        }
+        let slot = recent_slot(id, uri, underline);
+        if let Some(index) = self.links.find(id, uri, underline, slot) {
             return index;
         }
         if self.links.needs_release(limit) {
@@ -197,7 +237,7 @@ impl Terminal {
             self.release_links(keep);
             if self.links.is_full(limit) {
                 self.compact_links();
-                if let Some(index) = self.links.position(id, uri, slot) {
+                if let Some(index) = self.links.position(id, uri, underline, slot) {
                     return index;
                 }
             }
@@ -212,7 +252,27 @@ impl Terminal {
         if self.links.is_full(limit) {
             return 0;
         }
-        self.links.insert(id, uri, slot)
+        self.links.insert(id, uri, underline, slot)
+    }
+
+    /// The SGR 58 underline color of `cell`; `None` draws the underline in the text color.
+    pub fn underline_color(&self, cell: &Cell) -> Option<Color> {
+        if cell.hyperlink == 0 {
+            None
+        } else {
+            self.links.underline(cell.hyperlink)
+        }
+    }
+
+    /// Sets the underline color of the cursor's template, keeping its link.
+    pub(crate) fn set_underline_color(&mut self, underline: Option<Color>) {
+        let index = self.cursor.template.hyperlink;
+        if index == 0 && underline.is_none() || self.links.underline(index) == underline {
+            return;
+        }
+        let (id, uri) = self.links.get(index).unwrap_or_default();
+        let (id, uri) = (id.to_vec(), uri.to_vec());
+        self.cursor.template.hyperlink = self.intern_link(&id, &uri, underline, u16::MAX as usize);
     }
 
     /// Releases the links no cell references. Once `keep` distinct links are referenced, walking
@@ -280,7 +340,11 @@ impl Terminal {
             last += 1;
         }
         let index = self.line(point.line).cells[point.col].hyperlink;
-        if index != 0 {
+        if self
+            .links
+            .get(index)
+            .is_some_and(|(_, uri)| !uri.is_empty())
+        {
             let cells: Vec<_> = (first..=last)
                 .flat_map(|line| {
                     self.line(line)
@@ -643,6 +707,31 @@ mod tests {
     }
 
     #[test]
+    fn underline_color_keeps_the_link() {
+        let mut t = Terminal::new(8, 1);
+        t.advance(b"\x1b[58:5:1mA\x1b]8;;https://e\x07B\x1b[58:5:2mC\x1b[0mD\x1b]8;;\x07E");
+        let row = t.viewport_row(0).clone();
+        assert!(t.link_at(Point { line: 0, col: 0 }).is_none());
+        let link = t.link_at(Point { line: 0, col: 2 }).unwrap();
+        assert_eq!((link.start.col, link.end.col), (1, 3));
+        let colors: Vec<_> = row.cells[..5]
+            .iter()
+            .map(|c| t.underline_color(c))
+            .collect();
+        assert_eq!(
+            colors,
+            [
+                Some(Color::Indexed(1)),
+                Some(Color::Indexed(1)),
+                Some(Color::Indexed(2)),
+                None,
+                None
+            ]
+        );
+        assert_eq!(row.cells[4].hyperlink, 0);
+    }
+
+    #[test]
     fn malformed_osc() {
         let mut t = Terminal::new(8, 2);
         t.advance(b"\x1b]8\x07x\x1b]8;id=a\x07y");
@@ -655,7 +744,7 @@ mod tests {
 
     fn intern(t: &mut Terminal, id: usize, limit: usize) -> u16 {
         let (id, uri) = key(id);
-        t.intern_link(id.as_bytes(), uri.as_bytes(), limit)
+        t.intern_link(id.as_bytes(), uri.as_bytes(), None, limit)
     }
 
     #[test]
@@ -674,8 +763,8 @@ mod tests {
             assert_eq!(t.links.get(index), Some((k.as_bytes(), uri.as_bytes())));
         }
         assert!(t.links.len() < 2000);
-        let a = t.intern_link(b"", b"https://example.com/1", 2000);
-        let b = t.intern_link(b"1", b"https://example.com/", 2000);
+        let a = t.intern_link(b"", b"https://example.com/1", None, 2000);
+        let b = t.intern_link(b"1", b"https://example.com/", None, 2000);
         assert_ne!(a, b);
         assert_eq!(
             t.links.get(a),
@@ -691,9 +780,9 @@ mod tests {
             .enumerate()
         {
             t.primary.lines[0].cells[col].hyperlink =
-                t.links.insert(b"", uri, Slot { at: 0, tag: 0 });
+                t.links.insert(b"", uri, None, Slot { at: 0, tag: 0 });
         }
-        let index = t.intern_link(b"", b"https://a", 4);
+        let index = t.intern_link(b"", b"https://a", None, 4);
         assert_eq!(
             t.links.get(index),
             Some((b"".as_slice(), b"https://a".as_slice()))
@@ -703,14 +792,16 @@ mod tests {
         assert_eq!(cells[0].hyperlink, index);
         assert_eq!(cells[1].hyperlink, index);
         assert_eq!(cells[2].hyperlink, cells[3].hyperlink);
-        assert_eq!(t.intern_link(b"", b"https://a", 4), index);
+        assert_eq!(t.intern_link(b"", b"https://a", None, 4), index);
     }
 
     #[test]
     fn adjacent_runs_of_a_stored_twice_link_hover_together() {
         let mut t = Terminal::new(8, 2);
         t.advance(b"\x1b]8;id=a;https://a\x07ab\x1b]8;;\x07c");
-        let again = t.links.insert(b"a", b"https://a", Slot { at: 0, tag: 0 });
+        let again = t
+            .links
+            .insert(b"a", b"https://a", None, Slot { at: 0, tag: 0 });
         t.primary.lines[0].cells[2].hyperlink = again;
         let link = t.link_at(Point { line: 0, col: 2 }).unwrap();
         assert_eq!(link.uri, "https://a");
@@ -740,7 +831,7 @@ mod tests {
         for id in [1, 1, 3, 4, 5, 6, 7, 8] {
             let (k, uri) = key(id);
             let uri = if id == 1 { dup.clone() } else { uri };
-            t.links.insert(k.as_bytes(), uri.as_bytes(), slot);
+            t.links.insert(k.as_bytes(), uri.as_bytes(), None, slot);
         }
         t.primary.lines[1].cells[0].hyperlink = 1;
         let mut history = crate::Row::new(8, &crate::Cell::default());

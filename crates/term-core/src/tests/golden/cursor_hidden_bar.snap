@@ -1,5 +1,5 @@
 size=5x2 active=primary
-cursor row=0 col=2 visible=false shape=bar pending_wrap=false
+cursor row=0 col=2 visible=false shape=blinking-bar pending_wrap=false
 cursor attributes: fg=default-fg bg=default-bg flags=[]
 scroll_region=0..=1 history=0 display_offset=0
 primary:

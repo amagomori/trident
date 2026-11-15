@@ -97,6 +97,10 @@ const RESIZE_INTERVAL: Duration = Duration::from_millis(100);
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
 /// SGR 5 blinking text shows for one half period and hides for the next.
 const BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
+/// Half a cursor blink period.
+const CURSOR_BLINK_HALF: Duration = Duration::from_millis(530);
+/// A blinking cursor rests, visible and with no timer, this long after the last input.
+const CURSOR_BLINK_IDLE: Duration = Duration::from_secs(15);
 const EXIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
@@ -270,6 +274,10 @@ struct Session {
     redraw_at: Option<(Instant, Instant)>,
     target: Option<Instant>,
     sequence: usize,
+    /// When the cursor last restarted blinking: input or focus.
+    blink_since: Instant,
+    /// The next cursor blink flip.
+    cursor_blink_at: Option<Instant>,
     #[cfg(target_os = "linux")]
     presentation: Option<present_wayland::Feedback>,
     latency: Option<latency::Latency>,
@@ -525,6 +533,20 @@ fn defer_output(deferring: bool, since_frame: usize, queue_full: bool) -> bool {
 
 fn frame_wakeup(redraw_at: Option<Instant>, deferred: Option<Instant>) -> Option<Instant> {
     redraw_at.or_else(|| deferred.map(|since| since + MAX_DEFER))
+}
+
+/// Whether a cursor blinking since `since` shows at `now`, and when that next changes.
+fn cursor_blink(blinking: bool, since: Instant, now: Instant) -> (bool, Option<Instant>) {
+    let elapsed = now.saturating_duration_since(since);
+    if !blinking || elapsed >= CURSOR_BLINK_IDLE {
+        return (true, None);
+    }
+    let phase = elapsed.as_nanos() / CURSOR_BLINK_HALF.as_nanos();
+    let next = since + CURSOR_BLINK_HALF * (phase as u32 + 1);
+    (
+        phase.is_multiple_of(2),
+        Some(next.min(since + CURSOR_BLINK_IDLE)),
+    )
 }
 
 fn wake_deadline(
@@ -1082,6 +1104,8 @@ impl App {
             redraw_at: None,
             target: None,
             sequence: 0,
+            blink_since: Instant::now(),
+            cursor_blink_at: None,
             #[cfg(target_os = "linux")]
             presentation,
             synchronized_since: None,
@@ -1342,6 +1366,11 @@ impl App {
         .then(present_macos::arm_exit);
         let (blink_visible, blink_flip) = blink_phase(s.blink_epoch, started);
         s.renderer.blink_visible = blink_visible;
+        let blinking = s.term.cursor_blink && s.term.modes.show_cursor && self.focused;
+        let (cursor_visible, cursor_blink_at) =
+            cursor_blink(blinking, s.blink_since, Instant::now());
+        s.renderer.cursor_visible = cursor_visible;
+        s.cursor_blink_at = cursor_blink_at;
         let rendered = s.renderer.render(
             &s.term,
             &mut s.fonts,
@@ -1385,7 +1414,11 @@ impl App {
         }
         let visible_change = reset_view_for_input(&mut s.term, &mut s.scroll);
         s.pty.write(bytes);
-        if visible_change {
+        s.blink_since = Instant::now();
+        if visible_change
+            || !s.renderer.cursor_visible
+            || s.cursor_blink_at.is_none() && s.term.cursor_blink
+        {
             s.request_frame();
         }
     }
@@ -2514,6 +2547,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let poll = now + Duration::from_millis(100);
                 deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));
             }
+            if let Some(blink) = s.cursor_blink_at {
+                if now >= blink {
+                    s.cursor_blink_at = None;
+                    s.window.request_redraw();
+                } else {
+                    deadline = Some(deadline.map_or(blink, |deadline| deadline.min(blink)));
+                }
+            }
         }
         deadline = exit_wakeup(deadline, self.exit_deadline);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2549,6 +2590,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 if let Some(s) = &mut self.session {
+                    s.blink_since = Instant::now();
                     if !focused {
                         s.composition.clear();
                         if let Some(search) = &mut self.search {
@@ -4262,6 +4304,30 @@ mod tests {
         assert_eq!(
             wake_deadline(Some(now + MAX_DEFER), None, Some(now)),
             Some(now)
+        );
+    }
+
+    #[test]
+    fn cursor_blink_flips_then_rests_when_idle() {
+        let since = Instant::now();
+        assert_eq!(cursor_blink(false, since, since), (true, None));
+        assert_eq!(
+            cursor_blink(true, since, since),
+            (true, Some(since + CURSOR_BLINK_HALF))
+        );
+        let hidden = since + CURSOR_BLINK_HALF + Duration::from_millis(1);
+        assert_eq!(
+            cursor_blink(true, since, hidden),
+            (false, Some(since + CURSOR_BLINK_HALF * 2))
+        );
+        let last = since + CURSOR_BLINK_IDLE - Duration::from_millis(1);
+        assert_eq!(
+            cursor_blink(true, since, last).1,
+            Some(since + CURSOR_BLINK_IDLE)
+        );
+        assert_eq!(
+            cursor_blink(true, since, since + CURSOR_BLINK_IDLE),
+            (true, None)
         );
     }
 
