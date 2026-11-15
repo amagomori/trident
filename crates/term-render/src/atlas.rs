@@ -8,6 +8,7 @@ use std::collections::HashMap;
 pub struct GlyphKey {
     pub c: char,
     pub style: Style,
+    /// Cells the glyph spans; 0 for a mark drawn over another glyph (see `Fonts::rasterize`).
     pub cells: u8,
 }
 

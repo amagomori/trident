@@ -483,7 +483,7 @@ impl Renderer {
                         let key = GlyphKey {
                             c,
                             style,
-                            cells: if index == 0 { cells as u8 } else { 1 },
+                            cells: if index == 0 { cells as u8 } else { 0 },
                         };
                         match self.atlas.get(key, fonts, &self.device, &self.queue) {
                             Ok(Some(g)) => {
