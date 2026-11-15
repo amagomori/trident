@@ -224,11 +224,15 @@ impl Perform for Terminal {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.reports.status_request =
             (!ignore && intermediates == b"$" && action == 'q').then(Vec::new);
     }
 
+    #[cold]
+    #[inline(never)]
     fn put(&mut self, byte: u8) {
         if let Some(request) = &mut self.reports.status_request
             && request.len() < 8
@@ -237,6 +241,8 @@ impl Perform for Terminal {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn unhook(&mut self) {
         if let Some(request) = self.reports.status_request.take() {
             self.report_setting(&request);
@@ -374,6 +380,8 @@ impl Terminal {
         })
     }
 
+    #[cold]
+    #[inline(never)]
     fn report_private_mode(&mut self, mode: u16) {
         let status = self
             .private_mode(mode)
