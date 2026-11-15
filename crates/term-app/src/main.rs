@@ -1561,6 +1561,8 @@ impl App {
             self.config = next;
             #[cfg(target_os = "macos")]
             close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
+            #[cfg(target_os = "macos")]
+            ime::set_command_chords(&self.config.bindings);
             self.watch_appearance();
             if let Some(s) = &mut self.session {
                 s.pty
@@ -2232,6 +2234,10 @@ impl ApplicationHandler<UserEvent> for App {
                     &session.window,
                     session.pty.running_program_check(),
                 );
+                #[cfg(target_os = "macos")]
+                ime::set_command_chords(&self.config.bindings);
+                #[cfg(target_os = "macos")]
+                ime::forward_command_chords(&session.window);
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
                 self.process_output();
