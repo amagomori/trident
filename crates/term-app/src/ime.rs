@@ -187,11 +187,109 @@ unsafe fn takes_from_composition(
     }
 }
 
-/// Lets bound Command chords through winit's view while a composition is active.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const PERFORM_KEY_EQUIVALENT_TYPES: &std::ffi::CStr = c"B@:@";
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+const PERFORM_KEY_EQUIVALENT_TYPES: &std::ffi::CStr = c"c@:@";
+
+/// AppKit offers a Command key to the key window's views, then to the menu bar, and only then
+/// sends it to `keyDown:`, so a Window menu item (Minimize's Command-M, which AppKit assigns
+/// even when the item has none) took bound chords away from `config.bindings`. This override
+/// keeps the order Trident had before it had a Window menu: a bound chord goes to the app menu
+/// (Quit, Hide, Close Window), else straight to the view as a key down.
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn perform_key_equivalent(
+    this: *mut objc2::runtime::AnyObject,
+    _cmd: objc2::runtime::Sel,
+    event: *mut objc2::runtime::AnyObject,
+) -> objc2::runtime::Bool {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Bool};
+    // SAFETY: AppKit calls this on the main thread with a live view and NSEvent.
+    unsafe {
+        let this: &AnyObject = &*this;
+        if !event.is_null() && in_key_window(this) && is_bound_command_key(&*event) {
+            if let Some(app_menu) = app_menu() {
+                let handled: Bool = msg_send![&*app_menu, performKeyEquivalent: event];
+                if handled.as_bool() {
+                    return Bool::YES;
+                }
+            }
+            let _: () = msg_send![this, keyDown: event];
+            return Bool::YES;
+        }
+        match VIEW_SUPERCLASS.get() {
+            Some(superclass) => msg_send![super(this, superclass), performKeyEquivalent: event],
+            None => Bool::NO,
+        }
+    }
+}
+
+/// The menu under the app's name, the first one in the menu bar.
+///
+/// # Safety
+/// Must be called on the main thread.
+#[cfg(target_os = "macos")]
+unsafe fn app_menu() -> Option<objc2::rc::Retained<objc2::runtime::AnyObject>> {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    unsafe {
+        let app: Option<Retained<AnyObject>> = msg_send![class!(NSApplication), sharedApplication];
+        let menubar: Option<Retained<AnyObject>> = msg_send![&*app?, mainMenu];
+        let menubar = menubar?;
+        let count: isize = msg_send![&*menubar, numberOfItems];
+        if count == 0 {
+            return None;
+        }
+        let item: Option<Retained<AnyObject>> = msg_send![&*menubar, itemAtIndex: 0isize];
+        msg_send![&*item?, submenu]
+    }
+}
+
+/// # Safety
+/// Must be called on the main thread with a live view.
+#[cfg(target_os = "macos")]
+unsafe fn in_key_window(view: &objc2::runtime::AnyObject) -> bool {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    unsafe {
+        let window: Option<Retained<AnyObject>> = msg_send![view, window];
+        window.is_some_and(|window| msg_send![&*window, isKeyWindow])
+    }
+}
+
+/// # Safety
+/// Must be called on the main thread with a live NSEvent.
+#[cfg(target_os = "macos")]
+unsafe fn is_bound_command_key(event: &objc2::runtime::AnyObject) -> bool {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2_foundation::NSString;
+    const NS_EVENT_TYPE_KEY_DOWN: usize = 10;
+    unsafe {
+        let kind: usize = msg_send![event, type];
+        if kind != NS_EVENT_TYPE_KEY_DOWN {
+            return false;
+        }
+        let flags: usize = msg_send![event, modifierFlags];
+        let unmodified: Option<Retained<NSString>> =
+            msg_send![event, charactersByApplyingModifiers: 0usize];
+        let Some(unmodified) = unmodified else {
+            return false;
+        };
+        let unmodified = unmodified.to_string();
+        COMMAND_CHORDS.with_borrow(|chords| is_command_chord(chords, flags, &unmodified))
+    }
+}
+
+/// Lets bound Command chords through winit's view while a composition is active, and ahead
+/// of the Window menu's key equivalents.
 #[cfg(target_os = "macos")]
 #[cold]
 pub fn forward_command_chords(window: &winit::window::Window) {
-    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
     use objc2::sel;
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -215,6 +313,16 @@ pub fn forward_command_chords(window: &winit::window::Window) {
             sel!(interpretKeyEvents:),
             imp,
             c"v@:@".as_ptr(),
+        );
+        let imp: Imp = std::mem::transmute(
+            perform_key_equivalent
+                as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool,
+        );
+        objc2::ffi::class_addMethod(
+            class as *const AnyClass as *mut AnyClass,
+            sel!(performKeyEquivalent:),
+            imp,
+            PERFORM_KEY_EQUIVALENT_TYPES.as_ptr(),
         );
     }
 }
@@ -327,6 +435,18 @@ mod tests {
         assert!(!is_command_chord(&chords, COMMAND, "f"));
         assert!(is_command_chord(&chords, COMMAND | SHIFT, "\r"));
         assert!(!chords.iter().any(|chord| chord.modifiers & SUPER == 0));
+    }
+
+    #[test]
+    fn a_bound_super_m_is_taken_from_the_window_menus_minimize() {
+        let mut bindings = crate::config::default_bindings_for(true);
+        let chords = command_chords(&bindings);
+        assert!(!is_command_chord(&chords, COMMAND, "m"));
+        bindings.insert(Chord::parse("super+m").unwrap(), Action::Search);
+        let chords = command_chords(&bindings);
+        assert!(is_command_chord(&chords, COMMAND, "m"));
+        assert!(is_command_chord(&chords, COMMAND, "M"));
+        assert!(!is_command_chord(&chords, COMMAND | OPTION, "m"));
     }
 
     #[test]

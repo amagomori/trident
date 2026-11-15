@@ -122,18 +122,27 @@ unsafe extern "C-unwind" fn new_window_for_tab(_: *mut AnyObject, _: Sel, _: *mu
     });
 }
 
-/// The Window menu's own items as (title, action), `None` for a separator. None has a key
-/// equivalent, so every chord stays with `config.bindings`. AppKit adds the tab items (Show Tab Bar, Show All Tabs, Show Next/Previous Tab, Move Tab
-/// to New Window, Merge All Windows) and the window list to it.
-const WINDOW_MENU: [Option<(&str, &std::ffi::CStr)>; 4] = [
+/// The Window menu's items as (title, action), `None` for a separator. None has a key
+/// equivalent, so every chord stays with `config.bindings`. The tab items are the
+/// standard NSWindow tab actions, so AppKit validates them, retitles Show/Hide Tab Bar
+/// and sends them to the key window; it only adds the window list to the menu itself.
+const WINDOW_MENU: [Option<(&str, &std::ffi::CStr)>; 12] = [
     Some(("Minimize", c"performMiniaturize:")),
     Some(("Zoom", c"performZoom:")),
+    None,
+    Some(("Show Tab Bar", c"toggleTabBar:")),
+    Some(("Show All Tabs", c"toggleTabOverview:")),
+    None,
+    Some(("Show Previous Tab", c"selectPreviousTab:")),
+    Some(("Show Next Tab", c"selectNextTab:")),
+    Some(("Move Tab to New Window", c"moveTabToNewWindow:")),
+    Some(("Merge All Windows", c"mergeAllWindows:")),
     None,
     Some(("Bring All to Front", c"arrangeInFront:")),
 ];
 
-/// Adds a Window menu to the menu bar and makes it the app's windows menu, which is where
-/// AppKit puts the native tab commands. Needs winit's default menu to be installed.
+/// Adds the Window menu, with the native tab commands, to the menu bar and makes it the
+/// app's windows menu. Needs winit's default menu to be installed.
 pub fn install_window_menu() {
     // SAFETY: called on the main thread once the event loop runs; every message matches the
     // AppKit signature of NSApplication, NSMenu and NSMenuItem, and each action is a
@@ -191,6 +200,26 @@ pub fn neighbor_in(order: &[usize], closing: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_menu_offers_every_native_tab_command_without_key_equivalents() {
+        let actions: Vec<_> = WINDOW_MENU
+            .into_iter()
+            .flatten()
+            .map(|(_, action)| action.to_str().unwrap())
+            .collect();
+        for action in [
+            "toggleTabBar:",
+            "toggleTabOverview:",
+            "selectNextTab:",
+            "selectPreviousTab:",
+            "moveTabToNewWindow:",
+            "mergeAllWindows:",
+            "performMiniaturize:",
+        ] {
+            assert!(actions.contains(&action), "Window menu lacks {action}");
+        }
+    }
 
     #[test]
     fn stepping_follows_the_tab_bar_order_and_wraps() {
