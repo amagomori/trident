@@ -1,0 +1,25 @@
+[package]
+name = "term-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+term-core = { path = "../crates/term-core" }
+
+# Outside the main workspace: cargo-fuzz builds it with nightly and sanitizer flags.
+[workspace]
+
+[[bin]]
+name = "terminal"
+path = "fuzz_targets/terminal.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

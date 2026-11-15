@@ -7,6 +7,8 @@ pub mod search;
 
 mod ascii;
 mod cell;
+#[doc(hidden)]
+pub mod fuzz;
 mod ghost;
 mod kitty;
 mod links;

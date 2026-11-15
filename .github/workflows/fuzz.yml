@@ -1,0 +1,52 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Fuzzing time in seconds
+        default: "300"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  terminal:
+    name: parser and grid
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Restore corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/terminal
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          mkdir -p corpus/terminal
+          cp ../crates/term-core/tests/fuzz/* corpus/terminal/
+          cargo fuzz run terminal corpus/terminal -- \
+            -dict=terminal.dict -max_total_time=${{ inputs.seconds || 300 }} \
+            -max_len=16384 -rss_limit_mb=2048 -timeout=30
+      - name: Save corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/terminal
+          key: fuzz-corpus-${{ github.run_id }}
+      - name: Upload crash
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
