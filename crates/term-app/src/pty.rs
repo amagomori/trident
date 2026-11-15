@@ -234,39 +234,108 @@ fn size(cols: usize, rows: usize, cell_w: f32, cell_h: f32) -> PtySize {
     }
 }
 
-/// Whether `args` (argv) is a shell started for its prompt: no `-c` command (alone or in a
-/// short option cluster such as `-lc`, or `--command`) and no script or other operand, apart
-/// from the values of the shell options that take one (`-o vi`, `-O extglob`, `--rcfile f`).
-/// Such a shell holding the foreground sits at its prompt; `sh -c make` or `bash build.sh`
-/// runs a command.
+/// How a shell's argv asks it to run something other than its prompt.
+struct ShellArgs {
+    /// The short option that runs a command string (`-c`).
+    command: char,
+    /// Short options that take the next argument as their value (`-o vi`).
+    short_values: &'static str,
+    /// Long options (without `--`) that run a command string.
+    long_commands: &'static [&'static str],
+    /// Long options (without `--`) that take a value, after `=` or as the next argument.
+    long_values: &'static [&'static str],
+}
+
+const POSIX_SHELL_ARGS: ShellArgs = ShellArgs {
+    command: 'c',
+    short_values: "o",
+    long_commands: &[],
+    long_values: &[],
+};
+
+/// The argv grammar of the shells whose options are modelled.
+fn shell_args(shell: &str) -> Option<ShellArgs> {
+    Some(match shell {
+        "bash" => ShellArgs {
+            short_values: "oO",
+            long_values: &["rcfile", "init-file"],
+            ..POSIX_SHELL_ARGS
+        },
+        "zsh" => ShellArgs {
+            long_values: &["emulate"],
+            ..POSIX_SHELL_ARGS
+        },
+        "sh" | "ash" | "dash" | "ksh" | "mksh" | "oksh" | "yash" | "osh" | "ysh" => {
+            POSIX_SHELL_ARGS
+        }
+        "fish" => ShellArgs {
+            command: 'c',
+            short_values: "Cdo",
+            long_commands: &["command"],
+            long_values: &[
+                "init-command",
+                "debug",
+                "debug-output",
+                "features",
+                "profile",
+                "profile-startup",
+            ],
+        },
+        _ => return None,
+    })
+}
+
+/// Whether `args` (argv) is a shell started for its prompt rather than for a command string
+/// (`-c`, also inside a cluster such as `-lc`, or fish's `--command`) or a script operand
+/// (`bash build.sh`, anything after `--`). Options are case-sensitive, and the values of
+/// options that take one (`-o vi`, `-O extglob`, `--rcfile f`, fish `-C cmd`) are skipped.
+/// Shells whose options are not modelled count as idle only with no options other than
+/// `-l`, `-i`, `--login` and `--interactive`.
 fn is_idle_shell(args: &[String]) -> bool {
     let Some((program, options)) = args.split_first() else {
         return false;
     };
-    if !is_shell(program) {
+    let Some(shell) = shell_name(program) else {
         return false;
-    }
-    let mut options = options.iter().map(|arg| arg.to_ascii_lowercase());
+    };
+    let Some(grammar) = shell_args(shell) else {
+        return options
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "-l" | "-i" | "--login" | "--interactive"));
+    };
+    let mut options = options.iter();
     while let Some(arg) = options.next() {
-        let takes_value = matches!(
-            arg.as_str(),
-            "-o" | "+o" | "--rcfile" | "--init-file" | "--config"
-        );
-        let option = match arg.strip_prefix("--") {
-            Some(long) => !long.starts_with("command"),
-            None => arg
-                .strip_prefix(['-', '+'])
-                .is_some_and(|short| !short.is_empty() && !short.contains('c')),
-        };
-        if !option || (takes_value && options.next().is_none()) {
+        if arg == "--" || arg == "-" {
+            return options.next().is_none();
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, value) = long
+                .split_once('=')
+                .map_or((long, None), |(n, v)| (n, Some(v)));
+            if grammar.long_commands.contains(&name) {
+                return false;
+            }
+            if grammar.long_values.contains(&name) && value.is_none() && options.next().is_none() {
+                return false;
+            }
+            continue;
+        }
+        let Some(flags) = arg.strip_prefix(['-', '+']) else {
             return false;
+        };
+        for flag in flags.chars() {
+            if flag == grammar.command
+                || (grammar.short_values.contains(flag) && options.next().is_none())
+            {
+                return false;
+            }
         }
     }
     true
 }
 
-/// Whether `program` names a shell, which sitting at its prompt runs nothing.
-fn is_shell(program: &str) -> bool {
+/// The shell `program` names (`/bin/bash`, `-zsh` for a login shell), if it is one.
+fn shell_name(program: &str) -> Option<&str> {
     let name = std::path::Path::new(program)
         .file_name()
         .and_then(|name| name.to_str())
@@ -292,6 +361,7 @@ fn is_shell(program: &str) -> bool {
             | "osh"
             | "ysh"
     )
+    .then_some(name)
 }
 
 impl Pty {
@@ -700,30 +770,104 @@ mod tests {
         wait_for(&mut pty, false);
     }
 
+    /// Every argv form QA tried on #71 and #60 (as the shell sees it after `env` or a path),
+    /// plus the option forms the parser models.
+    #[test]
+    fn shell_argv_is_idle_only_at_a_prompt() {
+        #[rustfmt::skip]
+        let cases: &[(bool, &[&str])] = &[
+            (true, &["bash"]),
+            (true, &["-bash"]),
+            (true, &["/opt/homebrew/bin/bash"]),
+            (true, &["bash", "--norc"]),
+            (true, &["bash", "--norc", "--noprofile", "--noediting", "-i"]),
+            (true, &["bash", "-l"]),
+            (true, &["bash", "--login"]),
+            (true, &["bash", "-i"]),
+            (true, &["bash", "-il"]),
+            (true, &["bash", "--rcfile", "rc"]),
+            (true, &["bash", "--rcfile=rc"]),
+            (true, &["bash", "--init-file", "rc", "-i"]),
+            (true, &["bash", "-O", "extglob", "-i"]),
+            (true, &["bash", "+O", "extglob"]),
+            (true, &["bash", "-o", "vi"]),
+            (true, &["bash", "-o", "vi", "-i"]),
+            (true, &["bash", "+o", "vi"]),
+            (true, &["bash", "-io", "vi"]),
+            (true, &["bash", "-C"]),
+            (true, &["bash", "-Ci"]),
+            (true, &["bash", "--"]),
+            (true, &["sh"]),
+            (true, &["/bin/sh"]),
+            (true, &["sh", "-i"]),
+            (true, &["dash"]),
+            (true, &["dash", "-l"]),
+            (true, &["zsh"]),
+            (true, &["-zsh"]),
+            (true, &["zsh", "-l"]),
+            (true, &["/bin/zsh", "-l"]),
+            (true, &["zsh", "-C"]),
+            (true, &["zsh", "-o", "nonomatch"]),
+            (true, &["zsh", "--emulate", "sh"]),
+            (true, &["fish"]),
+            (true, &["/usr/bin/fish", "-l"]),
+            (true, &["fish", "--login"]),
+            (true, &["fish", "-i"]),
+            (true, &["fish", "-C", "set x 1"]),
+            (true, &["fish", "--init-command=set x 1"]),
+            (true, &["fish", "--init-command", "set x 1"]),
+            (true, &["fish", "--no-config"]),
+            (true, &["nu"]),
+            (true, &["pwsh", "-l"]),
+            (false, &[]),
+            (false, &["vim"]),
+            (false, &["bashtop"]),
+            (false, &["sh", "-c", "sleep 30"]),
+            (false, &["/bin/sh", "-c", "sleep 603 | cat"]),
+            (false, &["bash", "-c", "sleep 605 && echo done"]),
+            (false, &["bash", "-lc", "sleep 607; echo done"]),
+            (false, &["bash", "-ic", "make"]),
+            (false, &["bash", "-Cc", "make"]),
+            (false, &["bash", "-C", "-c", "make"]),
+            (false, &["bash", "-i", "-c", "make"]),
+            (false, &["bash", "-O", "extglob", "-c", "make"]),
+            (false, &["bash", "-o", "vi", "-c", "make"]),
+            (false, &["bash", "-o", "pipefail", "-c", "sleep 610 | cat"]),
+            (false, &["bash", "--rcfile", "rc", "-c", "make"]),
+            (false, &["bash", "--norc", "-c", "make"]),
+            (false, &["bash", "s.sh"]),
+            (false, &["bash", "/home/u/qa71/h/s.sh"]),
+            (false, &["bash", "-o", "vi", "s.sh"]),
+            (false, &["bash", "--", "s.sh"]),
+            (false, &["bash", "-", "s.sh"]),
+            (false, &["bash", "-O"]),
+            (false, &["bash", "--rcfile"]),
+            (false, &["sh", "s.sh"]),
+            (false, &["sh", "./qa71s.sh"]),
+            (false, &["dash", "-c", "make"]),
+            (false, &["zsh", "-c", "sleep 608; echo done"]),
+            (false, &["zsh", "-o", "nonomatch", "-c", "make"]),
+            (false, &["zsh", "-C", "-c", "make"]),
+            (false, &["zsh", "-lc", "make"]),
+            (false, &["zsh", "s.zsh"]),
+            (false, &["fish", "-c", "make"]),
+            (false, &["fish", "-ic", "make"]),
+            (false, &["fish", "--command=make"]),
+            (false, &["fish", "--command", "make"]),
+            (false, &["fish", "-C", "set x 1", "-c", "make"]),
+            (false, &["fish", "s.fish"]),
+            (false, &["nu", "-c", "ls"]),
+            (false, &["pwsh", "-Command", "ls"]),
+        ];
+        for &(idle, argv) in cases {
+            let argv: Vec<String> = argv.iter().map(|&a| a.to_owned()).collect();
+            assert_eq!(is_idle_shell(&argv), idle, "{argv:?}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_shell_running_a_command_counts_as_running() {
-        let args = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
-        for idle in [
-            &["bash", "--norc", "--noprofile", "-i"][..],
-            &["-zsh"],
-            &["/usr/bin/fish", "-l"],
-            &["bash", "-O", "extglob", "-o", "vi", "--rcfile", "rc", "-i"],
-        ] {
-            assert!(is_idle_shell(&args(idle)), "{idle:?}");
-        }
-        for busy in [
-            &["sh", "-c", "sleep 30"][..],
-            &["bash", "-lc", "make"],
-            &["bash", "build.sh"],
-            &["bash", "-o", "vi", "build.sh"],
-            &["bash", "-O"],
-            &["fish", "--command=ls"],
-            &["vim"],
-            &[],
-        ] {
-            assert!(!is_idle_shell(&args(busy)), "{busy:?}");
-        }
         for shell in ["sh", "bash"] {
             let mut pty = Pty::spawn(
                 &[shell.into(), "-c".into(), "sleep 30; true".into()],
@@ -756,8 +900,9 @@ mod tests {
 
     #[test]
     fn a_direct_command_counts_as_running() {
-        assert!(is_shell("/bin/bash") && is_shell("-zsh") && is_shell("fish"));
-        assert!(!is_shell("vim") && !is_shell("/usr/bin/ssh") && !is_shell("bashtop"));
+        assert_eq!(shell_name("/bin/bash"), Some("bash"));
+        assert_eq!(shell_name("-zsh"), Some("zsh"));
+        assert!(shell_name("vim").is_none() && shell_name("/usr/bin/ssh").is_none());
         let mut wrapped = Pty::spawn(
             &[
                 "env".into(),
