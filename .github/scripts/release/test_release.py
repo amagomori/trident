@@ -21,7 +21,7 @@ HAS_DEB = shutil.which("dpkg-deb") and shutil.which("tic")
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         self.binary = self.tmp / "trident"
         self.binary.write_bytes(b"\x7fELF fake GLIBC_2.17\0GLIBC_2.35\0GLIBC_2.3.4\0")
