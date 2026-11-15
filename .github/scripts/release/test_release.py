@@ -258,6 +258,14 @@ class Packages(Base):
         with self.assertRaises(release.ReleaseError):
             release.sha256_of(self.tmp / "SHA256SUMS", "Trident-9.9.9-linux-x86_64.tar.gz")
 
+    def test_is_newest(self):
+        tags = ["v0.1.0", "v0.2.0", "v0.3.0-rc.1", "nightly"]
+        self.assertTrue(release.is_newest("0.2.0", tags))
+        self.assertTrue(release.is_newest("0.2.1", tags))
+        self.assertFalse(release.is_newest("0.1.1", tags))
+        self.assertTrue(release.is_newest("0.10.0", ["v0.9.0"]))
+        self.assertTrue(release.is_newest("1.0.0", []))
+
     def test_push_package(self):
         script = Path(release.__file__).with_name("push_package.sh")
         remote = self.tmp / "remote.git"
@@ -340,8 +348,9 @@ class Workflow(unittest.TestCase):
         job = text[text.index("\n  packages:\n"):]
         self.assertIn("needs: publish", job)
         self.assertIn("if: ${{ !contains(github.ref_name, '-') }}", job)
-        self.assertIn("if: env.HOMEBREW_TAP_TOKEN != ''", job)
-        self.assertIn("if: env.AUR_SSH_KEY != ''", job)
+        self.assertIn("if: steps.newest.outputs.newest == 'true' && env.HOMEBREW_TAP_TOKEN != ''", job)
+        self.assertIn("if: steps.newest.outputs.newest == 'true' && env.AUR_SSH_KEY != ''", job)
+        self.assertNotIn("ssh-keyscan", job)
 
 
 if __name__ == "__main__":

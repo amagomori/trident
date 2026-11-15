@@ -9,6 +9,7 @@ Silicon needs to run it at all; there is no Developer ID signature or notarizati
                     [--appimagetool T --runtime R]   and --runtime) an AppImage
   release.py macos --binary B --version V --out D    Trident.app and, where hdiutil exists, a .dmg
   release.py checksums D                            SHA256SUMS for every file in D
+  release.py newest --version V --released F        true unless F lists a newer stable tag
   release.py packages --version V --sums S --out D  Homebrew cask (D/trident.rb) and AUR
                     [--base-url URL]                 trident-bin (D/aur/PKGBUILD, .SRCINFO)
   release.py changelog --tag T [--since PREV]       release notes from the PRs merged since PREV
@@ -417,6 +418,15 @@ def srcinfo(version, sha256, base=None):
     return "\n".join(lines + ["", f"pkgname = {AUR_PACKAGE}", ""])
 
 
+def is_newest(version, tags):
+    """Whether no stable release among tags (v-prefixed) is newer than the stable version."""
+    def key(v):
+        return tuple(int(part) for part in v.split("."))
+    stable = re.compile(r"v(\d+\.\d+\.\d+)")
+    newer = [t for t in tags if (m := stable.fullmatch(t.strip())) and key(m[1]) > key(version)]
+    return not newer
+
+
 def packages(version, sums, out, base=None):
     """Writes the cask and AUR files for a release whose SHA256SUMS is sums."""
     out = Path(out)
@@ -497,6 +507,9 @@ def main(argv=None):
     p.add_argument("--sums", required=True, type=Path, help="the release's SHA256SUMS")
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--base-url", help="download from here instead of the GitHub release")
+    p = sub.add_parser("newest")
+    p.add_argument("--version", required=True)
+    p.add_argument("--released", required=True, type=Path, help="published tags, one per line")
     p = sub.add_parser("changelog")
     p.add_argument("--tag", required=True)
     p.add_argument("--since", help="previous tag (default: the last v* tag before --tag)")
@@ -516,6 +529,9 @@ def main(argv=None):
         elif args.command == "packages":
             for path in packages(args.version, args.sums, args.out, args.base_url):
                 print(path)
+        elif args.command == "newest":
+            newest = is_newest(args.version, args.released.read_text().splitlines())
+            print("true" if newest else "false")
         elif args.command == "checksums":
             sys.stdout.write("".join(checksums(args.dir)))
         else:

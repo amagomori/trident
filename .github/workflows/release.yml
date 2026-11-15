@@ -125,6 +125,16 @@ jobs:
       - run: >
           python3 .github/scripts/release/release.py packages
           --version "${{ steps.version.outputs.version }}" --sums dist/SHA256SUMS --out packages
+      # A release that finishes after a newer one must not downgrade the cask or the AUR package.
+      - id: newest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --exclude-pre-releases --exclude-drafts --limit 1000 \
+            --json tagName --jq '.[].tagName' > released.txt
+          newest=$(python3 .github/scripts/release/release.py newest \
+            --version "${{ steps.version.outputs.version }}" --released released.txt)
+          echo "newest=$newest" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: packages
@@ -132,18 +142,19 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
       - name: Update the Homebrew tap
-        if: env.HOMEBREW_TAP_TOKEN != ''
+        if: steps.newest.outputs.newest == 'true' && env.HOMEBREW_TAP_TOKEN != ''
         run: >
           .github/scripts/release/push_package.sh
           "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/amagomori/homebrew-tap.git"
           Casks "trident ${{ steps.version.outputs.version }}" packages/trident.rb
       - name: Update the AUR
-        if: env.AUR_SSH_KEY != ''
+        if: steps.newest.outputs.newest == 'true' && env.AUR_SSH_KEY != ''
         run: |
           install -dm700 ~/.ssh
           printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
-          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          # The ed25519 key behind the fingerprint published on https://aur.archlinux.org.
+          echo "aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN" >> ~/.ssh/known_hosts
           export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes" BRANCH=master
           .github/scripts/release/push_package.sh ssh://aur@aur.archlinux.org/trident-bin.git . \
             "Update to ${{ steps.version.outputs.version }}" packages/aur/PKGBUILD packages/aur/.SRCINFO
