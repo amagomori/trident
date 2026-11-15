@@ -159,19 +159,17 @@ impl Marks {
     }
 }
 
-fn command_text(c: &Command) -> String {
-    let text: String = c
-        .cells
-        .get(c.input_col..)
-        .unwrap_or_default()
-        .iter()
-        .filter(|cell| !cell.flags.contains(Flags::WIDE_SPACER))
-        .map(|cell| cell.c)
-        .collect();
-    text.trim().to_owned()
-}
-
 impl Terminal {
+    fn command_text(&self, c: &Command) -> String {
+        let mut text = String::new();
+        for cell in c.cells.get(c.input_col..).unwrap_or_default() {
+            if !cell.flags.contains(Flags::WIDE_SPACER) {
+                self.push_cell_text(cell, &mut text);
+            }
+        }
+        text.trim().to_owned()
+    }
+
     /// Turns compare-with-last-run on or off. Turning it off forgets stored runs and marks.
     pub fn set_compare_runs(&mut self, enabled: bool) {
         let shell = &mut *self.shell;
@@ -219,8 +217,9 @@ impl Terminal {
             return;
         };
         let Some(end) = c.next_prompt else { return };
-        let key = command_text(c);
-        if key.is_empty() || c.output_line < self.first_line() || c.gap.is_some() {
+        // Only a command's first input row is kept, so wrapped commands could share a key.
+        let key = self.command_text(c);
+        if key.is_empty() || c.continued || c.output_line < self.first_line() || c.gap.is_some() {
             return;
         }
         let end = end.min(self.history + self.rows as u64);
@@ -237,17 +236,18 @@ impl Terminal {
             let used = if last {
                 row.cells
                     .iter()
-                    .rposition(|cell| !cell.c.is_whitespace())
+                    .rposition(|cell| {
+                        cell.flags.contains(Flags::GRAPHEME) || !cell.c.is_whitespace()
+                    })
                     .map_or(0, |i| i + 1)
             } else {
                 row.cells.len()
             };
-            text.extend(
-                row.cells[..used]
-                    .iter()
-                    .filter(|cell| !cell.flags.contains(Flags::WIDE_SPACER))
-                    .map(|cell| cell.c),
-            );
+            for cell in &row.cells[..used] {
+                if !cell.flags.contains(Flags::WIDE_SPACER) {
+                    self.push_cell_text(cell, &mut text);
+                }
+            }
             if last {
                 text.truncate(text.trim_end().len());
                 let mut h = DefaultHasher::new();

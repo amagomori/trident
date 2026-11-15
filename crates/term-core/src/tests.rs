@@ -2546,6 +2546,22 @@ fn rerun_ignores_timing_but_marks_a_changed_test_result() {
 }
 
 #[test]
+fn rerun_compares_combining_marks_and_skips_wrapped_commands() {
+    let mut t = Terminal::new(40, 20);
+    t.advance(run("echo", &["cafe\u{301} ok"]).as_bytes());
+    t.advance(run("echo", &["cafe\u{300} ok"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(marked_rows(&t).len(), 1);
+    // Only the first row of a wrapped command is kept, so its runs aren't compared.
+    let long = "x".repeat(50);
+    let mut t = Terminal::new(40, 20);
+    t.advance(run(&long, &["a"]).as_bytes());
+    t.advance(run(&long, &["b"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert!(marked_rows(&t).is_empty());
+}
+
+#[test]
 fn new_ignore_patterns_forget_stored_runs_but_keep_marks() {
     let mut t = Terminal::new(40, 20);
     t.advance(run("make", &["build #1", "ok"]).as_bytes());
