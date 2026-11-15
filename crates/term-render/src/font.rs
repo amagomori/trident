@@ -263,40 +263,73 @@ impl Fonts {
         })
     }
 
-    /// An emoji sequence (ZWJ sequence, flag, skin tone) shaped by the color emoji font
-    /// that draws its first character, when that font draws the whole sequence as one glyph.
+    /// An emoji sequence (ZWJ sequence, flag, skin tone) shaped by a color emoji font that
+    /// draws one of its characters, when that font draws the whole sequence as one glyph.
     pub fn rasterize_sequence(&mut self, text: &str, cells: usize) -> Option<RasterizedGlyph> {
         let metrics = self.metrics;
         let px = self.px;
-        let fallback = self.fallback_for(text.chars().next()?, true, false)?;
-        let face = fallback.face.as_ref()?;
-        let font = harfrust::Font::new(fallback.data, fallback.index)?;
-        let mut buffer = harfrust::Buffer::new();
-        buffer.push_str(text);
-        buffer.guess_segment_properties();
-        harfrust::shape(
-            &harfrust::ShaperFont::new(&font),
-            &mut buffer,
-            harfrust::ShapeOptions::new(),
-        )
-        .ok()?;
-        let mut drawn = buffer
-            .glyph_infos()
-            .iter()
-            .zip(buffer.glyph_positions())
-            .filter(|(_, p)| p.x_advance != 0);
-        let (info, _) = drawn.next()?;
-        if drawn.next().is_some() {
-            return None;
+        // A text-default base (U+2764, U+261D) can resolve to a text font, so the color font
+        // may only be found through a later character of the sequence.
+        let mut tried = Vec::new();
+        for c in text
+            .chars()
+            .filter(|&c| c as u32 >= 0x80 && c != '\u{200D}')
+        {
+            let Some(fallback) = self.fallback_for(c, true, false) else {
+                continue;
+            };
+            let Some(face) = fallback.face.clone() else {
+                continue;
+            };
+            if tried.contains(&fallback.data.as_ptr()) {
+                continue;
+            }
+            tried.push(fallback.data.as_ptr());
+            let (data, index) = (fallback.data, fallback.index);
+            if let Some(glyph) = shape_sequence(text, cells, &face, data, index, metrics, px) {
+                return Some(glyph);
+            }
         }
-        let target = color::Target {
-            width: metrics.width * cells.max(1) as f32,
-            height: metrics.height,
-            baseline: metrics.baseline,
-            px,
-        };
-        color::rasterize(face, ttf_parser::GlyphId(info.glyph_id as u16), target)
+        None
     }
+}
+
+/// `text` as one color glyph from `face`, if the font's shaping draws it as one.
+fn shape_sequence(
+    text: &str,
+    cells: usize,
+    face: &ttf_parser::Face<'static>,
+    data: &'static [u8],
+    index: u32,
+    metrics: CellMetrics,
+    px: f32,
+) -> Option<RasterizedGlyph> {
+    let font = harfrust::Font::new(data, index)?;
+    let mut buffer = harfrust::Buffer::new();
+    buffer.push_str(text);
+    buffer.guess_segment_properties();
+    harfrust::shape(
+        &harfrust::ShaperFont::new(&font),
+        &mut buffer,
+        harfrust::ShapeOptions::new(),
+    )
+    .ok()?;
+    let mut drawn = buffer
+        .glyph_infos()
+        .iter()
+        .zip(buffer.glyph_positions())
+        .filter(|(_, p)| p.x_advance != 0);
+    let (info, _) = drawn.next()?;
+    if drawn.next().is_some() {
+        return None;
+    }
+    let target = color::Target {
+        width: metrics.width * cells.max(1) as f32,
+        height: metrics.height,
+        baseline: metrics.baseline,
+        px,
+    };
+    color::rasterize(face, ttf_parser::GlyphId(info.glyph_id as u16), target)
 }
 
 #[cfg(test)]

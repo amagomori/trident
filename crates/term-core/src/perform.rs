@@ -29,6 +29,9 @@ impl Perform for Terminal {
             0x09 => self.tab(1),
             0x0a..=0x0c => {
                 self.prompt_redraw = false;
+                // A line editor only feeds a line when it accepts it; what follows in the
+                // same read is the command's output.
+                self.shell.line_editor = false;
                 self.linefeed();
                 if self.modes.linefeed_newline {
                     self.cursor.col = 0;

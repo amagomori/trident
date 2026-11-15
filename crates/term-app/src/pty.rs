@@ -96,6 +96,17 @@ impl Probe {
         is_idle_shell(args) || (self.login.is_some() && args == self.login.as_slice())
     }
 
+    fn editor_modes(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.fd
+                .as_ref()
+                .is_some_and(|fd| editor_modes(fd.as_raw_fd()))
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
     fn shell(&self) -> Option<bool> {
         #[cfg(unix)]
         {
@@ -128,6 +139,8 @@ struct Pending {
     unchecked_from: Option<usize>,
     /// Bytes read since the last escape byte, if any.
     since_escape: Option<usize>,
+    /// Whether a line editor's modes were set at every read queued, if any is.
+    editing: Option<bool>,
 }
 
 impl Pending {
@@ -169,7 +182,8 @@ impl Pending {
         }
     }
 
-    fn append(&mut self, bytes: &[u8], checked: bool) {
+    fn append(&mut self, bytes: &[u8], checked: bool, editing: bool) {
+        self.editing = Some(self.editing.unwrap_or(true) && editing);
         if !checked && self.unchecked_from.is_none() {
             self.unchecked_from = Some(self.bytes.len());
         }
@@ -185,6 +199,7 @@ impl Pending {
         Output {
             bytes: std::mem::take(&mut self.bytes),
             shell_returns: std::mem::take(&mut self.shell_returns),
+            line_editing: self.editing.take().unwrap_or(false),
         }
     }
 
@@ -194,9 +209,13 @@ impl Pending {
     }
 }
 
+#[derive(Default)]
 pub struct Output {
     pub bytes: Vec<u8>,
     pub shell_returns: Vec<usize>,
+    /// Every read of these bytes found a line editor's modes (see `Pty::line_editing`):
+    /// the shell's echo and redraws, which it measures one codepoint at a time.
+    pub line_editing: bool,
 }
 
 #[derive(Default)]
@@ -239,6 +258,21 @@ pub struct Pty {
 struct Input {
     bytes: Vec<u8>,
     pause_boundary: Option<Arc<AtomicU64>>,
+}
+
+/// A line editor's modes (readline, zle, also in python or psql): no canonical mode or echo,
+/// signals on, and CR left unmapped, unlike a program's silent read.
+#[cfg(unix)]
+fn editor_modes(fd: std::os::fd::RawFd) -> bool {
+    let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: fd is a live PTY master; tcgetattr initializes attrs on success.
+    if unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: tcgetattr succeeded.
+    let attrs = unsafe { attrs.assume_init() };
+    attrs.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG) == libc::ISIG
+        && attrs.c_iflag & (libc::ICRNL | libc::INLCR) != libc::ICRNL
 }
 
 #[cfg(unix)]
@@ -639,12 +673,19 @@ impl Pty {
             .name("pty-reader".into())
             .spawn(move || {
                 let mut buf = vec![0u8; READ_BUFFER];
+                let mut was_editing = false;
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             #[cfg(unix)]
                             reader_activity.kick();
+                            // The modes are read after the bytes were written: a read that
+                            // finds the editor's modes just set is the end of a command's
+                            // output and the prompt, not the editor's own redraw.
+                            let modes = queue.probe.editor_modes();
+                            let editing = modes && was_editing;
+                            was_editing = modes;
                             let sequence = queue.read_sequence.fetch_add(1, Ordering::SeqCst) + 1;
                             let read_bytes =
                                 queue.read_bytes.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
@@ -665,7 +706,7 @@ impl Pty {
                             }
                             p.sequence = sequence;
                             p.read_bytes = read_bytes;
-                            p.append(&buf[..n], checked);
+                            p.append(&buf[..n], checked, editing);
                             drop(p);
                             if !pending.swap(true, Ordering::AcqRel) {
                                 wake(false);
@@ -825,18 +866,7 @@ impl Pty {
     fn editor_modes(&self) -> bool {
         #[cfg(unix)]
         {
-            let Some(fd) = self.master.as_raw_fd() else {
-                return false;
-            };
-            let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
-            // SAFETY: fd belongs to the live master; tcgetattr initializes attrs on success.
-            if unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) } != 0 {
-                return false;
-            }
-            // SAFETY: tcgetattr succeeded.
-            let attrs = unsafe { attrs.assume_init() };
-            attrs.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG) == libc::ISIG
-                && attrs.c_iflag & (libc::ICRNL | libc::INLCR) != libc::ICRNL
+            self.master.as_raw_fd().is_some_and(editor_modes)
         }
         #[cfg(not(unix))]
         false
@@ -1317,6 +1347,116 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Readline and zle move over and erase emoji sequences one codepoint at a time, so their
+    /// echo keeps per-codepoint cells while the same sequence printed by a command joins.
+    #[cfg(unix)]
+    #[test]
+    fn line_editor_echo_keeps_codepoint_cells_and_output_joins() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let bash = ["bash", "--norc", "--noprofile", "-i"];
+        line_editor_session(&bash, family);
+        line_editor_session(&bash, "\u{1f1ef}\u{1f1f5}");
+        if std::process::Command::new("zsh")
+            .arg("-fc")
+            .arg("true")
+            .status()
+            .is_ok()
+        {
+            // zsh draws a ZWJ as `<200d>` unless COMBINING_CHARS is set.
+            line_editor_session(&["zsh", "-f", "-i"], "\u{1f44d}\u{1f3fd}");
+            line_editor_session(&["zsh", "-f", "-i"], "\u{1f1ef}\u{1f1f5}");
+        } else {
+            eprintln!("no zsh on this system; skipping it");
+        }
+    }
+
+    #[cfg(unix)]
+    fn line_editor_session(args: &[&str], sequence: &str) {
+        let env = [
+            ("LANG".to_owned(), "C.UTF-8".to_owned()),
+            ("LC_ALL".to_owned(), "C.UTF-8".to_owned()),
+            ("PS1".to_owned(), "$ ".to_owned()),
+            // zsh picks the vi keymap from a `vi` editor.
+            ("EDITOR".to_owned(), "emacs".to_owned()),
+            ("VISUAL".to_owned(), "emacs".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let args: Vec<String> = args.iter().map(|&a| a.into()).collect();
+        let mut pty = Pty::spawn(&args, &env, None, 40, 10, (8.0, 16.0), |_| {}, |_| {}).unwrap();
+        let mut term = term_core::Terminal::new(40, 10);
+        let row_text = |term: &term_core::Terminal, row: usize| {
+            let mut text = String::new();
+            for cell in &term.viewport_row(row).cells {
+                if !cell.flags.contains(term_core::Flags::WIDE_SPACER) {
+                    term.push_cell_text(cell, &mut text);
+                }
+            }
+            text.trim_end().to_owned()
+        };
+        let pump = |pty: &mut Pty,
+                    term: &mut term_core::Terminal,
+                    what: &str,
+                    done: &dyn Fn(&term_core::Terminal) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let output = pty.take_output();
+                term.set_line_editing(output.line_editing);
+                term.advance(&output.bytes);
+                if done(term) && pty.output.pending.lock().unwrap().bytes.is_empty() {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{args:?} never {what}: {:?} at {:?}",
+                    (0..3).map(|row| row_text(term, row)).collect::<Vec<_>>(),
+                    term.cursor_position()
+                );
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        };
+        let cursor = |term: &term_core::Terminal| term.cursor_position().map(|(_, col)| col);
+        pump(&mut pty, &mut term, "prompted", &|t| {
+            row_text(t, 0) == "$" && cursor(t) == Some(2)
+        });
+        // As the editor counts them after the 17 columns of `$ printf '%s|\n' `: emoji take
+        // two columns, regional indicators one and a ZWJ none.
+        let width = |s: &str| {
+            let cols = |c: char| match c as u32 {
+                0x200d => 0,
+                0x1f1e6..=0x1f1ff => 1,
+                _ => 2,
+            };
+            17 + s.chars().map(cols).sum::<usize>()
+        };
+        let last = sequence.chars().last().unwrap();
+        let kept = &sequence[..sequence.len() - last.len_utf8()];
+        let end = width(sequence);
+        pty.write(format!("printf '%s|\\n' {sequence}").as_bytes());
+        pump(&mut pty, &mut term, "echoed", &|t| cursor(t) == Some(end));
+        pty.write(b"\x01");
+        pump(&mut pty, &mut term, "at the start", &|t| {
+            cursor(t) == Some(2)
+        });
+        pty.write(b"\x05");
+        pump(&mut pty, &mut term, "at the end", &|t| {
+            cursor(t) == Some(end)
+        });
+        // Backspace deletes the last codepoint; the screen agrees.
+        pty.write(b"\x7f");
+        pump(&mut pty, &mut term, "erased", &|t| {
+            cursor(t) == Some(width(kept))
+        });
+        assert_eq!(row_text(&term, 0), format!("$ printf '%s|\\n' {kept}"));
+        pty.write(format!("{last}\r").as_bytes());
+        pump(&mut pty, &mut term, "printed", &|t| {
+            row_text(t, 2) == "$" && cursor(t) == Some(2)
+        });
+        let row = term.viewport_row(1);
+        assert_eq!(term.grapheme(&row.cells[0]), Some(sequence), "{args:?}");
+        assert_eq!(term.base_char(&row.cells[2]), '|');
+    }
+
     #[cfg(unix)]
     #[test]
     fn only_the_shell_at_its_prompt_is_line_editing() {
@@ -1551,7 +1691,7 @@ mod tests {
 
     fn read(pending: &mut Pending, at: Instant, bytes: &[u8], shell: Option<bool>) -> bool {
         let checked = pending.check_foreground(at, bytes, || shell);
-        pending.append(bytes, checked);
+        pending.append(bytes, checked, false);
         checked
     }
 

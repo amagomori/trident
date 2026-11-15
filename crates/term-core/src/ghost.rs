@@ -173,6 +173,7 @@ impl Perform for Ghost<'_> {
     fn execute(&mut self, byte: u8) {
         if let 0x0a..=0x0c = byte {
             self.term.prompt_redraw = false;
+            self.term.shell.line_editor = false;
             self.linefeed();
             if self.term.modes.linefeed_newline {
                 self.term.cursor.col = 0;

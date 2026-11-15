@@ -42,6 +42,7 @@ enum Zone {
 struct ShellState {
     zone: Zone,
     marks_seen: bool,
+    line_editor: bool,
     command_finished: Vec<CommandFinished>,
     mark_line: Option<u64>,
     output_ends: Vec<OutputEnd>,
@@ -352,6 +353,25 @@ struct Reports {
 }
 
 impl Terminal {
+    /// Tells the terminal whether the output it is about to parse is a line editor's (readline,
+    /// zle), as the app reads it from the PTY's modes, until the next line feed. See
+    /// `per_codepoint_widths`.
+    pub fn set_line_editing(&mut self, editing: bool) {
+        self.shell.line_editor = editing;
+    }
+
+    /// Whether characters take their own `wcwidth` cells, as line editors count them, instead
+    /// of joining into emoji sequences: in the shell's prompt or input (OSC 133), or, without
+    /// those marks, in a line editor's output. A sequence the editor moves over or erases one
+    /// codepoint at a time would otherwise leave the screen out of step with its line.
+    pub(crate) fn per_codepoint_widths(&self) -> bool {
+        match self.shell.zone {
+            Zone::Prompt | Zone::Input => true,
+            Zone::Output => false,
+            Zone::None => self.shell.line_editor,
+        }
+    }
+
     pub fn has_shell_marks(&self) -> bool {
         self.shell.marks_seen
     }
@@ -797,6 +817,7 @@ impl Terminal {
             shell: Box::new(ShellState {
                 zone: Zone::None,
                 marks_seen: false,
+                line_editor: false,
                 command_finished: Vec::new(),
                 mark_line: None,
                 output_ends: Vec::new(),

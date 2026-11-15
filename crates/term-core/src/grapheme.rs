@@ -154,7 +154,14 @@ pub fn is_emoji_sequence(cluster: &str) -> bool {
     let first = chars.next();
     match first {
         Some(r) if regional(r) => chars.next().is_some_and(regional),
-        Some(p) if pictographic(p) => chars.any(|c| c == '\u{200D}' || skin_tone(c)),
+        Some(p) if pictographic(p) => {
+            let mut joiner = false;
+            chars.any(|c| {
+                let joined = skin_tone(c) || (joiner && c != '\u{200D}');
+                joiner = c == '\u{200D}';
+                joined
+            })
+        }
         _ => false,
     }
 }
@@ -269,7 +276,7 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     pub(crate) fn join_sequence(&mut self, c: char) -> bool {
-        if !(pictographic(c) || regional(c)) {
+        if !(pictographic(c) || regional(c)) || self.per_codepoint_widths() {
             return false;
         }
         let Some((row, col)) = self.cluster_cell() else {
@@ -292,10 +299,18 @@ impl Terminal {
         if !continues_sequence(&text, c) || !self.append(row, col, c) {
             return false;
         }
+        if !cell.flags.contains(Flags::WIDE) {
+            self.widen_sequence(row, col);
+        }
+        true
+    }
+
+    /// Gives the emoji sequence in the narrow cell `(row, col)` two columns, like a wide
+    /// character: in place, or on the next line when it sits in the last column.
+    fn widen_sequence(&mut self, row: usize, col: usize) {
         let cols = self.cols;
-        if regional(c) && !self.cursor.pending_wrap && col + 1 < cols && self.cursor.col == col + 1
-        {
-            let (insert, template) = (self.modes.insert, self.cursor.template);
+        let (insert, template) = (self.modes.insert, self.cursor.template);
+        if col + 1 < cols && !self.cursor.pending_wrap && self.cursor.col == col + 1 {
             let line = &mut self.lines_mut()[row];
             if insert {
                 crate::insert_printed_cells(line, col + 1, cols, 1, &template);
@@ -315,8 +330,44 @@ impl Terminal {
             } else {
                 self.cursor.col = col + 2;
             }
+        } else if cols >= 2 && col + 1 == cols && self.cursor.pending_wrap && self.modes.autowrap {
+            // Like a wide character printed in the last column: that cell is left blank and
+            // the sequence moves to the start of the next line.
+            self.sync_cursor_row();
+            let row = self.cursor.row;
+            let line = &mut self.lines_mut()[row];
+            let mut cell = line.cells[col];
+            let mut blank = Cell::blank(&template);
+            blank.flags.insert(Flags::WIDE_WRAP);
+            line.cells[col] = blank;
+            line.touch(col + 1);
+            line.set_wrapped(true);
+            self.cursor.col = 0;
+            self.cursor.pending_wrap = false;
+            self.linefeed();
+            let row = self.cursor.row;
+            let line = &mut self.lines_mut()[row];
+            if insert {
+                crate::insert_printed_cells(line, 0, cols, 2, &template);
+                line.touch_all();
+            }
+            crate::clear_wide_pair(&mut line.cells, 0);
+            crate::clear_wide_pair(&mut line.cells, 1);
+            cell.flags.insert(Flags::WIDE);
+            let mut spacer = cell;
+            spacer.c = ' ';
+            spacer.flags.remove(Flags::WIDE | Flags::GRAPHEME);
+            spacer.flags.insert(Flags::WIDE_SPACER);
+            line.cells[0] = cell;
+            line.cells[1] = spacer;
+            line.touch(2);
+            if cols == 2 {
+                self.cursor.col = 1;
+                self.cursor.pending_wrap = true;
+            } else {
+                self.cursor.col = 2;
+            }
         }
-        true
     }
 
     /// Frees the clusters no cell references any more.
@@ -395,18 +446,78 @@ mod tests {
         assert_eq!(t.grapheme(&row.cells[0]), Some(family));
         assert!(row.cells[0].flags.contains(Flags::WIDE));
         assert_eq!(t.base_char(&row.cells[2]), '|');
-        // U+1F3F3 is narrow; the sequence keeps its first character's width.
         assert_eq!(t.grapheme(&row.cells[3]), Some(rainbow));
-        assert_eq!(t.base_char(&row.cells[4]), '|');
-        assert_eq!(t.grapheme(&row.cells[5]), Some(thumb));
-        assert_eq!(t.base_char(&row.cells[7]), '|');
-        assert_eq!(t.grapheme(&row.cells[8]), Some(coder));
-        assert_eq!(t.base_char(&row.cells[10]), '|');
-        assert_eq!(t.cursor_position(), Some((0, 11)));
+        assert!(row.cells[3].flags.contains(Flags::WIDE));
+        assert!(row.cells[4].flags.contains(Flags::WIDE_SPACER));
+        assert_eq!(t.base_char(&row.cells[5]), '|');
+        assert_eq!(t.grapheme(&row.cells[6]), Some(thumb));
+        assert_eq!(t.base_char(&row.cells[8]), '|');
+        assert_eq!(t.grapheme(&row.cells[9]), Some(coder));
+        assert_eq!(t.base_char(&row.cells[11]), '|');
+        assert_eq!(t.cursor_position(), Some((0, 12)));
         assert_eq!(text(&t, 0), format!("{family}|{rainbow}|{thumb}|{coder}|"));
         assert!(is_emoji_sequence(family) && is_emoji_sequence(rainbow));
         assert!(is_emoji_sequence(thumb) && is_emoji_sequence(coder));
         assert!(!is_emoji_sequence("e\u{301}") && !is_emoji_sequence("\u{1f468}\u{fe0f}"));
+        assert!(!is_emoji_sequence("\u{1f468}\u{200d}"));
+    }
+
+    #[test]
+    fn sequences_on_a_narrow_base_take_two_cells() {
+        // Text-default or narrow bases: the sequence is as wide as `unicode-width` measures it.
+        for seq in [
+            "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
+            "\u{1f3f3}\u{fe0f}\u{200d}\u{26a7}\u{fe0f}",
+            "\u{2764}\u{fe0f}\u{200d}\u{1f525}",
+            "\u{1f441}\u{fe0f}\u{200d}\u{1f5e8}\u{fe0f}",
+            "\u{261d}\u{1f3fd}",
+            "\u{270c}\u{1f3ff}",
+        ] {
+            let mut t = Terminal::new(10, 2);
+            t.advance(format!("{seq}|").as_bytes());
+            let row = t.viewport_row(0);
+            assert_eq!(t.grapheme(&row.cells[0]), Some(seq), "{seq:?}");
+            assert!(row.cells[0].flags.contains(Flags::WIDE), "{seq:?}");
+            assert!(row.cells[1].flags.contains(Flags::WIDE_SPACER), "{seq:?}");
+            assert_eq!(t.base_char(&row.cells[2]), '|', "{seq:?}");
+            assert_eq!(t.cursor_position(), Some((0, 3)), "{seq:?}");
+            assert_eq!(text(&t, 0), format!("{seq}|"));
+            assert_eq!(unicode_width::UnicodeWidthStr::width(seq), 2, "{seq:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_editor_counts_each_codepoint() {
+        // Readline and zle move over and erase sequences per codepoint, as main draws them.
+        let family = "\u{1f468}\u{200d}\u{1f469}";
+        let mut t = Terminal::new(10, 2);
+        t.set_line_editing(true);
+        t.advance(format!("{family}\u{1f1ef}\u{1f1f5}\u{261d}\u{1f3fd}").as_bytes());
+        let row = t.viewport_row(0);
+        assert_eq!(t.base_char(&row.cells[0]), '\u{1f468}');
+        assert_eq!(t.base_char(&row.cells[2]), '\u{1f469}');
+        assert_eq!(t.base_char(&row.cells[4]), '\u{1f1ef}');
+        assert_eq!(t.base_char(&row.cells[5]), '\u{1f1f5}');
+        assert_eq!(t.base_char(&row.cells[6]), '\u{261d}');
+        assert_eq!(t.base_char(&row.cells[7]), '\u{1f3fd}');
+        assert_eq!(t.cursor_position(), Some((0, 9)));
+        // Backspace over the last codepoint and redraw the rest of the line, as readline does.
+        t.advance(b"\x08\x08\x1b[K");
+        assert_eq!(t.base_char(&t.viewport_row(0).cells[6]), '\u{261d}');
+        // Accepting the line ends the editor's output; the command's joins.
+        t.advance(format!("\r\n{family}|").as_bytes());
+        assert_eq!(t.grapheme(&t.viewport_row(1).cells[0]), Some(family));
+
+        // The same in the shell's input zone (OSC 133 B), without the PTY's modes.
+        let mut t = Terminal::new(10, 2);
+        t.advance(format!("\x1b]133;A\x07$ \x1b]133;B\x07{family}").as_bytes());
+        assert_eq!(t.base_char(&t.viewport_row(0).cells[4]), '\u{1f469}');
+        assert_eq!(t.cursor_position(), Some((0, 6)));
+        // Command output joins again.
+        t.advance(format!("\r\n\x1b]133;C\x07{family}|").as_bytes());
+        let row = t.viewport_row(1);
+        assert_eq!(t.grapheme(&row.cells[0]), Some(family));
+        assert_eq!(t.base_char(&row.cells[2]), '|');
     }
 
     #[test]
@@ -444,13 +555,25 @@ mod tests {
     }
 
     #[test]
-    fn a_flag_split_by_a_pending_wrap_keeps_one_cell() {
-        let mut t = Terminal::new(3, 2);
+    fn a_flag_in_the_last_column_wraps_like_a_wide_character() {
+        let mut t = Terminal::new(3, 3);
         t.advance("ab\u{1f1ef}\u{1f1f5}c".as_bytes());
         let row = t.viewport_row(0);
-        assert_eq!(t.grapheme(&row.cells[2]), Some("\u{1f1ef}\u{1f1f5}"));
-        assert!(!row.cells[2].flags.contains(Flags::WIDE));
-        assert_eq!(t.base_char(&t.viewport_row(1).cells[0]), 'c');
+        assert_eq!(t.base_char(&row.cells[2]), ' ');
+        assert!(row.cells[2].flags.contains(Flags::WIDE_WRAP));
+        let row = t.viewport_row(1);
+        assert_eq!(t.grapheme(&row.cells[0]), Some("\u{1f1ef}\u{1f1f5}"));
+        assert!(row.cells[0].flags.contains(Flags::WIDE));
+        assert!(row.cells[1].flags.contains(Flags::WIDE_SPACER));
+        assert_eq!(t.base_char(&row.cells[2]), 'c');
+        assert_eq!(text(&t, 0), "ab");
+        assert_eq!(text(&t, 1), "\u{1f1ef}\u{1f1f5}c");
+        assert_eq!(t.cursor_position(), Some((1, 2)));
+
+        // Without autowrap it stays in the last column, as a wide character would not fit.
+        let mut t = Terminal::new(3, 2);
+        t.advance("\x1b[?7lab\u{1f1ef}\u{1f1f5}".as_bytes());
+        assert_eq!(text(&t, 1), "");
     }
 
     #[test]
