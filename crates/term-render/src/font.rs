@@ -106,8 +106,13 @@ fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
 pub struct Fonts {
     faces: [FontArc; 4],
     system: SystemFonts,
-    /// Fallback fonts by file, each loaded on first need (`None` if it failed to load).
-    fallbacks: HashMap<FontFile, Option<Fallback>>,
+    /// Fallback fonts, each loaded on first need (`None` if it failed to load), and where
+    /// each file's font is in `fallbacks`.
+    fallbacks: Vec<Option<Fallback>>,
+    files: HashMap<FontFile, usize>,
+    /// The fallback picked for each character and emoji preference, so the system lookup
+    /// runs once per character rather than on every rasterization (atlas resets included).
+    picked: HashMap<(char, bool), Option<usize>>,
     pub px: f32,
     pub metrics: CellMetrics,
 }
@@ -141,7 +146,9 @@ impl Fonts {
         let mut fonts = Fonts {
             faces,
             system: SystemFonts::new(),
-            fallbacks: HashMap::new(),
+            fallbacks: Vec::new(),
+            files: HashMap::new(),
+            picked: HashMap::new(),
             px,
             metrics: CellMetrics {
                 width: 0.0,
@@ -173,14 +180,28 @@ impl Fonts {
     }
 
     fn fallback_for(&mut self, c: char, emoji: bool) -> Option<&Fallback> {
-        let file = self.system.lookup(c, emoji).into_iter().find(|file| {
-            self.fallbacks
-                .entry(file.clone())
-                .or_insert_with(|| load_fallback(file))
+        let index = match self.picked.get(&(c, emoji)) {
+            Some(&index) => index,
+            None => {
+                let index = self.pick_fallback(c, emoji);
+                self.picked.insert((c, emoji), index);
+                index
+            }
+        }?;
+        self.fallbacks[index].as_ref()
+    }
+
+    fn pick_fallback(&mut self, c: char, emoji: bool) -> Option<usize> {
+        self.system.lookup(c, emoji).into_iter().find_map(|file| {
+            let index = *self.files.entry(file).or_insert_with_key(|file| {
+                self.fallbacks.push(load_fallback(file));
+                self.fallbacks.len() - 1
+            });
+            self.fallbacks[index]
                 .as_ref()
                 .is_some_and(|f| f.can_draw(c))
-        })?;
-        self.fallbacks.get(&file)?.as_ref()
+                .then_some(index)
+        })
     }
 
     /// Rasterizes `c` to fit `cells` cells; `None` for blank glyphs.

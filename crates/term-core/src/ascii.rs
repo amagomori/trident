@@ -1,4 +1,4 @@
-use super::{Charset, Flags, PrintState, Terminal, clear_wide_pair};
+use super::{Cell, Charset, Flags, PrintState, Terminal, clear_wide_pair};
 use vte::{Params, Perform};
 
 impl Terminal {
@@ -12,6 +12,8 @@ impl Terminal {
             term: self,
             bytes: [0; 256],
             len: 0,
+            chars: ['\0'; 64],
+            chars_len: 0,
         };
         parser.advance(&mut writer, bytes);
         writer.flush();
@@ -58,17 +60,78 @@ impl Terminal {
             }
         }
     }
+
+    /// Prints characters outside ASCII, writing those that land before the last column
+    /// straight into the row; anything else goes through `put_char`.
+    #[inline(never)]
+    fn put_unicode_run(&mut self, mut chars: &[char]) {
+        if !self.modes.autowrap
+            || self.modes.insert
+            || self.charsets[self.active_charset] != Charset::Ascii
+        {
+            for &c in chars {
+                self.put_char(c);
+            }
+            return;
+        }
+        let mut template = self.cursor.template;
+        template.flags.remove(Flags::WIDE | Flags::WIDE_SPACER);
+        let mut wide = template;
+        wide.flags.insert(Flags::WIDE);
+        let mut spacer = self.cursor.template;
+        spacer.c = ' ';
+        spacer.flags.insert(Flags::WIDE_SPACER);
+        while let Some(&first) = chars.first() {
+            let mut written = 0;
+            if !self.cursor.pending_wrap {
+                let (row, cols) = (self.cursor.row, self.cols);
+                let mut col = self.cursor.col;
+                let cells = &mut self.lines_mut()[row].cells;
+                for &c in chars {
+                    let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                    if width == 0 || col + width >= cols {
+                        break;
+                    }
+                    clear_wide_pair(cells, col);
+                    if width == 2 {
+                        clear_wide_pair(cells, col + 1);
+                        cells[col + 1] = spacer;
+                        cells[col] = Cell { c, ..wide };
+                    } else {
+                        cells[col] = Cell { c, ..template };
+                    }
+                    col += width;
+                    written += 1;
+                }
+                if written > 0 {
+                    self.cursor.col = col;
+                    self.print_state = PrintState(chars[written - 1] as u32);
+                }
+            }
+            if written == 0 {
+                self.put_char(first);
+                written = 1;
+            }
+            chars = &chars[written..];
+        }
+    }
 }
 
 struct Writer<'a> {
     term: &'a mut Terminal,
     bytes: [u8; 256],
     len: u8,
+    /// Printed characters outside ASCII, buffered while no ASCII run is.
+    chars: [char; 64],
+    chars_len: u8,
 }
 
 impl Writer<'_> {
     #[inline(always)]
     fn flush(&mut self) {
+        if self.chars_len > 0 {
+            self.flush_chars();
+        }
         match self.len {
             0 => {}
             // A lone byte costs less through the per-character path.
@@ -77,12 +140,24 @@ impl Writer<'_> {
         }
         self.len = 0;
     }
+
+    #[inline(never)]
+    fn flush_chars(&mut self) {
+        match self.chars_len {
+            1 => self.term.put_char(self.chars[0]),
+            len => self.term.put_unicode_run(&self.chars[..len as usize]),
+        }
+        self.chars_len = 0;
+    }
 }
 
 impl Perform for Writer<'_> {
     #[inline]
     fn print(&mut self, c: char) {
         if (' '..='~').contains(&c) {
+            if self.chars_len > 0 {
+                self.flush_chars();
+            }
             self.bytes[self.len as usize] = c as u8;
             self.len = self.len.wrapping_add(1);
             if self.len == 0 {
@@ -90,7 +165,11 @@ impl Perform for Writer<'_> {
             }
         } else {
             self.flush();
-            self.term.put_char(c);
+            self.chars[self.chars_len as usize] = c;
+            self.chars_len += 1;
+            if self.chars_len as usize == self.chars.len() {
+                self.flush_chars();
+            }
         }
     }
 
@@ -407,6 +486,14 @@ pub(crate) mod tests {
             "abc\x07def\x00ghi\x7fjkl",
             "café",
             "naïve über façade",
+            "日本語中文字符한국어日本語中文字符한국어日本語",
+            "abcdefg日本語",
+            "abcdefgh日本",
+            "日本語\x1b[3G中\x1b[2G文字",
+            "🦀😀😀✓→🦀😀😀✓→🦀😀",
+            "中e\u{301}文\u{200b}字\u{fe0f}符",
+            "\x1b[1;31m日本\x1b[0m語\x1b[4h中文\x1b[4l字\x1b(0qx\x1b(B符",
+            "\x1b[?7l日本語中文字符한국어日本語中文\x1b[?7h",
             "abc\u{9b}31mdef",
             "abc\x1b]2;title\x07def\x1bPignored\x1b\\ghi\x1b[6n",
         ] {

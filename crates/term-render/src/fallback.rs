@@ -158,16 +158,23 @@ mod coretext {
     use super::FontFile;
     use objc2_core_foundation::{CFArray, CFRange, CFRetained, CFString, CFType, CFURL};
     use objc2_core_text::{CTFont, CTFontDescriptor, kCTFontNameAttribute, kCTFontURLAttribute};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
     /// Core Text's cascade list for Menlo, the system monospace font.
     #[derive(Default)]
     pub struct SystemFonts {
         base: Option<CFRetained<CTFont>>,
+        /// The cascade list's files, read once: it is the same for every character.
+        cascade: Option<Vec<FontFile>>,
+        /// Collection indexes by file and PostScript name, since finding one parses the
+        /// collection's faces.
+        indexes: HashMap<(PathBuf, String), u32>,
     }
 
     impl SystemFonts {
         pub fn new() -> SystemFonts {
-            SystemFonts { base: None }
+            SystemFonts::default()
         }
 
         /// The font Core Text picks for `c` (its cascade list already prefers Apple Color
@@ -181,31 +188,50 @@ mod coretext {
             let string = CFString::from_str(c.encode_utf8(&mut buf));
             let range = CFRange::new(0, c.len_utf16() as isize);
             let font = unsafe { base.for_string(&string, range) };
-            let mut files = Vec::new();
             let url = unsafe { font.attribute(kCTFontURLAttribute) };
-            files.extend(file(
-                url,
-                Some(unsafe { font.post_script_name() }.to_string()),
-            ));
-            if let Some(list) = unsafe { base.default_cascade_list_for_languages(None) } {
-                let list: &CFArray<CTFontDescriptor> =
-                    unsafe { &*(&*list as *const CFArray).cast() };
-                for descriptor in list.iter() {
-                    let url = unsafe { descriptor.attribute(kCTFontURLAttribute) };
-                    let name = unsafe { descriptor.attribute(kCTFontNameAttribute) }
-                        .and_then(|n| n.downcast::<CFString>().ok())
-                        .map(|n| n.to_string());
-                    files.extend(file(url, name));
+            let name = unsafe { font.post_script_name() }.to_string();
+            let mut files: Vec<FontFile> = file(&mut self.indexes, url, Some(name))
+                .into_iter()
+                .collect();
+            if self.cascade.is_none() {
+                let mut cascade = Vec::new();
+                if let Some(list) = unsafe { base.default_cascade_list_for_languages(None) } {
+                    let list: &CFArray<CTFontDescriptor> =
+                        unsafe { &*(&*list as *const CFArray).cast() };
+                    for descriptor in list.iter() {
+                        let url = unsafe { descriptor.attribute(kCTFontURLAttribute) };
+                        let name = unsafe { descriptor.attribute(kCTFontNameAttribute) }
+                            .and_then(|n| n.downcast::<CFString>().ok())
+                            .map(|n| n.to_string());
+                        cascade.extend(file(&mut self.indexes, url, name));
+                    }
                 }
+                self.cascade = Some(cascade);
             }
-            files.dedup();
+            let cascade = self.cascade.as_deref().unwrap_or_default();
+            let picked = files.first().cloned();
+            files.extend(
+                cascade
+                    .iter()
+                    .filter(|&f| picked.as_ref() != Some(f))
+                    .cloned(),
+            );
             files
         }
     }
 
-    fn file(url: Option<CFRetained<CFType>>, postscript: Option<String>) -> Option<FontFile> {
+    fn file(
+        indexes: &mut HashMap<(PathBuf, String), u32>,
+        url: Option<CFRetained<CFType>>,
+        postscript: Option<String>,
+    ) -> Option<FontFile> {
         let path = url?.downcast::<CFURL>().ok()?.to_file_path()?;
-        let index = postscript.map_or(0, |name| face_index(&path, &name));
+        let index = match postscript {
+            Some(name) => *indexes
+                .entry((path.clone(), name))
+                .or_insert_with_key(|(path, name)| face_index(path, name)),
+            None => 0,
+        };
         Some((path, index))
     }
 
