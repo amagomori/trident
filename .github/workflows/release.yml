@@ -1,0 +1,101 @@
+name: Release
+
+# Tags only: Actions minutes are capped, so this never runs on pushes to branches or PRs.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+  APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+  APPIMAGE_RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+  APPIMAGE_RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+
+jobs:
+  linux:
+    name: Linux x86_64
+    # The oldest supported runner, so the binary runs on glibc 2.35 and newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - id: version
+        run: echo "version=$(python3 .github/scripts/release/release.py version --tag "$GITHUB_REF_NAME")" >> "$GITHUB_OUTPUT"
+      - run: python3 -m unittest discover -s .github/scripts/release
+      - run: cargo build --release --locked -p term-app
+      - name: Fetch appimagetool
+        run: |
+          curl -fsSLo appimagetool "$APPIMAGETOOL_URL"
+          curl -fsSLo appimage-runtime "$APPIMAGE_RUNTIME_URL"
+          printf '%s  appimagetool\n%s  appimage-runtime\n' "$APPIMAGETOOL_SHA256" "$APPIMAGE_RUNTIME_SHA256" | sha256sum -c
+          chmod +x appimagetool
+      - run: >
+          python3 .github/scripts/release/release.py linux --binary target/release/trident
+          --version "${{ steps.version.outputs.version }}" --out dist
+          --appimagetool ./appimagetool --runtime ./appimage-runtime
+      - run: ./dist/*.AppImage --appimage-extract-and-run --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - id: version
+        run: echo "version=$(python3 .github/scripts/release/release.py version --tag "$GITHUB_REF_NAME")" >> "$GITHUB_OUTPUT"
+      - run: |
+          cargo build --release --locked -p term-app --target aarch64-apple-darwin
+          cargo build --release --locked -p term-app --target x86_64-apple-darwin
+          lipo -create -output trident-universal \
+            target/aarch64-apple-darwin/release/trident target/x86_64-apple-darwin/release/trident
+          lipo -verify_arch trident-universal arm64 x86_64
+      - run: >
+          python3 .github/scripts/release/release.py macos --binary trident-universal
+          --version "${{ steps.version.outputs.version }}" --out dist
+      - run: |
+          rm -rf dist/Trident.app
+          hdiutil verify dist/*.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: python3 .github/scripts/release/release.py checksums dist
+      - run: python3 .github/scripts/release/release.py changelog --tag "$GITHUB_REF_NAME" > notes.md
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 .github/scripts/release/release.py version --tag "$GITHUB_REF_NAME")
+          prerelease=
+          case "$version" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Trident $version" \
+            --notes-file notes.md $prerelease

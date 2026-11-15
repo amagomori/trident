@@ -20,6 +20,32 @@ cargo fmt
 
 CI runs these on Linux and macOS for every pull request.
 
+## Releasing
+
+Pushing a `v*` tag that matches the workspace version in `Cargo.toml` (for example `v0.1.0`, or
+`v0.1.0-rc.1` for a prerelease) runs `.github/workflows/release.yml`, the only workflow that runs
+on tags. It builds a universal macOS binary into `Trident.app` inside
+`Trident-<version>-macos-universal.dmg`, and a Linux x86_64 `Trident-<version>-linux-x86_64.tar.gz`,
+`Trident-<version>-linux-amd64.deb` and `Trident-<version>-x86_64.AppImage`, then publishes them
+with `SHA256SUMS` and release notes listing the PRs merged since the previous tag. Builds are not
+signed or notarized; the app is only ad-hoc signed so it runs on Apple silicon.
+
+The packaging lives in `.github/scripts/release/release.py`, so artifacts can be built and checked
+locally before tagging:
+
+```sh
+cargo build --release -p term-app
+python3 .github/scripts/release/release.py linux --binary target/release/trident --version 0.1.0 \
+  --out dist [--appimagetool appimagetool-x86_64.AppImage --runtime runtime-x86_64]
+python3 .github/scripts/release/release.py macos --binary trident-universal --version 0.1.0 --out dist
+python3 .github/scripts/release/release.py checksums dist
+python3 .github/scripts/release/release.py changelog --tag v0.1.0
+python3 -m unittest discover -s .github/scripts/release
+```
+
+The .deb needs `dpkg-deb` and `tic`; the .dmg needs macOS. `release.yml` pins appimagetool and its
+runtime by SHA-256.
+
 ## Measuring latency
 
 On Wayland with presentation feedback and a known refresh period, redraws and flood
