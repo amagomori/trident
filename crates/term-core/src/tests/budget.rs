@@ -299,3 +299,11 @@ fn selection_and_viewport_stay_on_their_text_while_the_gap_grows() {
     assert_eq!(t.selection_text().unwrap().trim_end(), "out 100");
     assert_eq!(t.viewport_row(0).text(), top);
 }
+
+#[test]
+fn reset_keeps_budget_settings() {
+    let mut t = Terminal::new(40, 5);
+    t.set_command_budget(false, 0.25);
+    t.advance(b"\x1bc");
+    assert_eq!(t.command_budget(), (false, 0.25));
+}

@@ -1834,7 +1834,9 @@ impl Terminal {
         fresh.palette = self.palette.clone();
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
+        let (enabled, share) = self.command_budget();
         *self = fresh;
+        self.set_command_budget(enabled, share);
         self.title_changed = true;
     }
 }
