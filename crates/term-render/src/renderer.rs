@@ -12,12 +12,18 @@ use term_core::colors::Rgb;
 use term_core::{Cell, CursorShape, Flags, Terminal, UnderlineStyle, grapheme};
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
-/// Whether `cell` draws something that SGR 5 blinks. The character under a block
-/// cursor stays visible in the hidden phase, as in xterm.
+/// Whether `cell` draws something that SGR 5 blinks. The character inside a block
+/// cursor, solid or hollow, stays visible in the hidden phase, as in xterm.
 fn blinks(cell: &Cell, under_block_cursor: bool) -> bool {
     let drawn = (cell.c != ' ' && !cell.flags.contains(Flags::HIDDEN))
         || cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKE);
     drawn && cell.flags.contains(Flags::BLINK) && !under_block_cursor
+}
+
+/// Whether the cursor is drawn as a box around its cell: solid for a focused block,
+/// hollow for every shape while unfocused.
+fn boxed_cursor(focused: bool, shape: CursorShape) -> bool {
+    !focused || shape == CursorShape::Block
 }
 
 #[repr(C)]
@@ -501,6 +507,7 @@ impl Renderer {
             .cursor_position()
             .filter(|_| preedit.is_none() && (self.cursor_visible || !focused));
         let block_cursor = focused && term.cursor_shape == CursorShape::Block;
+        let boxed_cursor = boxed_cursor(focused, term.cursor_shape);
         let mut ok = true;
 
         let first = Damage::first_row(pixel_offset);
@@ -578,7 +585,7 @@ impl Renderer {
                     backgrounds.push(self.rect(x, y, cw * cells as f32, ch, bg));
                 }
 
-                let blinked_off = blinks(cell, is_cursor && block_cursor) && {
+                let blinked_off = blinks(cell, is_cursor && boxed_cursor) && {
                     self.row_blinks[i] = true;
                     !self.blink_visible
                 };
@@ -1273,5 +1280,21 @@ mod tests {
         assert!(!blinks(&cell(' ', Flags::BLINK), false));
         assert!(!blinks(&cell('B', Flags::BLINK | Flags::HIDDEN), false));
         assert!(!blinks(&cell('B', Flags::default()), false));
+    }
+
+    #[test]
+    fn blink_keeps_the_character_under_a_hollow_cursor() {
+        let b = cell('B', Flags::BLINK);
+        for shape in [CursorShape::Block, CursorShape::Underline, CursorShape::Bar] {
+            assert!(boxed_cursor(false, shape), "unfocused {shape:?}");
+            assert!(
+                !blinks(&b, boxed_cursor(false, shape)),
+                "unfocused {shape:?}"
+            );
+        }
+        assert!(boxed_cursor(true, CursorShape::Block));
+        assert!(!boxed_cursor(true, CursorShape::Underline));
+        assert!(!boxed_cursor(true, CursorShape::Bar));
+        assert!(blinks(&b, boxed_cursor(true, CursorShape::Bar)));
     }
 }
