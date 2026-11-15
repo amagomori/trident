@@ -238,8 +238,11 @@ fn size(cols: usize, rows: usize, cell_w: f32, cell_h: f32) -> PtySize {
 struct ShellArgs {
     /// The short option that runs a command string (`-c`).
     command: char,
-    /// Short options that take the next argument as their value (`-o vi`).
+    /// Short options that take a value (`-o vi`).
     short_values: &'static str,
+    /// Whether a short option's value may follow it in the same argument (getopt's `-Ccmd`);
+    /// otherwise it is always the next argument and the cluster goes on (bash's `-oc vi cmd`).
+    attached_values: bool,
     /// Long options (without `--`) that run a command string.
     long_commands: &'static [&'static str],
     /// Long options (without `--`) that take a value, after `=` or as the next argument.
@@ -249,6 +252,7 @@ struct ShellArgs {
 const POSIX_SHELL_ARGS: ShellArgs = ShellArgs {
     command: 'c',
     short_values: "o",
+    attached_values: false,
     long_commands: &[],
     long_values: &[],
 };
@@ -271,6 +275,7 @@ fn shell_args(shell: &str) -> Option<ShellArgs> {
         "fish" => ShellArgs {
             command: 'c',
             short_values: "Cdo",
+            attached_values: true,
             long_commands: &["command"],
             long_values: &[
                 "init-command",
@@ -323,11 +328,17 @@ fn is_idle_shell(args: &[String]) -> bool {
         let Some(flags) = arg.strip_prefix(['-', '+']) else {
             return false;
         };
-        for flag in flags.chars() {
-            if flag == grammar.command
-                || (grammar.short_values.contains(flag) && options.next().is_none())
-            {
+        for (at, flag) in flags.char_indices() {
+            if flag == grammar.command {
                 return false;
+            }
+            if grammar.short_values.contains(flag) {
+                if grammar.attached_values && at + flag.len_utf8() < flags.len() {
+                    break;
+                }
+                if options.next().is_none() {
+                    return false;
+                }
             }
         }
     }
@@ -817,6 +828,9 @@ mod tests {
             (true, &["fish", "--init-command=set x 1"]),
             (true, &["fish", "--init-command", "set x 1"]),
             (true, &["fish", "--no-config"]),
+            (true, &["fish", "-Ctrue"]),
+            (true, &["fish", "-iCtrue"]),
+            (true, &["fish", "-d3"]),
             (true, &["nu"]),
             (true, &["pwsh", "-l"]),
             (false, &[]),
@@ -856,6 +870,9 @@ mod tests {
             (false, &["fish", "--command", "make"]),
             (false, &["fish", "-C", "set x 1", "-c", "make"]),
             (false, &["fish", "s.fish"]),
+            (false, &["fish", "-Ctrue", "build.fish"]),
+            (false, &["fish", "-d3", "build.fish"]),
+            (false, &["fish", "-C", "true", "build.fish"]),
             (false, &["nu", "-c", "ls"]),
             (false, &["pwsh", "-Command", "ls"]),
         ];
