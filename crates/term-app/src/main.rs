@@ -5,6 +5,7 @@ macro_rules! diag {
     }};
 }
 
+mod app_icon;
 #[cfg(target_os = "linux")]
 mod appearance;
 mod clipboard;
@@ -105,6 +106,10 @@ const CURSOR_BLINK_HALF: Duration = Duration::from_millis(530);
 /// A blinking cursor rests, visible and with no timer, this long after the last input.
 const CURSOR_BLINK_IDLE: Duration = Duration::from_secs(15);
 const EXIT_TIMEOUT: Duration = Duration::from_millis(500);
+/// Output quiet time after which the app icons are set up.
+const ICONS_QUIET: Duration = Duration::from_millis(50);
+/// Latest time after launch to set up the app icons, even under steady output.
+const ICONS_LATEST: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct ResizeThrottle {
@@ -557,6 +562,15 @@ fn cursor_blink(blinking: bool, since: Instant, now: Instant) -> (bool, Option<I
     )
 }
 
+/// When to set up the app icons: once output has been quiet for `ICONS_QUIET` after the
+/// first frame, and by `latest` in any case.
+fn icons_due(first_frame_at: Option<Instant>, output_at: Instant, latest: Instant) -> Instant {
+    match first_frame_at {
+        Some(drawn) => latest.min(drawn.max(output_at) + ICONS_QUIET),
+        None => latest,
+    }
+}
+
 fn wake_deadline(
     frame: Option<Instant>,
     resize: Option<Instant>,
@@ -877,6 +891,13 @@ struct App {
     appearance_generation: u64,
     config: config::Config,
     config_error: Option<String>,
+    icons: app_icon::Shown,
+    /// Until the startup icons are set up: the latest time to do it.
+    icons_latest: Option<Instant>,
+    /// When PTY output was last parsed.
+    output_at: Instant,
+    /// When the first frame was seen drawn, while the startup icons wait.
+    first_frame_at: Option<Instant>,
     _watcher: Option<config::ConfigWatcher>,
     options: Options,
     proxy: EventLoopProxy<UserEvent>,
@@ -928,7 +949,12 @@ fn select_at(term: &mut Terminal, point: Point, modifiers: ModifiersState, click
 impl App {
     fn new(options: Options, proxy: EventLoopProxy<UserEvent>) -> App {
         let (config, config_error) = match config::load(&options.config_path) {
-            Ok(config) => (config, None),
+            Ok(config) => {
+                for warning in &config.warnings {
+                    diag!("{warning}");
+                }
+                (config, None)
+            }
             Err(error) => {
                 diag!("{error}");
                 (config::Config::default(), Some(error))
@@ -952,6 +978,10 @@ impl App {
             font_size: options.size(&config),
             config,
             config_error,
+            icons: app_icon::Shown::default(),
+            icons_latest: None,
+            output_at: Instant::now(),
+            first_frame_at: None,
             _watcher: watcher,
             options,
             proxy,
@@ -1229,6 +1259,29 @@ impl App {
         }
     }
 
+    /// Sets up the Dock and menu bar icons once startup settles, or returns when to check
+    /// again. On macOS that is ~15 ms of main-thread IPC with the Dock and the menu bar, which
+    /// would otherwise hold back the first frame and the first output.
+    fn show_icons_when_idle(&mut self) -> Option<Instant> {
+        let latest = self.icons_latest?;
+        let s = self.session.as_ref()?;
+        if self.exit_deadline.is_some() {
+            return None;
+        }
+        let now = Instant::now();
+        if s.sequence > 0 {
+            self.first_frame_at.get_or_insert(now);
+        }
+        let due = icons_due(self.first_frame_at, self.output_at, latest);
+        if now < due {
+            return Some(due);
+        }
+        self.icons_latest = None;
+        self.icons
+            .apply(&s.window, self.config.app_icon, self.config.menu_bar_icon);
+        None
+    }
+
     fn process_output(&mut self) {
         if let Some(search) = &mut self.search {
             search.dirty = true;
@@ -1254,6 +1307,7 @@ impl App {
             return;
         };
         s.since_frame += processed;
+        self.output_at = Instant::now();
         let synchronized_started = s.term.take_synchronized_output_started();
         if s.term.modes.mouse == MouseMode::Off {
             self.reported_button = None;
@@ -1726,6 +1780,9 @@ impl App {
                 diag!("trident: shell/term/env changes apply on the next launch");
             }
             let next_vsync_off = !next.vsync && self.config.vsync;
+            for warning in &next.warnings {
+                diag!("{warning}");
+            }
             self.config = next;
             #[cfg(target_os = "macos")]
             close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
@@ -1733,6 +1790,9 @@ impl App {
             ime::set_command_chords(&self.config.bindings);
             self.watch_appearance();
             if let Some(s) = &mut self.session {
+                self.icons_latest = None;
+                self.icons
+                    .apply(&s.window, self.config.app_icon, self.config.menu_bar_icon);
                 s.pty
                     .set_command_notifications(self.config.notify_long_commands_after != 0)?;
                 s.term
@@ -2421,6 +2481,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match self.start(event_loop) {
             Ok(session) => {
+                self.icons_latest = Some(Instant::now() + ICONS_LATEST);
                 #[cfg(target_os = "macos")]
                 close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
                 #[cfg(target_os = "macos")]
@@ -2684,6 +2745,9 @@ impl ApplicationHandler<UserEvent> for App {
                     deadline = Some(deadline.map_or(blink, |deadline| deadline.min(blink)));
                 }
             }
+        }
+        if let Some(due) = self.show_icons_when_idle() {
+            deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
         }
         deadline = exit_wakeup(deadline, self.exit_deadline);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -4502,6 +4566,18 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn icons_wait_for_the_first_frame_and_quiet_output() {
+        let now = Instant::now();
+        let latest = now + ICONS_LATEST;
+        let drawn = now + Duration::from_millis(100);
+        assert_eq!(icons_due(None, now, latest), latest);
+        assert_eq!(icons_due(Some(drawn), now, latest), drawn + ICONS_QUIET);
+        let output = drawn + Duration::from_millis(30);
+        assert_eq!(icons_due(Some(drawn), output, latest), output + ICONS_QUIET);
+        assert_eq!(icons_due(Some(drawn), latest, latest), latest);
+    }
+
     #[test]
     fn wake_deadline_merges_frame_resize_and_probe_without_idle_timers() {
         let now = Instant::now();

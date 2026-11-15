@@ -20,6 +20,8 @@ clipboard_read = false      # true: let programs read the clipboard with OSC 52
 confirm_close = true        # false: close the window at once even while a program runs
 desktop_notifications = true # false: ignore OSC 9/777/99 notification requests
 vsync = true                # false: present without waiting for vblank (lower latency, may tear)
+app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset (see App icons in usage.md)
+menu_bar_icon = true        # macOS: false hides the menu bar item
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 term = "xterm-256color"     # "xterm-trident" once installed (falls back if not found)
 

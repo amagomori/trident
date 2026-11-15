@@ -105,6 +105,19 @@ other apps' windows. ConEmu's numeric OSC 9 commands
 seconds; title and body are capped at 1024 characters and shown as plain text. Set
 `desktop_notifications = false` to ignore them.
 
+## App icons
+
+`app_icon` picks the Dock icon on macOS and the window icon on Linux from eight variants:
+`tide` (default), `lagoon`, `dusk`, `reef`, `kelp`, `midnight`, `golden` and `sunset`
+(case-insensitive). On macOS the same icon also shows as a menu bar item whose menu brings the
+window forward or quits; set `menu_bar_icon = false` to hide it. Both apply on config reload. An
+unknown name logs a warning and uses `tide` instead of rejecting the file.
+
+Each variant ships as `assets/icons/<name>.icns` (16 to 1024 px, 1x and 2x, the artwork on
+Apple's 824/1024 icon grid) and 18 pt menu bar images at 1x and 2x
+(`<name>-menubar.png`, `<name>-menubar@2x.png`). After editing a source image in `assets/`,
+regenerate them with `python3 assets/generate_icons.py` (needs Pillow).
+
 ## Dropping files
 
 Drop a local file from your file manager onto the window to insert its POSIX-shell-quoted
