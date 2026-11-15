@@ -18,8 +18,8 @@ git worktree add ../t-main origin/main && git worktree add ../t-head <head-sha>
 for d in ../t-main ../t-head; do (cd $d && CARGO_TARGET_DIR=$PWD/target cargo build --release -p term-app); done
 python3 .github/scripts/ascii-run-qa/fixtures.py --dir ../k87-fixtures
 for f in dense mixed cjk; do
-    python3 .github/scripts/ascii-run-qa/ptyab.py --a ../t-main/target/release/terminal \
-        --b ../t-head/target/release/terminal --fixture ../k87-fixtures/$f.txt --pairs 10
+    python3 .github/scripts/ascii-run-qa/ptyab.py --a ../t-main/target/release/trident \
+        --b ../t-head/target/release/trident --fixture ../k87-fixtures/$f.txt --pairs 10
 done
 ```
 

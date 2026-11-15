@@ -8,7 +8,7 @@ A Cargo workspace of three crates:
 | --- | --- |
 | `crates/term-core` | Terminal state: grid, scrollback, cursor, modes, selection, colors, and the VT/xterm escape sequence handling (parsed with [`vte`](https://crates.io/crates/vte)). No GPU or window dependencies, so it builds and tests headless |
 | `crates/term-render` | wgpu renderer (`renderer.rs`, `shader.wgsl`) that draws a frame as one instanced pass, plus glyph rasterization ([`ab_glyph`](https://crates.io/crates/ab_glyph)), system font fallback (`fallback.rs`), color glyphs (`color.rs`) and the GPU glyph atlases. Takes any window with raw window and display handles |
-| `crates/term-app` | The `terminal` binary: window and event loop ([`winit`](https://crates.io/crates/winit)), the shell on a pseudo-terminal ([`portable-pty`](https://crates.io/crates/portable-pty)), key and mouse encoding, and the clipboard |
+| `crates/term-app` | The `trident` binary: window and event loop ([`winit`](https://crates.io/crates/winit)), the shell on a pseudo-terminal ([`portable-pty`](https://crates.io/crates/portable-pty)), key and mouse encoding, and the clipboard |
 
 ## Building and testing
 
@@ -29,7 +29,7 @@ and the fixed flood timeout. Idle windows do not schedule frame timers.
 
 From a Linux or macOS desktop session, run `python3 .github/scripts/latency.py
 --base ../baseline --head . --runs 5`, or use
-`--app target/release/terminal`. It reports per-run p50/p99/mean input-to-present
+`--app target/release/trident`. It reports per-run p50/p99/mean input-to-present
 latency and their min–max spread, plus presented/wasted/late frames and bytes/s
 under sustained output. Load mode runs without probes for `--duration` seconds
 (default 10) and reports throughput only. Late intervals exceed 1.5 refresh periods

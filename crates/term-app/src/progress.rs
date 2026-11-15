@@ -4,7 +4,7 @@ use term_core::Progress;
 
 /// The window title for `title` (as set by OSC 0/2) with `progress` in front.
 pub fn window_title(title: &str, progress: Option<Progress>) -> String {
-    let title = if title.is_empty() { "terminal" } else { title };
+    let title = if title.is_empty() { "Trident" } else { title };
     let prefix = match progress {
         None => return title.to_string(),
         Some(Progress::Normal(percent)) => format!("{percent}%"),
@@ -58,9 +58,9 @@ mod tests {
     fn title_shows_progress_in_front() {
         let cases = [
             (None, "vim", "vim"),
-            (None, "", "terminal"),
+            (None, "", "Trident"),
             (Some(Progress::Normal(42)), "cargo", "[42%] cargo"),
-            (Some(Progress::Normal(0)), "", "[0%] terminal"),
+            (Some(Progress::Normal(0)), "", "[0%] Trident"),
             (Some(Progress::Error(Some(60))), "make", "[error 60%] make"),
             (Some(Progress::Error(None)), "make", "[error] make"),
             (Some(Progress::Indeterminate), "apt", "[busy] apt"),

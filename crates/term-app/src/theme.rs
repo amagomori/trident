@@ -208,7 +208,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error,
-            "terminal: theme.toml:3:1: colors.white: expected \"#rrggbb\", got \"oops\""
+            "trident: theme.toml:3:1: colors.white: expected \"#rrggbb\", got \"oops\""
         );
     }
 
@@ -221,7 +221,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error,
-            "terminal: theme.toml:4:1: colors.white: expected \"#rrggbb\", got \"oops\""
+            "trident: theme.toml:4:1: colors.white: expected \"#rrggbb\", got \"oops\""
         );
     }
 

@@ -80,7 +80,7 @@ pub fn watch(changed: impl Fn(Option<Theme>) + Send + 'static) -> std::io::Resul
         std::env::var_os("XDG_RUNTIME_DIR"),
     ) {
         diag!(
-            "terminal: OS appearance unavailable (using dark): DBUS_SESSION_BUS_ADDRESS and XDG_RUNTIME_DIR are unset"
+            "trident: OS appearance unavailable (using dark): DBUS_SESSION_BUS_ADDRESS and XDG_RUNTIME_DIR are unset"
         );
         return Ok(Watch {
             stop: Arc::default(),
@@ -92,7 +92,7 @@ pub fn watch(changed: impl Fn(Option<Theme>) + Send + 'static) -> std::io::Resul
     spawn(
         async move {
             if let Err(error) = listen(first, changed).await {
-                diag!("terminal: OS appearance unavailable (using dark): {error}");
+                diag!("trident: OS appearance unavailable (using dark): {error}");
             }
         },
         Some(initial),

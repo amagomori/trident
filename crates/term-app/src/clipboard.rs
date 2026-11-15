@@ -96,7 +96,7 @@ impl Clipboard {
                     .map(Backend::Arboard)
                     .map_err(|e| e.to_string()),
             })
-            .map_err(|e| diag!("terminal: clipboard unavailable: {e}"))
+            .map_err(|e| diag!("trident: clipboard unavailable: {e}"))
             .ok();
         Self {
             inner,
@@ -119,7 +119,7 @@ impl Clipboard {
             use x11rb::connection::RequestConnection;
             x11rb::connect(None)
                 .map(|(connection, _)| connection.maximum_request_bytes())
-                .map_err(|e| diag!("terminal: X11 request size unavailable: {e}"))
+                .map_err(|e| diag!("trident: X11 request size unavailable: {e}"))
                 .ok()
         });
         max.is_none_or(|max| x11_property_fits(len, max))
@@ -156,7 +156,7 @@ impl Clipboard {
         #[cfg(target_os = "linux")]
         if self.inner.is_some() && !self.x11_can_serve(text.len()) {
             diag!(
-                "terminal: {} bytes is more than the X server can transfer; clipboard left unchanged",
+                "trident: {} bytes is more than the X server can transfer; clipboard left unchanged",
                 text.len()
             );
             return;

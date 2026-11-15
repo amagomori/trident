@@ -18,8 +18,8 @@ when its workload did not run, so a wrong path cannot pass as a fast run.
 git worktree add ../t-main <frozen main sha>
 git worktree add ../t-head <frozen head sha>
 for d in ../t-main ../t-head; do (cd $d && cargo build --release -p term-app); done
-M=$(cd ../t-main && pwd)/target/release/terminal
-H=$(cd ../t-head && pwd)/target/release/terminal
+M=$(cd ../t-main && pwd)/target/release/trident
+H=$(cd ../t-head && pwd)/target/release/trident
 FX=$HOME/qa-fixtures; Q=$PWD/.github/scripts
 ```
 

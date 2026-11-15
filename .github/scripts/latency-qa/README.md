@@ -14,10 +14,10 @@ Xvfb, for anything that counts as evidence.
 git worktree add ../t-main origin/main && git worktree add ../t-head <head-sha>
 (cd ../t-main && CARGO_TARGET_DIR=$PWD/target cargo build --release -p term-app)
 (cd ../t-head && CARGO_TARGET_DIR=$PWD/target cargo build --release -p term-app)
-python3 .github/scripts/latency-qa/ab.py --main ../t-main/target/release/terminal \
-    --head ../t-head/target/release/terminal --rounds 8 --out ab-out
-python3 .github/scripts/latency-qa/vs_alacritty.py --main ../t-main/target/release/terminal \
-    --head ../t-head/target/release/terminal --rounds 6 --probes 200 --load --out vs-out
+python3 .github/scripts/latency-qa/ab.py --main ../t-main/target/release/trident \
+    --head ../t-head/target/release/trident --rounds 8 --out ab-out
+python3 .github/scripts/latency-qa/vs_alacritty.py --main ../t-main/target/release/trident \
+    --head ../t-head/target/release/trident --rounds 6 --probes 200 --load --out vs-out
 ```
 
 Both write `rows.json` (every run) and `summary.json` into `--out`; a reused `--out` loses its old

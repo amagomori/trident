@@ -159,7 +159,7 @@ fn notify_linux(message: Message, shown: &mut ReplaceIds) {
     let mut notification = notify_rust::Notification::new();
     notification
         .summary(&message.title)
-        .appname("terminal")
+        .appname("Trident")
         .urgency(match message.urgency {
             term_core::Urgency::Low => notify_rust::Urgency::Low,
             term_core::Urgency::Normal => notify_rust::Urgency::Normal,
@@ -177,7 +177,7 @@ fn notify_linux(message: Message, shown: &mut ReplaceIds) {
                 shown.insert(key, handle.id());
             }
         }
-        Err(error) => diag!("terminal: notification failed: {error}"),
+        Err(error) => diag!("trident: notification failed: {error}"),
     }
 }
 
@@ -198,7 +198,7 @@ fn applescript_string(value: &str) -> String {
 /// process, so the key is scoped to it.
 #[cfg(any(target_os = "macos", test))]
 fn request_identifier(pid: u32, key: &str) -> String {
-    format!("terminal-{pid}-{key}")
+    format!("trident-{pid}-{key}")
 }
 
 /// Returns once macOS has accepted the request (or failed it), so the next one queues
@@ -220,7 +220,7 @@ fn notify_macos(message: Message) {
         replace,
     } = message;
     let (title, body) = if body.is_empty() {
-        ("terminal".to_owned(), title)
+        ("Trident".to_owned(), title)
     } else {
         (title, body)
     };
@@ -237,10 +237,10 @@ fn notify_macos(message: Message) {
         {
             Ok(output) if output.status.success() => {}
             Ok(output) => diag!(
-                "terminal: notification failed: {}",
+                "trident: notification failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
-            Err(error) => diag!("terminal: notification failed: {error}"),
+            Err(error) => diag!("trident: notification failed: {error}"),
         }
         return;
     }
@@ -249,7 +249,7 @@ fn notify_macos(message: Message) {
     let (done, accepted) = std::sync::mpsc::sync_channel::<()>(1);
     let authorized = RcBlock::new(move |granted: Bool, error: *mut NSError| {
         if !error.is_null() || !granted.as_bool() {
-            diag!("terminal: notification authorization denied or failed");
+            diag!("trident: notification authorization denied or failed");
             let _ = done.try_send(());
             return;
         }
@@ -276,7 +276,7 @@ fn notify_macos(message: Message) {
         let done = done.clone();
         let completed = RcBlock::new(move |error: *mut NSError| {
             if !error.is_null() {
-                diag!("terminal: notification delivery failed");
+                diag!("trident: notification delivery failed");
             }
             let _ = done.try_send(());
         });
@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn request_identifiers_are_per_process_and_key() {
-        assert_eq!(request_identifier(42, "build"), "terminal-42-build");
+        assert_eq!(request_identifier(42, "build"), "trident-42-build");
         assert_ne!(request_identifier(42, "a"), request_identifier(43, "a"));
     }
 

@@ -1,7 +1,7 @@
 """Real-display latency/throughput comparison (Python 3 stdlib, Linux/macOS).
 
 Run from a desktop session with cargo and the app's build dependencies installed:
-  python3 .github/scripts/latency.py --app target/release/terminal --runs 5
+  python3 .github/scripts/latency.py --app target/release/trident --runs 5
   python3 .github/scripts/latency.py --base ../baseline --head . --json results.json
 An uninstrumented baseline is skipped with a diagnostic; head must produce data.
 Each checkout gets its own target directory.
@@ -119,7 +119,9 @@ def build(checkout, target):
     env = dict(os.environ, CARGO_TARGET_DIR=str(target))
     subprocess.run(["cargo", "build", "--release", "-p", "term-app"],
                    cwd=checkout, env=env, check=True, stdout=sys.stderr)
-    return target / "release" / "terminal"
+    release = target / "release"
+    trident = release / "trident"
+    return trident if trident.exists() else release / "terminal"
 
 
 def main():
