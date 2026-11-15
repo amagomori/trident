@@ -149,16 +149,25 @@ thread_local! {
     static QUIT_HOOK: std::cell::RefCell<Option<QuitHook>> = const { std::cell::RefCell::new(None) };
     /// AppKit waits for `answer_quit` on a quit that `should_terminate` deferred.
     static QUIT_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// The window close `should_terminate` or Close Window sent closes every tab, so it asks
-    /// about all of them.
-    static QUIT_CLOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The window close `should_terminate` or Close Window sent closes more than its tab.
+    static WIDE_CLOSE: std::cell::Cell<Option<WideClose>> = const { std::cell::Cell::new(None) };
 }
 
-/// Whether a window's `CloseRequested` came from a quit (see `should_terminate`) or from
-/// Close Window (see `close_window`) rather than from closing that one tab; clears it.
+/// What a window's `CloseRequested` closes beyond that one tab.
 #[cfg(target_os = "macos")]
-pub fn take_quit_close() -> bool {
-    QUIT_CLOSE.replace(false)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WideClose {
+    /// Every tab, for a quit (see `should_terminate`).
+    Quit,
+    /// Every tab of the key window's tab group, for Close Window (see `close_window`).
+    Window,
+}
+
+/// What a window's `CloseRequested` closes beyond that one tab, if it came from a quit or
+/// Close Window; clears it.
+#[cfg(target_os = "macos")]
+pub fn take_wide_close() -> Option<WideClose> {
+    WIDE_CLOSE.take()
 }
 
 #[cfg(target_os = "macos")]
@@ -187,7 +196,7 @@ unsafe extern "C-unwind" fn should_terminate(
             // SAFETY: on the main thread.
             let session_ends = unsafe { quit_ends_session() };
             QUIT_DEFERRED.set(session_ends);
-            QUIT_CLOSE.set(true);
+            WIDE_CLOSE.set(Some(WideClose::Quit));
             // SAFETY: on the main thread; mainWindow is nil or a live NSWindow, and so is
             // hook.window, which stands in when the app has no main window.
             let _: () = unsafe {
@@ -210,15 +219,14 @@ unsafe extern "C-unwind" fn should_terminate(
 
 /// `terminalCloseWindow:`, the app menu's Close Window: each native tab is its own NSWindow,
 /// so a plain `performClose:` would close only the key one; this marks the close as one of
-/// every tab first.
+/// every tab in the key window's group first.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn close_window(
     _this: *mut objc2::runtime::AnyObject,
     _cmd: objc2::runtime::Sel,
     _sender: *mut objc2::runtime::AnyObject,
 ) {
-    QUIT_DEFERRED.set(false);
-    QUIT_CLOSE.set(true);
+    WIDE_CLOSE.set(Some(WideClose::Window));
     // SAFETY: on the main thread, where AppKit sends menu actions; keyWindow is nil or a
     // live NSWindow.
     unsafe {
@@ -233,7 +241,7 @@ unsafe extern "C-unwind" fn close_window(
                     performClose: std::ptr::null::<objc2::runtime::AnyObject>()
                 ];
             }
-            None => QUIT_CLOSE.set(false),
+            None => WIDE_CLOSE.set(None),
         }
     }
 }

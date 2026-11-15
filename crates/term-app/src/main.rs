@@ -1086,6 +1086,10 @@ struct App {
     tab_click: bool,
     /// The tab a close confirmation is for; none when it is for the window.
     pending_close_tab: Option<u64>,
+    /// The tabs, by pane id, of the native window a close confirmation is for while other
+    /// windows hold the rest.
+    #[cfg(target_os = "macos")]
+    pending_close_window: Option<Vec<u64>>,
     /// Per tab pane id, whether a program other than the shell runs there; asked before
     /// the app quits.
     #[cfg(target_os = "macos")]
@@ -1183,6 +1187,8 @@ impl App {
             tab_pointer: PhysicalPosition::default(),
             tab_click: false,
             pending_close_tab: None,
+            #[cfg(target_os = "macos")]
+            pending_close_window: None,
             #[cfg(target_os = "macos")]
             quit_checks: QuitChecks::default(),
             modifiers: ModifiersState::empty(),
@@ -1646,10 +1652,11 @@ impl App {
                 self.select_tab(index);
                 self.window_event(event_loop, id, WindowEvent::Focused(true));
             }
-            WindowEvent::CloseRequested if close_confirm::take_quit_close() => {
-                self.close_requested(event_loop)
-            }
-            WindowEvent::CloseRequested => self.close_tab(index, event_loop),
+            WindowEvent::CloseRequested => match close_confirm::take_wide_close() {
+                Some(close_confirm::WideClose::Quit) => self.close_requested(event_loop),
+                Some(close_confirm::WideClose::Window) => self.close_window(event_loop),
+                None => self.close_tab(index, event_loop),
+            },
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
             WindowEvent::Occluded(occluded) => {
                 if let Some(pane) = &mut self.tabs[index] {
@@ -1769,8 +1776,80 @@ impl App {
     #[cfg(target_os = "macos")]
     fn cancel_prompts(&mut self) {
         self.pending_paste = None;
+        if self.pending_close_window.take().is_some() {
+            self.pending_close = None;
+            return;
+        }
         if self.pending_close.take().is_some() && self.pending_close_tab.take().is_none() {
             close_confirm::answer_quit(false);
+        }
+    }
+
+    /// Closes the tabs of the active tab's native window, asking first while a program other
+    /// than the shell runs in one, and a second Close Window confirming; the app as a whole
+    /// when that window holds every tab.
+    #[cfg(target_os = "macos")]
+    #[cold]
+    fn close_window(&mut self, event_loop: &ActiveEventLoop) {
+        let group = self.native_tab_order();
+        if group.is_empty() || group.len() >= self.tabs.len() {
+            self.close_requested(event_loop);
+            return;
+        }
+        let ids: Vec<u64> = group
+            .iter()
+            .filter_map(|&index| {
+                if index == self.active_tab {
+                    self.session.as_ref().map(|s| s.pane)
+                } else {
+                    self.tabs.get(index)?.as_ref().map(|pane| pane.id)
+                }
+            })
+            .collect();
+        if self.pending_close_window.as_ref() == Some(&ids) {
+            self.pending_close_window = None;
+            self.pending_close = None;
+            self.remove_tabs(&ids);
+            return;
+        }
+        // A paste or quit prompt keeps the window; a tab prompt gives way to this one.
+        let app_prompt = self.pending_close.is_some()
+            && self.pending_close_tab.is_none()
+            && self.pending_close_window.is_none();
+        if self.pending_paste.is_some() || app_prompt {
+            return;
+        }
+        let running = group
+            .iter()
+            .filter(|_| self.config.confirm_close)
+            .find_map(|&index| self.tab_pty(index).and_then(Pty::running_program));
+        if let Some(pid) = running {
+            self.pending_close_tab = None;
+            self.pending_close = Some(close_confirm::process_name(pid));
+            self.pending_close_window = Some(ids);
+            if let Some(s) = &self.session {
+                s.window.request_redraw();
+            }
+            return;
+        }
+        self.pending_close_tab = None;
+        self.pending_close = None;
+        self.remove_tabs(&ids);
+    }
+
+    /// Drops the tabs with pane `ids`, the active one last so the tab shown next is one
+    /// that stays.
+    #[cfg(target_os = "macos")]
+    fn remove_tabs(&mut self, ids: &[u64]) {
+        let active = self.session.as_ref().map(|s| s.pane);
+        let (shown, hidden): (Vec<u64>, Vec<u64>) = ids.iter().partition(|&&id| Some(id) == active);
+        for id in hidden.into_iter().chain(shown) {
+            if let Some(index) = self.tab_index(id) {
+                self.remove_tab(index);
+            }
+        }
+        if let Some(s) = &self.session {
+            s.window.request_redraw();
         }
     }
 
@@ -2448,7 +2527,9 @@ impl App {
             .as_ref()
             .filter(|_| {
                 self.config.confirm_close
-                    && (self.pending_close.is_none() || self.pending_close_tab.is_some())
+                    && (self.pending_close.is_none()
+                        || self.pending_close_tab.is_some()
+                        || self.window_prompt())
             })
             .and_then(|s| {
                 s.pty.running_program().or_else(|| {
@@ -2462,6 +2543,10 @@ impl App {
             (Some(pid), Some(s)) => {
                 // A window close while a tab close is being asked about asks about the window.
                 self.pending_close_tab = None;
+                #[cfg(target_os = "macos")]
+                {
+                    self.pending_close_window = None;
+                }
                 self.pending_close = Some(close_confirm::process_name(pid));
                 if s.window.is_minimized() == Some(true) {
                     s.window.set_minimized(false);
@@ -2476,12 +2561,34 @@ impl App {
         }
     }
 
+    /// Whether the close prompt is for one native window's tabs rather than the app.
+    fn window_prompt(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.pending_close_window.is_some();
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
+    /// Clears a close prompt for one native window's tabs; whether there was one.
+    fn take_window_prompt(&mut self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.pending_close_window.take().is_some();
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
     /// Enter closes the window and Escape keeps it; other keys are ignored.
     #[cold]
     fn confirm_close_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
         use winit::keyboard::NamedKey;
         match event.logical_key {
             Key::Named(NamedKey::Enter) => {
+                #[cfg(target_os = "macos")]
+                if let Some(ids) = self.pending_close_window.take() {
+                    self.pending_close = None;
+                    self.remove_tabs(&ids);
+                    return;
+                }
                 if let Some(id) = self.pending_close_tab.take() {
                     self.pending_close = None;
                     if let Some(index) = self.tab_index(id) {
@@ -2496,7 +2603,7 @@ impl App {
             }
             Key::Named(NamedKey::Escape) => {
                 self.pending_close = None;
-                if self.pending_close_tab.take().is_none() {
+                if self.pending_close_tab.take().is_none() && !self.take_window_prompt() {
                     close_confirm::answer_quit(false);
                 }
                 if let Some(s) = &self.session {
@@ -3731,11 +3838,11 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
             #[cfg(target_os = "macos")]
-            WindowEvent::CloseRequested if close_confirm::take_quit_close() => {
-                self.close_requested(event_loop)
-            }
-            #[cfg(target_os = "macos")]
-            WindowEvent::CloseRequested => self.close_tab(self.active_tab, event_loop),
+            WindowEvent::CloseRequested => match close_confirm::take_wide_close() {
+                Some(close_confirm::WideClose::Quit) => self.close_requested(event_loop),
+                Some(close_confirm::WideClose::Window) => self.close_window(event_loop),
+                None => self.close_tab(self.active_tab, event_loop),
+            },
             #[cfg(not(target_os = "macos"))]
             WindowEvent::CloseRequested => self.close_requested(event_loop),
             WindowEvent::Resized(size) => {
