@@ -1,0 +1,15 @@
+size=6x1 active=primary
+cursor row=0 col=0 visible=true shape=block pending_wrap=false
+cursor attributes: fg=default-fg bg=index(4) flags=[]
+scroll_region=0..=0 history=0 display_offset=0
+primary:
+  row 0 wrap=false text="  好 x "
+    cells 0..2: fg=default-fg bg=index(4) flags=[]
+    cells 2..3: fg=default-fg bg=index(1) flags=[wide]
+    cells 3..4: fg=default-fg bg=index(1) flags=[wide-spacer]
+    cells 4..5: fg=default-fg bg=index(1) flags=[]
+    cells 5..6: fg=default-fg bg=default-bg flags=[]
+scrollback (oldest first):
+alternate:
+  row 0 wrap=false text="      "
+    cells 0..6: fg=default-fg bg=default-bg flags=[]

@@ -817,6 +817,24 @@ fn cases() -> Vec<Case> {
             "a你b好cd\x1b[1;3H\x1b[3X".as_bytes(),
         ),
         (
+            "erase_characters_wide_left_half_background",
+            6,
+            1,
+            "\x1b[41m你好x\x1b[44m\x1b[1;1H\x1b[X".as_bytes(),
+        ),
+        (
+            "erase_characters_wide_split_background",
+            8,
+            1,
+            "\x1b[41ma你b好cd\x1b[44m\x1b[1;3H\x1b[3X".as_bytes(),
+        ),
+        (
+            "erase_line_wide_split_background",
+            8,
+            2,
+            "\x1b[41ma你b好cd\r\na你b好cd\x1b[44m\x1b[1;3H\x1b[K\x1b[2;5H\x1b[1K".as_bytes(),
+        ),
+        (
             "erase_display_end",
             4,
             3,
