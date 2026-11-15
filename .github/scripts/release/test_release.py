@@ -110,6 +110,19 @@ class Linux(Base):
         self.assertIn("Icon=trident", (root / "trident.desktop").read_text())
         self.assertIn('exec "$here/usr/bin/trident" "$@"', (root / "AppRun").read_text())
 
+    def test_appimagetool_relative_to_cwd(self):
+        tool = self.tmp / "appimagetool"
+        tool.write_text('#!/bin/sh\nfor a; do last=$a; done\necho "$@" > "$last"\n')
+        tool.chmod(0o755)
+        (self.tmp / "runtime").write_bytes(b"")
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
+        release.appimage(self.binary, "x86_64", self.tmp / "out.AppImage", Path("./appimagetool"),
+                         Path("./runtime"))
+        args = (self.tmp / "out.AppImage").read_text()
+        self.assertIn(f"--runtime-file {self.tmp / 'runtime'} ", args)
+
     def test_unknown_arch(self):
         with self.assertRaises(release.ReleaseError):
             release.linux(self.binary, "1.2.3", "riscv64", self.tmp / "dist")

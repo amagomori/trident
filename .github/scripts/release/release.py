@@ -208,7 +208,8 @@ def appimage(binary, arch, out, tool, runtime):
         appdir(binary, root)
         env = dict(os.environ, ARCH=arch, APPIMAGE_EXTRACT_AND_RUN="1",
                    SOURCE_DATE_EPOCH=str(epoch()))
-        result = subprocess.run([str(tool), "--no-appstream", "--runtime-file", str(runtime),
+        result = subprocess.run([str(Path(tool).resolve()), "--no-appstream", "--runtime-file",
+                                 str(Path(runtime).resolve()),
                                  str(root), str(out)], capture_output=True, text=True, env=env)
         if result.returncode != 0:
             raise ReleaseError(f"appimagetool failed:\n{result.stdout}{result.stderr}")
