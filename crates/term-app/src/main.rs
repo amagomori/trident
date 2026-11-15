@@ -2026,6 +2026,13 @@ impl App {
             tab.renderer.clear_glyph_cache();
         }
         self.resize_grid();
+        // A tab torn out into its own window stays visible, so its grid follows the font now.
+        #[cfg(target_os = "macos")]
+        for index in 0..self.tabs.len() {
+            if self.tabs[index].is_some() {
+                self.with_tab_shown(index, App::resize_grid);
+            }
+        }
     }
 
     fn output_ready(&mut self) {
