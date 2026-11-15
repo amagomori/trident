@@ -776,7 +776,9 @@ impl Pty {
     }
 
     /// Whether a line editor (readline, zle) owns the terminal: echo and canonical input are
-    /// off while signals stay on, unlike the raw mode of full-screen apps and ssh.
+    /// off while signals stay on, unlike the raw mode of full-screen apps and ssh. A shell's
+    /// own silent `read` (bash `read -rsn1`, zsh `read -sk1`) sets the same local modes but
+    /// never redraws; it maps CR to NL alone, where readline maps neither and zle both.
     pub fn line_editing(&self) -> bool {
         #[cfg(unix)]
         {
@@ -789,8 +791,9 @@ impl Pty {
                 return false;
             }
             // SAFETY: tcgetattr succeeded.
-            let lflag = unsafe { attrs.assume_init() }.c_lflag;
-            lflag & (libc::ICANON | libc::ECHO | libc::ISIG) == libc::ISIG
+            let attrs = unsafe { attrs.assume_init() };
+            attrs.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG) == libc::ISIG
+                && attrs.c_iflag & (libc::ICRNL | libc::INLCR) != libc::ICRNL
         }
         #[cfg(not(unix))]
         false
@@ -986,6 +989,50 @@ mod tests {
         assert!(pty.watcher.is_none());
         pty.set_command_notifications(true).unwrap();
         assert!(pty.watcher.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn line_editing_is_the_editor_not_a_silent_read() {
+        let mut shells = vec![(vec!["bash", "--norc", "--noprofile", "-i"], "read -rsn1 k")];
+        if std::path::Path::new("/bin/zsh").exists()
+            || std::path::Path::new("/usr/bin/zsh").exists()
+        {
+            shells.push((vec!["zsh", "-f", "-i"], "read -sk1 k"));
+        } else {
+            eprintln!("zsh not installed; checking bash only");
+        }
+        for (argv, read) in shells {
+            let argv: Vec<String> = argv.into_iter().map(Into::into).collect();
+            let mut pty = Pty::spawn(
+                &argv,
+                &Default::default(),
+                None,
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap();
+            let wait_for = |pty: &mut Pty, editing: bool| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while pty.line_editing() != editing {
+                    pty.take_output();
+                    assert!(
+                        Instant::now() < deadline,
+                        "{argv:?}: editing stayed {}",
+                        !editing
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            };
+            wait_for(&mut pty, true);
+            pty.write(format!("{read}\r").as_bytes());
+            wait_for(&mut pty, false);
+            pty.write(b"q");
+            wait_for(&mut pty, true);
+        }
     }
 
     #[cfg(unix)]
