@@ -307,3 +307,27 @@ fn reset_keeps_budget_settings() {
     t.advance(b"\x1bc");
     assert_eq!(t.command_budget(), (false, 0.25));
 }
+
+#[test]
+fn inserted_lines_move_the_output_start() {
+    let mut t = Terminal::new(40, 30);
+    t.set_scrollback_limit(32);
+    t.advance(format!("{PROMPT}make\r\n\x1b]133;C\x07").as_bytes());
+    // Push the prompt and the output start down ten rows, then write below them.
+    t.advance(b"\x1b[H\x1b[10L\x1b[12;1H");
+    let mut out = String::new();
+    for i in 0..200 {
+        out.push_str(&format!("make {i}\r\n"));
+    }
+    out.push_str("\x1b]133;D;0\x07");
+    out.push_str(PROMPT);
+    t.advance(out.as_bytes());
+    let lines = lines(&t);
+    let at = lines
+        .iter()
+        .position(|l| l == "$ make")
+        .expect("prompt kept");
+    assert_eq!(lines[at + 1], "make 0", "{lines:?}");
+    let placeholders = lines.iter().filter(|l| l.starts_with('\u{2026}')).count();
+    assert_eq!(placeholders, 1, "{lines:?}");
+}

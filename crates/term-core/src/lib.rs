@@ -522,11 +522,13 @@ impl Terminal {
             };
             command.input_line = input_line;
             command.prompt_line = shift(command.prompt_line).unwrap_or(input_line);
+            command.output_line = shift(command.output_line).unwrap_or(bottom + 1);
             command.next_prompt = command
                 .next_prompt
                 .map(|next| shift(next).unwrap_or(bottom + 1));
             i += 1;
         }
+        self.refresh_budget_limit();
     }
 
     /// The command that owns the viewport's top row (`-1` while a partial row shows
