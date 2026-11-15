@@ -278,6 +278,10 @@ impl Terminal {
         self.shell.runs.enabled
     }
 
+    pub fn compare_ignore(&self) -> &Ignore {
+        &self.shell.runs.ignore
+    }
+
     /// Sets what compare-with-last-run ignores. New patterns forget the stored runs, which
     /// were hashed with the old ones; marks already shown stay.
     pub fn set_compare_ignore(&mut self, ignore: &Ignore) {

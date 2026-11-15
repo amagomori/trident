@@ -1238,10 +1238,11 @@ impl App {
             self.appearance = theme;
         }
         term.set_palette(self.config.themes.palette(self.appearance).clone());
-        term.set_scrollback_limit(self.options.scrollback(&self.config));
-        term.set_command_budget(self.config.command_budget, self.config.command_share);
-        term.set_compare_runs(self.config.compare_runs);
-        term.set_compare_ignore(&self.config.compare_ignore);
+        configure_term(
+            &mut term,
+            &self.config,
+            self.options.scrollback(&self.config),
+        );
         term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
         let cell = (fonts.metrics.width, fonts.metrics.height);
         if (cols, rows, cell) != (spawn_cols, spawn_rows, spawn_cell) {
@@ -1418,8 +1419,11 @@ impl App {
         };
         let mut term = Terminal::new(cols, rows);
         term.set_palette(self.config.themes.palette(self.appearance).clone());
-        term.set_scrollback_limit(self.options.scrollback(&self.config));
-        term.set_command_budget(self.config.command_budget, self.config.command_share);
+        configure_term(
+            &mut term,
+            &self.config,
+            self.options.scrollback(&self.config),
+        );
         term.set_cell_pixel_size(cell.0, cell.1);
         #[cfg(target_os = "macos")]
         self.quit_checks
@@ -2315,12 +2319,8 @@ impl App {
                     .set_palette(self.config.themes.palette(self.appearance).clone());
                 let responses = s.term.take_responses();
                 s.pty.write(&responses);
-                s.term
-                    .set_scrollback_limit(self.options.scrollback(&self.config));
-                s.term
-                    .set_command_budget(self.config.command_budget, self.config.command_share);
-                s.term.set_compare_runs(self.config.compare_runs);
-                s.term.set_compare_ignore(&self.config.compare_ignore);
+                let scrollback = self.options.scrollback(&self.config);
+                configure_term(&mut s.term, &self.config, scrollback);
                 if let Some(search) = &mut self.search {
                     search.dirty = true;
                 }
@@ -2332,10 +2332,7 @@ impl App {
                         .set_palette(self.config.themes.palette(self.appearance).clone());
                     let responses = pane.term.take_responses();
                     pane.pty.write(&responses);
-                    pane.term
-                        .set_scrollback_limit(self.options.scrollback(&self.config));
-                    pane.term
-                        .set_command_budget(self.config.command_budget, self.config.command_share);
+                    configure_term(&mut pane.term, &self.config, scrollback);
                     release_freed_memory(&mut pane.term);
                 }
                 if next_vsync_off {
@@ -2921,6 +2918,14 @@ impl App {
 
 /// Hand memory from dropped rows or recycled buffers back to the OS: glibc keeps
 /// freed heap pages otherwise.
+/// Applies the config settings every tab's terminal shares, at startup, in new tabs and on reload.
+fn configure_term(term: &mut Terminal, config: &config::Config, scrollback: usize) {
+    term.set_scrollback_limit(scrollback);
+    term.set_command_budget(config.command_budget, config.command_share);
+    term.set_compare_runs(config.compare_runs);
+    term.set_compare_ignore(&config.compare_ignore);
+}
+
 fn release_freed_memory(term: &mut Terminal) -> bool {
     let shrunk = term.take_shrunk();
     let recycled = term.take_recycled_memory_freed();
@@ -4651,6 +4656,29 @@ mod tests {
         ] {
             assert!(parse(&args).is_err());
         }
+    }
+
+    #[test]
+    fn configure_term_applies_compare_runs_to_every_terminal() {
+        let mut config = config::Config::default();
+        let mut term = Terminal::new(80, 24);
+        configure_term(&mut term, &config, 100);
+        assert!(term.compare_runs());
+        assert_eq!(term.compare_ignore(), &config.compare_ignore);
+
+        config.compare_runs = false;
+        config.compare_ignore = term_core::Ignore::new(&["build #\\d+"]).unwrap();
+        let mut new_tab = Terminal::new(80, 24);
+        configure_term(&mut new_tab, &config, 100);
+        configure_term(&mut term, &config, 100);
+        for term in [&new_tab, &term] {
+            assert!(!term.compare_runs());
+            assert_eq!(term.compare_ignore(), &config.compare_ignore);
+        }
+
+        config.compare_runs = true;
+        configure_term(&mut term, &config, 100);
+        assert!(term.compare_runs());
     }
 
     #[test]
