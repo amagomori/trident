@@ -24,6 +24,7 @@ mod paste;
 mod present_macos;
 #[cfg(target_os = "linux")]
 mod present_wayland;
+mod progress;
 mod pty;
 mod search;
 mod show;
@@ -291,6 +292,9 @@ struct Session {
     blink_epoch: Instant,
     /// When blinking text on screen next flips.
     blink_at: Option<Instant>,
+    /// The title set by OSC 0/2, shown after any OSC 9;4 progress.
+    title: String,
+    progress: Option<term_core::Progress>,
 }
 
 #[derive(Default)]
@@ -1121,6 +1125,8 @@ impl App {
             output: PendingOutput::default(),
             blink_epoch: Instant::now(),
             blink_at: None,
+            title: String::new(),
+            progress: None,
         })
     }
 
@@ -1225,9 +1231,18 @@ impl App {
         }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
-        if let Some(title) = s.term.take_title() {
+        let title = s.term.take_title();
+        let progress = s.term.take_progress();
+        if title.is_some() || progress.is_some() {
+            if let Some(title) = title {
+                s.title = title;
+            }
+            if let Some(progress) = progress {
+                s.progress = progress;
+                progress::set_dock_badge(progress::badge(progress).as_deref());
+            }
             s.window
-                .set_title(if title.is_empty() { "terminal" } else { &title });
+                .set_title(&progress::window_title(&s.title, s.progress));
         }
         if std::mem::take(&mut s.term.bell) && !self.focused {
             s.window
