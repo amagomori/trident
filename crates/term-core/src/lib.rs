@@ -139,6 +139,8 @@ pub enum CursorShape {
 enum Charset {
     Ascii,
     DecSpecial,
+    /// The VT100 United Kingdom set: `#` is the pound sign.
+    Uk,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -315,6 +317,19 @@ pub struct Terminal {
     /// Whether `parser` is known to be in its ground state between calls to `advance`.
     parser_ground: bool,
     shell: Box<ShellState>,
+    reports: Box<Reports>,
+}
+
+/// Rarely used state for conformance reports, boxed to keep `Terminal`'s hot fields in place.
+#[derive(Default)]
+struct Reports {
+    /// Whether DECRQCRA rectangle checksums are answered (off by default: they let any
+    /// program that writes to the terminal read the screen back).
+    checksums: bool,
+    /// DEC private modes saved with XTSAVE (`CSI ? Pm s`) for XTRESTORE (`CSI ? Pm r`).
+    saved_modes: Vec<(u16, bool)>,
+    /// The body of a DECRQSS request (`DCS $ q Pt ST`) while it is being received.
+    status_request: Option<Vec<u8>>,
 }
 
 impl Terminal {
@@ -768,6 +783,7 @@ impl Terminal {
                 cwd: None,
                 clipboard: Vec::new(),
             }),
+            reports: Box::default(),
             links: Default::default(),
             graphemes: Default::default(),
             palette: colors::Palette::default(),
@@ -938,6 +954,12 @@ impl Terminal {
     }
 
     /// Change how many lines of scrollback are kept, dropping the oldest ones past it.
+    /// Answer DECRQCRA (`CSI Pid ; Pp ; Pt ; Pl ; Pb ; Pr * y`) with the DEC rectangle
+    /// checksum, as conformance suites such as esctest need.
+    pub fn set_checksum_reports(&mut self, enabled: bool) {
+        self.reports.checksums = enabled;
+    }
+
     pub fn set_scrollback_limit(&mut self, lines: usize) {
         if lines < self.max_scrollback {
             self.shrunk = true;
@@ -1552,6 +1574,8 @@ impl Terminal {
     fn put_char(&mut self, c: char) {
         let c = match self.charsets[self.active_charset] {
             Charset::DecSpecial => dec_special(c),
+            Charset::Uk if c == '#' => '\u{a3}',
+            Charset::Uk => c,
             Charset::Ascii => c,
         };
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
@@ -1974,6 +1998,7 @@ impl Terminal {
         fresh.palette = self.palette.clone();
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
+        fresh.reports.checksums = self.reports.checksums;
         let (enabled, share) = self.command_budget();
         fresh.shell.notifications = self.shell.notifications.reset();
         *self = fresh;
