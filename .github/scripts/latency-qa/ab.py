@@ -73,6 +73,7 @@ def main():
     if not args.latency.is_file():
         ap.error(f"--latency {args.latency} does not exist")
     args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "summary.json").unlink(missing_ok=True)
     copy = args.out / "terminal-main-copy"
     shutil.copy2(args.main, copy)
     assert sha(copy) == sha(args.main)

@@ -20,7 +20,8 @@ python3 .github/scripts/latency-qa/vs_alacritty.py --main ../t-main/target/relea
     --head ../t-head/target/release/terminal --rounds 6 --probes 200 --load --out vs-out
 ```
 
-Both write `rows.json` (every run) and `summary.json` into `--out`. Report the timing source
+Both write `rows.json` (every run) and `summary.json` into `--out`; a reused `--out` loses its old
+`summary.json` at the start of the run, so a run with no verdict never leaves a stale one. Report the timing source
 `ab.py` prints: only `wayland-presentation` is verified presentation; `x11-present`,
 `metal-presented` and `present-return` are labelled unverified. Where every presentation
 callback is a skip (the macOS VM's paravirtual Metal), `ab.py` reports present-return and

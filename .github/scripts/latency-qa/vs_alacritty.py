@@ -266,6 +266,7 @@ def main():
     elif not args.keylat.exists():
         sys.exit(f"build keylat first: swiftc -O {HERE / 'keylat.swift'} -o {args.keylat}")
     args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "summary.json").unlink(missing_ok=True)
     (args.out / "alacritty.toml").write_text(ALACRITTY_TOML)
     (args.out / "terminal.toml").write_text(TERMINAL_TOML)
     if args.load and not args.cat_file:
