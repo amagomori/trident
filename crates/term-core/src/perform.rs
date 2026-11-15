@@ -266,6 +266,7 @@ impl Terminal {
             7 => Some(self.modes.autowrap),
             25 => Some(self.modes.show_cursor),
             47 | 1047 | 1049 => Some(self.is_alt_screen()),
+            9 => Some(self.modes.mouse == MouseMode::X10),
             1000 => Some(self.modes.mouse == MouseMode::Click),
             1002 => Some(self.modes.mouse == MouseMode::Drag),
             1003 => Some(self.modes.mouse == MouseMode::Motion),
@@ -339,6 +340,7 @@ impl Terminal {
                 }
             }
             1049 => self.set_alt_screen(enable, true, enable),
+            9 => self.set_mouse(MouseMode::X10, enable),
             1000 => self.set_mouse(MouseMode::Click, enable),
             1002 => self.set_mouse(MouseMode::Drag, enable),
             1003 => self.set_mouse(MouseMode::Motion, enable),

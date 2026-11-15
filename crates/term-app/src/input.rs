@@ -1,5 +1,6 @@
 //! Encoding of keyboard and mouse input into the byte sequences terminal programs expect.
 
+use term_core::MouseMode;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// xterm's modifier parameter: 1 + shift + 2*alt + 4*ctrl.
@@ -184,6 +185,40 @@ pub fn encode_mouse(
     ])
 }
 
+/// Whether a click or wheel event goes to the program instead of local selection and
+/// scrolling. Shift always keeps it local; like xterm, X10 mode (DECSET 9) reports only
+/// unmodified buttons.
+pub fn tracks_mouse(mode: MouseMode, mods: ModifiersState) -> bool {
+    match mode {
+        MouseMode::Off => false,
+        MouseMode::X10 => !(mods.shift_key() || mods.alt_key() || mods.control_key()),
+        MouseMode::Click | MouseMode::Drag | MouseMode::Motion => !mods.shift_key(),
+    }
+}
+
+/// Encodes a mouse report for `mode`: X10 sends button presses only, without modifier
+/// bits; the other modes report as [`encode_mouse`] does.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mouse_report(
+    mode: MouseMode,
+    button: MouseButton,
+    pressed: bool,
+    motion: bool,
+    col: usize,
+    row: usize,
+    mods: ModifiersState,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    match mode {
+        MouseMode::Off => None,
+        MouseMode::X10 if !pressed || motion => None,
+        MouseMode::X10 => encode_mouse(button, true, false, col, row, ModifiersState::empty(), sgr),
+        MouseMode::Click | MouseMode::Drag | MouseMode::Motion => {
+            encode_mouse(button, pressed, motion, col, row, mods, sgr)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +335,82 @@ mod tests {
             encode_mouse(MouseButton::None, true, true, 4, 9, none, true),
             Some(b"\x1b[<35;5;10M".to_vec())
         );
+    }
+
+    #[test]
+    fn x10_reports_unmodified_presses_only() {
+        let none = ModifiersState::empty();
+        let x10 = |button, pressed, motion, mods, sgr| {
+            encode_mouse_report(MouseMode::X10, button, pressed, motion, 4, 9, mods, sgr)
+        };
+        assert_eq!(
+            x10(MouseButton::Left, true, false, none, false),
+            Some(vec![0x1b, b'[', b'M', 32, 37, 42])
+        );
+        assert_eq!(
+            x10(MouseButton::Right, true, false, none, false),
+            Some(vec![0x1b, b'[', b'M', 34, 37, 42])
+        );
+        assert_eq!(
+            x10(MouseButton::WheelDown, true, false, none, false),
+            Some(vec![0x1b, b'[', b'M', 32 + 65, 37, 42])
+        );
+        assert_eq!(
+            x10(MouseButton::Middle, true, false, none, true),
+            Some(b"\x1b[<1;5;10M".to_vec())
+        );
+        assert_eq!(x10(MouseButton::Left, false, false, none, false), None);
+        assert_eq!(x10(MouseButton::Left, false, false, none, true), None);
+        assert_eq!(x10(MouseButton::Left, true, true, none, false), None);
+        assert_eq!(x10(MouseButton::None, true, true, none, true), None);
+        assert_eq!(
+            x10(MouseButton::Left, true, false, ModifiersState::SUPER, false),
+            Some(vec![0x1b, b'[', b'M', 32, 37, 42])
+        );
+        assert_eq!(
+            encode_mouse_report(
+                MouseMode::Off,
+                MouseButton::Left,
+                true,
+                false,
+                4,
+                9,
+                none,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            encode_mouse_report(
+                MouseMode::Click,
+                MouseButton::Left,
+                false,
+                false,
+                4,
+                9,
+                ModifiersState::CONTROL,
+                false
+            ),
+            Some(vec![0x1b, b'[', b'M', 32 + 16 + 3, 37, 42])
+        );
+    }
+
+    #[test]
+    fn modifiers_keep_mouse_events_local() {
+        let none = ModifiersState::empty();
+        assert!(!tracks_mouse(MouseMode::Off, none));
+        for mode in [
+            MouseMode::X10,
+            MouseMode::Click,
+            MouseMode::Drag,
+            MouseMode::Motion,
+        ] {
+            assert!(tracks_mouse(mode, none), "{mode:?}");
+            assert!(tracks_mouse(mode, ModifiersState::SUPER), "{mode:?}");
+            assert!(!tracks_mouse(mode, ModifiersState::SHIFT), "{mode:?}");
+            for mods in [ModifiersState::CONTROL, ModifiersState::ALT] {
+                assert_eq!(tracks_mouse(mode, mods), mode != MouseMode::X10, "{mode:?}");
+            }
+        }
     }
 }

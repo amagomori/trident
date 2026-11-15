@@ -1864,8 +1864,7 @@ impl App {
     fn mouse_reporting(&self) -> bool {
         self.session
             .as_ref()
-            .is_some_and(|s| s.term.modes.mouse != MouseMode::Off)
-            && !self.modifiers.shift_key()
+            .is_some_and(|s| input::tracks_mouse(s.term.modes.mouse, self.modifiers))
     }
 
     fn hover_link(&self) -> Option<term_core::Link> {
@@ -1931,7 +1930,8 @@ impl App {
         };
         let Some(s) = &mut self.session else { return };
         let sgr = s.term.modes.sgr_mouse;
-        if let Some(bytes) = input::encode_mouse(
+        if let Some(bytes) = input::encode_mouse_report(
+            s.term.modes.mouse,
             button,
             pressed,
             motion,

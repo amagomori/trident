@@ -697,7 +697,7 @@ fn synchronized_output() {
 #[test]
 fn private_mode_reports() {
     for mode in [
-        1, 6, 7, 25, 47, 1047, 1049, 1000, 1002, 1003, 1004, 1006, 1007, 2004, 2031,
+        1, 6, 7, 9, 25, 47, 1047, 1049, 1000, 1002, 1003, 1004, 1006, 1007, 2004, 2031,
     ] {
         let mut t = term(10, 5, "");
         for (action, status) in [('h', 1), ('l', 2)] {
@@ -881,7 +881,7 @@ fn assert_input_modes(t: &Terminal, mouse: MouseMode, enabled: bool) {
 
 #[test]
 fn command_end_resets_input_modes_in_order() {
-    for mode in [1000, 1002, 1003] {
+    for mode in [9, 1000, 1002, 1003] {
         for end in ["\x1b]133;D\x07", "\x1b]133;D;0\x1b\\"] {
             let setup = format!("\x1b[?{mode};1006;1004;2004h");
             let mut t = term(10, 2, &setup);
@@ -905,7 +905,7 @@ fn command_end_preserves_alt_screen_input_modes() {
 fn reset_input_modes_reports_changes_and_preserves_alt_screen() {
     let mut t = Terminal::new(10, 2);
     assert!(!t.reset_input_modes());
-    for mode in [1000, 1002, 1003, 1006, 1004, 2004] {
+    for mode in [9, 1000, 1002, 1003, 1006, 1004, 2004] {
         t.advance(format!("\x1b[?{mode}h").as_bytes());
         assert!(t.reset_input_modes());
         assert_input_modes(&t, MouseMode::Off, false);

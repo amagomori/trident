@@ -143,6 +143,8 @@ impl Screen {
 pub enum MouseMode {
     #[default]
     Off,
+    /// 9: X10 compatibility, button presses only, without modifiers.
+    X10,
     /// 1000: press and release.
     Click,
     /// 1002: press, release and motion while a button is held.
