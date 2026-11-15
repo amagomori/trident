@@ -110,6 +110,7 @@ impl Terminal {
         cols: usize,
         rows: usize,
         view_top: Option<u64>,
+        keep_cursor_line: bool,
     ) -> Option<u64> {
         let old_rows = self.rows;
         let old_first = self.history - self.primary.scrollback.len() as u64;
@@ -138,6 +139,19 @@ impl Terminal {
         old.extend(self.primary.scrollback.drain(..));
         old.append(&mut self.primary.lines);
         let old_len = old.len();
+        // A line editor redraws its line by moving up the rows it had at the old width, so
+        // that line keeps its rows, cut to the new width, for the editor to rewrap.
+        let kept = (keep_cursor_line && !self.alt_active).then(|| {
+            let mut start = cursor_index;
+            while start > 0 && old[start - 1].wrapped() {
+                start -= 1;
+            }
+            let mut end = cursor_index;
+            while end + 1 < old_len && old[end].wrapped() {
+                end += 1;
+            }
+            start..=end
+        });
 
         let mut new: Vec<Row> = Vec::with_capacity(old_len);
         let mut starts = Vec::with_capacity(old_len);
@@ -159,6 +173,19 @@ impl Terminal {
                 });
                 starts.push(0);
                 new.push(crate::budget::placeholder_row(cols, &text));
+                continue;
+            }
+            if kept.as_ref().is_some_and(|k| k.contains(&i)) {
+                row.resize(cols);
+                row.clear_hidden();
+                map_rows.push(OldRow {
+                    first: new.len(),
+                    count: 1,
+                    base: 0,
+                    len: usize::MAX,
+                });
+                starts.push(0);
+                new.push(row);
                 continue;
             }
             let has_cursor = cursor.is_some() && i == cursor_index;
@@ -320,7 +347,7 @@ impl Terminal {
 
         let screen_row = cursor_row - top;
         let (col, pending) = if cursor_col >= cols {
-            (cols - 1, true)
+            (cols - 1, kept.is_none())
         } else {
             (cursor_col, false)
         };

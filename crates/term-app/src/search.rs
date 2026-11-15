@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 use term_core::{
-    Terminal,
+    Point, Terminal,
     search::{Match, SearchJob},
 };
 use winit::keyboard::ModifiersState;
@@ -174,18 +174,32 @@ impl Search {
             .or(self.keep)
     }
 
-    /// Resize `term`, keeping the selected match in view if it was on screen.
-    pub fn resize(search: Option<&Self>, term: &mut Terminal, cols: usize, rows: usize) {
+    /// Resize `term`, keeping the selected match in view if it was on screen. `editing` is
+    /// whether a line editor owns the cursor's line.
+    pub fn resize(
+        search: Option<&Self>,
+        term: &mut Terminal,
+        cols: usize,
+        rows: usize,
+        editing: bool,
+    ) {
+        let resize = |term: &mut Terminal, points: &mut [Point]| {
+            if editing {
+                term.resize_while_editing(cols, rows, points);
+            } else {
+                term.resize_tracking(cols, rows, points);
+            }
+        };
         let Some(found) = search
             .and_then(Self::selected)
             .filter(|found| term.line_visible(found.start.line))
         else {
-            term.resize(cols, rows);
+            resize(term, &mut []);
             return;
         };
         // A rewrap moves the match to other lines.
         let mut points = [found.start, found.end];
-        term.resize_tracking(cols, rows, &mut points);
+        resize(term, &mut points);
         let covered = search.map_or(0, |search| search.covered_rows);
         term.reveal_lines(points[0].line, points[1].line, covered);
     }
@@ -447,7 +461,7 @@ mod tests {
         let line = search.matches[search.current.unwrap()].start.line;
         assert!(term.line_visible(line));
         for (cols, rows) in [(30, 12), (12, 3), (40, 1), (20, 6)] {
-            Search::resize(Some(&search), &mut term, cols, rows);
+            Search::resize(Some(&search), &mut term, cols, rows, false);
             assert!(term.line_visible(line), "{cols}x{rows}");
             let row = line - term.viewport_to_point(0, 0).line;
             assert_eq!(term.viewport_row(row as usize).cells[0].c, 'n');
@@ -455,7 +469,7 @@ mod tests {
 
         term.scroll_display(100);
         let top = term.viewport_to_point(0, 0).line;
-        Search::resize(Some(&search), &mut term, 20, 3);
+        Search::resize(Some(&search), &mut term, 20, 3, false);
         assert!(!term.line_visible(line));
         assert_eq!(term.viewport_to_point(0, 0).line, top);
     }
@@ -483,7 +497,7 @@ mod tests {
             search.matches.clear();
             search.current = None;
             assert!(search.keep.is_some() && search.searching());
-            Search::resize(Some(&search), &mut term, 20, rows);
+            Search::resize(Some(&search), &mut term, 20, rows, false);
             assert!(term.line_visible(line), "{rows} rows");
         }
         search.advance(&mut term, None);
@@ -512,16 +526,16 @@ mod tests {
         // Both rows shown, the second on the bottom row; one row fewer drops it.
         term.scroll_to_line(start - 4);
         assert!(term.line_visible(start) && term.line_visible(end));
-        Search::resize(Some(&search), &mut term, 10, 5);
+        Search::resize(Some(&search), &mut term, 10, 5, false);
         assert!(term.line_visible(start) && term.line_visible(end));
-        Search::resize(Some(&search), &mut term, 10, 2);
+        Search::resize(Some(&search), &mut term, 10, 2, false);
         assert_eq!(term.viewport_to_point(0, 0).line, start);
         assert!(term.line_visible(end));
-        Search::resize(Some(&search), &mut term, 10, 1);
+        Search::resize(Some(&search), &mut term, 10, 1, false);
         assert!(term.line_visible(start));
 
         // Stepping to a match whose first row is already on the bottom row.
-        Search::resize(Some(&search), &mut term, 10, 5);
+        Search::resize(Some(&search), &mut term, 10, 5, false);
         term.scroll_to_line(start - 4);
         assert!(!term.line_visible(end));
         search.step(&mut term, true);
@@ -536,14 +550,14 @@ mod tests {
         };
         term.scroll_to_line(start - 3);
         assert!(term.line_visible(end) && !above_bar(&term, end));
-        Search::resize(Some(&search), &mut term, 10, 5);
+        Search::resize(Some(&search), &mut term, 10, 5, false);
         assert!(above_bar(&term, start) && above_bar(&term, end));
         term.scroll_to_line(start - 3);
         search.step(&mut term, true);
         assert!(above_bar(&term, start) && above_bar(&term, end));
-        Search::resize(Some(&search), &mut term, 10, 6);
+        Search::resize(Some(&search), &mut term, 10, 6, false);
         term.scroll_to_line(start - 4);
-        Search::resize(Some(&search), &mut term, 10, 5);
+        Search::resize(Some(&search), &mut term, 10, 5, false);
         assert!(above_bar(&term, start) && above_bar(&term, end));
     }
 
@@ -566,7 +580,7 @@ mod tests {
         // The match sits just above the Find bar, below a line that wraps once narrowed.
         term.scroll_to_line(line - 4);
 
-        Search::resize(Some(&search), &mut term, 10, 6);
+        Search::resize(Some(&search), &mut term, 10, 6, false);
         let found = term.search("SPANHIT", false).unwrap()[0];
         let top = term.viewport_to_point(0, 0).line;
         assert!((top..top + 5).contains(&found.start.line));

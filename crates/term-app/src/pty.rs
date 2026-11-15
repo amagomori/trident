@@ -775,6 +775,27 @@ impl Pty {
         });
     }
 
+    /// Whether a line editor (readline, zle) owns the terminal: echo and canonical input are
+    /// off while signals stay on, unlike the raw mode of full-screen apps and ssh.
+    pub fn line_editing(&self) -> bool {
+        #[cfg(unix)]
+        {
+            let Some(fd) = self.master.as_raw_fd() else {
+                return false;
+            };
+            let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: fd belongs to the live master; tcgetattr initializes attrs on success.
+            if unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) } != 0 {
+                return false;
+            }
+            // SAFETY: tcgetattr succeeded.
+            let lflag = unsafe { attrs.assume_init() }.c_lflag;
+            lflag & (libc::ICANON | libc::ECHO | libc::ISIG) == libc::ISIG
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
     fn flow_flags(&self) -> Option<FlowSettings> {
         #[cfg(unix)]
         {

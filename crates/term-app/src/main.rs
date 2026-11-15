@@ -1189,7 +1189,8 @@ impl App {
             .as_mut()
             .is_some_and(|search| std::mem::replace(&mut search.covered_rows, covered) != covered);
         if grid_changed || covered_changed {
-            search::Search::resize(self.search.as_ref(), &mut s.term, cols, rows);
+            let editing = s.pty.line_editing();
+            search::Search::resize(self.search.as_ref(), &mut s.term, cols, rows, editing);
         }
         if grid_changed {
             release_freed_memory(&mut s.term);

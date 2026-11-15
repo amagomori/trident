@@ -2167,3 +2167,67 @@ fn reflow_leaves_the_alternate_screen_cut() {
     t.resize(13, 3);
     assert_eq!(screen(&t), ["0123456789abc", "!", ""]);
 }
+
+/// Bash's prompt and a half-typed command of 146 chars: two rows at 100 columns.
+fn half_typed_command() -> String {
+    format!(
+        "bash$ printf '%s\\n' 'BEGIN-{}-END'",
+        "0123456789".repeat(12)
+    )
+}
+
+#[test]
+fn resize_while_editing_lets_the_editor_redraw_its_line_once() {
+    let line = half_typed_command();
+    assert_eq!(line.len(), 152);
+    // What bash 5.1 and zsh 5.8 send after SIGWINCH: up to the line's first row, redraw.
+    let redraws = [
+        format!("\r\x1b[K\x1b[A{line}"),
+        format!("\x1b[A\r\r\x1b[0m\x1b[27m\x1b[24m\x1b[J{line}\x1b[K"),
+    ];
+    for redraw in redraws {
+        let mut t = term(100, 8, &format!("out\r\n{line}"));
+        t.resize_while_editing(60, 8, &mut []);
+        // The edited line keeps its two rows, cut to the new width.
+        assert_eq!(screen(&t)[1], line[..60]);
+        assert_eq!(screen(&t)[2], line[100..]);
+        assert_eq!((t.cursor.row, t.cursor.col), (2, 52));
+        t.advance(redraw.as_bytes());
+        let mut want = vec!["out", &line[..60], &line[60..120], &line[120..]];
+        want.resize(8, "");
+        assert_eq!(screen(&t), want);
+        // Run, then widen: the command rewraps whole, nothing cut from it comes back.
+        t.advance(b"\r\nran\r\n");
+        t.resize(100, 8);
+        let mut want = vec!["out", &line[..100], &line[100..], "ran"];
+        want.resize(8, "");
+        assert_eq!(screen(&t), want);
+    }
+}
+
+#[test]
+fn resize_rewraps_the_cursor_line_without_an_editor() {
+    let line = half_typed_command();
+    let mut t = term(100, 8, &format!("out\r\n{line}"));
+    t.resize(60, 8);
+    let mut want = vec!["out", &line[..60], &line[60..120], &line[120..]];
+    want.resize(8, "");
+    assert_eq!(screen(&t), want);
+}
+
+#[test]
+fn resize_while_editing_rewraps_the_lines_above() {
+    let line = half_typed_command();
+    let long = "x".repeat(150);
+    let mut t = term(100, 8, &format!("{long}\r\n{line}"));
+    t.resize_while_editing(60, 8, &mut []);
+    let mut want = vec![
+        &long[..60],
+        &long[60..120],
+        &long[120..],
+        &line[..60],
+        &line[100..],
+    ];
+    want.resize(8, "");
+    assert_eq!(screen(&t), want);
+}
