@@ -269,6 +269,21 @@ mod tests {
     }
 
     #[test]
+    fn copying_widened_wrapped_lines_keeps_clusters() {
+        let mut t = Terminal::new(5, 3);
+        t.advance("he\u{301}llo wo\u{308}rld".as_bytes());
+        t.resize(8, 3);
+        t.start_selection(Point { line: 0, col: 0 }, SelectionKind::Simple);
+        t.update_selection(Point { line: 2, col: 7 });
+        assert_eq!(t.selection_text().unwrap(), "he\u{301}llo wo\u{308}rld");
+        let mut t = Terminal::new(5, 2);
+        t.advance("abcd\u{754c}\u{301}x".as_bytes());
+        t.start_selection(Point { line: 0, col: 0 }, SelectionKind::Simple);
+        t.update_selection(Point { line: 1, col: 2 });
+        assert_eq!(t.selection_text().unwrap(), "abcd\u{754c}\u{301}x");
+    }
+
+    #[test]
     fn overwritten_clusters_are_released() {
         let mut t = Terminal::new(4, 2);
         t.set_scrollback_limit(0);
