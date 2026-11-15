@@ -81,6 +81,22 @@ fn inside([x, y, w, h]: [f32; 4], px: f32, py: f32) -> bool {
 }
 
 impl TabLayout {
+    /// The `[x, width]` runs of tabs other than `active`, which get the bar's tint. The
+    /// active tab and the bar past the last tab show the background the frame is
+    /// cleared to, so a lone tab costs almost no drawn pixels.
+    pub fn inactive_runs(&self, active: usize) -> Vec<[f32; 2]> {
+        let span = |tabs: &[TabRect]| match (tabs.first(), tabs.last()) {
+            (Some(first), Some(last)) => Some([first.x, last.x + last.width - first.x]),
+            _ => None,
+        };
+        let (before, after) = if active < self.tabs.len() {
+            (&self.tabs[..active], &self.tabs[active + 1..])
+        } else {
+            (&self.tabs[..], &self.tabs[..0])
+        };
+        [span(before), span(after)].into_iter().flatten().collect()
+    }
+
     /// The part of the bar at `(x, y)`, measured from the bar's top-left corner.
     pub fn hit(&self, x: f32, y: f32) -> Option<TabHit> {
         if y < 0.0 || y >= self.height {
@@ -154,6 +170,18 @@ mod tests {
         assert_eq!(layout.hit(5.0, layout.height), None);
         assert_eq!(layout.hit(5.0, -1.0), None);
         assert_eq!(layout.hit(599.0, 10.0), None);
+    }
+
+    #[test]
+    fn only_tabs_other_than_the_active_one_are_tinted() {
+        let layout = tab_layout(1, 600.0, 10.0, 20.0);
+        assert!(layout.inactive_runs(0).is_empty());
+        let layout = tab_layout(4, 600.0, 10.0, 20.0);
+        let w = layout.tabs[0].width;
+        assert_eq!(layout.inactive_runs(0), vec![[w, 3.0 * w]]);
+        assert_eq!(layout.inactive_runs(2), vec![[0.0, 2.0 * w], [3.0 * w, w]]);
+        assert_eq!(layout.inactive_runs(3), vec![[0.0, 3.0 * w]]);
+        assert_eq!(layout.inactive_runs(9), vec![[0.0, 4.0 * w]]);
     }
 
     #[test]

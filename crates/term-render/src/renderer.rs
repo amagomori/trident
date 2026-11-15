@@ -997,13 +997,14 @@ impl Renderer {
         let strip = mix(bg, fg, 0.08);
         let hovered = mix(bg, fg, 0.14);
         let dim = mix(fg, strip, 0.4);
-        out.push(self.rect(0.0, 0.0, width, height, strip));
+        for [x, w] in layout.inactive_runs(bar.active) {
+            out.push(self.rect(x, 0.0, w, height, strip));
+        }
         let text_y = ((height - ch) / 2.0).floor();
         let mut glyphs: Vec<(f32, char, Rgb)> = Vec::new();
         for (i, (tab, title)) in layout.tabs.iter().zip(&bar.titles).enumerate() {
             let active = i == bar.active;
             if active {
-                out.push(self.rect(tab.x, 0.0, tab.width, height, bg));
                 out.push(self.rect(
                     tab.x,
                     0.0,
