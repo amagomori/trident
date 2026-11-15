@@ -59,7 +59,8 @@ class Linux(Base):
             top = "Trident-1.2.3-linux-x86_64"
             exe = members[f"{top}/bin/trident"]
             self.assertEqual(exe.mode, 0o755)
-            self.assertEqual((exe.uid, exe.gid, exe.mtime), (0, 0, 0))
+            self.assertEqual((exe.uid, exe.gid, exe.mtime), (0, 0, release.epoch()))
+            self.assertGreater(exe.mtime, 0)
             for name in ("share/applications/trident.desktop",
                          "share/icons/hicolor/256x256/apps/trident.png",
                          "share/trident/terminfo/xterm-trident.terminfo",
