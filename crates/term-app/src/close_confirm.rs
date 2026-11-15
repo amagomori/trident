@@ -278,8 +278,14 @@ unsafe extern "C-unwind" fn reply_to_quit(
     }
 }
 
+/// The app menu's Close Window shortcut is Cmd-Shift plus this key. Cmd-W is left to the
+/// `close_tab` binding: a menu key equivalent is matched before the key reaches the window, so
+/// Cmd-W there would close every tab.
+#[cfg(any(target_os = "macos", test))]
+const CLOSE_WINDOW_KEY: &str = "w";
+
 /// Makes every app quit go through `window`'s close confirmation (see `should_terminate`) and
-/// adds Close Window (Cmd-W) to the app menu. Needs winit's application delegate and default
+/// adds Close Window (Cmd-Shift-W) to the app menu. Needs winit's application delegate and default
 /// menu to be installed.
 #[cfg(target_os = "macos")]
 #[cold]
@@ -349,7 +355,7 @@ pub fn route_app_quit_through_close(
             let action: Option<Sel> = msg_send![&*item, action];
             if action == Some(sel!(terminate:)) {
                 let title = NSString::from_str("Close Window");
-                let key = NSString::from_str("w");
+                let key = NSString::from_str(CLOSE_WINDOW_KEY);
                 let close: Allocated<AnyObject> = msg_send![class!(NSMenuItem), alloc];
                 let close: Retained<AnyObject> = msg_send![
                     close,
@@ -357,6 +363,9 @@ pub fn route_app_quit_through_close(
                     action: sel!(performClose:),
                     keyEquivalent: &*key
                 ];
+                const COMMAND: usize = 1 << 20;
+                const SHIFT: usize = 1 << 17;
+                let _: () = msg_send![&*close, setKeyEquivalentModifierMask: COMMAND | SHIFT];
                 let _: () = msg_send![&*menu, insertItem: &*close, atIndex: index];
                 return;
             }
@@ -367,6 +376,18 @@ pub fn route_app_quit_through_close(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn close_window_menu_leaves_cmd_w_to_close_tab() {
+        use crate::config::{Action, Chord, default_bindings_for};
+        let macos = default_bindings_for(true);
+        assert_eq!(
+            macos.get(&Chord::parse("super+w").unwrap()),
+            Some(&Action::CloseTab)
+        );
+        let close_window = Chord::parse(&format!("super+shift+{CLOSE_WINDOW_KEY}")).unwrap();
+        assert!(!macos.contains_key(&close_window));
+    }
 
     #[test]
     fn prompt_names_the_program() {

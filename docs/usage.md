@@ -46,6 +46,7 @@ fail unless the entry is installed there too; copy it with
 | Paste | Cmd+V | Ctrl+Shift+V, Shift+Insert, middle click |
 | New window | Cmd+N | Ctrl+Shift+N |
 | New tab / close tab | Cmd+T / Cmd+W | Ctrl+Shift+T / Ctrl+Shift+W |
+| Close window (every tab in it) | Cmd+Shift+W | — |
 | Next / previous tab | Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+PageDown / Ctrl+PageUp, Ctrl+Tab / Ctrl+Shift+Tab |
 | Go to tab 1-8 / last tab | Cmd+1..8 / Cmd+9 | Alt+1..8 / Alt+9 |
 | Scroll one line up / down | Cmd+Option+Up/Down | Ctrl+Alt+Shift+Up/Down |
@@ -98,9 +99,9 @@ Closing the window at an idle shell prompt quits at once. While another program 
 Trident's foreground (vim, ssh, a build), a banner names it and asks first: Enter (or a
 second close) closes the window, Escape keeps it, and other keys are ignored while it is
 shown. A command started with `-e` (`trident -e vim`, `trident -e sh -c make`) counts as a
-running program too, unless it is a shell at its prompt. On macOS, Cmd-W and every app quit
-(Cmd-Q, the Quit menu, Dock > Quit, logging out) ask the same way. Set `confirm_close = false`
-to always close immediately.
+running program too, unless it is a shell at its prompt. On macOS, Close Window
+(Cmd-Shift-W) and every app quit (Cmd-Q, the Quit menu, Dock > Quit, logging out) ask the
+same way. Set `confirm_close = false` to always close immediately.
 
 ## Secure Keyboard Entry
 
