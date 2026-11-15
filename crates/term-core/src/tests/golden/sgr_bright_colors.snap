@@ -10,7 +10,7 @@ primary:
     cells 3..4: fg=index(2) bg=index(11) flags=[]
     cells 4..5: fg=default-fg bg=index(11) flags=[]
     cells 5..6: fg=default-fg bg=default-bg flags=[]
-    cells 6..7: fg=default-fg bg=default-bg flags=[underline]
+    cells 6..7: fg=default-fg bg=default-bg flags=[underline-double]
     cells 7..10: fg=default-fg bg=default-bg flags=[]
   row 1 wrap=false text="          "
     cells 0..10: fg=default-fg bg=default-bg flags=[]

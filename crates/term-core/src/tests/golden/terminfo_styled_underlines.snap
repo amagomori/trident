@@ -4,7 +4,11 @@ cursor attributes: fg=default-fg bg=default-bg flags=[]
 scroll_region=0..=1 history=0 display_offset=0
 primary:
   row 0 wrap=false text="abcdef  "
-    cells 0..5: fg=default-fg bg=default-bg flags=[underline]
+    cells 0..1: fg=default-fg bg=default-bg flags=[underline]
+    cells 1..2: fg=default-fg bg=default-bg flags=[underline-double]
+    cells 2..3: fg=default-fg bg=default-bg flags=[underline-curly]
+    cells 3..4: fg=default-fg bg=default-bg flags=[underline-dotted]
+    cells 4..5: fg=default-fg bg=default-bg flags=[underline-dashed]
     cells 5..8: fg=default-fg bg=default-bg flags=[]
   row 1 wrap=false text="        "
     cells 0..8: fg=default-fg bg=default-bg flags=[]

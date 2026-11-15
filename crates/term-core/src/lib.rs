@@ -17,7 +17,7 @@ mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod perform;
 
-pub use cell::{Cell, Color, Flags, Row, RowFlags};
+pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
 use std::collections::VecDeque;
@@ -251,6 +251,8 @@ pub struct Terminal {
     active_charset: usize,
     pub modes: Modes,
     pub cursor_shape: CursorShape,
+    /// DECSCUSR odd styles and mode 12: the cursor blinks.
+    pub cursor_blink: bool,
     /// Lines ever pushed into the primary scrollback (including ones since dropped).
     history: u64,
     max_scrollback: usize,
@@ -753,6 +755,7 @@ impl Terminal {
                 ..Modes::default()
             },
             cursor_shape: CursorShape::Block,
+            cursor_blink: false,
             history: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             shrunk: false,

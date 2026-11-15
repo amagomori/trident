@@ -783,6 +783,32 @@ fn cases() -> Vec<Case> {
         ("erase_display_all", 4, 2, b"abcd\r\nef\x1b[2J"),
         ("sgr_basic_reset", 6, 2, b"\x1b[1;31;44mA\x1b[0mB"),
         (
+            "sgr_underline_styles",
+            12,
+            2,
+            b"\x1b[4mA\x1b[4:2mB\x1b[4:3mC\x1b[4:4mD\x1b[4:5mE\x1b[21mF\x1b[4:0mG\x1b[4:1mH\x1b[24mI",
+        ),
+        (
+            "sgr_underline_grapheme",
+            8,
+            2,
+            "\x1b[4:3;58:5:1me\u{301}\x1b[4:2m\u{1f469}\u{200d}\u{1f4bb}\x1b[21ma\u{323}\x1b[24mx".as_bytes(),
+        ),
+        (
+            "sgr_underline_color",
+            12,
+            2,
+            b"\x1b[4:3;58:2::255:0:0mA\x1b[58;5;4mB\x1b]8;;https://e\x07C\x1b[59mD\x1b]8;;\x07E\x1b[58:5:2mF\x1b[0mG",
+        ),
+        (
+            "cursor_style_blink",
+            6,
+            2,
+            b"\x1b[5 q",
+        ),
+        ("cursor_style_steady", 6, 2, b"\x1b[5 q\x1b[?12l\x1b[2 q"),
+        ("cursor_style_mode_12", 6, 2, b"\x1b[4 q\x1b[?12h"),
+        (
             "insert_delete_characters",
             6,
             2,
@@ -944,7 +970,7 @@ fn cases() -> Vec<Case> {
             b"\x1b[4:1ma\x1b[4:2mb\x1b[4:3mc\x1b[4:4md\x1b[4:5me\x1b[4:0mf",
         ),
         (
-            "sgr_underline_color_ignored",
+            "sgr_underline_color_forms",
             8,
             2,
             b"\x1b[1;31m\x1b[58:2::1:2:3ma\x1b[58;2;0;0;0mb\x1b[58;5;4mc\x1b[59md",
@@ -980,7 +1006,7 @@ fn color(color: Color) -> String {
     }
 }
 
-fn attributes(cell: &Cell) -> String {
+fn attributes(t: &Terminal, cell: &Cell) -> String {
     let flags: Vec<_> = [
         (Flags::BOLD, "bold"),
         (Flags::DIM, "dim"),
@@ -996,14 +1022,27 @@ fn attributes(cell: &Cell) -> String {
         (Flags::GRAPHEME, "grapheme"),
     ]
     .into_iter()
-    .filter_map(|(flag, name)| cell.flags.contains(flag).then_some(name))
+    .filter_map(|(flag, name)| match (flag, cell.flags.underline()) {
+        (Flags::UNDERLINE, Some(style)) => Some(match style {
+            UnderlineStyle::Single => "underline",
+            UnderlineStyle::Double => "underline-double",
+            UnderlineStyle::Curly => "underline-curly",
+            UnderlineStyle::Dotted => "underline-dotted",
+            UnderlineStyle::Dashed => "underline-dashed",
+        }),
+        _ => cell.flags.contains(flag).then_some(name),
+    })
     .collect();
-    format!(
+    let mut out = format!(
         "fg={} bg={} flags=[{}]",
         color(cell.fg),
         color(cell.bg),
         flags.join(",")
-    )
+    );
+    if let Some(c) = t.underline_color(cell) {
+        write!(out, " underline-color={}", color(c)).unwrap();
+    }
+    out
 }
 
 fn rows<'a>(out: &mut String, t: &Terminal, label: &str, rows: impl IntoIterator<Item = &'a Row>) {
@@ -1016,9 +1055,9 @@ fn rows<'a>(out: &mut String, t: &Terminal, label: &str, rows: impl IntoIterator
         writeln!(out, "  row {index} wrap={} text={text:?}", row.wrapped()).unwrap();
         let mut start = 0;
         while start < row.cells.len() {
-            let attr = attributes(&row.cells[start]);
+            let attr = attributes(t, &row.cells[start]);
             let mut end = start + 1;
-            while end < row.cells.len() && attributes(&row.cells[end]) == attr {
+            while end < row.cells.len() && attributes(t, &row.cells[end]) == attr {
                 end += 1;
             }
             writeln!(out, "    cells {start}..{end}: {attr}").unwrap();
@@ -1037,13 +1076,21 @@ fn snapshot(t: &Terminal) -> String {
         t.cursor.col,
         t.modes.show_cursor,
         match t.cursor_shape {
+            CursorShape::Block if t.cursor_blink => "blinking-block",
             CursorShape::Block => "block",
+            CursorShape::Underline if t.cursor_blink => "blinking-underline",
             CursorShape::Underline => "underline",
+            CursorShape::Bar if t.cursor_blink => "blinking-bar",
             CursorShape::Bar => "bar",
         },
         t.cursor.pending_wrap,
     );
-    writeln!(out, "cursor attributes: {}", attributes(&t.cursor.template)).unwrap();
+    writeln!(
+        out,
+        "cursor attributes: {}",
+        attributes(t, &t.cursor.template)
+    )
+    .unwrap();
     writeln!(
         out,
         "scroll_region={}..={} history={} display_offset={}",
