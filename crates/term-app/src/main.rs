@@ -52,6 +52,8 @@ use term_core::{ClipboardRequest, MouseMode, Point, SelectionKind, Terminal};
 use term_render::PADDING;
 use term_render::{Fonts, Renderer};
 mod links;
+#[cfg(target_os = "macos")]
+mod native_tabs;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -150,6 +152,9 @@ enum UserEvent {
     Exit(u64),
     #[cfg(target_os = "macos")]
     Presented,
+    /// The native tab bar's + button was clicked.
+    #[cfg(target_os = "macos")]
+    NewTab,
 }
 
 struct Options {
@@ -334,10 +339,37 @@ struct Pane {
     output: PendingOutput,
     title: String,
     progress: Option<term_core::Progress>,
+    #[cfg(target_os = "macos")]
+    window: TabWindow,
+}
+
+/// A native macOS tab's own window and what draws into it, traded with the active tab's
+/// by `Session::swap_pane` along with the terminal.
+#[cfg(target_os = "macos")]
+struct TabWindow {
+    window: Arc<Window>,
+    size: PhysicalSize<u32>,
+    renderer: Renderer,
+    fonts: Fonts,
+    ime_cursor_area: Option<[f32; 4]>,
+    redraw_at: Option<(Instant, Instant)>,
+    target: Option<Instant>,
+    cursor_blink_at: Option<Instant>,
+    blink_at: Option<Instant>,
+    resize: ResizeThrottle,
+    redraw_pending: bool,
+    drawable_wait: Option<Instant>,
+    occluded: bool,
 }
 
 impl Pane {
-    fn new(id: u64, term: Terminal, pty: Pty, pty_cell: (f32, f32)) -> Pane {
+    fn new(
+        id: u64,
+        term: Terminal,
+        pty: Pty,
+        pty_cell: (f32, f32),
+        #[cfg(target_os = "macos")] window: TabWindow,
+    ) -> Pane {
         Pane {
             id,
             composition: ime::Composition::default(),
@@ -353,8 +385,15 @@ impl Pane {
             output: PendingOutput::default(),
             title: String::new(),
             progress: None,
+            #[cfg(target_os = "macos")]
+            window,
         }
     }
+}
+
+/// Whether Trident draws its own tab bar; macOS shows native AppKit tabs instead.
+fn tab_bar_drawn(shown: bool) -> bool {
+    shown && !cfg!(target_os = "macos")
 }
 
 /// The title shown on a tab: the terminal's title, or a placeholder until it sets one.
@@ -627,6 +666,22 @@ impl Session {
         swap(&mut self.output, &mut pane.output);
         swap(&mut self.title, &mut pane.title);
         swap(&mut self.progress, &mut pane.progress);
+        #[cfg(target_os = "macos")]
+        {
+            let tab = &mut pane.window;
+            swap(&mut self.window, &mut tab.window);
+            swap(&mut self.size, &mut tab.size);
+            swap(&mut self.renderer, &mut tab.renderer);
+            swap(&mut self.fonts, &mut tab.fonts);
+            swap(&mut self.ime_cursor_area, &mut tab.ime_cursor_area);
+            swap(&mut self.redraw_at, &mut tab.redraw_at);
+            swap(&mut self.target, &mut tab.target);
+            swap(&mut self.cursor_blink_at, &mut tab.cursor_blink_at);
+            swap(&mut self.blink_at, &mut tab.blink_at);
+            swap(&mut self.resize, &mut tab.resize);
+            swap(&mut self.redraw_pending, &mut tab.redraw_pending);
+            swap(&mut self.drawable_wait, &mut tab.drawable_wait);
+        }
     }
 
     /// The part of the window below the tab bar, where the grid goes.
@@ -1208,6 +1263,11 @@ impl App {
         let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
             attrs, "trident", "trident",
         );
+        #[cfg(target_os = "macos")]
+        let attrs = winit::platform::macos::WindowAttributesExtMacOS::with_tabbing_identifier(
+            attrs,
+            native_tabs::TABBING_IDENTIFIER,
+        );
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -1376,7 +1436,7 @@ impl App {
 
     /// The tab bar's height with `tabs` tabs open, 0 when it is hidden.
     fn tab_bar_height(&self, tabs: usize, fonts: &Fonts) -> u32 {
-        if self.config.tab_bar.shown(tabs) {
+        if tab_bar_drawn(self.config.tab_bar.shown(tabs)) {
             term_render::tab_bar_height(fonts.metrics.height)
         } else {
             0
@@ -1402,7 +1462,17 @@ impl App {
     }
 
     /// Opens a tab after the active one, in the active tab's OSC 7 directory, and shows it.
-    fn new_tab(&mut self) {
+    fn new_tab(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        let window = match self.open_tab_window(event_loop) {
+            Ok(window) => window,
+            Err(error) => {
+                diag!("trident: new tab: {error}");
+                return;
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let _ = event_loop;
         let Some(s) = &self.session else { return };
         let cwd = local_working_directory(s.term.working_directory())
             .or_else(|| self.options.working_directory.clone());
@@ -1430,12 +1500,183 @@ impl App {
             .borrow_mut()
             .push((id, Box::new(pty.running_program_check())));
         let index = (self.active_tab + 1).min(self.tabs.len());
-        self.tabs
-            .insert(index, Some(Pane::new(id, term, pty, cell)));
+        self.tabs.insert(
+            index,
+            Some(Pane::new(
+                id,
+                term,
+                pty,
+                cell,
+                #[cfg(target_os = "macos")]
+                window,
+            )),
+        );
         if index <= self.active_tab {
             self.active_tab += 1;
         }
         self.select_tab(index);
+    }
+
+    /// Creates the window for a new native tab and adds it to the active window's tab group.
+    #[cfg(target_os = "macos")]
+    fn open_tab_window(&self, event_loop: &ActiveEventLoop) -> Result<TabWindow, String> {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        let s = self.session.as_ref().ok_or("no window")?;
+        let attrs = Window::default_attributes()
+            .with_title("Trident")
+            .with_inner_size(s.size)
+            .with_visible(false)
+            .with_tabbing_identifier(native_tabs::TABBING_IDENTIFIER);
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .map_err(|e| format!("cannot create window: {e}"))?,
+        );
+        window.set_ime_allowed(true);
+        native_tabs::add_tab(&s.window, &window);
+        let size = window.inner_size();
+        let fonts = Fonts::new(
+            self.options.font(&self.config),
+            self.font_size * window.scale_factor() as f32,
+        )?;
+        let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
+        Ok(TabWindow {
+            window,
+            size,
+            renderer,
+            fonts,
+            ime_cursor_area: None,
+            redraw_at: None,
+            target: None,
+            cursor_blink_at: None,
+            blink_at: None,
+            resize: ResizeThrottle::default(),
+            redraw_pending: false,
+            drawable_wait: None,
+            occluded: false,
+        })
+    }
+
+    /// The window tab `index` draws into.
+    #[cfg(target_os = "macos")]
+    fn tab_window(&self, index: usize) -> Option<&Window> {
+        if index == self.active_tab {
+            self.session.as_ref().map(|s| &*s.window)
+        } else {
+            self.tabs
+                .get(index)?
+                .as_ref()
+                .map(|pane| &*pane.window.window)
+        }
+    }
+
+    /// The tabs of the active window's native tab group, in tab bar order.
+    #[cfg(target_os = "macos")]
+    fn native_tab_order(&self) -> Vec<usize> {
+        let Some(s) = &self.session else {
+            return Vec::new();
+        };
+        let keys: Vec<Option<usize>> = (0..self.tabs.len())
+            .map(|index| self.tab_window(index).and_then(native_tabs::key))
+            .collect();
+        native_tabs::tab_order(&s.window)
+            .into_iter()
+            .filter_map(|key| keys.iter().position(|&k| k == Some(key)))
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn step_native_tab(&mut self, step: isize) {
+        if let Some(tab) = native_tabs::step_in(&self.native_tab_order(), self.active_tab, step) {
+            self.select_tab(tab);
+        }
+    }
+
+    /// Runs `f` with background tab `index` standing in as the active one, as when its
+    /// window, torn out of the tab group, is drawn or resized on its own.
+    #[cfg(target_os = "macos")]
+    fn with_tab_shown(&mut self, index: usize, f: impl FnOnce(&mut App)) {
+        let Some(mut pane) = self.tabs.get_mut(index).and_then(Option::take) else {
+            return;
+        };
+        let Some(s) = &mut self.session else {
+            self.tabs[index] = Some(pane);
+            return;
+        };
+        s.swap_pane(&mut pane);
+        std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+        let latency = s.latency.take();
+        let search = self.search.take();
+        let focused = std::mem::replace(&mut self.focused, false);
+        let pending_paste = self.pending_paste.take();
+        let pending_close = self.pending_close.take();
+        let tab_hover = self.tab_hover.take();
+        f(self);
+        self.tab_hover = tab_hover;
+        self.pending_close = pending_close;
+        self.pending_paste = pending_paste;
+        self.focused = focused;
+        self.search = search;
+        std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+        if let Some(s) = &mut self.session {
+            s.latency = latency;
+            s.swap_pane(&mut pane);
+        }
+        self.tabs[index] = Some(pane);
+    }
+
+    /// Events for a background tab's window: AppKit selecting or closing its tab, or the
+    /// window resizing or redrawing while torn out of the tab group.
+    #[cfg(target_os = "macos")]
+    fn background_window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(index) = self.tabs.iter().position(|pane| {
+            pane.as_ref()
+                .is_some_and(|pane| pane.window.window.id() == id)
+        }) else {
+            return;
+        };
+        match event {
+            WindowEvent::Focused(true) => {
+                self.select_tab(index);
+                self.window_event(event_loop, id, WindowEvent::Focused(true));
+            }
+            WindowEvent::CloseRequested => self.close_tab(index, event_loop),
+            WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
+            WindowEvent::Occluded(occluded) => {
+                if let Some(pane) = &mut self.tabs[index] {
+                    pane.window.occluded = occluded;
+                    if !occluded {
+                        pane.window.window.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::Resized(size) => self.with_tab_shown(index, |app| {
+                if let Some(s) = &mut app.session {
+                    s.size = size;
+                    s.renderer.resize(size.width, size.height);
+                }
+                app.resize_grid();
+            }),
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.with_tab_shown(index, |app| app.set_font_size(app.font_size))
+            }
+            WindowEvent::RedrawRequested => self.with_tab_shown(index, |app| {
+                if !app.occluded
+                    && app
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.window.is_visible() != Some(false))
+                {
+                    app.present_frame();
+                }
+            }),
+            _ => {}
+        }
     }
 
     /// Shows tab `index`; the tab it replaces keeps running in the background.
@@ -1451,7 +1692,13 @@ impl App {
             s.pty.write(b"\x1b[O");
         }
         s.swap_pane(&mut pane);
+        #[cfg(not(target_os = "macos"))]
         s.renderer.forget_frame();
+        #[cfg(target_os = "macos")]
+        {
+            std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+            native_tabs::show(&s.window);
+        }
         self.tabs[self.active_tab] = Some(pane);
         self.active_tab = index;
         if self.focused && s.term.modes.focus_events {
@@ -1501,7 +1748,12 @@ impl App {
             return;
         }
         if index == self.active_tab {
-            self.select_tab(neighbor_tab(index, self.tabs.len()));
+            #[cfg(target_os = "macos")]
+            let neighbor = native_tabs::neighbor_in(&self.native_tab_order(), index)
+                .unwrap_or_else(|| neighbor_tab(index, self.tabs.len()));
+            #[cfg(not(target_os = "macos"))]
+            let neighbor = neighbor_tab(index, self.tabs.len());
+            self.select_tab(neighbor);
         }
         let removed = self.tabs.remove(index);
         if index < self.active_tab {
@@ -1566,7 +1818,19 @@ impl App {
             pane.title = title;
         }
         if let Some(progress) = pane.term.take_progress() {
+            changed |= pane.progress != progress;
             pane.progress = progress;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if changed {
+                pane.window
+                    .window
+                    .set_title(&progress::window_title(&pane.title, pane.progress));
+            }
+            if !pane.window.occluded {
+                pane.window.window.request_redraw();
+            }
         }
         let bell = std::mem::take(&mut pane.term.bell);
         for notification in pane.term.take_notifications() {
@@ -1619,7 +1883,9 @@ impl App {
             | (MouseButton::Middle, Some(TabHit::Tab(i) | TabHit::Close(i))) => {
                 self.close_tab(i, event_loop)
             }
-            (MouseButton::Left | MouseButton::Middle, Some(TabHit::New)) => self.new_tab(),
+            (MouseButton::Left | MouseButton::Middle, Some(TabHit::New)) => {
+                self.new_tab(event_loop)
+            }
             _ => {}
         }
         true
@@ -1657,7 +1923,7 @@ impl App {
     }
 
     fn resize_grid(&mut self) {
-        let tab_bar_shown = self.config.tab_bar.shown(self.tabs.len());
+        let tab_bar_shown = tab_bar_drawn(self.config.tab_bar.shown(self.tabs.len()));
         let Some(s) = &mut self.session else { return };
         s.scroll.reset();
         s.resize.applied(Instant::now());
@@ -1668,6 +1934,8 @@ impl App {
         };
         let (cols, rows) = grid_size(&s.window, &s.fonts, self.config.padding, s.tab_bar);
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
+        // Native macOS tabs each size to their own window, on their own resize or once shown.
+        #[cfg(not(target_os = "macos"))]
         for pane in self.tabs.iter_mut().flatten() {
             pane.term.set_cell_pixel_size(cell.0, cell.1);
             if (cols, rows) != (pane.term.cols(), pane.term.rows()) {
@@ -1718,6 +1986,13 @@ impl App {
         s.fonts
             .set_size(self.font_size * s.window.scale_factor() as f32);
         s.renderer.clear_glyph_cache();
+        #[cfg(target_os = "macos")]
+        for pane in self.tabs.iter_mut().flatten() {
+            let tab = &mut pane.window;
+            tab.fonts
+                .set_size(self.font_size * tab.window.scale_factor() as f32);
+            tab.renderer.clear_glyph_cache();
+        }
         self.resize_grid();
     }
 
@@ -2342,6 +2617,22 @@ impl App {
                 if let Some(fonts) = fonts {
                     s.fonts = fonts;
                     s.renderer.clear_glyph_cache();
+                    #[cfg(target_os = "macos")]
+                    for pane in self.tabs.iter_mut().flatten() {
+                        let tab = &mut pane.window;
+                        let px = size * tab.window.scale_factor() as f32;
+                        match Fonts::new(self.config.font.as_deref(), px) {
+                            Ok(fonts) => {
+                                tab.fonts = fonts;
+                                tab.renderer.clear_glyph_cache();
+                            }
+                            Err(error) => diag!("trident: font: {error}"),
+                        }
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                for pane in self.tabs.iter_mut().flatten() {
+                    pane.window.renderer.set_vsync(self.config.vsync);
                 }
             }
             if size_changed {
@@ -2398,12 +2689,26 @@ impl App {
                     s.window.request_redraw();
                 }
             }
-            Action::NewTab => self.new_tab(),
+            Action::NewTab => self.new_tab(event_loop),
             Action::CloseTab => self.close_tab(self.active_tab, event_loop),
+            #[cfg(target_os = "macos")]
+            Action::NextTab => self.step_native_tab(1),
+            #[cfg(target_os = "macos")]
+            Action::PreviousTab => self.step_native_tab(-1),
+            #[cfg(target_os = "macos")]
+            Action::SelectTab(index) => {
+                let order = self.native_tab_order();
+                if let Some(&tab) = order.get(shortcut_tab(index, order.len())) {
+                    self.select_tab(tab);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             Action::NextTab => self.select_tab((self.active_tab + 1) % self.tabs.len().max(1)),
+            #[cfg(not(target_os = "macos"))]
             Action::PreviousTab => self.select_tab(
                 (self.active_tab + self.tabs.len().max(1) - 1) % self.tabs.len().max(1),
             ),
+            #[cfg(not(target_os = "macos"))]
             Action::SelectTab(index) => self.select_tab(shortcut_tab(index, self.tabs.len())),
             Action::NewWindow => {
                 let working_directory = self
@@ -3070,6 +3375,8 @@ impl ApplicationHandler<UserEvent> for App {
                 ime::set_command_chords(&self.config.bindings);
                 #[cfg(target_os = "macos")]
                 ime::forward_command_chords(&session.window);
+                #[cfg(target_os = "macos")]
+                native_tabs::handle_new_tab_button(&session.window, self.proxy.clone());
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
                 self.tabs = vec![None];
@@ -3091,8 +3398,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
+            #[cfg(target_os = "macos")]
+            UserEvent::NewTab => self.new_tab(event_loop),
             #[cfg(target_os = "linux")]
             UserEvent::Appearance(generation, theme) => {
                 if self.appearance_watch.is_some() && generation == self.appearance_generation {
@@ -3371,9 +3680,19 @@ impl ApplicationHandler<UserEvent> for App {
         });
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        #[cfg(target_os = "macos")]
+        if self.session.as_ref().is_some_and(|s| s.window.id() != id) {
+            self.background_window_event(event_loop, id, event);
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
         match event {
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
+            #[cfg(target_os = "macos")]
+            WindowEvent::CloseRequested => self.close_tab(self.active_tab, event_loop),
+            #[cfg(not(target_os = "macos"))]
             WindowEvent::CloseRequested => self.close_requested(event_loop),
             WindowEvent::Resized(size) => {
                 if let Some(search) = &mut self.search {
@@ -3389,7 +3708,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
-                self.focused = focused;
+                let changed = std::mem::replace(&mut self.focused, focused) != focused;
                 if let Some(s) = &mut self.session {
                     s.blink_since = Instant::now();
                     if !focused {
@@ -3399,7 +3718,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         s.ime_cursor_area = None;
                     }
-                    if s.term.modes.focus_events {
+                    if changed && s.term.modes.focus_events {
                         s.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
                     }
                     s.window.request_redraw();
@@ -3584,6 +3903,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drawn_tab_bar_gives_way_to_native_tabs_on_macos() {
+        assert!(!tab_bar_drawn(false));
+        assert_eq!(tab_bar_drawn(true), !cfg!(target_os = "macos"));
+    }
 
     #[test]
     fn link_hit_test_excludes_padding_and_leftover_space() {

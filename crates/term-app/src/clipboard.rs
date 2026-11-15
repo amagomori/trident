@@ -66,6 +66,7 @@ pub struct Clipboard {
     x11_max_request_bytes: Option<Option<usize>>,
     #[cfg(target_os = "linux")]
     x11: bool,
+    #[cfg(target_os = "linux")]
     _window: Option<Arc<Window>>,
 }
 
@@ -104,6 +105,7 @@ impl Clipboard {
             x11_max_request_bytes: None,
             #[cfg(target_os = "linux")]
             x11,
+            #[cfg(target_os = "linux")]
             _window: Some(window),
         }
     }
