@@ -1059,12 +1059,14 @@ impl Renderer {
                     self.draw_region(&mut pass, region);
                 }
             } else {
-                let layers = [Layer::BelowBackgrounds, Layer::BelowText, Layer::AboveText];
-                for (region, layer) in layers.into_iter().enumerate() {
-                    self.images.draw(&mut pass, layer, clip);
-                    pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
-                    self.draw_region(&mut pass, region);
-                }
+                self.images.draw(&mut pass, Layer::BelowBackgrounds, clip);
+                pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
+                self.draw_region(&mut pass, 0);
+                self.images.draw(&mut pass, Layer::BelowText, clip);
+                pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
+                self.draw_region(&mut pass, 1);
+                self.draw_region(&mut pass, 2);
+                self.images.draw(&mut pass, Layer::AboveText, clip);
             }
             pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             self.draw_region(&mut pass, 3);
