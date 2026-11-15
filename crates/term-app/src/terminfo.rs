@@ -161,6 +161,8 @@ mod tests {
             "Sync=\\E[?2026%?%p1%{1}%-%tl%eh%;",
             "tsl=\\E]2;",
             "fsl=^G",
+            "civis=\\E[?25l",
+            "cnorm=\\E[?25h",
         ] {
             assert!(caps.contains(&cap), "missing {cap}");
         }
@@ -168,10 +170,30 @@ mod tests {
         for cap in ["smcup=\\E[?1049h", "kmous=\\E[", "colors#"] {
             assert!(caps.iter().any(|c| c.starts_with(cap)), "missing {cap}");
         }
-        for cap in ["blink=", "flash=", "initc=", "Ms=", "Cs=", "smglr=", "mc5="] {
+        for cap in [
+            "blink=", "flash=", "initc=", "Ms=", "Cs=", "smglr=", "mc5=", "cvvis=",
+        ] {
             assert!(!caps.iter().any(|c| c.starts_with(cap)), "unexpected {cap}");
         }
+        assert_cnorm_keeps_blink(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&empty).unwrap();
+    }
+
+    /// What tmux sends on every cursor show: a blinking DECSCUSR style, then
+    /// the entry's cnorm. The cursor must still blink (KAN-126).
+    fn assert_cnorm_keeps_blink(dir: &Path) {
+        let cnorm = Command::new(tool("tput"))
+            .args(["-T", NAME, "cnorm"])
+            .env("TERMINFO", dir)
+            .output()
+            .unwrap();
+        assert!(cnorm.status.success());
+        assert_eq!(cnorm.stdout, b"\x1b[?25h");
+        let mut term = term_core::Terminal::new(10, 2);
+        term.advance(b"\x1b[?25l\x1b[1 q");
+        term.advance(&cnorm.stdout);
+        assert!(term.cursor_blink);
+        assert!(term.modes.show_cursor);
     }
 }
