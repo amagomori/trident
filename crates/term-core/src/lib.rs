@@ -1016,7 +1016,8 @@ impl Terminal {
         self.invalidate_output_ends();
         self.selection = None;
         // A scrolled-back view keeps its top line; one at the bottom follows the bottom.
-        let anchor = (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
+        let mut anchor =
+            (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
         self.display_offset = 0;
         if cols < self.cols || rows < self.rows {
             self.shrunk = true;
@@ -1024,7 +1025,7 @@ impl Terminal {
         // The primary screen rewraps its lines; the alternate one is redrawn by its app.
         let reflow = cols != self.cols;
         if reflow {
-            self.reflow_primary(cols, rows);
+            anchor = self.reflow_primary(cols, rows, anchor);
         }
 
         let mut alt_shifted = 0;

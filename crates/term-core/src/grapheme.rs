@@ -273,8 +273,9 @@ mod tests {
         let mut t = Terminal::new(5, 3);
         t.advance("he\u{301}llo wo\u{308}rld".as_bytes());
         t.resize(8, 3);
+        // Reflow rejoins the three rows into two at the new width.
         t.start_selection(Point { line: 0, col: 0 }, SelectionKind::Simple);
-        t.update_selection(Point { line: 2, col: 7 });
+        t.update_selection(Point { line: 1, col: 7 });
         assert_eq!(t.selection_text().unwrap(), "he\u{301}llo wo\u{308}rld");
         let mut t = Terminal::new(5, 2);
         t.advance("abcd\u{754c}\u{301}x".as_bytes());

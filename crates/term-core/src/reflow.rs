@@ -102,8 +102,14 @@ fn move_marks(
 impl Terminal {
     /// Rejoins the soft-wrapped lines of the primary screen and its scrollback and wraps
     /// them again at `cols`, keeping the cursor on the cell it was on, and sizes the
-    /// screen to `rows`.
-    pub(crate) fn reflow_primary(&mut self, cols: usize, rows: usize) {
+    /// screen to `rows`. `view_top` is the viewport's top line when scrolled back; returns
+    /// where that line went.
+    pub(crate) fn reflow_primary(
+        &mut self,
+        cols: usize,
+        rows: usize,
+        view_top: Option<u64>,
+    ) -> Option<u64> {
         let old_rows = self.rows;
         let old_first = self.history - self.primary.scrollback.len() as u64;
         let back = self.primary.scrollback.len();
@@ -121,6 +127,9 @@ impl Terminal {
         // A cursor past the end of its line is wrapped like the text before it: at the
         // end of a full row it waits there to wrap, as if the line had been typed anew.
         let mut cursor_end = false;
+        // Budget placeholders stay one row, rewritten for the new width.
+        let gaps = self.gap_rows(old_first, back + self.primary.lines.len());
+        let mut gaps = gaps.into_iter().peekable();
 
         // Draining keeps the scrollback's buffer and avoids `make_contiguous`, whose
         // `rotate_left::<Row>` would then stop being inlined into scrolling.
@@ -137,6 +146,17 @@ impl Terminal {
         let mut line = Vec::new();
         let mut rows_iter = old.into_iter().enumerate().peekable();
         while let Some((i, mut row)) = rows_iter.next() {
+            if let Some((_, text)) = gaps.next_if(|(at, _)| *at == i) {
+                map_rows.push(OldRow {
+                    first: new.len(),
+                    count: 1,
+                    base: 0,
+                    len: usize::MAX,
+                });
+                starts.push(0);
+                new.push(crate::budget::placeholder_row(cols, &text));
+                continue;
+            }
             let has_cursor = cursor.is_some() && i == cursor_index;
             if !row.wrapped() && !row.has_hidden() {
                 let used = row
@@ -267,12 +287,6 @@ impl Terminal {
         let mut lines = new.split_off(top);
         lines.truncate(rows);
         lines.resize_with(rows, || Row::new(cols, &Cell::default()));
-        let drop = if self.max_scrollback == 0 {
-            new.len()
-        } else {
-            new.len().saturating_sub(self.max_scrollback)
-        };
-        new.drain(..drop);
         self.primary.scrollback.extend(new);
         self.primary.lines = lines;
         self.history = old_first + top as u64;
@@ -316,6 +330,7 @@ impl Terminal {
                 map.line(command.input_line, command.input_col, false);
             command.next_prompt = command.next_prompt.map(|l| map.line(l, 0, false).0);
         }
+        self.remap_budget_lines(|l| map.line(l, 0, false).0);
         if !self.primary.placements.is_empty() {
             for p in &mut self.primary.placements {
                 let (line, col) = map.line(p.line, p.col, false);
@@ -324,9 +339,30 @@ impl Terminal {
             }
             self.images.generation += 1;
         }
-        if drop > 0 {
+
+        // Rows past the scrollback limit go as if scrolled off, so the command budget
+        // trims an over-budget command before older commands lose their lines.
+        self.cols = cols;
+        self.display_offset = view_top.map_or(0, |l| {
+            (self.history.saturating_sub(map.line(l, 0, false).0) as usize)
+                .min(self.primary.scrollback.len())
+        });
+        let trimmed = if self.max_scrollback == 0 {
+            let all = !self.primary.scrollback.is_empty();
+            self.primary.scrollback.clear();
+            all
+        } else {
+            self.trim_scrollback()
+        };
+        if trimmed {
             self.shrunk = true;
-            self.drop_placements_before(old_first + drop as u64);
+            if !self.primary.placements.is_empty() {
+                let first = self.history - self.primary.scrollback.len() as u64;
+                self.drop_placements_before(first);
+            }
         }
+        self.refresh_budget_limit();
+        let offset = std::mem::take(&mut self.display_offset);
+        view_top.map(|_| self.history - offset.min(self.primary.scrollback.len()) as u64)
     }
 }
