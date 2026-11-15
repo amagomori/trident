@@ -9,6 +9,9 @@ fn arg(params: &Params, index: usize, default: u16) -> u16 {
     }
 }
 
+/// DA1 reply: VT220 with ANSI color.
+const DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
         self.put_char(c);
@@ -93,8 +96,7 @@ impl Perform for Terminal {
             }
             ('c', []) => {
                 if arg(params, 0, 0) == 0 {
-                    // VT220 with ANSI color.
-                    self.responses.extend_from_slice(b"\x1b[?62;22c");
+                    self.responses.extend_from_slice(DEVICE_ATTRIBUTES);
                 }
             }
             ('c', [b'>']) => self.responses.extend_from_slice(b"\x1b[>0;10;1c"),
@@ -127,11 +129,10 @@ impl Perform for Terminal {
                 }
                 _ => {}
             },
-            ('n', [b'?']) => {
-                if arg(params, 0, 0) == 996 {
-                    self.report_color_scheme();
-                }
-            }
+            ('n', [b'?']) => self.private_status_report(params),
+            ('p', [b'$']) => self.report_ansi_mode(arg(params, 0, 0)),
+            ('s', [b'?']) => self.save_private_modes(params),
+            ('r', [b'?']) => self.restore_private_modes(params),
             ('p', [b'?', b'$']) => {
                 self.report_private_mode(arg(params, 0, 0));
             }
@@ -151,6 +152,7 @@ impl Perform for Terminal {
                 self.set_scroll_region(top, bottom);
             }
             ('t', []) => self.window_report(arg(params, 0, 0)),
+            ('y', [b'*']) if self.checksum_reports => self.report_rect_checksum(params),
             ('s', []) => self.save_cursor(),
             ('u', []) => self.restore_cursor(),
             ('p', [b'!']) => {
@@ -160,9 +162,14 @@ impl Perform for Terminal {
                 self.modes.insert = false;
                 self.modes.autowrap = true;
                 self.modes.app_cursor = false;
+                self.modes.app_keypad = false;
                 self.cursor.template = Default::default();
+                self.charsets = [Charset::Ascii; 2];
+                self.active_charset = 0;
                 self.scroll_top = 0;
                 self.scroll_bottom = self.rows - 1;
+                // DECRC after a soft reset goes home with default attributes.
+                self.screen_mut().saved = None;
             }
             _ => {}
         }
@@ -187,6 +194,11 @@ impl Perform for Terminal {
                         cell.c = 'E';
                     }
                 }
+                self.scroll_top = 0;
+                self.scroll_bottom = self.rows - 1;
+                self.cursor.row = 0;
+                self.cursor.col = 0;
+                self.cursor.pending_wrap = false;
             }
             (b'D', []) => self.linefeed(),
             (b'E', []) => {
@@ -199,13 +211,34 @@ impl Perform for Terminal {
             }
             (b'M', []) => self.reverse_index(),
             (b'c', []) => self.reset(),
+            (b'Z', []) => self.responses.extend_from_slice(DEVICE_ATTRIBUTES),
             (b'=', []) => self.modes.app_keypad = true,
             (b'>', []) => self.modes.app_keypad = false,
             (b'0', [b'(']) => self.charsets[0] = Charset::DecSpecial,
             (b'0', [b')']) => self.charsets[1] = Charset::DecSpecial,
+            (b'A', [b'(']) => self.charsets[0] = Charset::Uk,
+            (b'A', [b')']) => self.charsets[1] = Charset::Uk,
             (_, [b'(']) => self.charsets[0] = Charset::Ascii,
             (_, [b')']) => self.charsets[1] = Charset::Ascii,
             _ => {}
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        self.status_request = (!ignore && intermediates == b"$" && action == 'q').then(Vec::new);
+    }
+
+    fn put(&mut self, byte: u8) {
+        if let Some(request) = &mut self.status_request
+            && request.len() < 8
+        {
+            request.push(byte);
+        }
+    }
+
+    fn unhook(&mut self) {
+        if let Some(request) = self.status_request.take() {
+            self.report_setting(&request);
         }
     }
 
@@ -318,29 +351,178 @@ impl Terminal {
 
     #[cold]
     #[inline(never)]
+    fn private_mode(&self, mode: u16) -> Option<bool> {
+        Some(match mode {
+            1 => self.modes.app_cursor,
+            6 => self.modes.origin,
+            7 => self.modes.autowrap,
+            12 => self.cursor_blink,
+            25 => self.modes.show_cursor,
+            47 | 1047 | 1049 => self.is_alt_screen(),
+            9 => self.modes.mouse == MouseMode::X10,
+            1000 => self.modes.mouse == MouseMode::Click,
+            1002 => self.modes.mouse == MouseMode::Drag,
+            1003 => self.modes.mouse == MouseMode::Motion,
+            1004 => self.modes.focus_events,
+            1006 => self.modes.sgr_mouse,
+            1007 => self.modes.alt_scroll,
+            2004 => self.modes.bracketed_paste,
+            2026 => self.modes.synchronized_output,
+            2031 => self.modes.color_scheme_updates,
+            _ => return None,
+        })
+    }
+
     fn report_private_mode(&mut self, mode: u16) {
-        let enabled = match mode {
-            1 => Some(self.modes.app_cursor),
-            6 => Some(self.modes.origin),
-            7 => Some(self.modes.autowrap),
-            12 => Some(self.cursor_blink),
-            25 => Some(self.modes.show_cursor),
-            47 | 1047 | 1049 => Some(self.is_alt_screen()),
-            9 => Some(self.modes.mouse == MouseMode::X10),
-            1000 => Some(self.modes.mouse == MouseMode::Click),
-            1002 => Some(self.modes.mouse == MouseMode::Drag),
-            1003 => Some(self.modes.mouse == MouseMode::Motion),
-            1004 => Some(self.modes.focus_events),
-            1006 => Some(self.modes.sgr_mouse),
-            1007 => Some(self.modes.alt_scroll),
-            2004 => Some(self.modes.bracketed_paste),
-            2026 => Some(self.modes.synchronized_output),
-            2031 => Some(self.modes.color_scheme_updates),
-            _ => None,
-        };
-        let status = enabled.map_or(0, |set| if set { 1 } else { 2 });
+        let status = self
+            .private_mode(mode)
+            .map_or(0, |set| if set { 1 } else { 2 });
         let reply = format!("\x1b[?{mode};{status}$y");
         self.responses.extend_from_slice(reply.as_bytes());
+    }
+
+    /// DECRQM for ANSI modes (`CSI Ps $ p`): IRM and LNM can change, SRM is always set
+    /// (no local echo) and the other ECMA-48 modes are always reset.
+    #[cold]
+    #[inline(never)]
+    fn report_ansi_mode(&mut self, mode: u16) {
+        let status = match mode {
+            4 => 2 - self.modes.insert as u8,
+            20 => 2 - self.modes.linefeed_newline as u8,
+            12 => 3,
+            1 | 2 | 5 | 7 | 10 | 11 | 13..=19 => 4,
+            _ => 0,
+        };
+        let reply = format!("\x1b[{mode};{status}$y");
+        self.responses.extend_from_slice(reply.as_bytes());
+    }
+
+    /// XTSAVE: remember the listed DEC private modes for XTRESTORE.
+    #[cold]
+    #[inline(never)]
+    fn save_private_modes(&mut self, params: &Params) {
+        for p in params.iter() {
+            let Some(value) = self.private_mode(p[0]) else {
+                continue;
+            };
+            match self.saved_modes.iter_mut().find(|(mode, _)| *mode == p[0]) {
+                Some(saved) => saved.1 = value,
+                None => self.saved_modes.push((p[0], value)),
+            }
+        }
+    }
+
+    /// XTRESTORE: put back DEC private modes saved with XTSAVE; others are left alone.
+    #[cold]
+    #[inline(never)]
+    fn restore_private_modes(&mut self, params: &Params) {
+        for p in params.iter() {
+            let saved = self.saved_modes.iter().find(|(mode, _)| *mode == p[0]);
+            if let Some(&(mode, value)) = saved {
+                self.set_mode(mode, true, value);
+            }
+        }
+    }
+
+    /// DEC private DSR (`CSI ? Ps n`) and DECCKSR (`CSI ? 63 ; Pid n`), answered as a
+    /// VT220-class terminal with no printer, UDKs, locator or macros.
+    #[cold]
+    #[inline(never)]
+    fn private_status_report(&mut self, params: &Params) {
+        let reply = match arg(params, 0, 0) {
+            6 => {
+                let row = if self.modes.origin {
+                    self.cursor.row - self.scroll_top
+                } else {
+                    self.cursor.row
+                };
+                format!("\x1b[?{};{}R", row + 1, self.cursor.col + 1)
+            }
+            15 => "\x1b[?13n".into(),
+            25 => "\x1b[?20n".into(),
+            26 => "\x1b[?27;1n".into(),
+            53 | 55 => "\x1b[?50n".into(),
+            56 => "\x1b[?57;0n".into(),
+            62 => "\x1b[0*{".into(),
+            63 => format!("\x1bP{}!~0000\x1b\\", arg(params, 1, 0)),
+            75 => "\x1b[?70n".into(),
+            85 => "\x1b[?83n".into(),
+            996 => return self.report_color_scheme(),
+            _ => return,
+        };
+        self.responses.extend_from_slice(reply.as_bytes());
+    }
+
+    /// DECRQSS reply: `DCS 1 $ r Pt ST` with the setting for SGR, DECSTBM and DECSCUSR,
+    /// `DCS 0 $ r ST` for anything else.
+    #[cold]
+    #[inline(never)]
+    fn report_setting(&mut self, request: &[u8]) {
+        let setting = match request {
+            b"m" => Some(self.sgr_setting()),
+            b"r" => Some(format!(
+                "{};{}r",
+                self.scroll_top + 1,
+                self.scroll_bottom + 1
+            )),
+            b" q" => {
+                let style = match self.cursor_shape {
+                    CursorShape::Block => 1,
+                    CursorShape::Underline => 3,
+                    CursorShape::Bar => 5,
+                } + !self.cursor_blink as u8;
+                Some(format!("{style} q"))
+            }
+            _ => None,
+        };
+        let reply = match setting {
+            Some(setting) => format!("\x1bP1$r{setting}\x1b\\"),
+            None => "\x1bP0$r\x1b\\".into(),
+        };
+        self.responses.extend_from_slice(reply.as_bytes());
+    }
+
+    fn sgr_setting(&self) -> String {
+        let t = &self.cursor.template;
+        let mut out = String::from("0");
+        for (flag, code) in [
+            (Flags::BOLD, "1"),
+            (Flags::DIM, "2"),
+            (Flags::ITALIC, "3"),
+            (Flags::BLINK, "5"),
+            (Flags::INVERSE, "7"),
+            (Flags::HIDDEN, "8"),
+            (Flags::STRIKE, "9"),
+        ] {
+            if t.flags.contains(flag) {
+                out.push(';');
+                out.push_str(code);
+            }
+        }
+        match t.flags.underline() {
+            None => {}
+            Some(UnderlineStyle::Single) => out.push_str(";4"),
+            Some(UnderlineStyle::Double) => out.push_str(";21"),
+            Some(style) => {
+                let n = match style {
+                    UnderlineStyle::Curly => 3,
+                    UnderlineStyle::Dotted => 4,
+                    _ => 5,
+                };
+                out.push_str(&format!(";4:{n}"));
+            }
+        }
+        for (color, base, bright) in [(t.fg, 30, 90), (t.bg, 40, 100)] {
+            match color {
+                Color::Indexed(i) if i < 8 => out.push_str(&format!(";{}", base + i as u16)),
+                Color::Indexed(i) if i < 16 => out.push_str(&format!(";{}", bright + i as u16 - 8)),
+                Color::Indexed(i) => out.push_str(&format!(";{};5;{i}", base + 8)),
+                Color::Rgb(r, g, b) => out.push_str(&format!(";{};2;{r};{g};{b}", base + 8)),
+                Color::DefaultFg | Color::DefaultBg => {}
+            }
+        }
+        out.push('m');
+        out
     }
 
     /// Color-scheme report (`CSI ? 997 ; 1 n` dark, `; 2 n` light), answering DSR 996
@@ -354,6 +536,59 @@ impl Terminal {
             b"\x1b[?997;2n"
         };
         self.responses.extend_from_slice(reply);
+    }
+
+    /// DECRQCRA: `DCS Pid ! ~ XXXX ST`, the negated 16-bit sum of the characters in the
+    /// rectangle plus 0x10/0x20/0x40/0x80 for underline/inverse/blink/bold, as on the
+    /// VT420 and xterm. Coordinates follow origin mode; empty cells count as spaces.
+    #[cold]
+    #[inline(never)]
+    fn report_rect_checksum(&mut self, params: &Params) {
+        let id = arg(params, 0, 0);
+        let (origin, last) = if self.modes.origin {
+            (self.scroll_top, self.scroll_bottom)
+        } else {
+            (0, self.rows - 1)
+        };
+        let row_at = |i: usize, default: usize| {
+            (origin + (arg(params, i, (default + 1) as u16) as usize).max(1) - 1).min(last)
+        };
+        let col_at = |i: usize, default: usize| {
+            ((arg(params, i, (default + 1) as u16) as usize).max(1) - 1).min(self.cols - 1)
+        };
+        let (top, left) = (row_at(2, 0), col_at(3, 0));
+        let (bottom, right) = (row_at(4, last - origin), col_at(5, self.cols - 1));
+        let mut sum: u32 = 0;
+        if top <= bottom && left <= right {
+            for line in &self.screen().lines[top..=bottom] {
+                for cell in line.cells.iter().take(right + 1).skip(left) {
+                    if cell.flags.contains(Flags::WIDE_SPACER) {
+                        continue;
+                    }
+                    let c = if cell.flags.contains(Flags::GRAPHEME) {
+                        self.grapheme(cell)
+                            .and_then(|g| g.chars().next())
+                            .unwrap_or(' ')
+                    } else {
+                        cell.c
+                    };
+                    sum += c as u32;
+                    for (flag, weight) in [
+                        (Flags::UNDERLINE, 0x10),
+                        (Flags::INVERSE, 0x20),
+                        (Flags::BLINK, 0x40),
+                        (Flags::BOLD, 0x80),
+                    ] {
+                        if cell.flags.contains(flag) {
+                            sum += weight;
+                        }
+                    }
+                }
+            }
+        }
+        let checksum = sum.wrapping_neg() & 0xffff;
+        let reply = format!("\x1bP{id}!~{checksum:04X}\x1b\\");
+        self.responses.extend_from_slice(reply.as_bytes());
     }
 
     /// XTWINOPS size reports: text area in pixels (14), cell size in pixels (16) and text

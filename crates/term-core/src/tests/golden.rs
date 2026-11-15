@@ -1072,6 +1072,30 @@ fn cases() -> Vec<Case> {
             2,
             b"a\x1b]7;file://box/home/me/my%20dir\x07b\x1b]7;bogus\x1b\\c",
         ),
+        (
+            "decaln_homes_and_resets_margins",
+            4,
+            3,
+            b"\x1b[2;3r\x1b[2;3H\x1b#8\x1b[3BX",
+        ),
+        (
+            "decstr_resets_saved_cursor",
+            6,
+            2,
+            b"a\x1b7\x1b(0\x1b[!pb\x1b8cq",
+        ),
+        (
+            "uk_charset_pound",
+            7,
+            2,
+            b"\x1b(A#a\x1b)A\x0e#\x0f\x1b(B#",
+        ),
+        (
+            "xtsave_restores_autowrap",
+            4,
+            2,
+            b"\x1b[?7s\x1b[?7l\x1b[?7rabcdef",
+        ),
     ];
     let mut cases: Vec<_> = inputs
         .iter()
@@ -1429,6 +1453,93 @@ fn golden_mouse_modes() {
             expected == actual,
             "{}",
             difference("mouse_modes", &expected, &actual)
+        );
+    }
+}
+
+#[test]
+fn golden_conformance_reports() {
+    let steps: &[(&str, &[u8])] = &[
+        ("DECRQCRA off by default", b"AB\x1b[1*y"),
+        ("enable checksums", b""),
+        ("DECRQCRA one cell", b"\x1b[1;0;1;1;1;1*y"),
+        ("DECRQCRA blank cell", b"\x1b[2;0;2;1;2;1*y"),
+        ("DECRQCRA bold A", b"\x1b[H\x1b[1mA\x1b[m\x1b[3;0;1;1;1;1*y"),
+        ("DECRQCRA whole screen", b"\x1b[4*y"),
+        (
+            "DECRQCRA origin mode",
+            b"\x1b[2;3r\x1b[?6h\x1b[HZ\x1b[5;0;1;1;1;1*y\x1b[?6l\x1b[r",
+        ),
+        ("DECRQCRA clamps", b"\x1b[6;0;9;9;99;99*y"),
+        ("DECXCPR", b"\x1b[2;3H\x1b[?6n"),
+        ("printer, UDK, keyboard", b"\x1b[?15n\x1b[?25n\x1b[?26n"),
+        ("locator", b"\x1b[?53n\x1b[?55n\x1b[?56n"),
+        ("macros, DECCKSR", b"\x1b[?62n\x1b[?63;7n"),
+        ("integrity, sessions", b"\x1b[?75n\x1b[?85n"),
+        ("DECID", b"\x1bZ"),
+        (
+            "DECRQM IRM, LNM",
+            b"\x1b[4$p\x1b[4h\x1b[4$p\x1b[4l\x1b[20$p",
+        ),
+        (
+            "DECRQM fixed ANSI modes",
+            b"\x1b[12$p\x1b[2$p\x1b[19$p\x1b[99$p",
+        ),
+        ("DECRQSS SGR default", b"\x1bP$qm\x1b\\"),
+        (
+            "DECRQSS SGR styled",
+            b"\x1b[1;3;4:3;7;31;104m\x1bP$qm\x1b\\\x1b[38;5;200;48;2;1;2;3m\x1bP$qm\x1b\\\x1b[m",
+        ),
+        (
+            "DECRQSS DECSTBM",
+            b"\x1b[2;3r\x1bP$qr\x1b\\\x1b[r\x1bP$qr\x1b\\",
+        ),
+        (
+            "DECRQSS DECSCUSR",
+            b"\x1b[4 q\x1bP$q q\x1b\\\x1b[5 q\x1bP$q q\x1b\\\x1b[0 q",
+        ),
+        ("DECRQSS unknown", b"\x1bP$q\"q\x1b\\\x1bP$qtoolong!\x1b\\"),
+        (
+            "XTSAVE/XTRESTORE",
+            b"\x1b[?7;2004;9999s\x1b[?7l\x1b[?2004h\x1b[?7;2004;9999r\x1b[?7$p\x1b[?2004$p",
+        ),
+        (
+            "XTRESTORE unsaved",
+            b"\x1b[?25l\x1b[?25r\x1b[?25$p\x1b[?25h",
+        ),
+        ("RIS keeps checksums", b"\x1bc\x1b[8;0;1;1;1;1*y"),
+    ];
+    let run = |bytewise: bool| {
+        let mut term = Terminal::new(4, 3);
+        let mut out = String::new();
+        for &(label, bytes) in steps {
+            if label == "enable checksums" {
+                term.set_checksum_reports(true);
+            }
+            if bytewise {
+                for byte in bytes.chunks(1) {
+                    term.advance(byte);
+                }
+            } else {
+                term.advance(bytes);
+            }
+            let replies = String::from_utf8(term.take_responses()).unwrap();
+            writeln!(out, "{label}: {replies:?}").unwrap();
+        }
+        out
+    };
+    let actual = run(false);
+    assert_eq!(actual, run(true));
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden/conformance_reports.snap");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(path, &actual).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(path).unwrap();
+        assert!(
+            expected == actual,
+            "{}",
+            difference("conformance_reports", &expected, &actual)
         );
     }
 }
