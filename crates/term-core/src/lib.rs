@@ -380,7 +380,6 @@ impl Terminal {
     fn feed_line(&mut self) {
         if std::mem::take(&mut self.shell.line_sent) {
             self.shell.line_editor = false;
-            self.shell.editor_after = None;
         }
     }
 

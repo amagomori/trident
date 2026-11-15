@@ -531,6 +531,23 @@ mod tests {
         t.advance(format!("{}|\r\n{family}", &family[4..]).as_bytes());
         assert_eq!(t.grapheme(&t.viewport_row(0).cells[0]), Some(family));
         assert_eq!(t.base_char(&t.viewport_row(1).cells[2]), '\u{1f469}');
+        // Accepting the line before the editor's next output starts leaves that start in place.
+        for split in [true, false] {
+            let mut t = Terminal::new(10, 2);
+            t.set_line_editing(Some(2));
+            t.line_sent();
+            if split {
+                t.advance(b"\r\n");
+                t.advance(family.as_bytes());
+            } else {
+                t.advance(format!("\r\n{family}").as_bytes());
+            }
+            assert_eq!(
+                t.base_char(&t.viewport_row(1).cells[2]),
+                '\u{1f469}',
+                "{split}"
+            );
+        }
 
         // The same in the shell's input zone (OSC 133 B), without the PTY's modes.
         let mut t = Terminal::new(10, 2);
