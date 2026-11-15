@@ -94,6 +94,8 @@ const DEFER_AFTER: usize = 64 * 1024;
 const MAX_DEFER: Duration = Duration::from_millis(16);
 const RESIZE_INTERVAL: Duration = Duration::from_millis(100);
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
+/// SGR 5 blinking text shows for one half period and hides for the next.
+const BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
 const EXIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
@@ -275,6 +277,9 @@ struct Session {
     #[cfg(target_os = "macos")]
     drawable_wait: Option<Instant>,
     output: PendingOutput,
+    blink_epoch: Instant,
+    /// When blinking text on screen next flips.
+    blink_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -632,6 +637,15 @@ fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
         _ => return None,
     };
     Some(config::Chord { modifiers, key })
+}
+
+/// Whether blinking text shows at `now`, and when that next flips.
+fn blink_phase(epoch: Instant, now: Instant) -> (bool, Instant) {
+    let half = BLINK_HALF_PERIOD.as_nanos();
+    let elapsed = now.saturating_duration_since(epoch).as_nanos();
+    let flips = elapsed / half;
+    let next = epoch + Duration::from_nanos(((flips + 1) * half) as u64);
+    (flips.is_multiple_of(2), next)
 }
 
 fn sync_expired(since: Option<Instant>, now: Instant) -> bool {
@@ -1067,6 +1081,8 @@ impl App {
             #[cfg(target_os = "macos")]
             drawable_wait: None,
             output: PendingOutput::default(),
+            blink_epoch: Instant::now(),
+            blink_at: None,
         })
     }
 
@@ -1316,6 +1332,8 @@ impl App {
                 .exit_presentation
                 .needs_metal_submission(present_macos::feedback().0))
         .then(present_macos::arm_exit);
+        let (blink_visible, blink_flip) = blink_phase(s.blink_epoch, started);
+        s.renderer.blink_visible = blink_visible;
         let rendered = s.renderer.render(
             &s.term,
             &mut s.fonts,
@@ -1328,6 +1346,7 @@ impl App {
             hover.as_ref(),
             Some(&mut pre_present),
         );
+        s.blink_at = s.renderer.blinking().then_some(blink_flip);
         if rendered {
             if self.startup_stderr {
                 if let Err(error) = finish_startup_stderr() {
@@ -2455,6 +2474,14 @@ impl ApplicationHandler<UserEvent> for App {
                 s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
             );
             deadline = sync_wakeup(deadline, s.output.waiting_since, s.synchronized_since);
+            if let Some(flip) = s.blink_at {
+                if now >= flip {
+                    s.blink_at = None;
+                    s.window.request_redraw();
+                } else {
+                    deadline = Some(deadline.map_or(flip, |deadline| deadline.min(flip)));
+                }
+            }
             #[cfg(target_os = "macos")]
             if let Some(since) = s.drawable_wait {
                 let retry = since + MAX_DEFER;
@@ -4240,6 +4267,24 @@ mod tests {
             Some(start),
             start + Duration::from_millis(300)
         ));
+    }
+
+    #[test]
+    fn blink_alternates_each_half_period() {
+        let epoch = Instant::now();
+        let half = BLINK_HALF_PERIOD;
+        assert_eq!(blink_phase(epoch, epoch), (true, epoch + half));
+        let late = epoch + half - Duration::from_nanos(1);
+        assert_eq!(blink_phase(epoch, late), (true, epoch + half));
+        assert_eq!(blink_phase(epoch, epoch + half), (false, epoch + half * 2));
+        assert_eq!(
+            blink_phase(epoch, epoch + half * 5 + Duration::from_millis(1)),
+            (false, epoch + half * 6)
+        );
+        assert_eq!(
+            blink_phase(epoch, epoch + half * 6),
+            (true, epoch + half * 7)
+        );
     }
 
     #[test]

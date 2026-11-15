@@ -57,6 +57,9 @@ pub struct Renderer {
     backgrounds: Vec<Instance>,
     glyphs: Vec<Instance>,
     overlays: Vec<Instance>,
+    /// Whether blinking cells show their text this frame.
+    pub blink_visible: bool,
+    blinking: bool,
 }
 
 fn present_mode(vsync: bool) -> wgpu::PresentMode {
@@ -259,6 +262,8 @@ impl Renderer {
             backgrounds: Vec::new(),
             glyphs: Vec::new(),
             overlays: Vec::new(),
+            blink_visible: true,
+            blinking: false,
         })
     }
 
@@ -277,6 +282,11 @@ impl Renderer {
             self.config.present_mode = mode;
             self.surface.configure(&self.device, &self.config);
         }
+    }
+
+    /// Whether the last frame drew text or decorations that blink.
+    pub fn blinking(&self) -> bool {
+        self.blinking
     }
 
     /// Glyph rasterizations depend on the font size, so drop them when it changes.
@@ -399,6 +409,7 @@ impl Renderer {
         let cursor = term.cursor_position().filter(|_| preedit.is_none());
         let block_cursor = focused && term.cursor_shape == CursorShape::Block;
         let mut ok = true;
+        self.blinking = false;
 
         'rows: for row in -isize::from(pixel_offset > 0.0)..term.rows() as isize {
             let line = term.viewport_row_signed(row);
@@ -445,7 +456,13 @@ impl Renderer {
                     backgrounds.push(self.rect(x, y, cw * cells as f32, ch, bg));
                 }
 
-                if cell.c != ' ' && !cell.flags.contains(Flags::HIDDEN) {
+                let drawn = (cell.c != ' ' && !cell.flags.contains(Flags::HIDDEN))
+                    || cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKE);
+                let blinked_off = drawn && cell.flags.contains(Flags::BLINK) && {
+                    self.blinking = true;
+                    !self.blink_visible
+                };
+                if !blinked_off && cell.c != ' ' && !cell.flags.contains(Flags::HIDDEN) {
                     let key = GlyphKey {
                         c: cell.c,
                         style: Style::new(
@@ -469,14 +486,14 @@ impl Renderer {
                         }
                     }
                 }
-                if cell.flags.contains(Flags::UNDERLINE)
+                if (!blinked_off && cell.flags.contains(Flags::UNDERLINE))
                     || hover
                         .is_some_and(|link| link.contains(term.viewport_to_point_signed(row, col)))
                 {
                     let w = cw * cells as f32;
                     overlays.push(self.rect(x, y + underline_offset, w, stroke, fg));
                 }
-                if cell.flags.contains(Flags::STRIKE) {
+                if !blinked_off && cell.flags.contains(Flags::STRIKE) {
                     let w = cw * cells as f32;
                     overlays.push(self.rect(x, y + (ch / 2.0).round(), w, stroke, fg));
                 }
