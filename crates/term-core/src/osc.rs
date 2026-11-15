@@ -122,8 +122,14 @@ impl Terminal {
             return;
         };
         let text = String::from_utf8_lossy(&decoded).into_owned();
-        requests
+        let since = requests
+            .iter()
+            .rposition(|r| matches!(r, ClipboardRequest::Load { .. }))
+            .map_or(0, |i| i + 1);
+        let mut pending = requests.split_off(since);
+        pending
             .retain(|r| !matches!(r, ClipboardRequest::Store { primary: p, .. } if *p == primary));
+        requests.append(&mut pending);
         requests.push(ClipboardRequest::Store { primary, text });
     }
 
@@ -134,7 +140,7 @@ impl Terminal {
     }
 
     /// Clipboard operations requested with OSC 52 since the last call, oldest first.
-    /// Only the latest store per selection is kept.
+    /// Stores to one selection with no query between them collapse to the latest.
     pub fn take_clipboard_requests(&mut self) -> Vec<ClipboardRequest> {
         std::mem::take(&mut self.shell.clipboard)
     }
@@ -172,6 +178,23 @@ mod tests {
             ]
         );
         assert!(t.take_clipboard_requests().is_empty());
+        let store = |text: &str| ClipboardRequest::Store {
+            primary: false,
+            text: text.into(),
+        };
+        let mut t = term("\x1b]52;c;YQ==\x07\x1b]52;c;?\x07\x1b]52;c;Yg==\x07\x1b]52;c;Yw==\x07");
+        assert_eq!(
+            t.take_clipboard_requests(),
+            [
+                store("a"),
+                ClipboardRequest::Load {
+                    primary: false,
+                    selection: 'c',
+                    bell: true
+                },
+                store("c"),
+            ]
+        );
         let mut t = term("\x1b]52;;Zmlyc3Q=\x07\x1b]52;s0;c2Vjb25k\x07");
         assert_eq!(
             t.take_clipboard_requests(),
