@@ -1012,6 +1012,56 @@ fn golden_keypad_modes() {
 }
 
 #[test]
+fn golden_mouse_modes() {
+    let steps: &[(&str, &[u8])] = &[
+        ("default", b"\x1b[?9$p"),
+        ("X10 set", b"\x1b[?9h\x1b[?9$p\x1b[?1000$p"),
+        ("1000 reset keeps X10", b"\x1b[?1000l\x1b[?9$p"),
+        ("1000 replaces X10", b"\x1b[?1000h\x1b[?9$p\x1b[?1000$p"),
+        ("X10 reset keeps 1000", b"\x1b[?9l\x1b[?1000$p"),
+        ("X10 replaces 1000", b"\x1b[?9h\x1b[?1000$p\x1b[?9$p"),
+        ("SGR with X10", b"\x1b[?1006h"),
+        ("X10 reset", b"\x1b[?9l\x1b[?9$p"),
+        ("X10 set again", b"\x1b[?9;1006h"),
+        ("RIS", b"\x1bc\x1b[?9$p"),
+    ];
+    let run = |bytewise: bool| {
+        let mut term = Terminal::new(5, 2);
+        let mut out = String::new();
+        for &(label, bytes) in steps {
+            if bytewise {
+                for byte in bytes.chunks(1) {
+                    term.advance(byte);
+                }
+            } else {
+                term.advance(bytes);
+            }
+            let replies = String::from_utf8(term.take_responses()).unwrap();
+            writeln!(
+                out,
+                "{label}: mouse={:?} sgr={} replies={replies:?}",
+                term.modes.mouse, term.modes.sgr_mouse
+            )
+            .unwrap();
+        }
+        out
+    };
+    let actual = run(false);
+    assert_eq!(actual, run(true));
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden/mouse_modes.snap");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(path, &actual).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(path).unwrap();
+        assert!(
+            expected == actual,
+            "{}",
+            difference("mouse_modes", &expected, &actual)
+        );
+    }
+}
+
+#[test]
 fn golden_terminal_state() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden");
     let update = std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1");

@@ -8,8 +8,9 @@ A fast GPU-rendered terminal emulator written from scratch in Rust, for macOS an
   MacBooks stay on the integrated one, and only redraws when something on screen changes.
   Idle, it uses no CPU or GPU.
 - **xterm-compatible**: 256 colors and truecolor, bold/italic/underline/strikethrough/dim,
-  alternate screen, scroll regions, bracketed paste, focus events, mouse reporting (SGR and
-  legacy), window titles, and wide (CJK) characters. Runs vim, tmux, htop, less and friends.
+  alternate screen, scroll regions, bracketed paste, focus events, mouse reporting (X10,
+  click, drag and motion tracking; SGR and legacy encodings), window titles, and wide (CJK)
+  characters. Runs vim, tmux, htop, less and friends.
 - **Configurable scrollback** (10,000 lines by default), pixel-smooth trackpad scrolling,
   mouse selection (double-click for words, triple-click for
   lines), and clipboard support, including the primary selection on Linux.

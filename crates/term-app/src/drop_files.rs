@@ -63,7 +63,7 @@ mod tests {
         let mut term = Terminal::new(80, 24);
         assert!(preview_enabled(true, &term));
         assert!(!preview_enabled(false, &term));
-        for mode in [47, 1047, 1049, 1000, 1002, 1003] {
+        for mode in [47, 1047, 1049, 9, 1000, 1002, 1003] {
             term.advance(format!("\x1b[?{mode}h").as_bytes());
             assert!(!preview_enabled(true, &term), "mode {mode}");
             term.advance(format!("\x1b[?{mode}l").as_bytes());
