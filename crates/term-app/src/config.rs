@@ -10,6 +10,8 @@ pub struct Config {
     pub font_size: f32,
     pub padding: f32,
     pub scrollback: usize,
+    pub command_budget: bool,
+    pub command_share: f64,
     pub notify_long_commands_after: u64,
     pub drop_preview: bool,
     pub paste_protection: bool,
@@ -28,6 +30,8 @@ impl Default for Config {
             font_size: 14.0,
             padding: term_render::PADDING,
             scrollback: 10_000,
+            command_budget: true,
+            command_share: 0.5,
             notify_long_commands_after: 10,
             drop_preview: true,
             paste_protection: true,
@@ -47,7 +51,7 @@ struct Raw {
     font: Option<PathBuf>,
     font_size: Option<f32>,
     padding: Option<f32>,
-    scrollback: Option<usize>,
+    scrollback: Option<Scrollback>,
     notify_long_commands_after: Option<u64>,
     drop_preview: Option<bool>,
     paste_protection: Option<bool>,
@@ -58,6 +62,59 @@ struct Raw {
     colors: BTreeMap<String, String>,
     theme: Option<theme::Selection>,
     keybindings: BTreeMap<String, Binding>,
+}
+
+/// `scrollback = 10000`, or a `[scrollback]` table that also tunes command budgeting.
+#[derive(Default)]
+struct Scrollback {
+    lines: Option<usize>,
+    command_budget: Option<bool>,
+    command_share: Option<f64>,
+}
+
+impl<'de> Deserialize<'de> for Scrollback {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Scrollback;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a nonnegative line count or a [scrollback] table")
+            }
+            fn visit_u64<E: serde::de::Error>(self, lines: u64) -> Result<Scrollback, E> {
+                let lines = usize::try_from(lines)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Unsigned(lines), &self))?;
+                Ok(Scrollback {
+                    lines: Some(lines),
+                    ..Scrollback::default()
+                })
+            }
+            fn visit_i64<E: serde::de::Error>(self, lines: i64) -> Result<Scrollback, E> {
+                u64::try_from(lines)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(lines), &self))
+                    .and_then(|lines| self.visit_u64(lines))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Scrollback, A::Error> {
+                Table::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(|t| {
+                    Scrollback {
+                        lines: t.lines,
+                        command_budget: t.command_budget,
+                        command_share: t.command_share,
+                    }
+                })
+            }
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Table {
+            lines: Option<usize>,
+            command_budget: Option<bool>,
+            command_share: Option<f64>,
+        }
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 #[derive(Deserialize)]
@@ -375,7 +432,21 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         config.padding = padding;
     }
     if let Some(scrollback) = raw.scrollback {
-        config.scrollback = scrollback;
+        if let Some(lines) = scrollback.lines {
+            config.scrollback = lines;
+        }
+        if let Some(enabled) = scrollback.command_budget {
+            config.command_budget = enabled;
+        }
+        if let Some(share) = scrollback.command_share {
+            if !share.is_finite() || share <= 0.0 || share > 1.0 {
+                return Err(error(
+                    "scrollback.command_share",
+                    "expected a number greater than 0 and at most 1",
+                ));
+            }
+            config.command_share = share;
+        }
     }
     if let Some(seconds) = raw.notify_long_commands_after {
         config.notify_long_commands_after = seconds;
@@ -938,6 +1009,24 @@ bright_white = "#fefdfc"
         assert_eq!(config.font_size, 20.0);
         assert_eq!(config.padding, 12.0);
         assert_eq!(config.scrollback, 500);
+        assert!(config.command_budget);
+        assert_eq!(config.command_share, 0.5);
+        let table =
+            parse_text("[scrollback]\nlines = 700\ncommand_budget = false\ncommand_share = 0.25")
+                .unwrap();
+        assert_eq!(
+            (table.scrollback, table.command_budget, table.command_share),
+            (700, false, 0.25)
+        );
+        let share_only = parse_text("[scrollback]\ncommand_share = 1").unwrap();
+        assert_eq!(
+            (
+                share_only.scrollback,
+                share_only.command_budget,
+                share_only.command_share
+            ),
+            (10_000, true, 1.0)
+        );
         assert_eq!(config.shell, ["zsh", "-l"]);
         assert_eq!(config.env["TERM"], "custom");
         assert_eq!(config.themes.palette(None).background, (0xab, 0xcd, 0xef));
@@ -963,6 +1052,26 @@ bright_white = "#fefdfc"
             ("font_size = nan", "font_size", "between"),
             ("padding = -1", "padding", "between"),
             ("scrollback = -1", "scrollback", "invalid"),
+            (
+                "[scrollback]\ncommand_share = 0",
+                "scrollback.command_share",
+                "greater than 0",
+            ),
+            (
+                "[scrollback]\ncommand_share = 1.5",
+                "scrollback.command_share",
+                "at most 1",
+            ),
+            (
+                "[scrollback]\ncommand_budget = 'yes'",
+                "scrollback.command_budget",
+                "invalid type",
+            ),
+            (
+                "[scrollback]\nlimit = 5",
+                "scrollback.limit",
+                "unknown field",
+            ),
             ("font_size = 'large'", "font_size", "invalid type"),
             ("unknown = 1", "unknown", "unknown field"),
             (

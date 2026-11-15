@@ -6,6 +6,7 @@ pub mod images;
 pub mod search;
 
 mod ascii;
+mod budget;
 mod cell;
 mod ghost;
 mod kitty;
@@ -39,6 +40,7 @@ struct ShellState {
     prompt_line: Option<u64>,
     input_start: Option<(u64, usize)>,
     commands: VecDeque<Command>,
+    budget: budget::Budget,
 }
 
 /// Commands kept for the pinned header; older ones lose it first.
@@ -61,6 +63,10 @@ pub struct Command {
     pub started: Instant,
     pub finished: Option<Instant>,
     pub exit_code: Option<i32>,
+    /// Line of the command start mark (`C`); its output runs from here to `next_prompt`.
+    pub(crate) output_line: u64,
+    /// Where output dropped by the scrollback budget was replaced by one row.
+    pub(crate) gap: Option<budget::Gap>,
 }
 
 impl Command {
@@ -392,6 +398,8 @@ impl Terminal {
                     && last.next_prompt.is_none()
                 {
                     last.next_prompt = Some(line);
+                    self.note_command_ended(self.shell.commands.len() - 1);
+                    self.shell.budget.limit = u64::MAX;
                 }
                 self.shell.prompt_line = Some(line);
                 self.shell.input_start = None;
@@ -444,7 +452,13 @@ impl Terminal {
                     started: Instant::now(),
                     finished: None,
                     exit_code: None,
+                    output_line: line,
+                    gap: None,
                 });
+                if let Some(ended) = self.shell.commands.len().checked_sub(2) {
+                    self.note_command_ended(ended);
+                }
+                self.refresh_budget_limit();
             }
             b"D" if self.shell.zone == Zone::Output => {
                 if let Some(last) = self.shell.commands.back_mut()
@@ -470,6 +484,7 @@ impl Terminal {
             .is_some_and(|c| c.prompt_line >= prompt_line)
         {
             self.shell.commands.pop_back();
+            self.shell.budget.limit = u64::MAX;
         }
         if let Some(last) = self.shell.commands.back_mut()
             && let Some(next) = &mut last.next_prompt
@@ -691,6 +706,7 @@ impl Terminal {
                 prompt_line: None,
                 input_start: None,
                 commands: VecDeque::new(),
+                budget: budget::Budget::default(),
             }),
             links: Default::default(),
             palette: colors::Palette::default(),
@@ -848,6 +864,7 @@ impl Terminal {
             self.shrunk = true;
         }
         self.max_scrollback = lines;
+        self.refresh_budget_pending();
         let excess = self.primary.scrollback.len().saturating_sub(lines);
         if excess == 0 {
             return;
@@ -1328,11 +1345,19 @@ impl Terminal {
         self.history += 1;
         let mut evicted = None;
         if self.primary.scrollback.len() > self.max_scrollback {
-            evicted = self.primary.scrollback.pop_front();
+            if self.budget_armed()
+                && let Some(spare) = self.evict_from_command()
+            {
+                evicted = spare;
+            } else {
+                evicted = self.primary.scrollback.pop_front();
+            }
             if !self.primary.placements.is_empty() {
                 let first = self.history - self.primary.scrollback.len() as u64;
                 self.drop_placements_before(first);
             }
+        } else if self.history > self.shell.budget.limit {
+            evicted = self.cap_command();
         }
         if self.display_offset > 0 {
             self.display_offset = (self.display_offset + 1).min(self.primary.scrollback.len());

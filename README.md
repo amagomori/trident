@@ -95,7 +95,7 @@ values, including on reload.
 # font = "/path/to/mono.ttf" # default: bundled JetBrains Mono
 font_size = 14.0            # 4..=200 points
 padding = 6.0               # 0..=1000 logical pixels
-scrollback = 10000          # retained lines; 0 disables history
+scrollback = 10000          # retained lines; 0 disables history (or use the [scrollback] table below)
 drop_preview = true         # false: file drops insert only the shell-quoted path
 paste_protection = true     # false: never confirm multi-line or control-character pastes
 confirm_close = true        # false: close the window at once even while a program runs
@@ -147,6 +147,20 @@ Actions: `new_window`, `search`, `copy`, `paste`, `paste_primary` (primary selec
 or `{ send = "..." }`. Chords use `ctrl`, `shift`, `alt` (alias `option`), and
 `super` (alias `cmd`), plus a character or named key such as `pageup`, `home`,
 `insert`, `enter`, `escape`, `space`, arrows, or `f1` through `f35`.
+
+To cap how much history one command can take, use the table form of `scrollback`:
+
+```toml
+[scrollback]
+lines = 10000               # same as scrollback = 10000
+command_budget = true       # false: plain oldest-first eviction
+command_share = 0.5         # 0 < share <= 1 of `lines` one command's output may use
+```
+
+With OSC 133 marks, a command whose output outgrows its share keeps its first and last
+lines and drops the middle, leaving one dim line such as `… 48,213 lines of make output
+dropped`, so earlier commands stay in history. Without marks, eviction is oldest-first.
+Both settings are live-reloaded.
 
 Shell integration uses OSC 133 marks emitted by your shell. With integration enabled,
 clearing at a prompt preserves the screen in scrollback (explicit scrollback clears
