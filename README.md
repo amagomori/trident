@@ -288,6 +288,8 @@ OSC 52, which also works through ssh and tmux (`set -g set-clipboard on`), for e
 `printf '\e]52;c;%s\a' "$(printf hello | base64)"`. Reading the clipboard back with an
 `OSC 52 ; c ; ?` query is off by default because any program, including one on a remote
 host, could read what you copied; set `clipboard_read = true` to answer such queries.
+On X11 a copy larger than the X server's maximum request size (about 16 MiB with
+BIG-REQUESTS) is ignored and the clipboard keeps its previous contents.
 
 Closing the window at an idle shell prompt quits at once. While another program holds the
 terminal's foreground (vim, ssh, a build), a banner names it and asks first: Enter (or a
