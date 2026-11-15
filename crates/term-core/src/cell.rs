@@ -27,6 +27,19 @@ impl Flags {
     /// Unprinted padding before a soft wrap, from a wide character or widening the row.
     pub const WIDE_WRAP: Flags = Flags(1 << 10);
 
+    pub const fn union(self, other: Flags) -> Flags {
+        Flags(self.0 | other.0)
+    }
+
+    pub(crate) const fn bits(self) -> u16 {
+        self.0
+    }
+
+    /// Whether any flag of `other` is set.
+    pub fn intersects(self, other: Flags) -> bool {
+        self.0 & other.0 != 0
+    }
+
     pub fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
     }

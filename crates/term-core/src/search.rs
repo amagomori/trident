@@ -1,6 +1,6 @@
 //! On-demand search over the active screen and its retained history.
 use crate::{Cell, Flags, Point, Row, Terminal};
-use regex::{Regex, RegexBuilder};
+use regex::bytes::{Regex, RegexBuilder};
 use std::time::Instant;
 
 pub const MATCH_LIMIT: usize = 10_000;
@@ -27,13 +27,18 @@ pub struct SearchJob {
     found: Vec<Match>,
     chunks: Vec<std::ops::Range<usize>>,
     total: usize,
-    text: String,
+    text: Vec<u8>,
     points: Vec<(Point, Point)>,
     eager: bool,
+    /// The query is a literal without newlines, so lines can be tested many at a time.
+    batch: bool,
 }
 
 /// Logical lines scanned between deadline checks.
 const SLICE_LINES: usize = 256;
+
+/// Logical lines a literal search rules out with one regex call.
+const BATCH_LINES: usize = 64;
 
 impl SearchJob {
     pub fn done(&self) -> bool {
@@ -55,23 +60,71 @@ impl SearchJob {
     pub fn run(&mut self, term: &Terminal, lines: usize) -> bool {
         let last = term.history + term.rows as u64 - 1;
         let first = term.first_line();
-        for _ in 0..lines {
+        let mut budget = lines;
+        // Lines of a batch that matched, to scan one by one before batching again.
+        let mut unbatched = 0;
+        while budget > 0 {
             let Some(next) = self.next else { break };
             if next < first || self.total == MATCH_LIMIT {
                 self.next = None;
                 break;
             }
-            let logical_end = next.min(last);
-            let mut logical_start = logical_end;
-            while logical_start > first && term.line(logical_start - 1).wrapped() {
-                logical_start -= 1;
+            if self.batch && !self.eager && unbatched == 0 {
+                let n = budget.min(BATCH_LINES);
+                match self.skip_batch(term, next, n, first, last) {
+                    Some(scanned) => {
+                        budget -= scanned;
+                        continue;
+                    }
+                    None => unbatched = n,
+                }
             }
-            self.scan(term, logical_start, logical_end, last);
-            self.frontier = logical_start;
-            self.next =
-                (logical_start > first && self.total < MATCH_LIMIT).then(|| logical_start - 1);
+            let logical_start = logical_start(term, next.min(last), first);
+            self.scan(term, logical_start, next.min(last), last);
+            self.advance_past(logical_start, first);
+            budget -= 1;
+            unbatched = unbatched.saturating_sub(1);
         }
         self.done()
+    }
+
+    fn advance_past(&mut self, logical_start: u64, first: u64) {
+        self.frontier = logical_start;
+        self.next = (logical_start > first && self.total < MATCH_LIMIT).then(|| logical_start - 1);
+    }
+
+    /// Rule out up to `lines` logical lines ending at `next` with one regex call, returning how
+    /// many were scanned, or `None` if one of them may match and they need a line-by-line scan.
+    /// Only for literal queries without newlines: the newline joining lines can't take part in
+    /// a match, so the joined text matches exactly when one of the lines does.
+    fn skip_batch(
+        &mut self,
+        term: &Terminal,
+        next: u64,
+        lines: usize,
+        first: u64,
+        last: u64,
+    ) -> Option<usize> {
+        self.text.clear();
+        let mut end = next.min(last);
+        let mut scanned = 0;
+        let oldest = loop {
+            let start = logical_start(term, end, first);
+            for line in start..=end {
+                push_line(&mut self.text, term, line, last);
+            }
+            self.text.push(b'\n');
+            scanned += 1;
+            if scanned == lines || start <= first {
+                break start;
+            }
+            end = start - 1;
+        };
+        if self.re.is_match(&self.text) {
+            return None;
+        }
+        self.advance_past(oldest, first);
+        Some(scanned)
     }
 
     fn scan(&mut self, term: &Terminal, logical_start: u64, logical_end: u64, last: u64) {
@@ -89,29 +142,12 @@ impl SearchJob {
         let has_points = *eager;
         if has_points {
             points.clear();
-            for line in logical_start..=logical_end {
-                let (cells, row, hidden) = text_cells(term, line, last);
-                for (col, cell) in cells {
-                    text.push(cell.c);
+        }
+        for line in logical_start..=logical_end {
+            push_line(text, term, line, last);
+            if has_points {
+                for (col, cell) in line_columns(term, line, last) {
                     push_points(points, line, col, cell);
-                }
-                if hidden > 0 {
-                    for (col, cell) in hidden_text_cells(row, hidden) {
-                        text.push(cell.c);
-                        push_points(points, line, col, cell);
-                    }
-                }
-            }
-        } else {
-            for line in logical_start..=logical_end {
-                let (cells, row, hidden) = text_cells(term, line, last);
-                for (_, cell) in cells {
-                    text.push(cell.c);
-                }
-                if hidden > 0 {
-                    for (_, cell) in hidden_text_cells(row, hidden) {
-                        text.push(cell.c);
-                    }
                 }
             }
         }
@@ -122,14 +158,8 @@ impl SearchJob {
             }
             points.clear();
             for line in logical_start..=logical_end {
-                let (cells, row, hidden) = text_cells(term, line, last);
-                for (col, cell) in cells {
+                for (col, cell) in line_columns(term, line, last) {
                     push_points(points, line, col, cell);
-                }
-                if hidden > 0 {
-                    for (col, cell) in hidden_text_cells(row, hidden) {
-                        push_points(points, line, col, cell);
-                    }
                 }
             }
         }
@@ -180,13 +210,21 @@ fn push_points(points: &mut Vec<(Point, Point)>, line: u64, col: usize, cell: &C
     points.extend(std::iter::repeat_n((start, end), cell.c.len_utf8()));
 }
 
-/// The visible cells of `line` that are text, with their columns, plus how many of its
-/// cells past the right edge (kept from a wider window) belong to the text too.
-fn text_cells(
-    term: &Terminal,
-    line: u64,
-    last: u64,
-) -> (impl Iterator<Item = (usize, &Cell)>, &Row, usize) {
+/// First line of the logical line that ends at `end`.
+fn logical_start(term: &Terminal, end: u64, first: u64) -> u64 {
+    let mut start = end;
+    while start > first && term.line(start - 1).wrapped() {
+        start -= 1;
+    }
+    start
+}
+
+/// Cells that hold no text of their own: wide-character halves and padding.
+const NOT_TEXT: Flags = Flags::WIDE_SPACER.union(Flags::PAD).union(Flags::WIDE_WRAP);
+
+/// The visible cells of `line` that the search sees, before dropping `NOT_TEXT` cells, plus
+/// how many of its cells past the right edge (kept from a wider window) belong to the text too.
+fn text_cells(term: &Terminal, line: u64, last: u64) -> (&[Cell], &Row, usize) {
     let row = term.line(line);
     let trim = !row.wrapped() || line == last;
     let hidden = if row.has_hidden() {
@@ -194,17 +232,57 @@ fn text_cells(
     } else {
         0
     };
-    let cells = if trim && hidden == 0 {
-        let end = row
-            .cells
-            .iter()
-            .rposition(|cell| *cell != Cell::default())
-            .map_or(0, |col| col + 1);
-        &row.cells[..end]
+    if !trim || hidden > 0 {
+        return (&row.cells, row, hidden);
+    }
+    let blank = Cell::default();
+    // Past `occupied` every cell equals the last one, so a default last cell bounds the scan.
+    let content = if row.cells.last() == Some(&blank) {
+        &row.cells[..row.occupied()]
     } else {
         &row.cells[..]
     };
-    (cells.iter().enumerate().filter(is_text), row, hidden)
+    let end = content
+        .iter()
+        .rposition(|cell| *cell != blank)
+        .map_or(0, |col| col + 1);
+    (&row.cells[..end], row, 0)
+}
+
+/// The text cells of `line` with their columns, in the order `push_line` writes them.
+fn line_columns(term: &Terminal, line: u64, last: u64) -> impl Iterator<Item = (usize, &Cell)> {
+    let (cells, row, hidden) = text_cells(term, line, last);
+    let cells = cells.iter().enumerate().filter(is_text);
+    cells.chain(
+        (hidden > 0)
+            .then(|| hidden_text_cells(row, hidden))
+            .into_iter()
+            .flatten(),
+    )
+}
+
+/// Append the UTF-8 text of `line`, copying rows of plain ASCII cells byte for byte.
+fn push_line(text: &mut Vec<u8>, term: &Terminal, line: u64, last: u64) {
+    let (cells, row, hidden) = text_cells(term, line, last);
+    let start = text.len();
+    let mut seen = 0;
+    text.extend(cells.iter().map(|cell| {
+        seen |= u32::from(cell.c) | u32::from(cell.flags.bits() & NOT_TEXT.bits()) << 16;
+        cell.c as u8
+    }));
+    if seen > 0x7f {
+        text.truncate(start);
+        push_utf8(text, cells.iter().enumerate().filter(is_text));
+    }
+    if hidden > 0 {
+        push_utf8(text, hidden_text_cells(row, hidden));
+    }
+}
+
+fn push_utf8<'a>(text: &mut Vec<u8>, cells: impl Iterator<Item = (usize, &'a Cell)>) {
+    for (_, cell) in cells {
+        text.extend_from_slice(cell.c.encode_utf8(&mut [0; 4]).as_bytes());
+    }
 }
 
 /// Searches a narrowed row as if it were widened again, so results don't depend on width.
@@ -226,9 +304,7 @@ fn hidden_text_cells(row: &Row, len: usize) -> impl Iterator<Item = (usize, &Cel
 }
 
 fn is_text(&(_, cell): &(usize, &Cell)) -> bool {
-    !(cell.flags.contains(Flags::WIDE_SPACER)
-        || cell.flags.contains(Flags::PAD)
-        || cell.flags.contains(Flags::WIDE_WRAP))
+    !cell.flags.intersects(NOT_TEXT)
 }
 
 /// The index of the match that highlights the cell at `point`, if any. Padding that stands
@@ -262,9 +338,10 @@ impl Terminal {
             found: Vec::with_capacity(MATCH_LIMIT),
             chunks: Vec::new(),
             total: 0,
-            text: String::new(),
+            text: Vec::new(),
             points: Vec::new(),
             eager: true,
+            batch: !regex && !query.contains('\n'),
         })
     }
 
@@ -356,6 +433,22 @@ mod tests {
         assert!(t.search("[", true).is_err());
         assert!(t.search("", true).unwrap().is_empty());
         assert!(t.search("absent", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn batched_literal_lines_stay_apart() {
+        let mut t = Terminal::new(10, 2);
+        t.set_scrollback_limit(1000);
+        for i in 0..300 {
+            t.advance(if i % 97 == 0 { b"xab\r\n" } else { b"cd\r\n" });
+        }
+        assert!(t.search("bc", false).unwrap().is_empty());
+        assert!(t.search("b\nc", false).unwrap().is_empty());
+        assert_eq!(t.search("AB", false).unwrap().len(), 0);
+        let found = t.search("ab", false).unwrap();
+        assert_eq!(found.len(), 4);
+        assert!(found.iter().all(|m| m.start.col == 1 && m.end.col == 2));
+        assert_eq!(found, t.search("ab", true).unwrap());
     }
 
     #[test]
