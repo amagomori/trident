@@ -11,6 +11,8 @@ mod font;
 mod images;
 mod ledger;
 mod preedit;
+#[cfg(target_os = "linux")]
+mod present_shm;
 mod renderer;
 
 pub use font::{CellMetrics, FAMILY as BUNDLED_FONT_FAMILY, Fonts, REGULAR as BUNDLED_FONT, Style};

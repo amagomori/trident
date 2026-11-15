@@ -2651,6 +2651,8 @@ dependencies = [
  "ab_glyph",
  "ab_glyph_rasterizer",
  "bytemuck",
+ "glow",
+ "libc",
  "memmap2",
  "objc2-core-foundation",
  "objc2-core-text",
@@ -2660,6 +2662,7 @@ dependencies = [
  "ttf-parser",
  "unicode-width",
  "wgpu",
+ "x11rb",
  "yeslogic-fontconfig-sys",
 ]
 
