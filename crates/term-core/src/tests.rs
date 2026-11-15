@@ -2035,7 +2035,7 @@ fn reflow_lets_bash_redraw_a_wrapped_command_line() {
     let mut t = Terminal::new(40, 10);
     for (cols, output) in steps {
         if let Some(cols) = cols {
-            t.resize(cols, 10);
+            t.resize_while_editing(cols, 10, &mut []);
         }
         t.advance(output.as_bytes());
         let screen = screen(&t);
@@ -2065,6 +2065,15 @@ fn reflow_lets_bash_redraw_a_wrapped_command_line() {
             "",
         ]
     );
+}
+
+#[test]
+fn reflow_moves_a_cursor_before_text_with_its_cell_without_a_line_editor() {
+    // Text after the cursor alone does not mean a line editor will redraw the line.
+    let mut t = term(8, 4, "abcdefghijkl\x1b[2;3H");
+    t.resize(4, 4);
+    t.advance(b"X");
+    assert_eq!(screen(&t), ["abcd", "efgh", "ijXl", ""]);
 }
 
 #[test]
@@ -2290,5 +2299,103 @@ fn resize_while_editing_lets_bash_3_redraw_a_line_edited_mid_line() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn resize_while_editing_back_and_forth_leaves_no_stale_tail() {
+    let line = format!("$ echo {} CMDMATCH {}", "a".repeat(165), "p".repeat(60));
+    let output: String = (1..=26).map(|i| format!("output line {i}\r\n")).collect();
+    // What bash 5.1 and zsh 5.8 send after SIGWINCH, moving up the rows the cursor was
+    // below the line's start at the old width.
+    let redraws: [fn(usize, &str) -> String; 2] = [
+        |up, line| format!("\r\x1b[K{}{line}", "\x1b[A".repeat(up)),
+        |up, line| {
+            format!(
+                "{}\r\r\x1b[0m\x1b[27m\x1b[24m\x1b[J{line}\x1b[K",
+                "\x1b[A".repeat(up)
+            )
+        },
+    ];
+    for redraw in redraws {
+        let mut t = term(100, 30, &format!("{output}{line}"));
+        for (cols, rows, up) in [(60, 20, 2), (100, 30, 4), (60, 20, 2), (100, 30, 4)] {
+            t.resize_while_editing(cols, rows, &mut []);
+            t.advance(redraw(up, &line).as_bytes());
+            let shown = screen(&t);
+            let top = shown.iter().position(|r| r.starts_with('$')).unwrap();
+            let chunks: Vec<_> = line.as_bytes().chunks(cols).collect();
+            assert_eq!(shown[top - 1], "output line 26", "{cols}x{rows}");
+            for (row, chunk) in shown[top..].iter().zip(&chunks) {
+                assert_eq!(row, std::str::from_utf8(chunk).unwrap(), "{cols}x{rows}");
+            }
+            assert!(
+                shown[top + chunks.len()..].iter().all(String::is_empty),
+                "{cols}x{rows}: {shown:?}"
+            );
+            assert_eq!(
+                (t.cursor.row, t.cursor.col),
+                (top + chunks.len() - 1, 242 % cols)
+            );
+        }
+    }
+}
+
+#[test]
+fn resize_while_editing_mid_line_leaves_no_stale_tail() {
+    let words: Vec<String> = (1..=46).map(|i| format!("w{i:03}")).collect();
+    let line = format!(
+        "\x1b[1;32mdevin@qa-mac\x1b[0m:~/projects/terminal (main)$ echo {} CMDMATCH {}",
+        words[..23].join(" "),
+        words[23..].join(" ")
+    );
+    let shown_line = line.replace("\x1b[1;32m", "").replace("\x1b[0m", "");
+    let len = shown_line.len();
+    let point = len - 30;
+    let output: String = (1..=40).map(|i| format!("output-line-{i}\r\n")).collect();
+    // Readline 5.2 (bash 3.2) after SIGWINCH: clear the cursor's row, move up the rows the
+    // cursor was below the line's start, redraw the line, then move back to the point.
+    let place = |cols: usize| {
+        let up = (len - 1) / cols - point / cols;
+        format!("{}\r\x1b[{}C", "\x1b[A".repeat(up), point % cols)
+    };
+    let mut t = term(100, 30, &format!("{output}{line}{}", place(100)));
+    let mut old = 100;
+    for (cols, rows) in [
+        (60, 30),
+        (40, 30),
+        (140, 30),
+        (100, 30),
+        (60, 20),
+        (100, 30),
+    ] {
+        t.resize_while_editing(cols, rows, &mut []);
+        let redraw = format!(
+            "\r\x1b[K{}{line}{}",
+            "\x1b[A".repeat(point / old),
+            place(cols)
+        );
+        t.advance(redraw.as_bytes());
+        old = cols;
+        let shown = screen(&t);
+        let top = shown.iter().position(|r| r.starts_with("devin@")).unwrap();
+        let chunks: Vec<_> = shown_line.as_bytes().chunks(cols).collect();
+        assert_eq!(shown[top - 1], "output-line-40", "{cols}x{rows}");
+        for (row, chunk) in shown[top..].iter().zip(&chunks) {
+            assert_eq!(
+                row,
+                std::str::from_utf8(chunk).unwrap().trim_end(),
+                "{cols}x{rows}"
+            );
+        }
+        assert!(
+            shown[top + chunks.len()..].iter().all(String::is_empty),
+            "{cols}x{rows}: {shown:?}"
+        );
+        assert_eq!(
+            (t.cursor.row, t.cursor.col),
+            (top + point / cols, point % cols),
+            "{cols}x{rows}"
+        );
     }
 }

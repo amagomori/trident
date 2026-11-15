@@ -147,8 +147,7 @@ impl Terminal {
         // Shell marks to move once their rows exist: (old index, flags, prompt_col, output_col, len).
         let mut marks = Vec::new();
         // The cursor's wrapped line: its first old row, and whether a line editor is
-        // editing it (one owns the terminal, text after the cursor, or the shell's input
-        // zone).
+        // editing it (one owns the terminal, or the cursor is in the shell's input zone).
         let mut cursor_line = None;
         let mut line = Vec::new();
         let mut rows_iter = old.into_iter().enumerate().peekable();
@@ -236,14 +235,7 @@ impl Terminal {
             }
 
             if !self.alt_active && (first_old..map_rows.len()).contains(&cursor_index) {
-                let at = map_rows[cursor_index].base + cursor_at;
-                let text_after = line
-                    .get(at..)
-                    .is_some_and(|rest| rest.iter().any(|c| *c != Cell::default()));
-                cursor_line = Some((
-                    first_old,
-                    editing || text_after || self.shell.zone == Zone::Input,
-                ));
+                cursor_line = Some((first_old, editing || self.shell.zone == Zone::Input));
             }
             // Wrap it at the new width.
             let mut pos = 0;
