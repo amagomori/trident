@@ -1525,8 +1525,15 @@ impl App {
             return;
         }
         pane.pty.wake_pending.store(false, Ordering::Release);
+        // Bytes the tab had queued when it was switched away from come first.
+        let queued = pty::Output {
+            bytes: std::mem::take(&mut pane.output.bytes),
+            shell_returns: std::mem::take(&mut pane.output.shell_returns),
+        };
+        pane.output.waiting_since = None;
         let batch = pane.pty.take_output();
         update_terminal(&mut pane.term, &mut pane.scroll, |term| {
+            advance_all(term, queued);
             advance_all(term, batch);
         });
         if pane.term.take_synchronized_output_started() {
