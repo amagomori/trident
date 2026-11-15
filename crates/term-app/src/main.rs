@@ -2818,7 +2818,14 @@ impl ApplicationHandler<UserEvent> for App {
                     s.window.request_redraw();
                 }
             }
-            WindowEvent::Occluded(occluded) => self.occluded = occluded,
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                // wgpu acquires no drawable while the window is occluded, which includes a new
+                // window before macOS first shows it, so draw again once it is visible.
+                if !occluded && let Some(s) = &self.session {
+                    s.window.request_redraw();
+                }
+            }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
                 self.refresh_link();
