@@ -1133,8 +1133,20 @@ impl App {
         let grid_changed = (cols, rows) != (s.term.cols(), s.term.rows());
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
-        if grid_changed {
+        let covered = find_bar_rows(
+            s.window.inner_size().height as f32,
+            self.config.padding * s.window.scale_factor() as f32,
+            s.fonts.metrics.height,
+            rows,
+        );
+        let covered_changed = self
+            .search
+            .as_mut()
+            .is_some_and(|search| std::mem::replace(&mut search.covered_rows, covered) != covered);
+        if grid_changed || covered_changed {
             search::Search::resize(self.search.as_ref(), &mut s.term, cols, rows);
+        }
+        if grid_changed {
             release_freed_memory(&mut s.term);
             if let Some(search) = &mut self.search {
                 search.dirty = true;
@@ -1708,6 +1720,14 @@ impl App {
         match action {
             Action::Search => {
                 let search = self.search.get_or_insert_with(search::Search::default);
+                if let Some(s) = &self.session {
+                    search.covered_rows = find_bar_rows(
+                        s.window.inner_size().height as f32,
+                        self.config.padding * s.window.scale_factor() as f32,
+                        s.fonts.metrics.height,
+                        s.term.rows(),
+                    );
+                }
                 if let Some((text, cursor)) =
                     self.session.as_mut().and_then(|s| s.composition.take())
                 {
@@ -2278,6 +2298,15 @@ fn pointer_in_search_bar(
         && pos.x < size.width as f64
         && pos.y >= layout.cursor_area[1] as f64
         && pos.y < size.height as f64
+}
+
+/// How many of the grid's `rows` bottom rows the Find bar is drawn over, wholly or in part.
+fn find_bar_rows(height: f32, padding: f32, cell_height: f32, rows: usize) -> usize {
+    let bar_top =
+        term_render::search_layout(0, 0..0, 0, cell_height, height, cell_height, cell_height)
+            .cursor_area[1];
+    let clear = ((bar_top - padding) / cell_height).floor().max(0.0) as usize;
+    rows.saturating_sub(clear)
 }
 
 fn pointer_in_grid(
@@ -3059,6 +3088,17 @@ mod tests {
         assert!(!cell_in_preedit(&layout, 2, (2, 7)));
         assert!(!cell_in_preedit(&layout, 2, (1, 4)));
         assert!(!cell_in_preedit(&layout, 2, (-1, 4)));
+    }
+
+    #[test]
+    fn find_bar_rows_counts_rows_it_overlaps() {
+        // 6 px padding, 20 px cells: 10 rows end at 206, the bar starts at 200 and clips row 9.
+        assert_eq!(find_bar_rows(220.0, 6.0, 20.0, 10), 1);
+        // A full spare row below the grid leaves every row clear.
+        assert_eq!(find_bar_rows(240.0, 6.0, 20.0, 10), 0);
+        // Row 8 ends exactly at the bar's top edge, so only row 9 is covered.
+        assert_eq!(find_bar_rows(206.0, 6.0, 20.0, 10), 1);
+        assert_eq!(find_bar_rows(10.0, 6.0, 20.0, 1), 1);
     }
 
     #[test]

@@ -394,6 +394,27 @@ impl Terminal {
                 .min(self.scrollback_len() as u64) as usize;
         }
     }
+
+    /// Bring history lines `start..=end` into the top `rows - covered` screen rows (the rest sit
+    /// under an overlay): center an off-screen `start` as [`Self::reveal_line`] does, then scroll
+    /// just far enough to show `end` too, keeping `start` in view.
+    pub fn reveal_lines(&mut self, start: u64, end: u64, covered: usize) {
+        let view = self.rows.saturating_sub(covered).max(1) as u64;
+        let top = self.history - self.display_offset as u64;
+        let mut want = top;
+        if !(want..want + view).contains(&start) {
+            want = start.saturating_sub(view / 2).max(self.first_line());
+        }
+        if !(want..want + view).contains(&end) {
+            want = (end + 1).saturating_sub(view).min(start);
+        }
+        if want != top {
+            self.display_offset = self
+                .history
+                .saturating_sub(want)
+                .min(self.scrollback_len() as u64) as usize;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -717,6 +738,36 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn reveal_lines_keeps_both_rows_above_covered_rows() {
+        let mut t = Terminal::new(4, 4);
+        t.set_scrollback_limit(100);
+        for _ in 0..20 {
+            t.advance(b"x\r\n");
+        }
+        let top = |t: &Terminal| t.viewport_to_point(0, 0).line;
+        t.scroll_to_line(5);
+        // Already in the clear rows: nothing moves.
+        t.reveal_lines(6, 7, 1);
+        assert_eq!(top(&t), 5);
+        // The end row sits under the overlay: scroll just enough to lift it out.
+        t.reveal_lines(7, 8, 1);
+        assert_eq!(top(&t), 6);
+        // Without an overlay the bottom row counts.
+        t.scroll_to_line(5);
+        t.reveal_lines(7, 8, 0);
+        assert_eq!(top(&t), 5);
+        // Off screen: centered in the clear rows, then the end is shown.
+        t.reveal_lines(15, 16, 1);
+        assert_eq!(top(&t), 14);
+        // Taller than the clear rows: the start stays at the top.
+        t.reveal_lines(2, 9, 1);
+        assert_eq!(top(&t), 2);
+        // Everything covered still leaves one row.
+        t.reveal_lines(12, 13, 9);
+        assert_eq!(top(&t), 12);
     }
 
     #[test]
