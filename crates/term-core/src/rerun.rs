@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::{Command, Flags, Terminal};
+use crate::{Cell, Command, Flags, Terminal};
 
 /// A viewport row whose output differs from the previous run of its command.
 pub const ROW_CHANGED: u8 = 1;
@@ -25,16 +25,17 @@ const MAX_STORED: usize = 200_000;
 /// Edits past which the diff gives up and marks the whole differing middle.
 const MAX_EDITS: usize = 1_000;
 
-/// Default ignore patterns: timestamps, durations, PIDs and temp paths.
+/// Default ignore patterns: timestamps, durations, PIDs and temp paths. Digits are ASCII:
+/// Unicode `\d` makes every line's search slower and tools print ASCII numbers.
 pub const DEFAULT_IGNORE: &[&str] = &[
     // ISO 8601 dates and date-times: 2026-11-15, 2026-11-15T07:02:11.123Z.
-    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?",
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:[.,][0-9]+)?)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)?",
     // Clock times and elapsed times: 07:02:11, 00:01:23.5.
-    r"(?-u:\b)\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?(?-u:\b)",
+    r"(?-u:\b)[0-9]{1,2}:[0-9]{2}:[0-9]{2}(?:[.,][0-9]+)?(?-u:\b)",
     // Durations: 0.42s, 12 ms, 1m3s, 0m0.123s, 3 minutes.
-    r"(?-u:\b)\d+(?:\.\d+)? ?(?:ns|us|µs|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))*(?-u:\b)",
+    r"(?-u:\b)[0-9]+(?:\.[0-9]+)? ?(?:ns|us|µs|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)(?:[0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*(?-u:\b)",
     // PIDs: pid 1234, PID=1234, process 1234, a shell's `[1] 12345` job notice.
-    r"(?i)(?-u:\b)(?:pid[ :=#]*\d+|process(?: id)?[ :=#]+\d{3,})|^\[\d+\] \d+$",
+    r"(?i)(?-u:\b)(?:pid[ :=#]*[0-9]+|process(?: id)?[ :=#]+[0-9]{3,})|^\[[0-9]+\] [0-9]+$",
     // Temp paths: /tmp/..., /var/folders/... (macOS $TMPDIR), /dev/shm/..., Rust's `.tmpXXXXXX`.
     r#"(?:^|[\s'"(=:,\[<])(?:/private)?(?:/var/folders|/var/tmp|/tmp|/dev/shm)/[^\s'")\]>,:]+|\.tmp[A-Za-z0-9]{6}(?-u:\b)"#,
 ];
@@ -319,12 +320,14 @@ impl Terminal {
             let last = !row.wrapped() || line + 1 == end;
             // Trailing blanks would be trimmed below; skip them up front.
             let used = if last {
-                row.cells
-                    .iter()
-                    .rposition(|cell| {
-                        cell.flags.contains(Flags::GRAPHEME) || !cell.c.is_whitespace()
-                    })
-                    .map_or(0, |i| i + 1)
+                let shown =
+                    |cell: &Cell| cell.flags.contains(Flags::GRAPHEME) || !cell.c.is_whitespace();
+                // Cells from `occupied` on all equal the last one, so a blank tail needs no scan.
+                let cells = match row.cells.last() {
+                    Some(cell) if !shown(cell) => &row.cells[..row.occupied()],
+                    _ => &row.cells[..],
+                };
+                cells.iter().rposition(shown).map_or(0, |i| i + 1)
             } else {
                 row.cells.len()
             };
@@ -646,6 +649,11 @@ mod tests {
             "Sun Nov 15 _ PST 2026"
         );
         assert_eq!(masked("elapsed 00:01:23.5"), "elapsed _");
+        // Only ASCII digits are masked.
+        assert_eq!(
+            masked("on \u{663}\u{660}\u{662}\u{666}-\u{661}\u{661}-\u{661}\u{665}"),
+            "on \u{663}\u{660}\u{662}\u{666}-\u{661}\u{661}-\u{661}\u{665}"
+        );
     }
 
     #[test]
