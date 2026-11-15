@@ -398,7 +398,7 @@ impl Pty {
             }
             None => CommandBuilder::new_default_prog(),
         };
-        cmd.env("TERM", crate::terminfo::term());
+        cmd.env("TERM", crate::terminfo::term(env));
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", env!("CARGO_BIN_NAME"));
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));

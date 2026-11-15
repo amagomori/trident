@@ -51,8 +51,8 @@ terminal [OPTIONS] [-e COMMAND [ARGS...]]
   --install-terminfo  Install the xterm-terminal terminfo entry with tic
 ```
 
-It starts your login shell (`$SHELL`) with `TERM=xterm-terminal` when that
-terminfo entry is installed, and `TERM=xterm-256color` otherwise. The entry
+It starts your login shell (`$SHELL`) with `TERM=xterm-terminal` when ncurses
+(`infocmp`) finds that terminfo entry, and `TERM=xterm-256color` otherwise. The entry
 ([crates/term-app/terminfo/xterm-terminal.terminfo](crates/term-app/terminfo/xterm-terminal.terminfo))
 extends xterm-256color with truecolor (`Tc`, `setrgbf`/`setrgbb`), styled
 underlines (`Smulx`), bracketed paste (`BE`/`BD`/`PS`/`PE`), synchronized
