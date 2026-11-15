@@ -285,7 +285,12 @@ impl Terminal {
         let cols = self.cols;
         if regional(c) && !self.cursor.pending_wrap && col + 1 < cols && self.cursor.col == col + 1
         {
+            let (insert, template) = (self.modes.insert, self.cursor.template);
             let line = &mut self.lines_mut()[row];
+            if insert {
+                crate::insert_printed_cells(line, col + 1, cols, 1, &template);
+                line.touch_all();
+            }
             crate::clear_wide_pair(&mut line.cells, col + 1);
             line.cells[col].flags.insert(Flags::WIDE);
             let mut spacer = line.cells[col];
@@ -411,6 +416,21 @@ mod tests {
             text(&t, 0),
             "\u{1f1ef}\u{1f1f5}\u{1f1fa}\u{1f1f8}\u{1f1e9}x"
         );
+    }
+
+    #[test]
+    fn a_flag_inserted_before_text_shifts_it() {
+        let mut t = Terminal::new(8, 2);
+        t.advance("abcde\r\x1b[4h\u{1f1ef}\u{1f1f5}".as_bytes());
+        assert_eq!(text(&t, 0), "\u{1f1ef}\u{1f1f5}abcde");
+        assert_eq!(t.cursor_position(), Some((0, 2)));
+    }
+
+    #[test]
+    fn repeat_after_a_flag_repeats_its_last_indicator() {
+        let mut t = Terminal::new(8, 2);
+        t.advance("\u{1f1ef}\u{1f1f5}\x1b[b".as_bytes());
+        assert_eq!(t.base_char(&t.viewport_row(0).cells[2]), '\u{1f1f5}');
     }
 
     #[test]

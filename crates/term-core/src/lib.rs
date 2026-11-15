@@ -1599,7 +1599,7 @@ impl Terminal {
             return;
         }
         if c as u32 >= 0x80 && self.join_sequence(c) {
-            self.print_state.disarm_clear();
+            self.print_state = PrintState(c as u32);
             return;
         }
 
@@ -2034,7 +2034,13 @@ fn default_tabs(cols: usize) -> Vec<bool> {
 // it here spills the hot character writer's state even when insert mode is off.
 #[cold]
 #[inline(never)]
-fn insert_printed_cells(line: &mut Row, col: usize, cols: usize, width: usize, template: &Cell) {
+pub(crate) fn insert_printed_cells(
+    line: &mut Row,
+    col: usize,
+    cols: usize,
+    width: usize,
+    template: &Cell,
+) {
     line.materialize_wrap_padding(col);
     for _ in 0..width {
         line.cells.insert(col, Cell::blank(template));
