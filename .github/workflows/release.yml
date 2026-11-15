@@ -25,7 +25,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - id: version
-        run: echo "version=$(python3 .github/scripts/release/release.py version --tag "$GITHUB_REF_NAME")" >> "$GITHUB_OUTPUT"
+        run: |
+          version=$(python3 .github/scripts/release/release.py version --tag "$GITHUB_REF_NAME")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - run: python3 -m unittest discover -s .github/scripts/release
       - run: cargo build --release --locked -p term-app
       - name: Fetch appimagetool
@@ -56,13 +58,15 @@ jobs:
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - id: version
-        run: echo "version=$(python3 .github/scripts/release/release.py version --tag "$GITHUB_REF_NAME")" >> "$GITHUB_OUTPUT"
+        run: |
+          version=$(python3 .github/scripts/release/release.py version --tag "$GITHUB_REF_NAME")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - run: |
           cargo build --release --locked -p term-app --target aarch64-apple-darwin
           cargo build --release --locked -p term-app --target x86_64-apple-darwin
           lipo -create -output trident-universal \
             target/aarch64-apple-darwin/release/trident target/x86_64-apple-darwin/release/trident
-          lipo -verify_arch trident-universal arm64 x86_64
+          lipo trident-universal -verify_arch arm64 x86_64
       - run: >
           python3 .github/scripts/release/release.py macos --binary trident-universal
           --version "${{ steps.version.outputs.version }}" --out dist
