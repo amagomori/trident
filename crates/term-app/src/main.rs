@@ -16,6 +16,7 @@ mod drop_files;
 mod flow_control;
 #[cfg(any(target_os = "linux", test))]
 mod frame_clock;
+mod hover_preview;
 mod ime;
 mod input;
 mod latency;
@@ -147,6 +148,7 @@ enum UserEvent {
     /// A long command finished in the tab with this pane id.
     CommandFinished(u64, command_notify::Finished),
     ConfigChanged,
+    HoverPreview(hover_preview::Ready),
     /// The PTY of the tab with this pane id has output.
     Output(u64),
     /// The PTY of the tab with this pane id exited.
@@ -1116,6 +1118,7 @@ struct App {
     notification_throttle: osc_notify::Throttle,
     mouse_pos: PhysicalPosition<f64>,
     typing_pointer: pointer::TypingPointer,
+    hover_preview: Option<hover_preview::HoverPreview>,
     left_down: bool,
     /// The left press landed on the pinned command header; swallow its release.
     ledger_click: bool,
@@ -1212,6 +1215,8 @@ impl App {
             notification_throttle: osc_notify::Throttle::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             typing_pointer: pointer::TypingPointer::default(),
+            hover_preview: hover_preview::enabled(std::env::var_os(hover_preview::ENV).as_deref())
+                .then(hover_preview::HoverPreview::new),
             left_down: false,
             ledger_click: false,
             reported_button: None,
@@ -2181,10 +2186,15 @@ impl App {
         s.deferred = None;
         let was_synchronized = s.term.modes.synchronized_output;
         let mut advanced = None;
+        let hover_preview = &mut self.hover_preview;
         update_terminal(&mut s.term, &mut s.scroll, |term| {
             advanced = s.output.advance(term, s.pty.flow.paused, || {
                 s.pty.wake_pending.store(false, Ordering::Release);
-                s.pty.take_output()
+                let output = s.pty.take_output();
+                if let Some(preview) = hover_preview {
+                    preview.osc7.scan(&output.bytes);
+                }
+                output
             });
         });
         let Some((processed, from_leftover)) = advanced else {
@@ -2333,6 +2343,9 @@ impl App {
             if s.output.waiting_since.is_some() && !s.pty.flow.paused {
                 s.pty.wake_pending.store(false, Ordering::Release);
                 let queued = s.pty.take_output();
+                if let Some(preview) = &mut self.hover_preview {
+                    preview.osc7.scan(&queued.bytes);
+                }
                 if s.output.coalesce(queued) {
                     self.process_output();
                 }
@@ -2344,8 +2357,10 @@ impl App {
             search.refresh(&mut s.term, false);
         }
         self.update_ime_cursor_area();
-        let hover = self.hover_link();
+        let (preview_link, floating) = self.hover_preview_overlay();
+        let hover = self.hover_link().or(preview_link);
         let Some(s) = &mut self.session else { return };
+        s.renderer.set_floating(floating);
         if s.term.modes.synchronized_output {
             s.redraw_pending = true;
             return;
@@ -3194,6 +3209,7 @@ impl App {
             s.hover = link;
             s.request_frame();
         }
+        self.refresh_hover_preview();
     }
 
     fn report_mouse(&mut self, button: ReportButton, pressed: bool, motion: bool) {
@@ -3602,6 +3618,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ConfigChanged => self.reload_config(),
+            UserEvent::HoverPreview(ready) => self.hover_preview_ready(ready),
             UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
                 self.output_ready()
             }
