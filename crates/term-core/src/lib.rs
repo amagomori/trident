@@ -1287,6 +1287,10 @@ impl Terminal {
             let keeps_lines = to_history && self.max_scrollback > 0;
             self.scroll_placements(top, bottom, -(n as isize), keeps_lines);
         }
+        if !to_history {
+            self.rotate_region_up(top, bottom, n);
+            return;
+        }
         for _ in 0..n {
             let row = self.lines_mut().remove(top);
             let spare = if to_history {
@@ -1339,11 +1343,24 @@ impl Terminal {
         if !self.screen().placements.is_empty() {
             self.scroll_placements(top, bottom, n as isize, false);
         }
-        for _ in 0..n {
-            let blank = self.blank_row();
-            self.lines_mut().remove(bottom);
-            self.lines_mut().insert(top, blank);
+        self.lines_mut()[top..=bottom].rotate_right(n);
+        self.reset_rows(top..top + n);
+    }
+
+    /// Moves rows `top + n..=bottom` up to `top` in place and blanks the `n` rows freed at
+    /// the bottom; `remove`/`insert` would shift every row below `top` on the screen.
+    fn rotate_region_up(&mut self, top: usize, bottom: usize, n: usize) {
+        self.lines_mut()[top..=bottom].rotate_left(n);
+        self.reset_rows(bottom + 1 - n..bottom + 1);
+    }
+
+    fn reset_rows(&mut self, rows: std::ops::Range<usize>) {
+        let (cols, template) = (self.cols, self.cursor.template);
+        let mut freed = self.recycled_memory_freed;
+        for row in &mut self.lines_mut()[rows] {
+            row.reset(cols, &template, &mut freed);
         }
+        self.recycled_memory_freed = freed;
     }
 
     fn linefeed(&mut self) {
@@ -1681,11 +1698,7 @@ impl Terminal {
             if !self.screen().placements.is_empty() {
                 self.scroll_placements(row, bottom, -(n as isize), false);
             }
-            for _ in 0..n {
-                let blank = self.blank_row();
-                self.lines_mut().remove(row);
-                self.lines_mut().insert(bottom, blank);
-            }
+            self.rotate_region_up(row, bottom, n);
             self.cursor.col = 0;
             self.cursor.pending_wrap = false;
         }

@@ -566,6 +566,82 @@ fn scroll_region() {
 }
 
 #[test]
+fn region_scrolls_match_a_line_model() {
+    // Rows outside the region stay put; rows inside move by `n`; freed rows are blank.
+    let ops: [(&str, usize, usize, usize); 10] = [
+        ("S", 2, 5, 1),
+        ("S", 2, 5, 3),
+        ("S", 2, 5, 9),
+        ("T", 2, 5, 1),
+        ("T", 2, 5, 2),
+        ("T", 1, 7, 9),
+        ("L", 3, 6, 2),
+        ("M", 3, 6, 2),
+        ("M", 1, 8, 4),
+        ("L", 5, 6, 1),
+    ];
+    for (op, top, bottom, n) in ops {
+        let mut t = Terminal::new(6, 8);
+        let mut model: Vec<String> = (0..8).map(|i| format!("r{i}")).collect();
+        t.advance(model.join("\r\n").as_bytes());
+        t.advance(format!("\x1b[{top};{bottom}r").as_bytes());
+        let (top, bottom) = (top - 1, bottom - 1);
+        match op {
+            "S" | "T" => t.advance(format!("\x1b[{n}{op}").as_bytes()),
+            _ => t.advance(format!("\x1b[{};1H\x1b[{n}{op}", top + 1).as_bytes()),
+        }
+        let region = &mut model[top..=bottom];
+        let k = n.min(region.len());
+        let len = region.len();
+        if op == "S" || op == "M" {
+            region.rotate_left(k);
+            region[len - k..].fill(String::new());
+        } else {
+            region.rotate_right(k);
+            region[..k].fill(String::new());
+        }
+        assert_eq!(screen(&t), model, "{op} {top}..={bottom} n={n}");
+        assert_eq!(t.scrollback_len(), 0, "{op}");
+    }
+}
+
+#[test]
+fn region_scrolls_recycle_rows_as_blanks() {
+    for op in ["\x1b[2T", "\x1b[2;1H\x1b[2L", "\x1b[2;1H\x1b[2M", "\x1b[2S"] {
+        let mut t = Terminal::new(8, 5);
+        t.advance(b"\x1b[2;4r");
+        for row in 1..4 {
+            let line = &mut t.lines_mut()[row];
+            line.cells.fill(Cell {
+                c: 'x',
+                bg: Color::Indexed(3),
+                ..Cell::default()
+            });
+            line.touch_all();
+            line.set_wrapped(true);
+            line.flags.insert(RowFlags::PROMPT_START);
+            line.prompt_col = 2;
+        }
+        let allocations: Vec<_> = t.screen().lines.iter().map(|r| r.cells.as_ptr()).collect();
+        t.advance(b"\x1b[44m");
+        t.advance(op.as_bytes());
+        let lines = &t.screen().lines;
+        let mut moved: Vec<_> = lines.iter().map(|r| r.cells.as_ptr()).collect();
+        moved.sort();
+        let mut expected = allocations.clone();
+        expected.sort();
+        assert_eq!(moved, expected, "{op}: rows are reused, not reallocated");
+        let blanks = lines.iter().filter(|r| **r == t.blank_row()).count();
+        assert_eq!(blanks, 2, "{op}");
+        assert!(
+            lines
+                .iter()
+                .all(|r| r.occupied() == 0 || r.text() == "xxxxxxxx")
+        );
+    }
+}
+
+#[test]
 fn insert_and_delete_lines() {
     let t = term(5, 4, "1\r\n2\r\n3\r\n4\x1b[2;1H\x1b[L");
     assert_eq!(screen(&t), ["1", "", "2", "3"]);
