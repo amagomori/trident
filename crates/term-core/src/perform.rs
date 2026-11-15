@@ -152,7 +152,7 @@ impl Perform for Terminal {
                 self.set_scroll_region(top, bottom);
             }
             ('t', []) => self.window_report(arg(params, 0, 0)),
-            ('y', [b'*']) if self.checksum_reports => self.report_rect_checksum(params),
+            ('y', [b'*']) if self.reports.checksums => self.report_rect_checksum(params),
             ('s', []) => self.save_cursor(),
             ('u', []) => self.restore_cursor(),
             ('p', [b'!']) => {
@@ -225,11 +225,12 @@ impl Perform for Terminal {
     }
 
     fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        self.status_request = (!ignore && intermediates == b"$" && action == 'q').then(Vec::new);
+        self.reports.status_request =
+            (!ignore && intermediates == b"$" && action == 'q').then(Vec::new);
     }
 
     fn put(&mut self, byte: u8) {
-        if let Some(request) = &mut self.status_request
+        if let Some(request) = &mut self.reports.status_request
             && request.len() < 8
         {
             request.push(byte);
@@ -237,7 +238,7 @@ impl Perform for Terminal {
     }
 
     fn unhook(&mut self) {
-        if let Some(request) = self.status_request.take() {
+        if let Some(request) = self.reports.status_request.take() {
             self.report_setting(&request);
         }
     }
@@ -405,9 +406,14 @@ impl Terminal {
             let Some(value) = self.private_mode(p[0]) else {
                 continue;
             };
-            match self.saved_modes.iter_mut().find(|(mode, _)| *mode == p[0]) {
+            match self
+                .reports
+                .saved_modes
+                .iter_mut()
+                .find(|(mode, _)| *mode == p[0])
+            {
                 Some(saved) => saved.1 = value,
-                None => self.saved_modes.push((p[0], value)),
+                None => self.reports.saved_modes.push((p[0], value)),
             }
         }
     }
@@ -417,7 +423,11 @@ impl Terminal {
     #[inline(never)]
     fn restore_private_modes(&mut self, params: &Params) {
         for p in params.iter() {
-            let saved = self.saved_modes.iter().find(|(mode, _)| *mode == p[0]);
+            let saved = self
+                .reports
+                .saved_modes
+                .iter()
+                .find(|(mode, _)| *mode == p[0]);
             if let Some(&(mode, value)) = saved {
                 self.set_mode(mode, true, value);
             }
