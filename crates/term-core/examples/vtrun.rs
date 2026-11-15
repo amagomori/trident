@@ -73,8 +73,13 @@ mod unix {
                 "--key" => keys.push(unescape(&args.next().unwrap_or_default())),
                 "--" => {
                     program.extend(args.by_ref());
+                    break;
                 }
-                _ => program.push(arg),
+                _ => {
+                    program.push(arg);
+                    program.extend(args.by_ref());
+                    break;
+                }
             }
         }
         if program.is_empty() {
@@ -123,7 +128,15 @@ mod unix {
         dump(&t, step);
         unsafe {
             libc::kill(child, libc::SIGHUP);
-            libc::waitpid(child, std::ptr::null_mut(), 0);
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while libc::waitpid(child, std::ptr::null_mut(), libc::WNOHANG) == 0 {
+                if Instant::now() >= deadline {
+                    libc::kill(child, libc::SIGKILL);
+                    libc::waitpid(child, std::ptr::null_mut(), 0);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 
