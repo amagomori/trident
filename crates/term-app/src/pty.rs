@@ -224,7 +224,8 @@ pub struct Pty {
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Input>,
     pause_boundary: Option<Arc<AtomicU64>>,
-    child: Box<dyn Child + Send + Sync>,
+    /// `None` only once `drop` has handed it to the reaper thread.
+    child: Option<Box<dyn Child + Send + Sync>>,
     output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
     pub wake_pending: Arc<AtomicBool>,
@@ -686,7 +687,7 @@ impl Pty {
             master: pair.master,
             input,
             pause_boundary: None,
-            child,
+            child: Some(child),
             output,
             wake_pending,
             watcher_stopped,
@@ -704,7 +705,10 @@ impl Pty {
             if !enabled {
                 self.watcher = None;
             } else if self.watcher.is_none()
-                && let (Some(fd), Some(shell)) = (self.master.as_raw_fd(), self.child.process_id())
+                && let (Some(fd), Some(shell)) = (
+                    self.master.as_raw_fd(),
+                    self.child.as_ref().and_then(|child| child.process_id()),
+                )
             {
                 let fd = unsafe { BorrowedFd::borrow_raw(fd) }
                     .try_clone_to_owned()
@@ -896,8 +900,24 @@ impl Drop for Pty {
         self.watcher_activity.wake_for_shutdown();
         self.output.pending.lock().unwrap().closed = true;
         self.output.room.notify_one();
-        let _ = self.child.kill();
+        if let Some(child) = self.child.take() {
+            reap(child);
+        }
     }
+}
+
+/// Hangs up on `child`, killing it if it lingers, and waits for it so it never stays a
+/// zombie: a shell that outlives portable-pty's grace period gets SIGKILL and no wait. The
+/// wait runs on its own thread, as it can outlast the UI's frame.
+fn reap(mut child: Box<dyn Child + Send + Sync>) {
+    if child.kill().is_err() || matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("pty-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
 }
 
 #[cfg(test)]
@@ -1142,6 +1162,41 @@ mod tests {
         while !String::from_utf8_lossy(&seen).contains(&expected) {
             assert!(Instant::now() < deadline, "output: {seen:?}");
             seen.extend_from_slice(&pty.take_output().bytes);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_reaps_a_shell_that_ignores_hangup() {
+        let mut pty = Pty::spawn(
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                "trap '' HUP; echo ready; while :; do sleep 1; done".into(),
+            ],
+            &Default::default(),
+            None,
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let pid = pty.child.as_ref().unwrap().process_id().unwrap() as libc::pid_t;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while !String::from_utf8_lossy(&seen).contains("ready\r\n") {
+            assert!(Instant::now() < deadline, "output: {seen:?}");
+            seen.extend_from_slice(&pty.take_output().bytes);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(pty);
+        // A zombie still answers signal 0; only a reaped pid is gone.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "shell {pid} was not reaped");
             std::thread::sleep(Duration::from_millis(20));
         }
     }
