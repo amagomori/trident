@@ -49,9 +49,24 @@ terminal [OPTIONS] [-e COMMAND [ARGS...]]
   --option-as-alt     On macOS, make Option act as Alt/Meta
   --copy-on-select    Copy selected text to the clipboard on mouse release
   -e, --command ...   Run this command instead of your shell
+  --install-terminfo  Install the xterm-terminal terminfo entry with tic
 ```
 
-It starts your login shell (`$SHELL`) with `TERM=xterm-256color`.
+It starts your login shell (`$SHELL`) with `TERM=xterm-256color`. terminal also
+ships an `xterm-terminal` terminfo entry
+([crates/term-app/terminfo/xterm-terminal.terminfo](crates/term-app/terminfo/xterm-terminal.terminfo))
+that extends xterm-256color with truecolor (`Tc`, `setrgbf`/`setrgbb`), styled
+underlines (`Smulx`), bracketed paste (`BE`/`BD`/`PS`/`PE`), synchronized
+output (`Sync`) and the window title (`tsl`/`fsl`), and drops the xterm
+features terminal lacks. To use it, install it once with
+`terminal --install-terminfo` (or `/usr/bin/tic -x` on that file) and set
+`term = "xterm-terminal"` in the config. terminal then sets that TERM when the
+system ncurses (`/usr/bin/infocmp` when present) finds the entry, and falls back
+to `xterm-256color` when it does not. On macOS, install with `/usr/bin/tic`: an
+entry compiled by Homebrew's ncurses can't be read by the system tools, so
+terminal falls back. ssh passes TERM to the remote host, where curses programs
+fail unless the entry is installed there too; copy it with
+`infocmp -x xterm-terminal | ssh host -- tic -x /dev/stdin`.
 
 | Action | macOS | Linux |
 | --- | --- | --- |
@@ -102,6 +117,7 @@ paste_protection = true     # false: never confirm multi-line or control-charact
 confirm_close = true        # false: close the window at once even while a program runs
 vsync = true                # false: present without waiting for vblank (lower latency, may tear)
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
+term = "xterm-256color"     # "xterm-terminal" once installed (falls back if not found)
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
 EDITOR = "vim"

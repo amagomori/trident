@@ -26,6 +26,7 @@ mod present_wayland;
 mod pty;
 mod search;
 mod show;
+mod terminfo;
 mod theme;
 
 use config::Action;
@@ -184,6 +185,7 @@ fn usage() -> ! {
            --scrollback <LINES> History lines (default: 10000; 0 disables; max: 1000000)\n  \
            --copy-on-select    Copy selected text to the clipboard on mouse release\n  \
            -e, --command ...   Run this command instead of your shell\n  \
+           --install-terminfo  Install the xterm-terminal terminfo entry with tic\n  \
            -h, --help          Show this help\n  \
            -V, --version       Show the version\n\n\
          `terminal show` draws images and prints text files in the terminal it runs in\n\
@@ -949,9 +951,14 @@ impl App {
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let proxy = self.proxy.clone();
         let command_proxy = self.proxy.clone();
+        let mut env = self.config.env.clone();
+        if !env.contains_key("TERM") {
+            let term = terminfo::term(&self.config.term, &self.config.env);
+            env.insert("TERM".into(), term.into());
+        }
         let mut pty = Pty::spawn(
             self.options.command(&self.config),
-            &self.config.env,
+            &env,
             spawn_cols,
             spawn_rows,
             spawn_cell,
@@ -1574,8 +1581,11 @@ impl App {
             } else {
                 None
             };
-            if next.shell != self.config.shell || next.env != self.config.env {
-                diag!("terminal: shell/env changes apply on the next launch");
+            if next.shell != self.config.shell
+                || next.term != self.config.term
+                || next.env != self.config.env
+            {
+                diag!("terminal: shell/term/env changes apply on the next launch");
             }
             let next_vsync_off = !next.vsync && self.config.vsync;
             self.config = next;
@@ -2668,6 +2678,9 @@ fn main() {
     unsafe { std::env::remove_var(STARTUP_STDERR) };
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
+    }
+    if std::env::args().nth(1).as_deref() == Some("--install-terminfo") {
+        std::process::exit(terminfo::install());
     }
     let options = match parse_args() {
         Ok(o) => o,
