@@ -21,6 +21,7 @@ pub struct Config {
     pub compare_runs: bool,
     pub compare_ignore: term_core::Ignore,
     pub confirm_close: bool,
+    pub tab_bar: TabBarMode,
     pub vsync: bool,
     pub app_icon: AppIcon,
     pub menu_bar_icon: bool,
@@ -51,6 +52,7 @@ impl Default for Config {
             compare_runs: true,
             compare_ignore: term_core::Ignore::default(),
             confirm_close: true,
+            tab_bar: TabBarMode::Always,
             vsync: true,
             app_icon: AppIcon::default(),
             menu_bar_icon: true,
@@ -79,6 +81,7 @@ struct Raw {
     clipboard_read: Option<bool>,
     compare_runs: Option<CompareRunsEntry>,
     confirm_close: Option<bool>,
+    tab_bar: Option<String>,
     vsync: Option<bool>,
     app_icon: Option<String>,
     menu_bar_icon: Option<bool>,
@@ -201,10 +204,41 @@ struct SendBinding {
     send: String,
 }
 
+/// When the tab bar is shown: always (so its `+` button is always there), only with
+/// two or more tabs, or never (tabs are then reached by shortcuts only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabBarMode {
+    Always,
+    Auto,
+    Never,
+}
+
+impl TabBarMode {
+    const NAMES: [(&'static str, TabBarMode); 3] = [
+        ("always", TabBarMode::Always),
+        ("auto", TabBarMode::Auto),
+        ("never", TabBarMode::Never),
+    ];
+
+    pub fn shown(self, tabs: usize) -> bool {
+        match self {
+            TabBarMode::Always => true,
+            TabBarMode::Auto => tabs > 1,
+            TabBarMode::Never => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Search,
     NewWindow,
+    NewTab,
+    CloseTab,
+    NextTab,
+    PreviousTab,
+    /// Selects the tab at this zero-based index.
+    SelectTab(usize),
     LineUp,
     LineDown,
     Copy,
@@ -231,6 +265,10 @@ impl Action {
             Binding::Send(send) => Self::Send(send.send),
             Binding::Name(name) => match name.as_str() {
                 "new_window" => Self::NewWindow,
+                "new_tab" => Self::NewTab,
+                "close_tab" => Self::CloseTab,
+                "next_tab" => Self::NextTab,
+                "previous_tab" => Self::PreviousTab,
                 "scroll_line_up" => Self::LineUp,
                 "scroll_line_down" => Self::LineDown,
                 "copy" => Self::Copy,
@@ -249,7 +287,13 @@ impl Action {
                 "jump_to_prompt_down" => Self::JumpToPromptDown,
                 "select_command_output" => Self::SelectCommandOutput,
                 "none" => Self::None,
-                _ => return Err(format!("unknown action {name:?}")),
+                _ => match name
+                    .strip_prefix("select_tab_")
+                    .and_then(|n| n.parse::<usize>().ok())
+                {
+                    Some(n @ 1..=9) => Self::SelectTab(n - 1),
+                    _ => return Err(format!("unknown action {name:?}")),
+                },
             },
         })
     }
@@ -359,6 +403,8 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
     let mut bindings = BTreeMap::new();
     for (key, action) in [
         ("n", Action::NewWindow),
+        ("t", Action::NewTab),
+        ("w", Action::CloseTab),
         ("c", Action::Copy),
         ("f", Action::Search),
         ("v", Action::Paste),
@@ -378,6 +424,33 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
             Chord::parse(&format!("{command}+alt+{key}")).unwrap(),
             action,
         );
+    }
+    let select = if macos { "super" } else { "alt" };
+    for n in 1..=9 {
+        bindings.insert(
+            Chord::parse(&format!("{select}+{n}")).unwrap(),
+            Action::SelectTab(n - 1),
+        );
+    }
+    let (next, previous) = if macos {
+        ("super+shift+]", "super+shift+[")
+    } else {
+        ("ctrl+pagedown", "ctrl+pageup")
+    };
+    let (next_shifted, previous_shifted) = if macos {
+        ("super+shift+}", "super+shift+{")
+    } else {
+        (next, previous)
+    };
+    for (chord, action) in [
+        ("ctrl+tab", Action::NextTab),
+        ("ctrl+shift+tab", Action::PreviousTab),
+        (next, Action::NextTab),
+        (previous, Action::PreviousTab),
+        (next_shifted, Action::NextTab),
+        (previous_shifted, Action::PreviousTab),
+    ] {
+        bindings.insert(Chord::parse(chord).unwrap(), action);
     }
     if macos {
         bindings.insert(
@@ -500,6 +573,17 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         auto_secure_input: raw.auto_secure_input.unwrap_or(true),
         ..Config::default()
     };
+    if let Some(name) = raw.tab_bar {
+        match TabBarMode::NAMES.iter().find(|(n, _)| *n == name) {
+            Some(&(_, mode)) => config.tab_bar = mode,
+            None => config.warnings.push(error(
+                "tab_bar",
+                &format!(
+                    "unknown mode {name:?}, using \"always\" (expected always, auto or never)"
+                ),
+            )),
+        }
+    }
     if let Some(name) = raw.app_icon {
         match AppIcon::from_name(&name) {
             Some(icon) => config.app_icon = icon,
@@ -1345,6 +1429,8 @@ bright_white = "#fefdfc"
             for (suffix, name, action) in [
                 ("f", "search", Action::Search),
                 ("n", "new_window", Action::NewWindow),
+                ("t", "new_tab", Action::NewTab),
+                ("w", "close_tab", Action::CloseTab),
                 ("alt+up", "scroll_line_up", Action::LineUp),
                 ("alt+down", "scroll_line_down", Action::LineDown),
             ] {
@@ -1528,5 +1614,48 @@ bright_white = "#fefdfc"
         wait(24.0);
         drop(watcher);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tab_bar_modes_and_tab_bindings() {
+        assert_eq!(parse_text("").unwrap().tab_bar, TabBarMode::Always);
+        assert_eq!(
+            parse_text("tab_bar = 'auto'").unwrap().tab_bar,
+            TabBarMode::Auto
+        );
+        assert_eq!(
+            parse_text("tab_bar = 'never'").unwrap().tab_bar,
+            TabBarMode::Never
+        );
+        let unknown = parse_text("tab_bar = 'sometimes'").unwrap();
+        assert_eq!(unknown.tab_bar, TabBarMode::Always);
+        assert_eq!(unknown.warnings.len(), 1);
+        assert!(TabBarMode::Always.shown(1));
+        assert!(!TabBarMode::Auto.shown(1) && TabBarMode::Auto.shown(2));
+        assert!(!TabBarMode::Never.shown(3));
+        for name in ["select_tab_0", "select_tab_10", "select_tab_x"] {
+            assert!(Action::parse(Binding::Name(name.into())).is_err());
+        }
+        for (name, action) in [
+            ("next_tab", Action::NextTab),
+            ("previous_tab", Action::PreviousTab),
+            ("select_tab_9", Action::SelectTab(8)),
+        ] {
+            assert_eq!(Action::parse(Binding::Name(name.into())).unwrap(), action);
+        }
+        for (macos, next, previous, select) in [
+            (true, "super+shift+]", "super+shift+[", "super"),
+            (true, "super+shift+}", "super+shift+{", "super"),
+            (false, "ctrl+pagedown", "ctrl+pageup", "alt"),
+        ] {
+            let defaults = default_bindings_for(macos);
+            let get = |chord: &str| defaults.get(&Chord::parse(chord).unwrap()).cloned();
+            assert_eq!(get(&format!("{select}+3")), Some(Action::SelectTab(2)));
+            assert_eq!(get(&format!("{select}+9")), Some(Action::SelectTab(8)));
+            assert_eq!(get(next), Some(Action::NextTab));
+            assert_eq!(get(previous), Some(Action::PreviousTab));
+            assert_eq!(get("ctrl+tab"), Some(Action::NextTab));
+            assert_eq!(get("ctrl+shift+tab"), Some(Action::PreviousTab));
+        }
     }
 }
