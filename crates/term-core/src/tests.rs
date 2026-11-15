@@ -2745,3 +2745,82 @@ fn rerun_marks_follow_reflow_and_can_be_turned_off() {
     t.set_compare_runs(false);
     assert!(marked_rows(&t).is_empty());
 }
+
+fn click(t: &Terminal, row: usize, col: usize) -> Option<PromptClick> {
+    t.prompt_click(t.viewport_to_point(row, col))
+}
+
+#[test]
+fn prompt_click_moves_by_characters_within_the_input() {
+    let mut t = term(20, 4, "out\r\n\x1b]133;A\x07$ \x1b]133;B\x07echo hello");
+    assert_eq!(click(&t, 1, 7), Some(PromptClick::Move(-5)));
+    assert_eq!(click(&t, 1, 12), Some(PromptClick::Move(0)));
+    // Past the end of the text, and onto the prompt itself, clamp to the input.
+    assert_eq!(click(&t, 1, 19), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 1, 0), Some(PromptClick::Move(-10)));
+    // Rows outside the command line: earlier output, blank rows below.
+    assert_eq!(click(&t, 0, 1), None);
+    assert_eq!(click(&t, 2, 1), None);
+    t.advance(b"\x1b[5D");
+    assert_eq!(click(&t, 1, 19), Some(PromptClick::Move(5)));
+    // Trailing typed spaces before the cursor stay reachable.
+    t.advance(b"\x1b[5C  ");
+    assert_eq!(click(&t, 1, 19), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 1, 2), Some(PromptClick::Move(-12)));
+}
+
+#[test]
+fn prompt_click_counts_wide_characters_once_and_follows_soft_wraps() {
+    // 10 columns: "$ " then "ab日本cdefg" wraps after "日本" + "cd".
+    let t = term(10, 4, "\x1b]133;A\x07$ \x1b]133;B\x07ab日本cdefgh");
+    assert_eq!(screen(&t)[0], "$ ab日本cd");
+    assert_eq!(click(&t, 0, 4), Some(PromptClick::Move(-8)));
+    // The right half of a wide character is that character.
+    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-8)));
+    assert_eq!(click(&t, 0, 6), Some(PromptClick::Move(-7)));
+    assert_eq!(click(&t, 1, 0), Some(PromptClick::Move(-4)));
+    assert_eq!(click(&t, 1, 9), Some(PromptClick::Move(0)));
+    // A wide character that does not fit leaves wrap padding, which is not a character.
+    let t = term(6, 4, "\x1b]133;A\x07$ \x1b]133;B\x07abc日x");
+    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-2)));
+    assert_eq!(click(&t, 1, 0), Some(PromptClick::Move(-2)));
+    assert_eq!(click(&t, 1, 2), Some(PromptClick::Move(-1)));
+}
+
+#[test]
+fn prompt_click_needs_an_input_zone_on_the_primary_screen() {
+    assert_eq!(click(&term(20, 4, "$ echo hi"), 0, 2), None);
+    assert_eq!(click(&term(20, 4, "\x1b]133;A\x07$ "), 0, 1), None);
+    let running = "\x1b]133;A\x07$ \x1b]133;B\x07sleep 9\r\n\x1b]133;C\x07";
+    assert_eq!(click(&term(20, 4, running), 0, 3), None);
+    let done = format!("{running}\x1b]133;D;0\x07");
+    assert_eq!(click(&term(20, 4, &done), 0, 3), None);
+    let mut t = term(20, 4, "\x1b]133;A\x07$ \x1b]133;B\x07vim");
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(click(&t, 0, 2), None);
+    // A hard newline (a continuation prompt) leaves the marked line.
+    let t = term(20, 4, "\x1b]133;A\x07$ \x1b]133;B\x07echo \\\r\n> x");
+    assert_eq!(click(&t, 0, 2), None);
+    assert_eq!(click(&t, 1, 1), None);
+}
+
+#[test]
+fn prompt_click_reports_clicks_when_the_prompt_asks_for_them() {
+    let mut t = term(
+        10,
+        4,
+        "out\r\n\x1b]133;A;click_events=1\x07~\r\n$ \x1b]133;B\x07abcdefghij",
+    );
+    assert_eq!(
+        click(&t, 1, 3),
+        Some(PromptClick::Report { row: 1, col: 3 })
+    );
+    assert_eq!(
+        click(&t, 3, 0),
+        Some(PromptClick::Report { row: 3, col: 0 })
+    );
+    assert_eq!(click(&t, 0, 0), None);
+    // The next prompt without the option goes back to cursor keys.
+    t.advance(b"\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07ab");
+    assert_eq!(click(&t, 3, 2), Some(PromptClick::Move(-2)));
+}

@@ -1110,6 +1110,8 @@ struct App {
     /// Button held while a program tracks the mouse, for drag reports.
     reported_button: Option<ReportButton>,
     last_click: Option<(Instant, Point, u8)>,
+    /// Where a plain single left press landed, until a drag moves off it.
+    click_to_move: Option<Point>,
     scroll_accum: f64,
     clipboard: clipboard::Clipboard,
     /// Clipboard text waiting for the user to confirm (paste protection).
@@ -1203,6 +1205,7 @@ impl App {
             ledger_click: false,
             reported_button: None,
             last_click: None,
+            click_to_move: None,
             scroll_accum: 0.0,
             clipboard: clipboard::Clipboard::default(),
             pending_paste: None,
@@ -3236,6 +3239,9 @@ impl App {
             if self.options.copy_on_select {
                 self.copy(false);
             }
+            if let Some(point) = self.click_to_move.take() {
+                self.move_cursor_to(point);
+            }
             return;
         }
         if self.mouse_reporting() {
@@ -3255,6 +3261,7 @@ impl App {
                     return;
                 }
                 self.left_down = true;
+                self.click_to_move = None;
                 let Some((row, col)) = self.cell_at(self.mouse_pos) else {
                     return;
                 };
@@ -3270,11 +3277,30 @@ impl App {
                     _ => 1,
                 };
                 self.last_click = (!modified).then_some((Instant::now(), point, clicks));
+                self.click_to_move = (clicks == 1 && self.modifiers.is_empty()).then_some(point);
                 select_at(&mut s.term, point, self.modifiers, clicks);
                 s.request_frame();
             }
             MouseButton::Middle if pressed => self.paste(true),
             _ => {}
+        }
+    }
+
+    /// A click without a drag in the command line being edited moves the shell's cursor.
+    fn move_cursor_to(&mut self, point: Point) {
+        if self.search.is_some() || self.pending_paste.is_some() || self.pending_close.is_some() {
+            return;
+        }
+        let Some(s) = &self.session else { return };
+        if s.composition.preedit().is_some() {
+            return;
+        }
+        let Some(click) = s.term.prompt_click(point) else {
+            return;
+        };
+        let bytes = input::encode_prompt_click(click, s.term.modes.app_cursor);
+        if !bytes.is_empty() {
+            self.write_input(&bytes);
         }
     }
 
@@ -3286,6 +3312,9 @@ impl App {
         if self.left_down {
             if let (Some((row, col)), Some(s)) = (cell, &mut self.session) {
                 let point = s.term.viewport_to_point_signed(row, col);
+                if self.click_to_move.is_some_and(|start| start != point) {
+                    self.click_to_move = None;
+                }
                 s.term.update_selection(point);
                 s.request_frame();
             }

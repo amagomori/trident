@@ -47,6 +47,8 @@ struct ShellState {
     output_ends: Vec<OutputEnd>,
     prompt_line: Option<u64>,
     input_start: Option<(u64, usize)>,
+    /// The prompt asked for clicks as SGR mouse reports (`OSC 133 ; A ; click_events=1`).
+    click_events: bool,
     commands: VecDeque<Command>,
     budget: budget::Budget,
     runs: rerun::Runs,
@@ -126,6 +128,16 @@ struct OutputEnd {
     line: u64,
     cells: Vec<Cell>,
     wrapped: bool,
+}
+
+/// What a plain click in the command line being edited should send to the shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptClick {
+    /// Cursor-key presses: right when positive, left when negative.
+    Move(isize),
+    /// A left-click SGR mouse report at this active-screen cell, for shells that asked
+    /// for clicks (kitty's `click_events`).
+    Report { row: usize, col: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,6 +361,85 @@ impl Terminal {
     /// Desktop notifications requested with OSC 9, 777 or 99 since the last call.
     pub fn take_notifications(&mut self) -> Vec<Notification> {
         self.shell.notifications.take()
+    }
+
+    /// How a click at `point` moves the cursor in the command line being edited (OSC 133
+    /// `B` seen, no `C` yet), as in Ghostty and kitty. Only the soft-wrapped line holding
+    /// the cursor counts; a click past the end of the text moves to its end.
+    pub fn prompt_click(&self, point: Point) -> Option<PromptClick> {
+        if self.alt_active || !matches!(self.shell.zone, Zone::Prompt | Zone::Input) {
+            return None;
+        }
+        let cursor_line = self.history + self.cursor.row as u64;
+        if self.shell.click_events {
+            let first = self
+                .shell
+                .prompt_line
+                .unwrap_or(cursor_line)
+                .min(cursor_line);
+            return (point.line >= first.max(self.history)
+                && point.line <= self.soft_wrap_end(cursor_line))
+            .then(|| PromptClick::Report {
+                row: (point.line - self.history) as usize,
+                col: point.col.min(self.cols - 1),
+            });
+        }
+        let (start_line, start_col) = self.shell.input_start?;
+        if self.shell.zone != Zone::Input || start_line < self.first_line() {
+            return None;
+        }
+        let end_line = self.soft_wrap_end(start_line);
+        let span = start_line..=end_line;
+        if !span.contains(&cursor_line) || !span.contains(&point.line) {
+            return None;
+        }
+        let mut col = point.col.min(self.cols - 1);
+        if col > 0
+            && self.line(point.line).cells[col]
+                .flags
+                .contains(Flags::WIDE_SPACER)
+        {
+            col -= 1;
+        }
+        // Characters from the input start up to (line, col): spacers and wrap padding
+        // are not characters the line editor moves over.
+        let skip = Flags::WIDE_SPACER.union(Flags::WIDE_WRAP);
+        let mut text_end = 0;
+        let mut count = 0;
+        let mut click = None;
+        let mut cursor = None;
+        let cursor_col = self.cursor.col + usize::from(self.cursor.pending_wrap);
+        for line in start_line..=end_line {
+            let cells = &self.line(line).cells;
+            let from = if line == start_line { start_col } else { 0 };
+            for c in from..=cells.len() {
+                if line == point.line && c == col.max(from) {
+                    click.get_or_insert(count);
+                }
+                if line == cursor_line && c == cursor_col.max(from) {
+                    cursor.get_or_insert(count);
+                }
+                let Some(cell) = cells.get(c) else { break };
+                if !cell.flags.intersects(skip) {
+                    count += 1;
+                    if cell.c != ' ' {
+                        text_end = count;
+                    }
+                }
+            }
+        }
+        let cursor = cursor? as isize;
+        let target = click?.min(text_end.max(cursor as usize)) as isize;
+        Some(PromptClick::Move(target - cursor))
+    }
+
+    /// The last row of the soft-wrapped line starting at or running through `line`.
+    fn soft_wrap_end(&self, mut line: u64) -> u64 {
+        let last = self.history + self.rows as u64 - 1;
+        while line < last && self.line(line).wrapped() {
+            line += 1;
+        }
+        line
     }
 
     /// Put the nearest prompt strictly above/below the viewport top at its top.
@@ -690,6 +781,7 @@ impl Terminal {
         let flag = match mark {
             b"A" => {
                 self.shell.zone = Zone::Prompt;
+                self.shell.click_events = args.contains(&&b"click_events=1"[..]);
                 Some(RowFlags::PROMPT_START)
             }
             b"B" => {
@@ -788,6 +880,7 @@ impl Terminal {
                 output_ends: Vec::new(),
                 prompt_line: None,
                 input_start: None,
+                click_events: false,
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
                 runs: rerun::Runs::default(),
