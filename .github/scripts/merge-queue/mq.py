@@ -197,8 +197,11 @@ class Queue:
         self.save("QA pass #%d at %s" % (number, e["tree"]))
         return e
 
-    def drop(self, number):
+    def drop(self, number, force=False):
         e = self.entry(number)
+        if e.get("merging") and not force:
+            raise QueueError("#%d is being merged; if no merge is running, rerun merge or use "
+                             "drop --force" % number)
         self.entries.remove(e)
         self.save("drop #%d" % number)
         return e
@@ -210,8 +213,10 @@ class Queue:
         while i < len(self.entries):
             e = self.entries[i]
             info = self.forge.pr(e["pr"])
-            if info["state"] != "open":
-                events.append(("removed", e, "PR is %s" % info["state"]))
+            if info["state"] != "open" or info["base"] != self.base:
+                why = ("PR is %s" % info["state"] if info["state"] != "open"
+                       else "PR now targets %s" % info["base"])
+                events.append(("removed", e, why))
                 del self.entries[i]
                 changed = True
                 continue
@@ -248,11 +253,31 @@ class Queue:
     def merge(self, merge_all=False):
         merged, events = [], []
         while True:
+            self.load()
             events += self.sync()
             if not self.entries or not self.ready(0):
                 break
             e = self.entries[0]
-            self.forge.merge(e["pr"], e["head"], "%s (#%d)" % (e["title"], e["pr"]))
+            main = self.main_sha()
+            if e["onto"] != main:
+                # A squash leaves main at the queued base's tree but not its commit. Re-parent so
+                # GitHub's merge base is main and the squash is exactly the QA'd tree.
+                new = self.rebase(e["head"], main, e["onto"])
+                if self.git.tree(new) != e["tree"]:
+                    raise QueueError("re-parenting #%d onto %s changed its tree" % (e["pr"], main))
+                self.push(new, e["branch"], e["head"])
+                e.update(head=new, onto=main)
+            e["merging"] = True
+            self.save("merging #%d" % e["pr"])
+            try:
+                self.fetch_main()
+                if self.main_sha() != main:
+                    raise QueueError("%s moved while merging #%d; rerun" % (self.base, e["pr"]))
+                self.forge.merge(e["pr"], e["head"], "%s (#%d)" % (e["title"], e["pr"]))
+            except QueueError:
+                e["merging"] = False
+                self.save("merge #%d failed" % e["pr"])
+                raise
             self.fetch_main()
             main_tree = self.git.tree(self.main_sha())
             self.entries.pop(0)
@@ -260,7 +285,7 @@ class Queue:
                                 "main": self.main_sha(), "main_tree": main_tree})
             self.save("merge #%d" % e["pr"])
             merged.append((e, main_tree))
-            if not merge_all:
+            if not merge_all or main_tree != e["tree"]:
                 break
         return merged, events
 
@@ -304,7 +329,9 @@ def main(argv=None):
     p = sub.add_parser("pass", help="record a QA pass for a queued PR's current tree")
     p.add_argument("pr", type=int)
     p.add_argument("--tree", help="tree QA tested; refused unless it is the queued tree")
-    sub.add_parser("drop", help="take a PR out (QA fail or hold)").add_argument("pr", type=int)
+    d = sub.add_parser("drop", help="take a PR out (QA fail or hold)")
+    d.add_argument("pr", type=int)
+    d.add_argument("--force", action="store_true", help="even if a merge of it was started")
     sub.add_parser("sync", help="rebase entries whose base moved")
     sub.add_parser("merge", help="squash-merge the front PR if ready").add_argument(
         "--all", action="store_true", help="keep merging while the front PR is ready")
@@ -319,14 +346,15 @@ def main(argv=None):
             q.qa_pass(o.pr, o.tree)
             print(describe(q, q.entries.index(q.entry(o.pr))))
         elif o.cmd == "drop":
-            q.drop(o.pr)
+            q.drop(o.pr, o.force)
             print("dropped #%d; run sync to rebase the PRs behind it" % o.pr)
         elif o.cmd == "sync":
             print_events(q.sync())
         elif o.cmd == "merge":
             merged, events = q.merge(o.all)
             for e, main_tree in merged:
-                note = "" if main_tree == e["tree"] else " (main tree %s differs!)" % main_tree
+                note = "" if main_tree == e["tree"] else (
+                    " but main is at tree %s: main moved during the merge; QA main" % main_tree)
                 print("merged #%d at tree %s%s" % (e["pr"], e["tree"], note))
             print_events(events)
         if o.cmd in (None, "status") and getattr(o, "json", False):

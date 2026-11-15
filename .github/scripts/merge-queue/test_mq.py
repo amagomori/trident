@@ -28,7 +28,7 @@ class FakeGitHub:
     def pr(self, n):
         p = self.prs[n]
         head = git(self.bare, "rev-parse", "refs/heads/" + p["branch"])
-        return {"state": p["state"], "title": p["title"], "base": "main", "head": head,
+        return {"state": p["state"], "title": p["title"], "base": p.get("base", "main"), "head": head,
                 "branch": p["branch"], "same_repo": True}
 
     def merge(self, n, head, subject):
@@ -234,6 +234,64 @@ class QueueTest(unittest.TestCase):
         merged, _ = self.q.merge(merge_all=True)
         self.assertEqual([e["pr"] for e, _ in merged], [1, 2])
         self.assertEqual(git(self.bare, "rev-parse", "main^{tree}"), e2["tree"])
+
+    def test_stacked_edit_of_the_same_lines_merges_at_the_tested_tree(self):
+        self.pr(1, {"a.txt": "A\n"})
+        self.pr(2, {"a.txt": "a\n", "c.txt": "C\n"}, start="pr1")
+        for n in (1, 2):
+            self.q.add(n)
+            self.q.qa_pass(n)
+        tree2 = self.q.entry(2)["tree"]
+        merged, _ = self.q.merge(merge_all=True)
+        self.assertEqual([e["pr"] for e, _ in merged], [1, 2])
+        self.assertEqual(git(self.bare, "rev-parse", "main^{tree}"), tree2)
+
+    def test_retargeted_pr_is_removed(self):
+        self.pr(1, {"a.txt": "A\n"})
+        self.q.add(1)
+        self.q.qa_pass(1)
+        self.gh.prs[1]["base"] = "release"
+        merged, events = self.q.merge()
+        self.assertEqual(merged, [])
+        self.assertEqual([(k, e["pr"]) for k, e, _ in events], [("removed", 1)])
+
+    def test_pr_dropped_by_another_session_is_not_merged(self):
+        self.pr(1, {"a.txt": "A\n"})
+        self.q.add(1)
+        self.q.qa_pass(1)
+        other = self.queue(self.clone("other"))
+        other.drop(1)
+        merged, _ = self.q.merge()
+        self.assertEqual(merged, [])
+        self.assertEqual(self.gh.prs[1]["state"], "open")
+
+    def test_a_pr_being_merged_is_not_dropped(self):
+        self.pr(1, {"a.txt": "A\n"})
+        self.q.add(1)
+        self.q.entry(1)["merging"] = True
+        self.q.save("merging #1")
+        other = self.queue(self.clone("other"))
+        with self.assertRaises(mq.QueueError):
+            other.drop(1)
+        other.drop(1, force=True)
+        self.assertEqual(other.entries, [])
+
+    def test_main_moving_during_the_merge_is_reported_and_stops(self):
+        for n, f in ((1, "a.txt"), (2, "c.txt")):
+            self.pr(n, {f: "%d\n" % n})
+            self.q.add(n)
+            self.q.qa_pass(n)
+        real = self.gh.merge
+
+        def racing_merge(n, head, subject):
+            self.push_main({"b.txt": "raced\n"})
+            real(n, head, subject)
+        self.gh.merge = racing_merge
+        merged, _ = self.q.merge(merge_all=True)
+        self.assertEqual(len(merged), 1)
+        e, main_tree = merged[0]
+        self.assertNotEqual(main_tree, e["tree"])
+        self.assertEqual([x["pr"] for x in self.q.entries], [2])
 
     def test_pr_merged_outside_the_queue_is_removed(self):
         self.pr(1, {"a.txt": "a1\n"})
