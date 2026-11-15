@@ -44,9 +44,11 @@ struct Probe {
     #[cfg(unix)]
     fd: Option<std::os::fd::OwnedFd>,
     shell: Option<u32>,
-    /// The first child was an explicit command (`terminal -e vim`), which counts as a
-    /// running program while it holds the foreground, unless it is (or became) a shell.
-    command: bool,
+    /// `argv[0]` of the default launch's login shell (`-bash`), which stays idle even when
+    /// its name is not a known shell. Whatever holds the foreground counts as a running
+    /// program unless its argv is that shell or another idle shell, so an explicit command
+    /// (`terminal -e vim`) or a program the shell exec'd into (`exec vim`) prompts.
+    login: Option<String>,
 }
 
 impl Probe {
@@ -60,13 +62,15 @@ impl Probe {
             let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
             let shell = self.shell?;
             let running = group as u32 != shell
-                || (self.command
-                    && !crate::close_confirm::process_args(group)
-                        .is_some_and(|args| is_idle_shell(&args)));
+                || !crate::close_confirm::process_args(group).is_some_and(|args| self.idle(&args));
             (group > 0 && running).then_some(group)
         }
         #[cfg(not(unix))]
         None
+    }
+
+    fn idle(&self, args: &[String]) -> bool {
+        is_idle_shell(args) || (self.login.is_some() && args == self.login.as_slice())
     }
 
     fn shell(&self) -> Option<bool> {
@@ -412,6 +416,11 @@ impl Pty {
         {
             cmd.cwd(home);
         }
+        // portable-pty starts the default shell as a login shell, with argv[0] `-<basename>`.
+        let login = cmd.is_default_prog().then(|| {
+            let shell = cmd.get_shell();
+            format!("-{}", shell.rsplit('/').next().unwrap_or(&shell))
+        });
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -442,7 +451,7 @@ impl Pty {
                 #[cfg(unix)]
                 fd: foreground_fd,
                 shell: shell_pid,
-                command: !command.is_empty(),
+                login,
             },
             ..Default::default()
         });
@@ -602,7 +611,7 @@ impl Pty {
                 .as_ref()
                 .and_then(|fd| fd.try_clone().ok()),
             shell: self.output.probe.shell,
-            command: self.output.probe.command,
+            login: self.output.probe.login.clone(),
         };
         move || probe.program().is_some()
     }
@@ -880,6 +889,76 @@ mod tests {
             let argv: Vec<String> = argv.iter().map(|&a| a.to_owned()).collect();
             assert_eq!(is_idle_shell(&argv), idle, "{argv:?}");
         }
+    }
+
+    #[test]
+    fn the_login_shell_stays_idle_under_any_name() {
+        let argv = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
+        let login = Probe {
+            login: Some("-myshell".into()),
+            ..Default::default()
+        };
+        assert!(login.idle(&argv(&["-myshell"])));
+        assert!(login.idle(&argv(&["-bash"])));
+        assert!(!login.idle(&argv(&["-myshell", "-c", "make"])));
+        assert!(!login.idle(&argv(&["vim", "notes.txt"])));
+        assert!(!login.idle(&[]));
+        let command = Probe::default();
+        assert!(!command.idle(&argv(&["-myshell"])));
+        assert!(!command.idle(&[]));
+    }
+
+    /// A default launch (no `-e`) whose shell `exec`s into a program keeps the shell's pid
+    /// and process group, so only the argv check can tell it is no longer at a prompt. The
+    /// shell gets a name outside the known shells to check the login argv is idle as well.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_the_default_shell_execs_into_counts_as_running() {
+        let dir = std::env::temp_dir().join(format!("terminal-exec-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bash = ["/bin/bash", "/usr/bin/bash", "/opt/homebrew/bin/bash"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .unwrap();
+        let shell = dir.join("myshell");
+        std::os::unix::fs::symlink(bash, &shell).unwrap();
+        let env = [
+            ("SHELL".to_owned(), shell.to_str().unwrap().to_owned()),
+            ("HOME".to_owned(), dir.to_str().unwrap().to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let mut pty = Pty::spawn(&[], &env, 80, 24, (8.0, 16.0), |_| {}, |_| {}).unwrap();
+        assert_eq!(pty.output.probe.login.as_deref(), Some("-myshell"));
+        let wait_for = |pty: &mut Pty, running: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                pty.take_output();
+                let program = pty.running_program();
+                let args = program.and_then(crate::close_confirm::process_args);
+                let done = match running {
+                    true => {
+                        args.as_ref().and_then(|a| a.first()).map(String::as_str) == Some("sleep")
+                    }
+                    false => program.is_none(),
+                };
+                if done {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "running stayed {}: {args:?}",
+                    !running
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for(&mut pty, false);
+        pty.write(b"exec sleep 30\r");
+        wait_for(&mut pty, true);
+        drop(pty);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
