@@ -3,7 +3,8 @@
 //!
 //! A placement is anchored to the cell it was put on and moves with the text: into
 //! scrollback, through scroll regions, across resizes. It is dropped when its line leaves
-//! scrollback or the cells under it are erased.
+//! scrollback or the cells under it are erased, except by a line editor redrawing its prompt
+//! after a resize (until the next line feed); ED 2, RIS and kitty deletes always drop it.
 
 use super::Terminal;
 use std::collections::HashMap;
@@ -470,6 +471,9 @@ impl Terminal {
     /// Drops placements on the active screen that cover any cell of rows `top..=bottom`,
     /// columns `from..to` (screen coordinates).
     pub(crate) fn erase_placements(&mut self, top: usize, bottom: usize, from: usize, to: usize) {
+        if self.prompt_redraw && !self.alt_active {
+            return;
+        }
         let (history, base) = (self.history, self.placement_base(self.alt_active));
         let (top, bottom) = (top as i64, bottom as i64);
         let placements = &mut self.screen_mut().placements;

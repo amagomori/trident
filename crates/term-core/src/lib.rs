@@ -305,6 +305,9 @@ pub struct Terminal {
     synchronized_output_ended: bool,
     pub bell: bool,
     images: images::ImageStore,
+    /// Set by a resize while a line editor owns the cursor's line, until the next line feed:
+    /// its redraw erases cells without deleting the placements under them (as in kitty).
+    prompt_redraw: bool,
     /// Cell size in pixels, as reported by the app.
     cell_pixels: (f32, f32),
     kitty: kitty::Kitty,
@@ -807,6 +810,7 @@ impl Terminal {
             synchronized_output_ended: false,
             bell: false,
             images: images::ImageStore::new(),
+            prompt_redraw: false,
             cell_pixels: (8.0, 16.0),
             kitty: kitty::Kitty::default(),
             parser: vte::Parser::new(),
@@ -1216,6 +1220,7 @@ impl Terminal {
         for (point, tracked) in points.iter_mut().zip(self.tracked.drain(..)) {
             *point = tracked;
         }
+        self.prompt_redraw = !self.alt_active && (editing || self.shell.zone == Zone::Input);
     }
 
     // ---- Selection ----
@@ -1718,6 +1723,7 @@ impl Terminal {
                 self.erase_cells(row, 0, col + 1);
             }
             2 => {
+                self.prompt_redraw = false;
                 if !self.alt_active {
                     self.push_screen_to_history();
                 }
@@ -1932,6 +1938,7 @@ impl Terminal {
             return;
         }
         self.invalidate_output_ends();
+        self.prompt_redraw = false;
         if enable {
             if save_cursor {
                 self.save_cursor();

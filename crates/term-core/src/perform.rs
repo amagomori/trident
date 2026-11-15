@@ -25,6 +25,7 @@ impl Perform for Terminal {
             }
             0x09 => self.tab(1),
             0x0a..=0x0c => {
+                self.prompt_redraw = false;
                 self.linefeed();
                 if self.modes.linefeed_newline {
                     self.cursor.col = 0;
@@ -176,6 +177,7 @@ impl Perform for Terminal {
             (b'8', []) => self.restore_cursor(),
             (b'8', [b'#']) => {
                 // DECALN: fill the screen with 'E'.
+                self.prompt_redraw = false;
                 if !self.screen().placements.is_empty() {
                     self.erase_placements(0, self.rows - 1, 0, usize::MAX);
                 }
