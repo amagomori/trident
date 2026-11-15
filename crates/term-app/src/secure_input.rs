@@ -22,10 +22,6 @@ pub struct SecureInput {
 }
 
 impl SecureInput {
-    pub fn held(&self) -> bool {
-        self.held
-    }
-
     /// Holds secure input while `wanted`, releasing it otherwise.
     pub fn set(&mut self, wanted: bool) {
         self.update(wanted, platform::set);
@@ -97,9 +93,9 @@ mod tests {
             secure.update(wanted, |on| calls.push(on));
         }
         assert_eq!(calls, [true, false, true]);
-        assert!(secure.held());
+        assert!(secure.held);
         secure.update(false, |on| calls.push(on));
-        assert!(!secure.held());
+        assert!(!secure.held);
         assert_eq!(calls, [true, false, true, false]);
     }
 }
