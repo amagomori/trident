@@ -1024,7 +1024,7 @@ impl Terminal {
         // The primary screen rewraps its lines; the alternate one is redrawn by its app.
         let reflow = cols != self.cols;
         if reflow {
-            self.reflow_primary(cols);
+            self.reflow_primary(cols, rows);
         }
 
         let mut alt_shifted = 0;
@@ -1036,10 +1036,11 @@ impl Terminal {
             } else {
                 &mut self.primary
             };
-            if alt || !reflow {
-                for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
-                    row.resize(cols);
-                }
+            if !alt && reflow {
+                continue;
+            }
+            for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
+                row.resize(cols);
             }
             // The inactive screen's cursor is the one saved when switching away from it.
             let mut cursor_row = if is_active {

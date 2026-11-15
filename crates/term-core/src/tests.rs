@@ -2032,6 +2032,12 @@ fn reflow_keeps_the_screen_top_while_the_cursor_fits() {
     t.resize(4, 3);
     assert_eq!(screen(&t), ["0123", "4567", "89"]);
     assert_eq!(t.cursor_position(), Some((0, 0)));
+
+    // Rows added in the same resize take the text below the cursor.
+    let mut t = term(8, 2, "x\r\nabcdefgh\x1b[1;1H");
+    t.resize(4, 3);
+    assert_eq!(screen(&t), ["x", "abcd", "efgh"]);
+    assert_eq!(t.cursor_position(), Some((0, 0)));
 }
 
 #[test]
@@ -2041,6 +2047,16 @@ fn reflow_restores_the_saved_cursor() {
     assert_eq!(screen(&t), ["56789", "abc", ""]);
     t.advance(b"\x1b8X");
     assert_eq!(screen(&t), ["56789", "abcX", ""]);
+
+    // A cursor saved while waiting to wrap still waits after the resize.
+    let mut t = term(4, 3, "abcd\x1b7\r\n");
+    t.resize(8, 3);
+    t.advance(b"\x1b8X");
+    assert_eq!(screen(&t), ["abcdX", "", ""]);
+    let mut t = term(8, 3, "abcdefgh\x1b7\r\n");
+    t.resize(4, 3);
+    t.advance(b"\x1b8X");
+    assert_eq!(screen(&t), ["abcd", "efgh", "X"]);
 }
 
 #[test]

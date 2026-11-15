@@ -101,10 +101,10 @@ fn move_marks(
 
 impl Terminal {
     /// Rejoins the soft-wrapped lines of the primary screen and its scrollback and wraps
-    /// them again at `cols`, keeping the cursor on the cell it was on. The screen keeps
-    /// its height; the caller adjusts that afterwards.
-    pub(crate) fn reflow_primary(&mut self, cols: usize) {
-        let rows = self.rows;
+    /// them again at `cols`, keeping the cursor on the cell it was on, and sizes the
+    /// screen to `rows`.
+    pub(crate) fn reflow_primary(&mut self, cols: usize, rows: usize) {
+        let old_rows = self.rows;
         let old_first = self.history - self.primary.scrollback.len() as u64;
         let back = self.primary.scrollback.len();
         // The primary cursor: the live one, or the one saved when the alternate screen
@@ -115,7 +115,7 @@ impl Terminal {
         } else {
             Some(self.cursor)
         };
-        let anchor = cursor.map_or((rows - 1, 0, false), |c| (c.row, c.col, c.pending_wrap));
+        let anchor = cursor.map_or((old_rows - 1, 0, false), |c| (c.row, c.col, c.pending_wrap));
         let cursor_index = back + anchor.0;
         let cursor_at = anchor.1 + usize::from(anchor.2);
         // A cursor past the end of its line is wrapped like the text before it: at the
@@ -248,7 +248,7 @@ impl Terminal {
         // cursor stays on screen; a cursor on the bottom row stays there.
         let (cursor_row, cursor_col) = map.point(cursor_index, cursor_at, cursor_end);
         let lowest = (cursor_row + 1).saturating_sub(rows);
-        let mut top = if anchor.0 == rows - 1 {
+        let mut top = if anchor.0 == old_rows - 1 {
             lowest
         } else {
             map.point(back, 0, false).0.clamp(lowest, cursor_row)
@@ -291,14 +291,15 @@ impl Terminal {
             self.cursor.col = col;
             self.cursor.pending_wrap = pending;
             if let Some(saved) = &mut self.primary.saved {
+                let pending = saved.cursor.pending_wrap;
                 let (row, col) = map.point(
-                    back + saved.cursor.row.min(rows - 1),
-                    saved.cursor.col,
-                    false,
+                    back + saved.cursor.row.min(old_rows - 1),
+                    saved.cursor.col + usize::from(pending),
+                    pending,
                 );
                 saved.cursor.row = row.saturating_sub(top).min(rows - 1);
                 saved.cursor.col = col.min(cols - 1);
-                saved.cursor.pending_wrap = false;
+                saved.cursor.pending_wrap = pending && col >= cols;
             }
         }
 
