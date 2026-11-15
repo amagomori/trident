@@ -22,9 +22,9 @@ q=.github/scripts/merge-queue/mq.py
 python3 $q add 81                 # rebase onto the queue head, push, print head/tree/base
 python3 $q add 82 --qa-tree <t>   # QA already passed tree <t>; kept if the rebase keeps it
 python3 $q pass 81 --tree <t>     # record a QA pass; refused unless <t> is the queued tree
-python3 $q drop 81                # QA fail or hold: take it out
+python3 $q drop 81 [--force]      # QA fail or hold: take it out
 python3 $q sync                   # rebase PRs whose base moved; prints new frozen pairs
-python3 $q merge --all            # squash-merge (--match-head-commit) while the front is ready
+python3 $q merge --all [--force]  # squash-merge while the front is ready; --force takes over a dead claim
 python3 $q status [--json]
 ```
 

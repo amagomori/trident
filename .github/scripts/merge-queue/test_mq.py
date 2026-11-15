@@ -276,6 +276,33 @@ class QueueTest(unittest.TestCase):
         other.drop(1, force=True)
         self.assertEqual(other.entries, [])
 
+    def test_a_second_session_does_not_merge_a_pr_already_being_merged(self):
+        self.pr(1, {"a.txt": "A\n"})
+        self.q.add(1)
+        self.q.qa_pass(1)
+        other = self.queue(self.clone("other"))
+        real = self.gh.merge
+
+        def concurrent_merge(n, head, subject):
+            with self.assertRaises(mq.QueueError):
+                other.merge()
+            real(n, head, subject)
+        self.gh.merge = concurrent_merge
+        merged, _ = self.q.merge()
+        self.assertEqual([e["pr"] for e, _ in merged], [1])
+        self.assertEqual([m["pr"] for m in self.queue(self.clone("check")).merged], [1])
+
+    def test_merge_force_takes_over_a_stale_claim(self):
+        self.pr(1, {"a.txt": "A\n"})
+        self.q.add(1)
+        self.q.qa_pass(1)
+        self.q.entry(1)["merging"] = True
+        self.q.save("merging #1")
+        with self.assertRaises(mq.QueueError):
+            self.q.merge()
+        merged, _ = self.q.merge(force=True)
+        self.assertEqual([e["pr"] for e, _ in merged], [1])
+
     def test_main_moving_during_the_merge_is_reported_and_stops(self):
         for n, f in ((1, "a.txt"), (2, "c.txt")):
             self.pr(n, {f: "%d\n" % n})

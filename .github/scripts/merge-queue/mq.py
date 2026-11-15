@@ -250,7 +250,7 @@ class Queue:
             self.save("sync")
         return events
 
-    def merge(self, merge_all=False):
+    def merge(self, merge_all=False, force=False):
         merged, events = [], []
         while True:
             self.load()
@@ -258,6 +258,10 @@ class Queue:
             if not self.entries or not self.ready(0):
                 break
             e = self.entries[0]
+            if e.get("merging") and not force:
+                raise QueueError("another session is merging #%d; if none is, rerun with "
+                                 "merge --force" % e["pr"])
+            force = False
             main = self.main_sha()
             if e["onto"] != main:
                 # A squash leaves main at the queued base's tree but not its commit. Re-parent so
@@ -333,8 +337,9 @@ def main(argv=None):
     d.add_argument("pr", type=int)
     d.add_argument("--force", action="store_true", help="even if a merge of it was started")
     sub.add_parser("sync", help="rebase entries whose base moved")
-    sub.add_parser("merge", help="squash-merge the front PR if ready").add_argument(
-        "--all", action="store_true", help="keep merging while the front PR is ready")
+    m = sub.add_parser("merge", help="squash-merge the front PR if ready")
+    m.add_argument("--all", action="store_true", help="keep merging while the front PR is ready")
+    m.add_argument("--force", action="store_true", help="take over a merge another session started")
     o = ap.parse_args(argv)
     q = Queue(Git(o.cwd), GitHub(o.repo), o.remote, o.base)
     try:
@@ -351,7 +356,7 @@ def main(argv=None):
         elif o.cmd == "sync":
             print_events(q.sync())
         elif o.cmd == "merge":
-            merged, events = q.merge(o.all)
+            merged, events = q.merge(o.all, o.force)
             for e, main_tree in merged:
                 note = "" if main_tree == e["tree"] else (
                     " but main is at tree %s: main moved during the merge; QA main" % main_tree)
