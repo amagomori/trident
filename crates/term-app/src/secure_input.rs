@@ -3,8 +3,8 @@
 //! and passwd), macOS is asked to keep other apps' event taps from seeing keystrokes. Secure
 //! input is global, so it is only held while the window is focused.
 
-/// How often to look at the terminal's modes while secure input is held, so it is released
-/// even when a program restores echo without printing anything.
+/// How often to look at the focused terminal's modes, so secure input is taken at a prompt that
+/// turns echo off without printing (`read -s`) and released when echo comes back silently.
 #[cfg(target_os = "macos")]
 pub const POLL: std::time::Duration = std::time::Duration::from_millis(200);
 

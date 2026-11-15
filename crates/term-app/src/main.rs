@@ -2786,7 +2786,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         #[cfg(target_os = "macos")]
-        if self.secure_input.held() {
+        if self.config.auto_secure_input && self.focused && self.session.is_some() {
             let poll = now + secure_input::POLL;
             deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));
         }
