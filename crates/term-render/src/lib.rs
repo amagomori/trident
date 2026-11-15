@@ -5,6 +5,7 @@
 mod atlas;
 mod banner;
 mod color;
+mod damage;
 mod fallback;
 mod font;
 mod images;

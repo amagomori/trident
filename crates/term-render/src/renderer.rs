@@ -4,6 +4,7 @@
 
 use crate::Preedit;
 use crate::atlas::{Atlas, GlyphKey};
+use crate::damage::{self, Damage};
 use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
 use std::sync::Arc;
@@ -49,27 +50,36 @@ pub struct Renderer {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
+    /// Four regions of `instance_capacity` instances each: the grid's backgrounds, text and
+    /// decorations (each packed row by row), then the overlays drawn above the grid.
     instances: wgpu::Buffer,
     instance_capacity: usize,
     atlas: Atlas,
     images: ImagePipeline,
-    /// Instances in the frame's buffer: backgrounds end at `layers.0`, text, decorations and
-    /// the cursor at `layers.1`, and the scrollbar comes last.
-    layers: (u32, u32),
-    grid_instances: u32,
+    /// Instances in each region this frame.
+    lens: [u32; 4],
     /// The grid area images are clipped to: x, y, width, height in physical pixels.
     image_clip: [u32; 4],
     srgb: bool,
     pub adapter_info: String,
     /// False when the surface only offers FIFO, so `vsync = false` cannot take effect.
     pub vsync_optional: bool,
-    // Reused between frames to avoid allocating.
-    backgrounds: Vec<Instance>,
-    glyphs: Vec<Instance>,
+    damage: Damage,
+    damaged: Vec<bool>,
+    /// Each drawn row's instances, rebuilt only when the row is damaged.
+    grid: Vec<[Vec<Instance>; 3]>,
+    /// Rows rebuilt since their instances were last uploaded.
+    pending: Vec<bool>,
+    /// Where each row's instances start in each grid region on the GPU.
+    offsets: [Vec<u32>; 3],
     overlays: Vec<Instance>,
     /// Whether blinking cells show their text this frame.
     pub blink_visible: bool,
-    blinking: bool,
+    /// Whether each drawn row has cells that blink.
+    row_blinks: Vec<bool>,
+    // Reused between frames to avoid allocating.
+    row_lens: Vec<u32>,
+    staging: Vec<Instance>,
 }
 
 fn present_mode(vsync: bool) -> wgpu::PresentMode {
@@ -245,8 +255,8 @@ impl Renderer {
             cache: None,
         });
 
-        let instance_capacity = 4096;
-        let instances = create_instance_buffer(&device, instance_capacity);
+        let instance_capacity = 1024;
+        let instances = create_instance_buffer(&device, 4 * instance_capacity);
         let images = ImagePipeline::new(&device, format);
 
         Ok(Renderer {
@@ -263,18 +273,22 @@ impl Renderer {
             instance_capacity,
             atlas,
             images,
-            layers: (0, 0),
-            grid_instances: 0,
+            lens: [0; 4],
             image_clip: [0; 4],
             srgb: format.is_srgb(),
             adapter_info,
             vsync_optional,
-            backgrounds: Vec::new(),
-            glyphs: Vec::new(),
+            damage: Damage::default(),
+            damaged: Vec::new(),
+            grid: Vec::new(),
+            pending: Vec::new(),
+            offsets: Default::default(),
             overlays: Vec::new(),
             blink_visible: true,
-            blinking: false,
             cursor_visible: true,
+            row_blinks: Vec::new(),
+            row_lens: Vec::new(),
+            staging: Vec::new(),
         })
     }
 
@@ -297,7 +311,7 @@ impl Renderer {
 
     /// Whether the last frame drew text or decorations that blink.
     pub fn blinking(&self) -> bool {
-        self.blinking
+        self.row_blinks.contains(&true)
     }
 
     /// Glyph rasterizations depend on the font size, so drop them when it changes.
@@ -455,11 +469,7 @@ impl Renderer {
         preedit: Option<Preedit<'_>>,
         hover: Option<&term_core::Link>,
     ) -> bool {
-        let mut backgrounds = std::mem::take(&mut self.backgrounds);
-        let mut glyphs = std::mem::take(&mut self.glyphs);
         let mut overlays = std::mem::take(&mut self.overlays);
-        backgrounds.clear();
-        glyphs.clear();
         overlays.clear();
 
         let CellMetrics {
@@ -476,9 +486,38 @@ impl Renderer {
             .filter(|_| preedit.is_none() && (self.cursor_visible || !focused));
         let block_cursor = focused && term.cursor_shape == CursorShape::Block;
         let mut ok = true;
-        self.blinking = false;
 
-        'rows: for row in -isize::from(pixel_offset > 0.0)..term.rows() as isize {
+        let first = Damage::first_row(pixel_offset);
+        let mut damaged = std::mem::take(&mut self.damaged);
+        self.damage.update(
+            term,
+            &damage::Frame {
+                padding,
+                metrics: [cw, ch, underline_offset, stroke],
+                pixel_offset,
+                focused,
+                cursor,
+                search: search.map(|search| (search.matches, search.current)),
+                hover,
+                atlas: self.atlas.generation,
+                blink_visible: self.blink_visible,
+            },
+            &mut damaged,
+        );
+        let mut grid = std::mem::take(&mut self.grid);
+        grid.resize_with(damaged.len(), Default::default);
+        self.pending.resize(damaged.len(), true);
+        self.row_blinks.resize(damaged.len(), false);
+        'rows: for (i, [backgrounds, glyphs, overlays]) in grid.iter_mut().enumerate() {
+            if !damaged[i] {
+                continue;
+            }
+            self.pending[i] = true;
+            self.row_blinks[i] = false;
+            backgrounds.clear();
+            glyphs.clear();
+            overlays.clear();
+            let row = first + i as isize;
             let line = term.viewport_row_signed(row);
             let y = padding + row as f32 * ch + pixel_offset;
             for (col, cell) in line.cells.iter().enumerate() {
@@ -524,7 +563,7 @@ impl Renderer {
                 }
 
                 let blinked_off = blinks(cell, is_cursor && block_cursor) && {
-                    self.blinking = true;
+                    self.row_blinks[i] = true;
                     !self.blink_visible
                 };
                 if !blinked_off && !cell.flags.contains(Flags::HIDDEN) {
@@ -571,6 +610,7 @@ impl Renderer {
                             }
                             Ok(None) => {}
                             Err(_) => {
+                                self.damage.invalidate();
                                 ok = false;
                                 break 'rows;
                             }
@@ -620,9 +660,8 @@ impl Renderer {
             }
         }
 
-        let layers_bg = backgrounds.len() as u32;
-        let layers_text = (backgrounds.len() + glyphs.len() + overlays.len()) as u32;
-        self.grid_instances = layers_text;
+        self.damaged = damaged;
+        self.grid = grid;
         for row in -isize::from(pixel_offset > 0.0)..term.rows() as isize {
             if term
                 .viewport_row_signed(row)
@@ -833,11 +872,6 @@ impl Renderer {
             }
         }
 
-        backgrounds.append(&mut glyphs);
-        backgrounds.append(&mut overlays);
-        self.layers = (layers_bg, layers_text);
-        self.backgrounds = backgrounds;
-        self.glyphs = glyphs;
         self.overlays = overlays;
         ok
     }
@@ -978,15 +1012,7 @@ impl Renderer {
             }
             _ => return false,
         };
-        let instances = &self.backgrounds;
-        if instances.len() > self.instance_capacity {
-            self.instance_capacity = instances.len().next_power_of_two();
-            self.instances = create_instance_buffer(&self.device, self.instance_capacity);
-        }
-        if !instances.is_empty() {
-            self.queue
-                .write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
-        }
+        self.upload_instances();
         let uniforms = Uniforms {
             screen: [self.config.width as f32, self.config.height as f32],
             atlas: [self.atlas.mono.size as f32; 2],
@@ -1023,38 +1049,25 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            let total = self.grid_instances;
             let clip = self.image_clip;
             if clip[2] == 0 || clip[3] == 0 {
                 return false;
             }
             pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
             if self.images.is_empty() {
-                if total > 0 {
-                    self.draw_rects(&mut pass, 0..total);
+                for region in 0..3 {
+                    self.draw_region(&mut pass, region);
                 }
             } else {
-                let (bg, text) = self.layers;
-                let clip = self.image_clip;
-                let full = clip;
-                if clip[2] > 0 && clip[3] > 0 {
-                    self.images.draw(&mut pass, Layer::BelowBackgrounds, clip);
+                let layers = [Layer::BelowBackgrounds, Layer::BelowText, Layer::AboveText];
+                for (region, layer) in layers.into_iter().enumerate() {
+                    self.images.draw(&mut pass, layer, clip);
+                    pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
+                    self.draw_region(&mut pass, region);
                 }
-                pass.set_scissor_rect(full[0], full[1], full[2], full[3]);
-                self.draw_rects(&mut pass, 0..bg);
-                if clip[2] > 0 && clip[3] > 0 {
-                    self.images.draw(&mut pass, Layer::BelowText, clip);
-                }
-                pass.set_scissor_rect(full[0], full[1], full[2], full[3]);
-                self.draw_rects(&mut pass, bg..text);
-                if clip[2] > 0 && clip[3] > 0 {
-                    self.images.draw(&mut pass, Layer::AboveText, clip);
-                }
-                pass.set_scissor_rect(full[0], full[1], full[2], full[3]);
-                self.draw_rects(&mut pass, text..total);
             }
             pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
-            self.draw_rects(&mut pass, total..instances.len() as u32);
+            self.draw_region(&mut pass, 3);
         }
         self.queue.submit([encoder.finish()]);
         if let Some(pre_present) = pre_present {
@@ -1066,7 +1079,62 @@ impl Renderer {
 }
 
 impl Renderer {
-    fn draw_rects(&self, pass: &mut wgpu::RenderPass, range: std::ops::Range<u32>) {
+    /// Writes the instances of rows rebuilt or moved since the last upload, and the overlays.
+    fn upload_instances(&mut self) {
+        let mut totals = [0usize; 3];
+        for row in &self.grid {
+            for (total, layer) in totals.iter_mut().zip(row) {
+                *total += layer.len();
+            }
+        }
+        let needed = totals
+            .into_iter()
+            .max()
+            .unwrap_or(0)
+            .max(self.overlays.len());
+        if needed > self.instance_capacity {
+            self.instance_capacity = needed.next_power_of_two();
+            self.instances = create_instance_buffer(&self.device, 4 * self.instance_capacity);
+            self.pending.fill(true);
+        }
+        let size = std::mem::size_of::<Instance>();
+        for region in 0..3 {
+            self.row_lens.clear();
+            self.row_lens
+                .extend(self.grid.iter().map(|row| row[region].len() as u32));
+            let spans =
+                damage::upload_spans(&self.row_lens, &self.pending, &mut self.offsets[region]);
+            for span in spans {
+                self.staging.clear();
+                for row in &self.grid[span.clone()] {
+                    self.staging.extend_from_slice(&row[region]);
+                }
+                if !self.staging.is_empty() {
+                    let at =
+                        region * self.instance_capacity + self.offsets[region][span.start] as usize;
+                    self.queue.write_buffer(
+                        &self.instances,
+                        (at * size) as u64,
+                        bytemuck::cast_slice(&self.staging),
+                    );
+                }
+            }
+            self.lens[region] = totals[region] as u32;
+        }
+        self.pending.fill(false);
+        if !self.overlays.is_empty() {
+            self.queue.write_buffer(
+                &self.instances,
+                (3 * self.instance_capacity * size) as u64,
+                bytemuck::cast_slice(&self.overlays),
+            );
+        }
+        self.lens[3] = self.overlays.len() as u32;
+    }
+
+    fn draw_region(&self, pass: &mut wgpu::RenderPass, region: usize) {
+        let start = (region * self.instance_capacity) as u32;
+        let range = start..start + self.lens[region];
         if range.is_empty() {
             return;
         }
