@@ -2650,6 +2650,25 @@ fn rerun_compares_combining_marks_and_skips_wrapped_commands() {
 }
 
 #[test]
+fn rerun_skips_trailing_blanks_however_they_were_written() {
+    let mut t = Terminal::new(10, 20);
+    t.advance(
+        run(
+            "cat",
+            &["ok", "0123456789", "x\x1b[41m\x1b[K\x1b[m", "abc\r   "],
+        )
+        .as_bytes(),
+    );
+    t.advance(run("cat", &["ok   ", "0123456789", "x", ""]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert!(marked_rows(&t).is_empty());
+    t.advance(run("cat", &["ok", "012345678x", "x", "y"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    let marked: Vec<String> = marked_rows(&t).into_iter().map(|(text, _)| text).collect();
+    assert_eq!(marked, ["012345678x", "y"]);
+}
+
+#[test]
 fn reset_keeps_compare_settings() {
     let mut t = Terminal::new(40, 20);
     t.set_compare_runs(false);
