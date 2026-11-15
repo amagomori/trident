@@ -15,6 +15,8 @@ mod links;
 pub use links::Link;
 mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
+mod osc;
+pub use osc::{ClipboardRequest, WorkingDirectory};
 mod perform;
 mod reflow;
 
@@ -48,6 +50,8 @@ struct ShellState {
     notifications: notifications::Notifications,
     progress: Option<Progress>,
     progress_changed: bool,
+    cwd: Option<WorkingDirectory>,
+    clipboard: Vec<ClipboardRequest>,
 }
 
 /// Progress a program reports with ConEmu's `OSC 9 ; 4 ; state ; percent`.
@@ -756,6 +760,8 @@ impl Terminal {
                 notifications: Default::default(),
                 progress: None,
                 progress_changed: false,
+                cwd: None,
+                clipboard: Vec::new(),
             }),
             links: Default::default(),
             graphemes: Default::default(),

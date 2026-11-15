@@ -8,6 +8,7 @@ if status is-interactive; and test (string split . -- $version)[1] -lt 4; and no
     function fish_prompt
         set -l exit_code $status
         printf '\e]133;A\a'
+        printf '\e]7;file://%s%s\a' $hostname (string escape --style=url -- $PWD)
         _terminal_restore_status $exit_code
         _terminal_original_fish_prompt
         printf '\e]133;B\a'

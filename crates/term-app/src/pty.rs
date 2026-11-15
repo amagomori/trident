@@ -471,10 +471,13 @@ fn shell_name(program: &str) -> Option<&str> {
 
 impl Pty {
     /// Starts `command` (the user's login shell when empty). `wake` is called from the
-    /// reader thread when output is ready, and with `true` once the shell exits.
+    /// reader thread when output is ready, and with `true` once the shell exits. It starts in
+    /// `cwd` when given, else in this process's directory (`$HOME` when that is `/`).
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         command: &[String],
         env: &std::collections::BTreeMap<String, String>,
+        cwd: Option<&std::path::Path>,
         cols: usize,
         rows: usize,
         cell: (f32, f32),
@@ -499,7 +502,9 @@ impl Pty {
         for (key, value) in env {
             cmd.env(key, value);
         }
-        if let Some(home) = std::env::var_os("HOME")
+        if let Some(dir) = cwd {
+            cmd.cwd(dir);
+        } else if let Some(home) = std::env::var_os("HOME")
             && std::env::current_dir()
                 .map(|d| d == std::path::Path::new("/"))
                 .unwrap_or(true)
@@ -941,6 +946,7 @@ mod tests {
         let mut pty = Pty::spawn(
             &["/bin/sh".into()],
             &Default::default(),
+            None,
             80,
             24,
             (8.0, 16.0),
@@ -972,6 +978,7 @@ mod tests {
                 "-i".into(),
             ],
             &Default::default(),
+            None,
             80,
             24,
             (8.0, 16.0),
@@ -1000,6 +1007,31 @@ mod tests {
         );
         pty.write(b"\x03");
         wait_for(&mut pty, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_starts_in_the_requested_directory() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let mut pty = Pty::spawn(
+            &["/bin/sh".into(), "-c".into(), "pwd; sleep 5".into()],
+            &Default::default(),
+            Some(&dir),
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let expected = format!("{}\r\n", dir.display());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while !String::from_utf8_lossy(&seen).contains(&expected) {
+            assert!(Instant::now() < deadline, "output: {seen:?}");
+            seen.extend_from_slice(&pty.take_output().bytes);
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Every argv form QA tried on #71 and #60 (as the shell sees it after `env` or a path),
@@ -1180,6 +1212,7 @@ mod tests {
             let mut pty = Pty::spawn(
                 &[shell.into(), "-c".into(), "sleep 30; true".into()],
                 &Default::default(),
+                None,
                 80,
                 24,
                 (8.0, 16.0),
@@ -1220,6 +1253,7 @@ mod tests {
                 "-i".into(),
             ],
             &Default::default(),
+            None,
             80,
             24,
             (8.0, 16.0),
@@ -1239,6 +1273,7 @@ mod tests {
         let mut pty = Pty::spawn(
             &["sleep".into(), "30".into()],
             &Default::default(),
+            None,
             80,
             24,
             (8.0, 16.0),
@@ -1267,6 +1302,7 @@ mod tests {
             Pty::spawn(
                 &["/nonexistent/terminal-test-shell".into()],
                 &Default::default(),
+                None,
                 80,
                 24,
                 (8.0, 16.0),

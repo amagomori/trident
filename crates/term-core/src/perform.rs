@@ -214,6 +214,8 @@ impl Perform for Terminal {
         self.print_state.disarm_clear();
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
+            [b"52", targets, data] => self.osc_clipboard(targets, data, bell_terminated),
+            [b"7", rest @ ..] if !rest.is_empty() => self.osc_working_directory(&rest.join(&b';')),
             [b"8", attributes, rest @ ..] if !rest.is_empty() => {
                 let uri = match rest {
                     [uri] => std::borrow::Cow::Borrowed(*uri),
