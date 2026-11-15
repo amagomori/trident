@@ -18,6 +18,7 @@ struct FrameKey {
     cursor_shape: CursorShape,
     palette: Palette,
     atlas: u64,
+    graphemes: u64,
     /// Highlights are keyed by absolute line, so they move when the viewport does.
     top: Option<Point>,
     selection: Option<((Point, Point), SelectionKind)>,
@@ -80,6 +81,7 @@ impl Damage {
             cursor_shape: term.cursor_shape,
             palette: term.palette.clone(),
             atlas: frame.atlas,
+            graphemes: term.grapheme_releases(),
             top: highlights.then(|| term.viewport_to_point_signed(first, 0)),
             selection: term
                 .selection_range()
@@ -239,6 +241,35 @@ mod tests {
         assert_eq!(damaged(&mut damage, &term, &hidden), [1]);
         assert_eq!(damaged(&mut damage, &term, &hidden), [] as [usize; 0]);
         assert_eq!(damaged(&mut damage, &term, &frame(&term)), [1]);
+    }
+
+    #[test]
+    fn a_combining_mark_damages_the_row_of_the_cell_it_joins() {
+        let mut term = Terminal::new(20, 3);
+        term.advance(b"one\r\ntwo e");
+        let mut damage = Damage::default();
+        damaged(&mut damage, &term, &frame(&term));
+        term.advance("\u{301}".as_bytes());
+        assert_eq!(damaged(&mut damage, &term, &frame(&term)), [1]);
+    }
+
+    #[test]
+    fn freeing_grapheme_clusters_damages_every_row() {
+        let mut term = Terminal::new(20, 3);
+        term.advance("a\u{301}\r\nb".as_bytes());
+        let mut damage = Damage::default();
+        damaged(&mut damage, &term, &frame(&term));
+        // Distinct clusters overwriting one cell until a release scan frees the older ones,
+        // whose indices a later cluster may then reuse in a cell that compares equal.
+        let releases = term.grapheme_releases();
+        let mut i = 0;
+        while term.grapheme_releases() == releases {
+            let base = char::from_u32(0x4e00 + i).unwrap();
+            term.advance(format!("\x1b[3;1H{base}\u{301}").as_bytes());
+            i += 1;
+        }
+        term.advance(b"\x1b[3;1Hc");
+        assert_eq!(damaged(&mut damage, &term, &frame(&term)), [0, 1, 2]);
     }
 
     #[test]
