@@ -1,3 +1,4 @@
+use crate::app_icon::AppIcon;
 use crate::theme;
 use notify::Watcher;
 use serde::Deserialize;
@@ -18,11 +19,15 @@ pub struct Config {
     pub paste_protection: bool,
     pub confirm_close: bool,
     pub vsync: bool,
+    pub app_icon: AppIcon,
+    pub menu_bar_icon: bool,
     pub shell: Vec<String>,
     pub term: String,
     pub env: BTreeMap<String, String>,
     pub themes: theme::Themes,
     pub bindings: BTreeMap<Chord, Action>,
+    /// Problems that fell back to a default instead of rejecting the file.
+    pub warnings: Vec<String>,
 }
 
 impl Default for Config {
@@ -40,11 +45,14 @@ impl Default for Config {
             paste_protection: true,
             confirm_close: true,
             vsync: true,
+            app_icon: AppIcon::default(),
+            menu_bar_icon: true,
             shell: Vec::new(),
             term: crate::terminfo::FALLBACK.to_string(),
             env: BTreeMap::new(),
             themes: theme::Themes::default(),
             bindings: default_bindings(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -62,6 +70,8 @@ struct Raw {
     paste_protection: Option<bool>,
     confirm_close: Option<bool>,
     vsync: Option<bool>,
+    app_icon: Option<String>,
+    menu_bar_icon: Option<bool>,
     shell: Option<Shell>,
     term: Option<String>,
     env: BTreeMap<String, String>,
@@ -424,8 +434,25 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         confirm_close: raw.confirm_close.unwrap_or(true),
         desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
+        menu_bar_icon: raw.menu_bar_icon.unwrap_or(true),
         ..Config::default()
     };
+    if let Some(name) = raw.app_icon {
+        match AppIcon::from_name(&name) {
+            Some(icon) => config.app_icon = icon,
+            None => {
+                let names: Vec<_> = AppIcon::ALL.iter().map(|icon| icon.name()).collect();
+                config.warnings.push(error(
+                    "app_icon",
+                    &format!(
+                        "unknown icon {name:?}, using {:?} (expected one of {})",
+                        AppIcon::default().name(),
+                        names.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
     if let Some(size) = raw.font_size {
         if !size.is_finite() || !(4.0..=200.0).contains(&size) {
             return Err(error("font_size", "expected a number between 4 and 200"));
@@ -850,6 +877,33 @@ mod tests {
 
     fn parse_text(text: &str) -> Result<Config, String> {
         parse(Path::new("/config/terminal/config.toml"), text)
+    }
+
+    #[test]
+    fn app_icon() {
+        let config = parse_text("").unwrap();
+        assert_eq!(config.app_icon, AppIcon::Tide);
+        assert!(config.menu_bar_icon);
+        assert!(config.warnings.is_empty());
+        let config = parse_text("app_icon = \"sunset\"\nmenu_bar_icon = false").unwrap();
+        assert_eq!(config.app_icon, AppIcon::Sunset);
+        assert!(!config.menu_bar_icon);
+        assert!(config.warnings.is_empty());
+        let config = parse_text("font_size = 12.0\napp_icon = \"trident\"").unwrap();
+        assert_eq!(config.app_icon, AppIcon::Tide);
+        assert_eq!(config.font_size, 12.0);
+        assert_eq!(config.warnings.len(), 1);
+        assert!(
+            config.warnings[0]
+                .contains(":2:12: app_icon: unknown icon \"trident\", using \"tide\""),
+            "{}",
+            config.warnings[0]
+        );
+        assert!(
+            config.warnings[0].contains("tide, lagoon, dusk, reef, kelp, midnight, golden, sunset")
+        );
+        assert!(parse_text("app_icon = 3").is_err());
+        assert!(parse_text("menu_bar_icon = \"no\"").is_err());
     }
 
     #[test]

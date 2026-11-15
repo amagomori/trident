@@ -5,7 +5,6 @@ macro_rules! diag {
     }};
 }
 
-#[cfg(target_os = "macos")]
 mod app_icon;
 #[cfg(target_os = "linux")]
 mod appearance;
@@ -841,6 +840,7 @@ struct App {
     appearance_generation: u64,
     config: config::Config,
     config_error: Option<String>,
+    icons: app_icon::Shown,
     _watcher: Option<config::ConfigWatcher>,
     options: Options,
     proxy: EventLoopProxy<UserEvent>,
@@ -892,7 +892,12 @@ fn select_at(term: &mut Terminal, point: Point, modifiers: ModifiersState, click
 impl App {
     fn new(options: Options, proxy: EventLoopProxy<UserEvent>) -> App {
         let (config, config_error) = match config::load(&options.config_path) {
-            Ok(config) => (config, None),
+            Ok(config) => {
+                for warning in &config.warnings {
+                    diag!("{warning}");
+                }
+                (config, None)
+            }
             Err(error) => {
                 diag!("{error}");
                 (config::Config::default(), Some(error))
@@ -916,6 +921,7 @@ impl App {
             font_size: options.size(&config),
             config,
             config_error,
+            icons: app_icon::Shown::default(),
             _watcher: watcher,
             options,
             proxy,
@@ -1650,6 +1656,9 @@ impl App {
                 diag!("terminal: shell/term/env changes apply on the next launch");
             }
             let next_vsync_off = !next.vsync && self.config.vsync;
+            for warning in &next.warnings {
+                diag!("{warning}");
+            }
             self.config = next;
             #[cfg(target_os = "macos")]
             close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
@@ -1657,6 +1666,8 @@ impl App {
             ime::set_command_chords(&self.config.bindings);
             self.watch_appearance();
             if let Some(s) = &mut self.session {
+                self.icons
+                    .apply(&s.window, self.config.app_icon, self.config.menu_bar_icon);
                 s.pty
                     .set_command_notifications(self.config.notify_long_commands_after != 0)?;
                 s.term
@@ -2321,8 +2332,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match self.start(event_loop) {
             Ok(session) => {
-                #[cfg(target_os = "macos")]
-                app_icon::set_default();
+                self.icons.apply(
+                    &session.window,
+                    self.config.app_icon,
+                    self.config.menu_bar_icon,
+                );
                 #[cfg(target_os = "macos")]
                 close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
                 #[cfg(target_os = "macos")]

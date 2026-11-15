@@ -42,9 +42,9 @@ wayland-protocols = { version = "0.32.13", features = ["client"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu.workspace = true
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSBundle", "NSData", "NSString", "NSError", "NSUUID", "NSArray", "NSDictionary", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSBundle", "NSData", "NSGeometry", "NSString", "NSError", "NSUUID", "NSArray", "NSDictionary", "NSValue"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "block2"] }
 objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLDrawable", "block2", "objc2-core-foundation"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CABase", "objc2-core-foundation"] }
 block2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSBitmapImageRep", "NSButton", "NSControl", "NSImage", "NSImageRep", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView"] }
