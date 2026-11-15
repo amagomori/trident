@@ -2,6 +2,7 @@
 //! fonts for characters the primary font lacks. Fallback fonts are memory-mapped and parsed
 //! lazily, so even large CJK and emoji fonts cost little memory beyond the pages touched.
 
+use crate::builtin;
 use crate::color;
 use crate::fallback::{self, FontFile, SystemFonts};
 use ab_glyph::{Font, FontArc, FontRef, GlyphId, PxScale, ScaleFont, point};
@@ -189,6 +190,9 @@ impl Fonts {
     /// such as the emoji keycap for U+20E3, would hide its base), and `None` if none has it.
     pub fn rasterize(&mut self, c: char, style: Style, cells: usize) -> Option<RasterizedGlyph> {
         let metrics = self.metrics;
+        if builtin::covers(c) {
+            return builtin::rasterize(c, &metrics, cells);
+        }
         let px = self.px;
         let mark = cells == 0;
         let cells = cells.max(1);
