@@ -1509,3 +1509,65 @@ fn desktop_notification_query_and_limits() {
         ]
     );
 }
+
+#[test]
+fn golden_progress_reports() {
+    let steps: &[(&str, &[u8])] = &[
+        ("default", b""),
+        ("set 42", b"\x1b]9;4;1;42\x07"),
+        ("same again", b"\x1b]9;4;1;42\x1b\\"),
+        ("set without percent", b"\x1b]9;4;1\x07"),
+        ("set 250", b"\x1b]9;4;1;250\x07"),
+        ("set 60", b"\x1b]9;4;1;60\x07"),
+        ("error keeps percent", b"\x1b]9;4;2\x07"),
+        ("error 10", b"\x1b]9;4;2;10\x07"),
+        ("indeterminate", b"\x1b]9;4;3\x07"),
+        ("paused after indeterminate", b"\x1b]9;4;4\x07"),
+        ("paused 75", b"\x1b]9;4;4;75\x07"),
+        ("unknown state", b"\x1b]9;4;5;20\x07"),
+        ("bad percent", b"\x1b]9;4;1;4x\x07"),
+        ("bad state", b"\x1b]9;4;-1;20\x07"),
+        ("remove", b"\x1b]9;4;0;0\x07"),
+        ("remove again", b"\x1b]9;4;0\x07"),
+        ("set 5", b"\x1b]9;4;1;5\x07"),
+        ("empty state removes", b"\x1b]9;4;\x07"),
+        ("set 7", b"\x1b]9;4;1;7\x07"),
+        ("bare 9;4 removes", b"\x1b]9;4\x07"),
+        ("notification is not progress", b"\x1b]9;build done\x07"),
+        ("set 33 amid text", b"a\x1b]9;4;1;33\x07b"),
+        ("RIS", b"\x1bc"),
+        ("RIS again", b"\x1bc"),
+    ];
+    let run = |bytewise: bool| {
+        let mut term = Terminal::new(5, 2);
+        let mut out = String::new();
+        for &(label, bytes) in steps {
+            if bytewise {
+                for byte in bytes.chunks(1) {
+                    term.advance(byte);
+                }
+            } else {
+                term.advance(bytes);
+            }
+            let change = match term.take_progress() {
+                Some(progress) => format!("changed to {progress:?}"),
+                None => "unchanged".to_string(),
+            };
+            writeln!(out, "{label}: {change}").unwrap();
+        }
+        out
+    };
+    let actual = run(false);
+    assert_eq!(actual, run(true));
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden/progress_reports.snap");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(path, &actual).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(path).unwrap();
+        assert!(
+            expected == actual,
+            "{}",
+            difference("progress_reports", &expected, &actual)
+        );
+    }
+}

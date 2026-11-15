@@ -1,4 +1,4 @@
-use super::{Charset, Color, CursorShape, Flags, MouseMode, Terminal, UnderlineStyle};
+use super::{Charset, Color, CursorShape, Flags, MouseMode, Progress, Terminal, UnderlineStyle};
 use vte::{Params, Perform};
 
 /// The first value of each parameter, with 0 / missing replaced by `default`.
@@ -234,6 +234,7 @@ impl Perform for Terminal {
             [b"133", mark, args @ ..] => {
                 self.shell_mark(mark, args);
             }
+            [b"9", b"4", args @ ..] => self.progress_report(args),
             [b"9", rest @ ..] => self.shell.notifications.osc9(rest),
             [b"777", rest @ ..] => self.shell.notifications.osc777(rest),
             [b"99", rest @ ..] => {
@@ -270,6 +271,47 @@ impl Perform for Terminal {
 }
 
 impl Terminal {
+    /// ConEmu progress (`OSC 9 ; 4 ; state ; percent`): 0 removes it, 1 sets a
+    /// percentage, 2 marks an error, 3 is indeterminate and 4 paused. An error or pause
+    /// without a percentage keeps the last one; percentages over 100 count as 100.
+    #[cold]
+    #[inline(never)]
+    fn progress_report(&mut self, args: &[&[u8]]) {
+        fn number(param: &[u8]) -> Option<u32> {
+            if param.is_empty() || param.len() > 9 || !param.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            std::str::from_utf8(param).ok()?.parse().ok()
+        }
+        let state = match args.first() {
+            None | Some(&b"") => 0,
+            Some(param) => match number(param) {
+                Some(state) => state,
+                None => return,
+            },
+        };
+        let percent = match args.get(1) {
+            None | Some(&b"") => None,
+            Some(param) => match number(param) {
+                Some(percent) => Some(percent.min(100) as u8),
+                None => return,
+            },
+        };
+        let last = self.shell.progress.as_ref().and_then(Progress::percent);
+        let progress = match state {
+            0 => None,
+            1 => Some(Progress::Normal(percent.unwrap_or(0))),
+            2 => Some(Progress::Error(percent.or(last))),
+            3 => Some(Progress::Indeterminate),
+            4 => Some(Progress::Paused(percent.or(last))),
+            _ => return,
+        };
+        if progress != self.shell.progress {
+            self.shell.progress = progress;
+            self.shell.progress_changed = true;
+        }
+    }
+
     #[cold]
     #[inline(never)]
     fn report_private_mode(&mut self, mode: u16) {
