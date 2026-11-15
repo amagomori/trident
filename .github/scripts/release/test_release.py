@@ -67,7 +67,8 @@ class Linux(Base):
             top = "Trident-1.2.3-linux-x86_64"
             exe = members[f"{top}/bin/trident"]
             self.assertEqual(exe.mode, 0o755)
-            self.assertEqual((exe.uid, exe.gid, exe.mtime), (0, 0, 0))
+            self.assertEqual((exe.uid, exe.gid, exe.mtime), (0, 0, release.epoch()))
+            self.assertGreater(exe.mtime, 0)
             for size in release.ICON_SIZES:
                 icon = f"{top}/share/icons/hicolor/{size}x{size}/apps/trident.png"
                 self.assertEqual(members[icon].mode, 0o644, icon)

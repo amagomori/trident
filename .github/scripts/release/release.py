@@ -117,7 +117,15 @@ def stage(root, binary, prefix):
 
 
 def epoch():
-    return int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
+    """The timestamp packaged files carry: SOURCE_DATE_EPOCH, else the commit time.
+
+    Never 0: KDE's menu cache skips .desktop files dated 1970-01-01.
+    """
+    if "SOURCE_DATE_EPOCH" in os.environ:
+        return max(1, int(os.environ["SOURCE_DATE_EPOCH"]))
+    commit = subprocess.run(["git", "log", "-1", "--format=%ct"], cwd=Path(__file__).parent,
+                            capture_output=True, text=True)
+    return int(commit.stdout.strip() or 0) or 1
 
 
 def tarball(src_dir, top, out):
