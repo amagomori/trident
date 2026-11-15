@@ -546,11 +546,20 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn track_command(&mut self, mark: &[u8], args: &[&[u8]]) {
-        if self.alt_active || self.max_scrollback == 0 {
+        if self.alt_active {
             return;
         }
         let line = self.history + self.cursor.row as u64;
         let col = self.cursor.col + usize::from(self.cursor.pending_wrap);
+        if self.max_scrollback == 0 {
+            // No command history, but clicks in the prompt still need its bounds.
+            match mark {
+                b"A" => (self.shell.prompt_line, self.shell.input_start) = (Some(line), None),
+                b"B" => self.shell.input_start = Some((line, col)),
+                _ => {}
+            }
+            return;
+        }
         match mark {
             b"A" => {
                 self.drop_overwritten_commands(line);

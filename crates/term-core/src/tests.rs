@@ -2824,3 +2824,11 @@ fn prompt_click_reports_clicks_when_the_prompt_asks_for_them() {
     t.advance(b"\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07ab");
     assert_eq!(click(&t, 3, 2), Some(PromptClick::Move(-2)));
 }
+
+#[test]
+fn prompt_click_works_without_scrollback() {
+    let mut t = Terminal::new(20, 4);
+    t.set_scrollback_limit(0);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07echo hi");
+    assert_eq!(click(&t, 0, 2), Some(PromptClick::Move(-7)));
+}
