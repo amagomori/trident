@@ -6,7 +6,6 @@
 //! are compared, so runs that differ only there have no marks.
 
 use std::collections::{HashMap, VecDeque};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::sync::LazyLock;
 
@@ -83,22 +82,82 @@ impl Ignore {
     }
 
     /// `line` with every ignored match replaced by one placeholder character.
+    #[cfg(test)]
     fn mask<'a>(&self, line: &'a str) -> std::borrow::Cow<'a, str> {
         match &self.0 {
             Some(re) => re.replace_all(line, "\u{1}"),
             None => line.into(),
         }
     }
+
+    /// Hash of `line` with every ignored match as one placeholder.
+    fn hash(&self, line: &str) -> u64 {
+        let mut h = LineHasher::default();
+        let mut at = 0;
+        if let Some(re) = &self.0 {
+            for m in re.find_iter(line) {
+                h.bytes(&line.as_bytes()[at..m.start()]);
+                h.word(PLACEHOLDER);
+                at = m.end();
+            }
+        }
+        h.bytes(&line.as_bytes()[at..]);
+        h.finish()
+    }
+}
+
+/// Stands for an ignored match; no UTF-8 text hashes to this word.
+const PLACEHOLDER: u64 = u64::MAX;
+
+/// A fast word-at-a-time line hash; a collision only hides one changed line.
+#[derive(Default)]
+struct LineHasher(u64);
+
+impl LineHasher {
+    fn word(&mut self, w: u64) {
+        self.0 = (self.0 ^ w)
+            .wrapping_mul(0xf135_7aea_2e62_a9c5)
+            .rotate_left(26);
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) {
+        let (words, tail) = bytes.as_chunks::<8>();
+        for &w in words {
+            self.word(u64::from_le_bytes(w));
+        }
+        // The tail's length goes in its top byte, so segments split differently differ.
+        let mut last = [0; 8];
+        last[..tail.len()].copy_from_slice(tail);
+        last[7] = tail.len() as u8;
+        self.word(u64::from_le_bytes(last));
+    }
+
+    fn finish(self) -> u64 {
+        let mut h = self.0;
+        h ^= h >> 33;
+        h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        h ^ (h >> 33)
+    }
 }
 
 pub(crate) struct Runs {
     pub enabled: bool,
     pub ignore: Ignore,
-    /// Line hashes of each command's latest run, by command text.
-    last: HashMap<String, Vec<u64>>,
-    /// Command texts, least recently run first.
-    order: VecDeque<String>,
+    /// Each command's latest run, by command text.
+    last: HashMap<String, Run>,
+    /// Command texts with the run they were stored with, least recent first. An entry
+    /// whose run has since been replaced is stale and skipped.
+    order: VecDeque<(u64, String)>,
+    /// Runs stored so far.
+    seq: u64,
     stored: usize,
+}
+
+struct Run {
+    /// Line hashes.
+    hashes: Vec<u64>,
+    /// `Runs::seq` when stored.
+    seq: u64,
 }
 
 impl Default for Runs {
@@ -108,6 +167,7 @@ impl Default for Runs {
             ignore: Ignore::default(),
             last: HashMap::new(),
             order: VecDeque::new(),
+            seq: 0,
             stored: 0,
         }
     }
@@ -123,21 +183,36 @@ impl Runs {
         }
     }
 
-    /// Stores `hashes` as `key`'s latest run and returns the run it replaces.
-    fn replace(&mut self, key: String, hashes: Vec<u64>) -> Option<Vec<u64>> {
-        if let Some(i) = self.order.iter().position(|k| *k == key) {
-            self.order.remove(i);
-        }
+    /// Line hashes of `key`'s latest run.
+    fn previous(&self, key: &str) -> Option<&[u64]> {
+        self.last.get(key).map(|run| &run.hashes[..])
+    }
+
+    /// Stores `hashes` as `key`'s latest run, in time independent of how many are stored.
+    fn store(&mut self, key: String, hashes: Vec<u64>) {
+        self.seq += 1;
         // Each run also counts one line for itself, so commands with no output are bounded.
         self.stored += hashes.len() + 1;
-        let previous = self.last.insert(key.clone(), hashes);
-        self.stored -= previous.as_ref().map_or(0, |h| h.len() + 1);
-        self.order.push_back(key);
-        while self.stored > MAX_STORED && self.order.len() > 1 {
-            let oldest = self.order.pop_front().unwrap();
-            self.stored -= self.last.remove(&oldest).map_or(0, |h| h.len() + 1);
+        let run = Run {
+            hashes,
+            seq: self.seq,
+        };
+        match self.last.get_mut(&key) {
+            Some(old) => self.stored -= std::mem::replace(old, run).hashes.len() + 1,
+            None => _ = self.last.insert(key.clone(), run),
         }
-        previous
+        self.order.push_back((self.seq, key));
+        while self.stored > MAX_STORED && self.last.len() > 1 {
+            let (seq, oldest) = self.order.pop_front().unwrap();
+            if self.last.get(&oldest).is_some_and(|run| run.seq == seq) {
+                self.stored -= self.last.remove(&oldest).unwrap().hashes.len() + 1;
+            }
+        }
+        if self.order.len() > 2 * self.last.len() + 64 {
+            let last = &self.last;
+            self.order
+                .retain(|(seq, key)| last.get(key).is_some_and(|run| run.seq == *seq));
+        }
     }
 }
 
@@ -254,25 +329,25 @@ impl Terminal {
                 row.cells.len()
             };
             for cell in &row.cells[..used] {
-                if !cell.flags.contains(Flags::WIDE_SPACER) {
+                if !cell.flags.intersects(Flags::GRAPHEME | Flags::WIDE_SPACER) {
+                    text.push(cell.c);
+                } else if !cell.flags.contains(Flags::WIDE_SPACER) {
                     self.push_cell_text(cell, &mut text);
                 }
             }
             if last {
                 text.truncate(text.trim_end().len());
-                let mut h = DefaultHasher::new();
-                self.shell.runs.ignore.mask(&text).hash(&mut h);
-                hashes.push(h.finish());
+                hashes.push(self.shell.runs.ignore.hash(&text));
                 text.clear();
                 if hashes.len() > MAX_LINES {
                     return;
                 }
             }
         }
-        let Some(previous) = self.shell.runs.replace(key, hashes.clone()) else {
-            return;
-        };
-        let diff = diff(&previous, &hashes);
+        let runs = &mut self.shell.runs;
+        let diff = runs.previous(&key).map(|previous| diff(previous, &hashes));
+        runs.store(key, hashes);
+        let Some(diff) = diff else { return };
         let line_of = |i: usize| starts.get(i).copied().unwrap_or(end);
         let marks = Marks {
             changed: diff
@@ -517,10 +592,44 @@ mod tests {
     fn runs_without_output_are_bounded() {
         let mut runs = super::Runs::default();
         for i in 0..super::MAX_STORED + 10 {
-            runs.replace(format!("cd {i}"), Vec::new());
+            runs.store(format!("cd {i}"), Vec::new());
         }
         assert_eq!(runs.last.len(), super::MAX_STORED);
         assert_eq!(runs.order.len(), super::MAX_STORED);
+    }
+
+    #[test]
+    fn rerunning_a_command_keeps_it_and_the_order_compact() {
+        let mut runs = super::Runs::default();
+        runs.store("make".into(), vec![1; 1000]);
+        for i in 0..super::MAX_STORED {
+            runs.store("make".into(), vec![2; 1000]);
+            runs.store(format!("ls {}", i % 50), vec![3; 1000]);
+        }
+        assert_eq!(runs.previous("make"), Some(&[2; 1000][..]));
+        assert!(runs.order.len() <= 2 * runs.last.len() + 64);
+        // The oldest run goes first: `make` was just rerun, so `ls 0` is evicted.
+        runs.store("make".into(), vec![4; 1000]);
+        runs.store(
+            "big".into(),
+            vec![5; super::MAX_STORED - 1000 - 49 * 1001 - 1],
+        );
+        assert!(runs.previous("make").is_some());
+        assert!(runs.previous("ls 0").is_none());
+        assert!(runs.stored <= super::MAX_STORED);
+    }
+
+    #[test]
+    fn hashes_agree_with_masked_text() {
+        let ignore = Ignore::default();
+        let a = "[2026-11-15T07:02:11Z] test a ... ok (0.42s) pid 1234";
+        let b = "[2026-11-16T08:12:01Z] test a ... ok (13.1s) pid 99";
+        assert_eq!(ignore.hash(a), ignore.hash(b));
+        assert_ne!(ignore.hash(a), ignore.hash(&b.replace("ok", "FAILED")));
+        assert_ne!(ignore.hash("abcdefgh"), ignore.hash("abcdefg"));
+        assert_ne!(ignore.hash(""), ignore.hash("\0"));
+        let none = Ignore::new::<&str>(&[]).unwrap();
+        assert_ne!(none.hash(a), none.hash(b));
     }
 
     fn masked(line: &str) -> String {

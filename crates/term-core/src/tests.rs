@@ -1461,6 +1461,53 @@ mod bench {
             compare: bool,
             rewrite: bool,
         },
+        /// `COMMANDS` short OSC 133 commands, all distinct or all the same command text,
+        /// with compare-with-last-run on or off.
+        Commands {
+            compare: bool,
+            distinct: bool,
+        },
+    }
+
+    /// Enough commands that compare-with-last-run's stored runs reach `rerun::MAX_STORED`.
+    const COMMANDS: usize = 20_000;
+
+    /// `COMMANDS` 12-line runs with a timestamp, PID, duration and temp path on every line;
+    /// every third run fails one test.
+    fn commands_output(distinct: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        for run in 0..COMMANDS {
+            let command = if distinct {
+                format!("./job {run}")
+            } else {
+                "make test".to_owned()
+            };
+            out.extend_from_slice(
+                format!("\x1b]133;A\x07$ \x1b]133;B\x07{command}\r\n\x1b]133;C\x07").as_bytes(),
+            );
+            for i in 0..12 {
+                let result = if i == 5 && run % 3 == 0 {
+                    "FAILED"
+                } else {
+                    "ok"
+                };
+                out.extend_from_slice(
+                    format!(
+                        "[2026-11-15T07:{:02}:{:02}.{:03}Z] pid {} case_{i} ... {result} ({}.{:03}s) /tmp/tmp.{run:06}\r\n",
+                        run % 60,
+                        i % 60,
+                        run % 1000,
+                        1000 + run,
+                        run % 7,
+                        (run * 7 + i) % 1000
+                    )
+                    .as_bytes(),
+                );
+            }
+            out.extend_from_slice(b"\x1b]133;D;0\x07");
+        }
+        out.extend_from_slice(b"\x1b]133;A\x07$ ");
+        out
     }
 
     /// Output lines per run: just under `rerun::MAX_LINES` and the 20,000-line per-command
@@ -1522,6 +1569,34 @@ mod bench {
             Kind::Rerun {
                 compare: true,
                 rewrite: true,
+            },
+        ),
+        (
+            "osc133_distinct",
+            Kind::Commands {
+                compare: true,
+                distinct: true,
+            },
+        ),
+        (
+            "osc133_distinct_off",
+            Kind::Commands {
+                compare: false,
+                distinct: true,
+            },
+        ),
+        (
+            "osc133_repeat",
+            Kind::Commands {
+                compare: true,
+                distinct: false,
+            },
+        ),
+        (
+            "osc133_repeat_off",
+            Kind::Commands {
+                compare: false,
+                distinct: false,
             },
         ),
         (
@@ -1640,6 +1715,19 @@ mod bench {
                         })
                         .collect();
                     ("bytes", second.len(), secs)
+                }
+                Kind::Commands { compare, distinct } => {
+                    let input = commands_output(*distinct);
+                    let secs: Vec<f64> = (0..iters)
+                        .map(|_| {
+                            let mut term = Terminal::new(COLS, ROWS);
+                            term.set_compare_runs(*compare);
+                            let start = Instant::now();
+                            measured_advance(&mut term, &input, LINUX_BATCH);
+                            start.elapsed().as_secs_f64()
+                        })
+                        .collect();
+                    ("bytes", input.len(), secs)
                 }
                 Kind::Keystrokes => {
                     let screen = dense_ascii();
