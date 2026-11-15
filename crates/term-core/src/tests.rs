@@ -2167,3 +2167,128 @@ fn reflow_leaves_the_alternate_screen_cut() {
     t.resize(13, 3);
     assert_eq!(screen(&t), ["0123456789abc", "!", ""]);
 }
+
+/// Bash's prompt and a half-typed command of 146 chars: two rows at 100 columns.
+fn half_typed_command() -> String {
+    format!(
+        "bash$ printf '%s\\n' 'BEGIN-{}-END'",
+        "0123456789".repeat(12)
+    )
+}
+
+#[test]
+fn resize_while_editing_lets_the_editor_redraw_its_line_once() {
+    let line = half_typed_command();
+    assert_eq!(line.len(), 152);
+    // What bash 5.1 and zsh 5.8 send after SIGWINCH: up to the line's first row, redraw.
+    let redraws = [
+        format!("\r\x1b[K\x1b[A{line}"),
+        format!("\x1b[A\r\r\x1b[0m\x1b[27m\x1b[24m\x1b[J{line}\x1b[K"),
+    ];
+    for redraw in redraws {
+        let mut t = term(100, 8, &format!("out\r\n{line}"));
+        t.resize_while_editing(60, 8, &mut []);
+        // The line rewraps, and the cursor keeps its row in it, where the editor moves up from.
+        let mut want = vec!["out", &line[..60], &line[60..120], &line[120..]];
+        want.resize(8, "");
+        assert_eq!(screen(&t), want);
+        assert_eq!((t.cursor.row, t.cursor.col), (2, 52));
+        t.advance(redraw.as_bytes());
+        assert_eq!(screen(&t), want);
+        // Run, then widen: the command rewraps whole, nothing cut from it comes back.
+        t.advance(b"\r\nran\r\n");
+        t.resize(100, 8);
+        let mut want = vec!["out", &line[..100], &line[100..], "ran"];
+        want.resize(8, "");
+        assert_eq!(screen(&t), want);
+    }
+}
+
+#[test]
+fn resize_while_editing_keeps_text_no_editor_redraws() {
+    // Output with no newline before the prompt, or a silent `read`: nothing redraws it.
+    let out = format!("{}{}", "0123456789".repeat(15), "bash$ half");
+    let mut t = term(100, 6, &format!("top\r\n{out}"));
+    let before = primary_rows(&t);
+    t.resize_while_editing(60, 6, &mut []);
+    assert_eq!(screen(&t), screen(&term(60, 6, &format!("top\r\n{out}"))));
+    t.resize_while_editing(100, 6, &mut []);
+    assert_eq!(primary_rows(&t), before);
+    t.resize_while_editing(60, 6, &mut []);
+    t.resize(40, 6);
+    assert_eq!(screen(&t), screen(&term(40, 6, &format!("top\r\n{out}"))));
+}
+
+#[test]
+fn resize_rewraps_the_cursor_line_without_an_editor() {
+    let line = half_typed_command();
+    let mut t = term(100, 8, &format!("out\r\n{line}"));
+    t.resize(60, 8);
+    let mut want = vec!["out", &line[..60], &line[60..120], &line[120..]];
+    want.resize(8, "");
+    assert_eq!(screen(&t), want);
+}
+
+#[test]
+fn resize_while_editing_rewraps_the_lines_above() {
+    let line = half_typed_command();
+    let long = "x".repeat(150);
+    let mut t = term(100, 8, &format!("{long}\r\n{line}"));
+    t.resize_while_editing(60, 8, &mut []);
+    let mut want = vec![
+        &long[..60],
+        &long[60..120],
+        &long[120..],
+        &line[..60],
+        &line[60..120],
+        &line[120..],
+    ];
+    want.resize(8, "");
+    assert_eq!(screen(&t), want);
+}
+
+#[test]
+fn resize_while_editing_lets_bash_3_redraw_a_line_edited_mid_line() {
+    // bash 3.2 (readline 5.2) after SIGWINCH: CR, EL on the cursor's row, up as many rows
+    // as the cursor was below the line's start at the old width, then the whole line, with
+    // nothing erased below it; then it moves the cursor back to its place.
+    let words: Vec<String> = (0..26).map(|n| format!("word{n:02}")).collect();
+    let line = format!("$ {}", words.join(" "));
+    assert_eq!(line.len(), 183);
+    let place = |at: usize, cols: usize| {
+        let (end_row, row) = ((line.len()) / cols, at / cols);
+        format!(
+            "{}\r{}",
+            "\x1b[A".repeat(end_row - row),
+            "\x1b[C".repeat(at % cols)
+        )
+    };
+    for back in [0, 30] {
+        let at = line.len() - back;
+        let mut t = term(100, 10, &format!("out\r\n{line}{}", place(at, 100)));
+        let mut cols = 100;
+        for _ in 0..2 {
+            for new_cols in [60, 100] {
+                let up = at / cols;
+                t.resize_while_editing(new_cols, 10, &mut []);
+                cols = new_cols;
+                t.advance(
+                    format!("\r\x1b[K{}{line}{}", "\x1b[A".repeat(up), place(at, cols)).as_bytes(),
+                );
+                let mut want = vec!["out".to_string()];
+                want.extend(
+                    line.as_bytes()
+                        .chunks(cols)
+                        .map(|c| String::from_utf8_lossy(c).trim_end().to_string()),
+                );
+                want.resize(10, String::new());
+                assert_eq!(screen(&t), want, "{back} back, {cols} cols");
+                assert_eq!(
+                    t.cursor_position(),
+                    Some((1 + at / cols, at % cols)),
+                    "{back} back, {cols} cols"
+                );
+            }
+        }
+    }
+}
