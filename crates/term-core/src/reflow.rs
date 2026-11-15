@@ -122,7 +122,10 @@ impl Terminal {
         // end of a full row it waits there to wrap, as if the line had been typed anew.
         let mut cursor_end = false;
 
-        let mut old: Vec<Row> = std::mem::take(&mut self.primary.scrollback).into();
+        // Draining keeps the scrollback's buffer and avoids `make_contiguous`, whose
+        // `rotate_left::<Row>` would then stop being inlined into scrolling.
+        let mut old = Vec::with_capacity(back + self.primary.lines.len());
+        old.extend(self.primary.scrollback.drain(..));
         old.append(&mut self.primary.lines);
         let old_len = old.len();
 
@@ -270,7 +273,7 @@ impl Terminal {
             new.len().saturating_sub(self.max_scrollback)
         };
         new.drain(..drop);
-        self.primary.scrollback = new.into();
+        self.primary.scrollback.extend(new);
         self.primary.lines = lines;
         self.history = old_first + top as u64;
 
