@@ -789,6 +789,12 @@ fn cases() -> Vec<Case> {
             b"\x1b[4mA\x1b[4:2mB\x1b[4:3mC\x1b[4:4mD\x1b[4:5mE\x1b[21mF\x1b[4:0mG\x1b[4:1mH\x1b[24mI",
         ),
         (
+            "sgr_underline_grapheme",
+            8,
+            2,
+            "\x1b[4:3;58:5:1me\u{301}\x1b[4:2m\u{1f469}\u{200d}\u{1f4bb}\x1b[21ma\u{323}\x1b[24mx".as_bytes(),
+        ),
+        (
             "sgr_underline_color",
             12,
             2,
