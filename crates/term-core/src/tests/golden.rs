@@ -820,6 +820,12 @@ fn cases() -> Vec<Case> {
             2,
             b"\x1b[5mA\x1b[25mB\x1b[6mC\x1b[0mD\x1b[1;5;31mE\x1b[22;25mF\x1b[5m\x1b[mG",
         ),
+        (
+            "sgr_blink_combining",
+            6,
+            2,
+            "\x1b[5me\u{301}\x1b[25ma\u{308}".as_bytes(),
+        ),
         ("cjk_wrap", 5, 3, "a你好b".as_bytes()),
         ("cjk_edge", 4, 2, "abc你".as_bytes()),
         (
