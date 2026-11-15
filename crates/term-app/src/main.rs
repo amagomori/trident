@@ -3523,6 +3523,8 @@ impl ApplicationHandler<UserEvent> for App {
                 ime::forward_command_chords(&session.window);
                 #[cfg(target_os = "macos")]
                 native_tabs::handle_new_tab_button(&session.window, self.proxy.clone());
+                #[cfg(target_os = "macos")]
+                native_tabs::install_window_menu();
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
                 self.tabs = vec![None];

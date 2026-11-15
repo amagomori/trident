@@ -4,10 +4,11 @@
 
 use std::cell::RefCell;
 
+use objc2::rc::Allocated;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-use objc2::{msg_send, sel};
-use objc2_foundation::NSArray;
+use objc2::{class, msg_send, sel};
+use objc2_foundation::{NSArray, NSString};
 use winit::event_loop::EventLoopProxy;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
@@ -121,6 +122,55 @@ unsafe extern "C-unwind" fn new_window_for_tab(_: *mut AnyObject, _: Sel, _: *mu
     });
 }
 
+/// The Window menu's own items as (title, action, Command key), `None` for a separator.
+/// AppKit adds the tab items (Show Tab Bar, Show All Tabs, Show Next/Previous Tab, Move Tab
+/// to New Window, Merge All Windows) and the window list to it.
+const WINDOW_MENU: [Option<(&str, &std::ffi::CStr, &str)>; 4] = [
+    Some(("Minimize", c"performMiniaturize:", "m")),
+    Some(("Zoom", c"performZoom:", "")),
+    None,
+    Some(("Bring All to Front", c"arrangeInFront:", "")),
+];
+
+/// Adds a Window menu to the menu bar and makes it the app's windows menu, which is where
+/// AppKit puts the native tab commands. Needs winit's default menu to be installed.
+pub fn install_window_menu() {
+    // SAFETY: called on the main thread once the event loop runs; every message matches the
+    // AppKit signature of NSApplication, NSMenu and NSMenuItem, and each action is a
+    // standard NSWindow or NSApplication action.
+    unsafe {
+        let app: Option<Retained<AnyObject>> = msg_send![class!(NSApplication), sharedApplication];
+        let Some(app) = app else { return };
+        let menubar: Option<Retained<AnyObject>> = msg_send![&*app, mainMenu];
+        let Some(menubar) = menubar else { return };
+        let existing: Option<Retained<AnyObject>> = msg_send![&*app, windowsMenu];
+        if existing.is_some() {
+            return;
+        }
+        let title = NSString::from_str("Window");
+        let menu: Allocated<AnyObject> = msg_send![class!(NSMenu), alloc];
+        let menu: Retained<AnyObject> = msg_send![menu, initWithTitle: &*title];
+        for entry in WINDOW_MENU {
+            let item: Retained<AnyObject> = match entry {
+                Some((title, action, key)) => {
+                    let title = NSString::from_str(title);
+                    let key = NSString::from_str(key);
+                    let action = Sel::register(action);
+                    let item: Allocated<AnyObject> = msg_send![class!(NSMenuItem), alloc];
+                    msg_send![item, initWithTitle: &*title, action: action, keyEquivalent: &*key]
+                }
+                None => msg_send![class!(NSMenuItem), separatorItem],
+            };
+            let _: () = msg_send![&*menu, addItem: &*item];
+        }
+        let item: Retained<AnyObject> = msg_send![class!(NSMenuItem), new];
+        let _: () = msg_send![&*item, setTitle: &*title];
+        let _: () = msg_send![&*item, setSubmenu: &*menu];
+        let _: () = msg_send![&*menubar, addItem: &*item];
+        let _: () = msg_send![&*app, setWindowsMenu: &*menu];
+    }
+}
+
 /// The tab `step` places from `current` in tab bar `order`, wrapping around.
 pub fn step_in(order: &[usize], current: usize, step: isize) -> Option<usize> {
     let at = order.iter().position(|&tab| tab == current)? as isize;
@@ -141,6 +191,18 @@ pub fn neighbor_in(order: &[usize], closing: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_menu_keys_leave_bound_chords_alone() {
+        use crate::config::{Chord, default_bindings_for};
+        let macos = default_bindings_for(true);
+        for (title, _, key) in WINDOW_MENU.into_iter().flatten() {
+            if !key.is_empty() {
+                let chord = Chord::parse(&format!("super+{key}")).unwrap();
+                assert!(!macos.contains_key(&chord), "{title} takes a bound chord");
+            }
+        }
+    }
 
     #[test]
     fn stepping_follows_the_tab_bar_order_and_wraps() {
