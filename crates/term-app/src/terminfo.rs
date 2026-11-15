@@ -2,24 +2,46 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub const NAME: &str = "xterm-terminal";
 pub const FALLBACK: &str = "xterm-256color";
 pub const SOURCE: &str = include_str!("../terminfo/xterm-terminal.terminfo");
 
-/// The TERM value for a child with `env` applied: our entry when the
-/// system ncurses resolves it in that environment, else xterm-256color.
-pub fn term(env: &BTreeMap<String, String>) -> &'static str {
-    let found = Command::new("infocmp")
-        .arg(NAME)
+/// The TERM value for a child with `env` applied: `wanted` (the config's
+/// `term`) when the system ncurses resolves it in that environment, else
+/// xterm-256color. The default skips the lookup.
+pub fn term<'a>(wanted: &'a str, env: &BTreeMap<String, String>) -> &'a str {
+    if wanted != FALLBACK && resolves(&tool("infocmp"), wanted, env) {
+        wanted
+    } else {
+        FALLBACK
+    }
+}
+
+fn resolves(infocmp: &Path, name: &str, env: &BTreeMap<String, String>) -> bool {
+    Command::new(infocmp)
+        .arg(name)
         .envs(env)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|s| s.success());
-    if found { NAME } else { FALLBACK }
+        .is_ok_and(|s| s.success())
+}
+
+/// An ncurses program from /usr/bin when it is there, else from PATH. On
+/// macOS, Homebrew's ncurses 6.6 writes entries that Apple's ncurses 6.0
+/// (used by /usr/bin tools) cannot read; entries the system tic writes are
+/// readable by both.
+fn tool(name: &str) -> PathBuf {
+    let system = Path::new("/usr/bin").join(name);
+    if system.is_file() {
+        system
+    } else {
+        PathBuf::from(name)
+    }
 }
 
 /// Compiles the bundled entry with `tic -x`, which writes to $TERMINFO,
@@ -27,7 +49,10 @@ pub fn term(env: &BTreeMap<String, String>) -> &'static str {
 pub fn install() -> i32 {
     match tic(&[]) {
         Ok(()) => {
-            println!("terminal: installed the {NAME} terminfo entry; new shells get TERM={NAME}");
+            println!(
+                "terminal: installed the {NAME} terminfo entry; set term = \"{NAME}\" in the \
+                 config to use it (ssh hosts need the entry too, see the README)"
+            );
             0
         }
         Err(e) => {
@@ -39,7 +64,7 @@ pub fn install() -> i32 {
 
 /// Feeds the source to tic on stdin, so no temporary file is involved.
 fn tic(args: &[&std::ffi::OsStr]) -> Result<(), String> {
-    let mut child = Command::new("tic")
+    let mut child = Command::new(tool("tic"))
         .arg("-x")
         .args(args)
         .arg("/dev/stdin")
@@ -68,7 +93,7 @@ mod tests {
     }
 
     fn has_ncurses() -> bool {
-        let found = Command::new("tic").arg("-V").output().is_ok();
+        let found = Command::new(tool("tic")).arg("-V").output().is_ok();
         if !found {
             eprintln!("tic not found; skipping");
         }
@@ -77,8 +102,10 @@ mod tests {
 
     #[test]
     fn falls_back_without_infocmp() {
-        let env = BTreeMap::from([("PATH".to_string(), String::new())]);
-        assert_eq!(term(&env), FALLBACK);
+        let env = BTreeMap::new();
+        assert!(!resolves(Path::new("/nonexistent/infocmp"), NAME, &env));
+        assert_eq!(term(FALLBACK, &env), FALLBACK);
+        assert_eq!(term("no-such-terminal-entry", &env), FALLBACK);
     }
 
     /// Compiles the entry with the system tic, checks that TERM follows
@@ -98,21 +125,25 @@ mod tests {
                 ("HOME".to_string(), empty.display().to_string()),
             ])
         };
-        if term(&only(&empty)) == FALLBACK {
+        if term(NAME, &only(&empty)) == FALLBACK {
             tic(&["-o".as_ref(), dir.as_os_str()]).unwrap();
-            assert_eq!(term(&only(&dir)), NAME);
-            assert_eq!(term(&only(&empty)), FALLBACK);
+            assert_eq!(term(NAME, &only(&dir)), NAME);
+            assert_eq!(term(NAME, &only(&empty)), FALLBACK);
+            assert_eq!(term(FALLBACK, &only(&dir)), FALLBACK);
         } else {
             eprintln!("{NAME} is installed system-wide; checking the bundled source only");
             tic(&["-o".as_ref(), dir.as_os_str()]).unwrap();
         }
-        let infocmp = Command::new("infocmp")
+        let infocmp = Command::new(tool("infocmp"))
             .args(["-x", "-1", "-q", NAME])
             .env("TERMINFO", &dir)
             .output()
             .unwrap();
         assert!(infocmp.status.success());
-        let caps = String::from_utf8(infocmp.stdout).unwrap();
+        // ncurses 6.0 (Apple's) escapes ':' in strings; later versions don't.
+        let caps = String::from_utf8(infocmp.stdout)
+            .unwrap()
+            .replace("\\:", ":");
         let caps: Vec<&str> = caps
             .lines()
             .map(|l| l.trim().trim_end_matches(','))
@@ -130,10 +161,12 @@ mod tests {
             "Sync=\\E[?2026%?%p1%{1}%-%tl%eh%;",
             "tsl=\\E]2;",
             "fsl=^G",
-            "smcup=\\E[?1049h\\E[22;0;0t",
-            "kmous=\\E[<",
         ] {
             assert!(caps.contains(&cap), "missing {cap}");
+        }
+        // Inherited from the system's xterm-256color, which varies by version.
+        for cap in ["smcup=\\E[?1049h", "kmous=\\E[", "colors#"] {
+            assert!(caps.iter().any(|c| c.starts_with(cap)), "missing {cap}");
         }
         for cap in ["blink=", "flash=", "initc=", "Ms=", "Cs=", "smglr=", "mc5="] {
             assert!(!caps.iter().any(|c| c.starts_with(cap)), "unexpected {cap}");

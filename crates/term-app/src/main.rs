@@ -937,9 +937,14 @@ impl App {
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let proxy = self.proxy.clone();
         let command_proxy = self.proxy.clone();
+        let mut env = self.config.env.clone();
+        if !env.contains_key("TERM") {
+            let term = terminfo::term(&self.config.term, &self.config.env);
+            env.insert("TERM".into(), term.into());
+        }
         let mut pty = Pty::spawn(
             self.options.command(&self.config),
-            &self.config.env,
+            &env,
             spawn_cols,
             spawn_rows,
             spawn_cell,
@@ -1556,8 +1561,11 @@ impl App {
             } else {
                 None
             };
-            if next.shell != self.config.shell || next.env != self.config.env {
-                diag!("terminal: shell/env changes apply on the next launch");
+            if next.shell != self.config.shell
+                || next.term != self.config.term
+                || next.env != self.config.env
+            {
+                diag!("terminal: shell/term/env changes apply on the next launch");
             }
             let next_vsync_off = !next.vsync && self.config.vsync;
             self.config = next;
