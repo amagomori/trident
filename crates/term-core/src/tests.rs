@@ -2562,6 +2562,22 @@ fn rerun_compares_combining_marks_and_skips_wrapped_commands() {
 }
 
 #[test]
+fn reset_keeps_compare_settings() {
+    let mut t = Terminal::new(40, 20);
+    t.set_compare_runs(false);
+    t.advance(b"\x1bc");
+    assert!(!t.compare_runs());
+    let builds = crate::Ignore::new(&[r"#\d+"]).unwrap();
+    t.set_compare_runs(true);
+    t.set_compare_ignore(&builds);
+    t.advance(b"\x1bc");
+    t.advance(run("make", &["build #1"]).as_bytes());
+    t.advance(run("make", &["build #2"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert!(marked_rows(&t).is_empty());
+}
+
+#[test]
 fn new_ignore_patterns_forget_stored_runs_but_keep_marks() {
     let mut t = Terminal::new(40, 20);
     t.advance(run("make", &["build #1", "ok"]).as_bytes());
