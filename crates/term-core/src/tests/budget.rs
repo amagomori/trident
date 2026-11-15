@@ -457,3 +457,43 @@ fn reflow_keeps_a_scrolled_back_view_on_its_line() {
         format!("line 10 {}", "x".repeat(30))
     );
 }
+
+fn narrowing_overflows_the_budget(view: &str) -> Terminal {
+    let mut t = Terminal::new(40, 5);
+    t.set_scrollback_limit(100);
+    t.set_command_budget(true, 0.8);
+    for name in ["alpha", "beta", "gamma"] {
+        t.advance(command(name, 3).as_bytes());
+    }
+    let mut running = format!("{PROMPT}make\r\n\x1b]133;C\x07");
+    for i in 0..60 {
+        running.push_str(&format!("make {i:02} {}\r\n", "y".repeat(30)));
+    }
+    t.advance(running.as_bytes());
+    let line = line_of(&t, view);
+    t.scroll_to_line(line);
+    t.resize(20, 5);
+    t
+}
+
+#[test]
+fn reflow_trimming_the_budget_keeps_a_view_on_the_oldest_line() {
+    let t = narrowing_overflows_the_budget("$ alpha");
+    assert_eq!(t.viewport_row(0).text().trim_end(), "$ alpha");
+    let lines = lines(&t);
+    assert_eq!(lines[0], "$ alpha", "{lines:?}");
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with('\u{2026}')).count(),
+        1
+    );
+}
+
+#[test]
+fn reflow_trimming_the_budget_moves_a_view_in_the_cut_to_the_placeholder() {
+    let t = narrowing_overflows_the_budget(&format!("make 15 {}", "y".repeat(30)));
+    assert!(
+        t.viewport_row(0).text().starts_with('\u{2026}'),
+        "{:?}",
+        t.viewport_row(0).text()
+    );
+}

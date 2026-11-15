@@ -105,7 +105,13 @@ impl Terminal {
         let mut trimmed = false;
         while self.primary.scrollback.len() > self.max_scrollback {
             trimmed = true;
-            if self.budget_armed() && self.evict_from_command().is_some() {
+            // trim_command reads display_offset as push_history leaves it mid-push, one row
+            // past the viewport's top line.
+            let viewing = self.display_offset > 0;
+            self.display_offset -= viewing as usize;
+            let evicted = self.budget_armed() && self.evict_from_command().is_some();
+            self.display_offset += viewing as usize;
+            if evicted {
                 continue;
             }
             self.primary.scrollback.pop_front();
