@@ -4,7 +4,10 @@ cursor attributes: fg=index(1) bg=default-bg flags=[bold]
 scroll_region=0..=1 history=0 display_offset=0
 primary:
   row 0 wrap=false text="abcd    "
-    cells 0..4: fg=index(1) bg=default-bg flags=[bold]
+    cells 0..1: fg=index(1) bg=default-bg flags=[bold] underline-color=rgb(1,2,3)
+    cells 1..2: fg=index(1) bg=default-bg flags=[bold] underline-color=rgb(0,0,0)
+    cells 2..3: fg=index(1) bg=default-bg flags=[bold] underline-color=index(4)
+    cells 3..4: fg=index(1) bg=default-bg flags=[bold]
     cells 4..8: fg=default-fg bg=default-bg flags=[]
   row 1 wrap=false text="        "
     cells 0..8: fg=default-fg bg=default-bg flags=[]

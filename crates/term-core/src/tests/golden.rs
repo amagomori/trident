@@ -970,7 +970,7 @@ fn cases() -> Vec<Case> {
             b"\x1b[4:1ma\x1b[4:2mb\x1b[4:3mc\x1b[4:4md\x1b[4:5me\x1b[4:0mf",
         ),
         (
-            "sgr_underline_color_ignored",
+            "sgr_underline_color_forms",
             8,
             2,
             b"\x1b[1;31m\x1b[58:2::1:2:3ma\x1b[58;2;0;0;0mb\x1b[58;5;4mc\x1b[59md",
