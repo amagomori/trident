@@ -253,6 +253,18 @@ class Packages(Base):
         self.assertIn("bb" * 32, made[1].read_text())
         self.assertIn("bb" * 32, made[2].read_text())
 
+    def test_packages_for_one_platform(self):
+        sums = self.tmp / "SHA256SUMS"
+        lines = sums.read_text().splitlines()
+        for keep, expect in [("macos", ["trident.rb"]), ("linux", ["aur/PKGBUILD", "aur/.SRCINFO"])]:
+            sums.write_text("\n".join(l for l in lines if keep in l) + "\n")
+            out = self.tmp / f"out-{keep}"
+            made = release.packages("1.2.3", sums, out)
+            self.assertEqual([p.relative_to(out).as_posix() for p in made], expect)
+        sums.write_text("cc  other.zip\n")
+        with self.assertRaises(release.ReleaseError):
+            release.packages("1.2.3", sums, self.tmp / "out-none")
+
     def test_base_url_and_missing_asset(self):
         text = release.srcinfo("1.2.3", "bb", base="file:///srv")
         self.assertIn("::file:///srv/Trident-1.2.3-linux-x86_64.tar.gz", text)

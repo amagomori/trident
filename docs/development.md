@@ -45,7 +45,9 @@ python3 .github/scripts/release/release.py packages --version 0.1.0 --sums dist/
 python3 -m unittest discover -s .github/scripts/release
 ```
 
-The .deb needs `dpkg-deb` and `tic`; the .dmg needs macOS. `release.yml` pins appimagetool and its
+The .deb needs `dpkg-deb` and `tic`; the .dmg needs macOS. `packages` writes the cask when
+`SHA256SUMS` lists the .dmg and the AUR files when it lists the tarball, so a dist from either
+platform works. `release.yml` pins appimagetool and its
 runtime by SHA-256.
 
 ### Homebrew and the AUR

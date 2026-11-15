@@ -398,6 +398,7 @@ makedepends=('ncurses')
 optdepends=({words(AUR_OPTDEPENDS)})
 provides=('{PACKAGE}')
 conflicts=('{PACKAGE}')
+options=('!debug')
 source=("{name}::{url}")
 sha256sums=('{sha256}')
 
@@ -420,7 +421,8 @@ def srcinfo(version, sha256, base=None):
               ("license", "OFL-1.1")]
     fields += [("makedepends", "ncurses")] + [("depends", d) for d in AUR_DEPENDS]
     fields += [("optdepends", d) for d in AUR_OPTDEPENDS]
-    fields += [("provides", PACKAGE), ("conflicts", PACKAGE), ("source", f"{name}::{url}"),
+    fields += [("provides", PACKAGE), ("conflicts", PACKAGE), ("options", "!debug"),
+               ("source", f"{name}::{url}"),
                ("sha256sums", sha256)]
     lines = [f"pkgbase = {AUR_PACKAGE}"] + [f"\t{k} = {v}" for k, v in fields]
     return "\n".join(lines + ["", f"pkgname = {AUR_PACKAGE}", ""])
@@ -436,14 +438,25 @@ def is_newest(version, tags):
 
 
 def packages(version, sums, out, base=None):
-    """Writes the cask and AUR files for a release whose SHA256SUMS is sums."""
+    """Writes the cask and AUR files for the release artifacts listed in SHA256SUMS.
+
+    Each is skipped when its artifact is missing, e.g. a dist built on one platform.
+    """
     out = Path(out)
-    (out / "aur").mkdir(parents=True, exist_ok=True)
-    made = [out / f"{PACKAGE}.rb", out / "aur/PKGBUILD", out / "aur/.SRCINFO"]
-    made[0].write_text(cask(version, sha256_of(sums, dmg_name(version)), base))
-    tar_sha = sha256_of(sums, tarball_name(version))
-    made[1].write_text(pkgbuild(version, tar_sha, base))
-    made[2].write_text(srcinfo(version, tar_sha, base))
+    listed = {line.partition("  ")[2] for line in Path(sums).read_text().splitlines()}
+    made = []
+    if dmg_name(version) in listed:
+        made.append(out / f"{PACKAGE}.rb")
+        out.mkdir(parents=True, exist_ok=True)
+        made[-1].write_text(cask(version, sha256_of(sums, dmg_name(version)), base))
+    if tarball_name(version) in listed:
+        tar_sha = sha256_of(sums, tarball_name(version))
+        (out / "aur").mkdir(parents=True, exist_ok=True)
+        made += [out / "aur/PKGBUILD", out / "aur/.SRCINFO"]
+        made[-2].write_text(pkgbuild(version, tar_sha, base))
+        made[-1].write_text(srcinfo(version, tar_sha, base))
+    if not made:
+        raise ReleaseError(f"{sums} lists neither {dmg_name(version)} nor {tarball_name(version)}")
     return made
 
 
