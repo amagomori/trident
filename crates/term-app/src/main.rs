@@ -1193,7 +1193,11 @@ impl App {
         for notification in s.term.take_notifications() {
             if self.config.desktop_notifications
                 && osc_notify::wanted(notification.occasion, self.focused, || {
-                    !self.occluded && s.window.is_minimized() != Some(true)
+                    if self.occluded {
+                        Some(false)
+                    } else {
+                        s.window.is_minimized().map(|minimized| !minimized)
+                    }
                 })
                 && self.notification_throttle.allow(Instant::now())
             {

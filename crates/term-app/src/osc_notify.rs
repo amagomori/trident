@@ -32,11 +32,12 @@ impl Throttle {
 }
 
 /// Whether the notification's occasion (OSC 99 `o`) holds for the window right now.
-pub fn wanted(occasion: Occasion, focused: bool, visible: impl FnOnce() -> bool) -> bool {
+/// Where visibility is unknown (`None`, as on Wayland), `invisible` falls back to unfocused.
+pub fn wanted(occasion: Occasion, focused: bool, visible: impl FnOnce() -> Option<bool>) -> bool {
     match occasion {
         Occasion::Always => true,
         Occasion::Unfocused => !focused,
-        Occasion::Invisible => !focused && !visible(),
+        Occasion::Invisible => !focused && visible() != Some(true),
     }
 }
 
@@ -75,18 +76,20 @@ mod tests {
     #[test]
     fn occasions() {
         for (occasion, focused, visible, expected) in [
-            (Occasion::Always, true, true, true),
-            (Occasion::Always, false, false, true),
-            (Occasion::Unfocused, true, true, false),
-            (Occasion::Unfocused, false, true, true),
-            (Occasion::Invisible, false, true, false),
-            (Occasion::Invisible, false, false, true),
-            (Occasion::Invisible, true, false, false),
+            (Occasion::Always, true, Some(true), true),
+            (Occasion::Always, false, Some(false), true),
+            (Occasion::Unfocused, true, Some(true), false),
+            (Occasion::Unfocused, false, Some(true), true),
+            (Occasion::Invisible, false, Some(true), false),
+            (Occasion::Invisible, false, Some(false), true),
+            (Occasion::Invisible, true, Some(false), false),
+            (Occasion::Invisible, false, None, true),
+            (Occasion::Invisible, true, None, false),
         ] {
             assert_eq!(
                 wanted(occasion, focused, || visible),
                 expected,
-                "{occasion:?} {focused} {visible}"
+                "{occasion:?} {focused} {visible:?}"
             );
         }
     }
