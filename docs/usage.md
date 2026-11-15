@@ -102,8 +102,9 @@ lines. It ignores case unless the query has an uppercase letter.
 With shell integration, a click without a drag in the command line you're editing moves the
 shell's cursor there by sending Left/Right arrow keys, as in Ghostty and kitty. Only the
 soft-wrapped line holding the cursor counts, and a click past the end of the text moves to its
-end. A prompt that marks itself `OSC 133 ; A ; click_events=1` gets the click as an SGR mouse
-report instead.
+end. Greyed autosuggestion text (zsh-autosuggestions, fish) past the input isn't part of it, so a
+click there leaves the suggestion unaccepted. A prompt that marks itself
+`OSC 133 ; A ; click_events=1` gets the click as an SGR mouse report instead.
 
 ## Paste
 

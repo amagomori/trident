@@ -365,7 +365,8 @@ impl Terminal {
 
     /// How a click at `point` moves the cursor in the command line being edited (OSC 133
     /// `B` seen, no `C` yet), as in Ghostty and kitty. Only the soft-wrapped line holding
-    /// the cursor counts; a click past the end of the text moves to its end.
+    /// the cursor counts; a click past the end of the text moves to its end, before any
+    /// greyed autosuggestion.
     pub fn prompt_click(&self, point: Point) -> Option<PromptClick> {
         if self.alt_active || !matches!(self.shell.zone, Zone::Prompt | Zone::Input) {
             return None;
@@ -405,6 +406,8 @@ impl Terminal {
         // are not characters the line editor moves over.
         let skip = Flags::WIDE_SPACER.union(Flags::WIDE_WRAP);
         let mut text_end = 0;
+        // Where a trailing run of suggestion-styled text starts, and its style.
+        let mut faint_run: Option<(usize, (Color, bool))> = None;
         let mut count = 0;
         let mut click = None;
         let mut cursor = None;
@@ -421,16 +424,24 @@ impl Terminal {
                 }
                 let Some(cell) = cells.get(c) else { break };
                 if !cell.flags.intersects(skip) {
-                    count += 1;
                     if cell.c != ' ' {
-                        text_end = count;
+                        let style = (cell.fg, cell.flags.contains(Flags::DIM));
+                        faint_run = match faint_run {
+                            Some(run) if run.1 == style => Some(run),
+                            _ => suggestion_style(cell).then_some((count, style)),
+                        };
+                        text_end = count + 1;
                     }
+                    count += 1;
                 }
             }
         }
-        let cursor = cursor? as isize;
-        let target = click?.min(text_end.max(cursor as usize)) as isize;
-        Some(PromptClick::Move(target - cursor))
+        let cursor = cursor?;
+        // An autosuggestion (zsh-autosuggestions, fish) is drawn greyed past the end of
+        // the real input, and Right at that end accepts it, so stop where it starts.
+        let input_end = faint_run.map_or(text_end, |(start, _)| start);
+        let target = click?.min(input_end.max(cursor));
+        Some(PromptClick::Move(target as isize - cursor as isize))
     }
 
     /// The last row of the soft-wrapped line starting at or running through `line`.
@@ -2210,3 +2221,23 @@ fn dec_special(c: char) -> char {
 
 #[cfg(test)]
 mod tests;
+
+/// Whether a cell looks like shell autosuggestion text: faint, or a grey foreground
+/// (zsh-autosuggestions draws `fg=8`, fish `555`/`brblack`).
+fn suggestion_style(cell: &Cell) -> bool {
+    let grey =
+        |r: u8, g: u8, b: u8| r.max(g).max(b) - r.min(g).min(b) <= 16 && r.max(g).max(b) < 0xe0;
+    cell.flags.contains(Flags::DIM)
+        || match cell.fg {
+            Color::DefaultFg | Color::DefaultBg => false,
+            Color::Indexed(i) => match i {
+                0 | 8 | 232..=255 => true,
+                16..=231 => {
+                    let i = i - 16;
+                    i / 36 == i / 6 % 6 && i / 6 % 6 == i % 6 && i != 215
+                }
+                _ => false,
+            },
+            Color::Rgb(r, g, b) => grey(r, g, b),
+        }
+}

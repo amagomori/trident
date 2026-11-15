@@ -2788,6 +2788,44 @@ fn prompt_click_counts_wide_characters_once_and_follows_soft_wraps() {
 }
 
 #[test]
+fn prompt_click_stops_before_a_greyed_autosuggestion() {
+    // zsh-autosuggestions: typed `echo hel`, suggestion `lo world` in fg=8, cursor
+    // moved back to the end of the typed text.
+    let zsh = "\x1b]133;A\x07% \x1b]133;B\x07echo hel\x1b[90mlo world\x1b[39m\x1b[8D";
+    let t = term(30, 4, zsh);
+    assert_eq!(click(&t, 0, 25), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 0, 14), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 0, 4), Some(PromptClick::Move(-6)));
+    // fish: syntax-coloured input, suggestion in 256-colour or truecolor grey.
+    for grey in ["38;5;240", "38;2;85;85;85", "2"] {
+        let fish = format!(
+            "\x1b]133;A\x07> \x1b]133;B\x07\x1b[38;5;26mecho\x1b[m \x1b[38;5;39mhel\
+             \x1b[{grey}mlo world\x1b[m\x1b[8D"
+        );
+        let t = term(30, 4, &fish);
+        assert_eq!(click(&t, 0, 25), Some(PromptClick::Move(0)), "{grey}");
+        assert_eq!(click(&t, 0, 12), Some(PromptClick::Move(0)), "{grey}");
+    }
+    // With the cursor moved left, clicks still reach the end of the real input only.
+    let mut t = term(30, 4, zsh);
+    t.advance(b"\x1b[3D");
+    assert_eq!(click(&t, 0, 25), Some(PromptClick::Move(3)));
+    // Coloured text that is not grey, or grey text before more input, is typed input.
+    let t = term(
+        30,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07echo \x1b[33m'hi'\x1b[m\x1b[4D",
+    );
+    assert_eq!(click(&t, 0, 20), Some(PromptClick::Move(4)));
+    let t = term(
+        30,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[90m#x\x1b[m ab\x1b[4D",
+    );
+    assert_eq!(click(&t, 0, 20), Some(PromptClick::Move(4)));
+}
+
+#[test]
 fn prompt_click_needs_an_input_zone_on_the_primary_screen() {
     assert_eq!(click(&term(20, 4, "$ echo hi"), 0, 2), None);
     assert_eq!(click(&term(20, 4, "\x1b]133;A\x07$ "), 0, 1), None);
