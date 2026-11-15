@@ -295,7 +295,56 @@ fn shell_output_snapshot_lifetime() {
 }
 
 #[test]
-fn shell_output_start_is_clamped_on_resize() {
+fn shell_marks_follow_reflow() {
+    let rows = |t: &Terminal| -> Vec<_> {
+        t.primary
+            .scrollback
+            .iter()
+            .chain(&t.primary.lines)
+            .map(|r| (r.text(), r.flags, r.prompt_col, r.output_col))
+            .collect()
+    };
+    let mut t = Terminal::new(20, 6);
+    t.advance(
+        b"\x1b]133;A\x07$ \x1b]133;B\x07echo 0123456789abcdef\x1b]133;C\x07\r\n\
+          out-line-that-wraps-once\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07",
+    );
+    let original = rows(&t);
+    t.resize(8, 6);
+    let first = t.first_line();
+    let prompt: Vec<_> = (first..first + 3).map(|l| t.line(l).flags).collect();
+    assert!(prompt.iter().all(|f| f.contains(RowFlags::PROMPT)));
+    assert!(prompt[0].contains(RowFlags::PROMPT_START) && prompt[0].contains(RowFlags::SUCCEEDED));
+    assert!(!prompt[1].contains(RowFlags::PROMPT_START));
+    assert!(!t.line(first + 3).flags.contains(RowFlags::PROMPT));
+    let command = &t.shell.commands[0];
+    assert_eq!(
+        (command.prompt_line, command.input_line, command.input_col),
+        (first, first, 2)
+    );
+    let next = command.next_prompt.unwrap();
+    assert!(t.line(next).flags.contains(RowFlags::PROMPT_START));
+    assert_eq!(t.line(next).text(), "$");
+    assert_eq!(t.cursor_position(), Some((t.rows() - 1, 2)));
+    t.select_command_output();
+    assert_eq!(
+        t.selection_text().as_deref(),
+        Some("out-line-that-wraps-once")
+    );
+    t.jump_to_prompt(true);
+    assert_eq!(t.display_offset() as u64, t.history - first);
+
+    t.resize(20, 6);
+    assert_eq!(rows(&t), original);
+    t.select_command_output();
+    assert_eq!(
+        t.selection_text().as_deref(),
+        Some("out-line-that-wraps-once")
+    );
+}
+
+#[test]
+fn shell_output_start_follows_reflow() {
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ run\x1b]133;B\x07\x1b]133;C\x07result\x1b]133;D;0\x07");
     t.select_command_output();
@@ -303,16 +352,15 @@ fn shell_output_start_is_clamped_on_resize() {
     t.resize(4, 5);
     t.select_command_output();
     let (start, _) = t.selection_range().unwrap();
-    assert_eq!(start.col, 0);
-    assert_eq!(start.line, t.first_line());
-    assert_eq!(t.selection_text().as_deref(), Some("$ ru"));
+    assert_eq!(start, Point { line: 1, col: 1 });
+    assert_eq!(t.selection_text().as_deref(), Some("result"));
 
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ run\x1b]133;C\x07result\x1b]133;D;0\x07");
     t.resize(8, 3);
     t.select_command_output();
     assert_eq!(t.selection_range().unwrap().0, Point { line: 0, col: 5 });
-    assert_eq!(t.selection_text().as_deref(), Some("res"));
+    assert_eq!(t.selection_text().as_deref(), Some("result"));
 }
 
 #[test]
@@ -783,6 +831,32 @@ fn cases() -> Vec<Case> {
         ("erase_display_all", 4, 2, b"abcd\r\nef\x1b[2J"),
         ("sgr_basic_reset", 6, 2, b"\x1b[1;31;44mA\x1b[0mB"),
         (
+            "sgr_underline_styles",
+            12,
+            2,
+            b"\x1b[4mA\x1b[4:2mB\x1b[4:3mC\x1b[4:4mD\x1b[4:5mE\x1b[21mF\x1b[4:0mG\x1b[4:1mH\x1b[24mI",
+        ),
+        (
+            "sgr_underline_grapheme",
+            8,
+            2,
+            "\x1b[4:3;58:5:1me\u{301}\x1b[4:2m\u{1f469}\u{200d}\u{1f4bb}\x1b[21ma\u{323}\x1b[24mx".as_bytes(),
+        ),
+        (
+            "sgr_underline_color",
+            12,
+            2,
+            b"\x1b[4:3;58:2::255:0:0mA\x1b[58;5;4mB\x1b]8;;https://e\x07C\x1b[59mD\x1b]8;;\x07E\x1b[58:5:2mF\x1b[0mG",
+        ),
+        (
+            "cursor_style_blink",
+            6,
+            2,
+            b"\x1b[5 q",
+        ),
+        ("cursor_style_steady", 6, 2, b"\x1b[5 q\x1b[?12l\x1b[2 q"),
+        ("cursor_style_mode_12", 6, 2, b"\x1b[4 q\x1b[?12h"),
+        (
             "insert_delete_characters",
             6,
             2,
@@ -931,6 +1005,24 @@ fn cases() -> Vec<Case> {
             b"1\r\n2\r\n3\r\n4\x1b[2;1H\x1b[L\x1b[M",
         ),
         ("unsupported_sequences", 6, 2, b"a\x1b[999z\x1b[9999mb"),
+        (
+            "terminfo_truecolor",
+            6,
+            2,
+            b"\x1b[38;2;1;2;3m\x1b[48;2;4;5;6mab\x1b[39;49mc",
+        ),
+        (
+            "terminfo_styled_underlines",
+            8,
+            2,
+            b"\x1b[4:1ma\x1b[4:2mb\x1b[4:3mc\x1b[4:4md\x1b[4:5me\x1b[4:0mf",
+        ),
+        (
+            "sgr_underline_color_forms",
+            8,
+            2,
+            b"\x1b[1;31m\x1b[58:2::1:2:3ma\x1b[58;2;0;0;0mb\x1b[58;5;4mc\x1b[59md",
+        ),
         ("invalid_utf8", 6, 2, b"a\xffb\r\nZ"),
     ];
     let mut cases: Vec<_> = inputs
@@ -950,6 +1042,36 @@ fn cases() -> Vec<Case> {
         input: b"one\r\ntwo\r\nthree",
         resize: Some((6, 2)),
     });
+    type Reflow = (&'static str, usize, usize, &'static [u8], (usize, usize));
+    let reflows: &[Reflow] = &[
+        ("reflow_narrow", 8, 3, b"0123456789\r\n$ ", (4, 3)),
+        ("reflow_widen", 4, 4, b"0123456789\r\n$ ", (8, 4)),
+        ("reflow_pending_wrap", 8, 2, b"abcdefgh", (4, 2)),
+        ("reflow_wide_char", 5, 3, "ab\u{754c}cd".as_bytes(), (3, 3)),
+        (
+            "reflow_styled",
+            6,
+            3,
+            b"\x1b[1;31mabc\x1b[42mdefgh\x1b[m!",
+            (4, 3),
+        ),
+        (
+            "reflow_alternate",
+            8,
+            3,
+            b"0123456789\x1b[?1049hfullscreen app",
+            (4, 3),
+        ),
+    ];
+    for &(name, cols, rows, input, resize) in reflows {
+        cases.push(Case {
+            name,
+            cols,
+            rows,
+            input,
+            resize: Some(resize),
+        });
+    }
     cases
 }
 
@@ -962,7 +1084,7 @@ fn color(color: Color) -> String {
     }
 }
 
-fn attributes(cell: &Cell) -> String {
+fn attributes(t: &Terminal, cell: &Cell) -> String {
     let flags: Vec<_> = [
         (Flags::BOLD, "bold"),
         (Flags::DIM, "dim"),
@@ -978,14 +1100,27 @@ fn attributes(cell: &Cell) -> String {
         (Flags::GRAPHEME, "grapheme"),
     ]
     .into_iter()
-    .filter_map(|(flag, name)| cell.flags.contains(flag).then_some(name))
+    .filter_map(|(flag, name)| match (flag, cell.flags.underline()) {
+        (Flags::UNDERLINE, Some(style)) => Some(match style {
+            UnderlineStyle::Single => "underline",
+            UnderlineStyle::Double => "underline-double",
+            UnderlineStyle::Curly => "underline-curly",
+            UnderlineStyle::Dotted => "underline-dotted",
+            UnderlineStyle::Dashed => "underline-dashed",
+        }),
+        _ => cell.flags.contains(flag).then_some(name),
+    })
     .collect();
-    format!(
+    let mut out = format!(
         "fg={} bg={} flags=[{}]",
         color(cell.fg),
         color(cell.bg),
         flags.join(",")
-    )
+    );
+    if let Some(c) = t.underline_color(cell) {
+        write!(out, " underline-color={}", color(c)).unwrap();
+    }
+    out
 }
 
 fn rows<'a>(out: &mut String, t: &Terminal, label: &str, rows: impl IntoIterator<Item = &'a Row>) {
@@ -998,9 +1133,9 @@ fn rows<'a>(out: &mut String, t: &Terminal, label: &str, rows: impl IntoIterator
         writeln!(out, "  row {index} wrap={} text={text:?}", row.wrapped()).unwrap();
         let mut start = 0;
         while start < row.cells.len() {
-            let attr = attributes(&row.cells[start]);
+            let attr = attributes(t, &row.cells[start]);
             let mut end = start + 1;
-            while end < row.cells.len() && attributes(&row.cells[end]) == attr {
+            while end < row.cells.len() && attributes(t, &row.cells[end]) == attr {
                 end += 1;
             }
             writeln!(out, "    cells {start}..{end}: {attr}").unwrap();
@@ -1019,13 +1154,21 @@ fn snapshot(t: &Terminal) -> String {
         t.cursor.col,
         t.modes.show_cursor,
         match t.cursor_shape {
+            CursorShape::Block if t.cursor_blink => "blinking-block",
             CursorShape::Block => "block",
+            CursorShape::Underline if t.cursor_blink => "blinking-underline",
             CursorShape::Underline => "underline",
+            CursorShape::Bar if t.cursor_blink => "blinking-bar",
             CursorShape::Bar => "bar",
         },
         t.cursor.pending_wrap,
     );
-    writeln!(out, "cursor attributes: {}", attributes(&t.cursor.template)).unwrap();
+    writeln!(
+        out,
+        "cursor attributes: {}",
+        attributes(t, &t.cursor.template)
+    )
+    .unwrap();
     writeln!(
         out,
         "scroll_region={}..={} history={} display_offset={}",
@@ -1103,6 +1246,65 @@ fn golden_keypad_modes() {
             expected == actual,
             "{}",
             difference("keypad_modes", &expected, &actual)
+        );
+    }
+}
+
+/// Runs each string the terminfo entry adds that changes modes or the title.
+#[test]
+fn golden_terminfo_modes() {
+    let source = include_str!("../../../term-app/terminfo/xterm-terminal.terminfo");
+    let steps: &[(&str, &str, &[u8])] = &[
+        ("BE", "BE=\\E[?2004h", b"\x1b[?2004h"),
+        ("BD", "BD=\\E[?2004l", b"\x1b[?2004l"),
+        (
+            "Sync 1",
+            "Sync=\\E[?2026%?%p1%{1}%-%tl%eh%;",
+            b"\x1b[?2026h",
+        ),
+        ("Sync 0", "Sync=", b"\x1b[?2026l"),
+        ("tsl fsl", "tsl=\\E]2;", b"\x1b]2;vim\x07"),
+        ("dsl", "dsl=\\E]2;\\007", b"\x1b]2;\x07"),
+    ];
+    let run = |bytewise: bool| {
+        let mut term = Terminal::new(5, 2);
+        let mut out = String::new();
+        for &(label, cap, bytes) in steps {
+            assert!(source.contains(cap), "terminfo entry lacks {cap}");
+            if bytewise {
+                for byte in bytes.chunks(1) {
+                    term.advance(byte);
+                }
+            } else {
+                term.advance(bytes);
+            }
+            let title = term.take_title();
+            writeln!(
+                out,
+                "{label}: bracketed_paste={} synchronized_output={} title={title:?} text={:?}",
+                term.modes.bracketed_paste,
+                term.modes.synchronized_output,
+                term.primary.lines[0]
+                    .cells
+                    .iter()
+                    .map(|c| c.c)
+                    .collect::<String>(),
+            )
+            .unwrap();
+        }
+        out
+    };
+    let actual = run(false);
+    assert_eq!(actual, run(true));
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden/terminfo_modes.snap");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(path, &actual).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(path).unwrap();
+        assert!(
+            expected == actual,
+            "{}",
+            difference("terminfo_modes", &expected, &actual)
         );
     }
 }
@@ -1247,4 +1449,141 @@ fn golden_command_budget() {
             difference("command_budget", &expected, &actual)
         );
     }
+}
+
+#[test]
+fn desktop_notification_sequences() {
+    let n = |title: &str, body: &str| Notification {
+        title: title.into(),
+        body: body.into(),
+        ..Notification::default()
+    };
+    let cases: Vec<(&[u8], Vec<Notification>)> = vec![
+        (b"\x1b]9;Build done\x07", vec![n("", "Build done")]),
+        (b"\x1b]9;a;b\x1b\\", vec![n("", "a;b")]),
+        (b"\x1b]9;\x07", vec![]),
+        (b"\x1b]9;4;1;50\x07\x1b]9;2;box\x07\x1b]9;12\x07", vec![]),
+        (b"\x1b]9;13\x07", vec![n("", "13")]),
+        (
+            b"\x1b]777;notify;Title;Body;more\x07",
+            vec![n("Title", "Body;more")],
+        ),
+        (b"\x1b]777;notify;Title\x07", vec![n("Title", "")]),
+        (b"\x1b]777;other;Title;Body\x07", vec![]),
+        (b"\x1b]99;;Hello\x1b\\", vec![n("Hello", "")]),
+        (
+            b"\x1b]99;i=1:d=0;Hel\x1b\\\x1b]99;i=1:d=0;lo\x1b\\\x1b]99;i=1:p=body;World\x1b\\",
+            vec![n("Hello", "World")],
+        ),
+        (
+            b"\x1b]99;i=a:d=0;A\x07\x1b]99;i=b;B\x07\x1b]99;i=a:p=body;a\x07",
+            vec![n("B", ""), n("A", "a")],
+        ),
+        (b"\x1b]99;e=1;SGk7dGhlcmU=\x1b\\", vec![n("Hi;there", "")]),
+        (b"\x1b]99;e=1;!!\x1b\\", vec![]),
+        (
+            b"\x1b]99;i=s:d=0:e=1;SGk\x1b\\\x1b]99;i=s:p=body;World\x1b\\",
+            vec![n("Hi", "World")],
+        ),
+        (
+            b"\x1b]99;i=s:d=0:e=1;SGk7\x1b\\\x1b]99;i=s:d=0:e=1;dGhl\x1b\\\x1b]99;i=s:e=1;cmU=\x1b\\",
+            vec![n("Hi;there", "")],
+        ),
+        (
+            b"\x1b]99;i=s:d=0:e=1;SG\x1b\\\x1b]99;i=s:d=0:e=1;k7dGh\x1b\\\x1b]99;i=s:e=1;lcmU\x1b\\",
+            vec![n("Hi;there", "")],
+        ),
+        (
+            b"\x1b]99;i=s:d=0:e=1;w6\x1b\\\x1b]99;i=s:e=1;k=\x1b\\\x1b]99;i=t:d=0;\xc3\x1b\\\x1b]99;i=t;\xa9\x1b\\",
+            vec![n("\u{e9}", ""), n("\u{e9}", "")],
+        ),
+        (b"\x1b]99;p=close;x\x07\x1b]99;p=icon;x\x07", vec![]),
+        (b"\x1b]99;;a\x08b\tc\x07", vec![n("abc", "")]),
+        (b"\x1b]9;one\x07\x1bc", vec![n("", "one")]),
+        (
+            b"\x1b]99;i=u:d=0:u=2:o=unfocused;T\x07\x1b]99;i=u;!\x07",
+            vec![Notification {
+                title: "T!".into(),
+                urgency: Urgency::Critical,
+                occasion: Occasion::Unfocused,
+                ..Notification::default()
+            }],
+        ),
+        (
+            b"\x1b]99;u=0:o=invisible;T\x07",
+            vec![Notification {
+                title: "T".into(),
+                urgency: Urgency::Low,
+                occasion: Occasion::Invisible,
+                ..Notification::default()
+            }],
+        ),
+    ];
+    for (input, expected) in cases {
+        let mut t = Terminal::new(20, 3);
+        t.advance(b"x");
+        let before = snapshot(&t);
+        t.advance(input);
+        if input != b"\x1b]9;one\x07\x1bc" {
+            assert_eq!(snapshot(&t), before, "{input:?}");
+        }
+        let mut taken = t.take_notifications();
+        taken.iter_mut().for_each(|n| n.id.clear());
+        assert_eq!(taken, expected, "{input:?}");
+        assert!(t.take_notifications().is_empty());
+        assert!(t.take_responses().is_empty(), "{input:?}");
+    }
+
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]99;i=rep;v1\x07\x1b]99;i=rep:d=0;v\x07\x1b]99;i=rep;2\x07\x1b]9;x\x07");
+    let ids: Vec<_> = t.take_notifications().into_iter().map(|n| n.id).collect();
+    assert_eq!(ids, ["rep", "rep", ""]);
+}
+
+#[test]
+fn desktop_notification_query_and_limits() {
+    let mut t = Terminal::new(20, 3);
+    t.advance(b"\x1b]99;i=q1:p=?;\x1b\\\x1b]99;p=?\x07");
+    assert_eq!(
+        String::from_utf8(t.take_responses()).unwrap(),
+        "\x1b]99;i=q1:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2\x1b\\\
+         \x1b]99;i=:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2\x07"
+    );
+    assert!(t.take_notifications().is_empty());
+
+    for i in 0..40 {
+        t.advance(format!("\x1b]9;{i}x\x07").as_bytes());
+    }
+    let queued = t.take_notifications();
+    assert_eq!(queued.len(), 16);
+    assert_eq!(queued[0].body, "0x");
+    assert_eq!(queued[15].body, "15x");
+
+    t.advance(format!("\x1b]99;;{}\x07", "a".repeat(5000)).as_bytes());
+    assert_eq!(t.take_notifications()[0].title.chars().count(), 1024);
+    for _ in 0..10 {
+        t.advance(format!("\x1b]99;i=big:d=0;{}\x07", "b".repeat(900)).as_bytes());
+    }
+    t.advance(b"\x1b]99;i=big;\x07");
+    assert_eq!(t.take_notifications()[0].title.len(), 1024);
+
+    for i in 0..20 {
+        t.advance(format!("\x1b]99;i=p{i}:d=0;{i}\x07").as_bytes());
+    }
+    t.advance(b"\x1b]99;i=p0;!\x07\x1b]99;i=p19;!\x07");
+    assert_eq!(
+        t.take_notifications(),
+        vec![
+            Notification {
+                id: "p0".into(),
+                title: "!".into(),
+                ..Notification::default()
+            },
+            Notification {
+                id: "p19".into(),
+                title: "19!".into(),
+                ..Notification::default()
+            },
+        ]
+    );
 }

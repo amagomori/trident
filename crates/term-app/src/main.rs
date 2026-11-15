@@ -18,6 +18,7 @@ mod frame_clock;
 mod ime;
 mod input;
 mod latency;
+mod osc_notify;
 mod paste;
 #[cfg(target_os = "macos")]
 mod present_macos;
@@ -26,6 +27,7 @@ mod present_wayland;
 mod pty;
 mod search;
 mod show;
+mod terminfo;
 mod theme;
 
 use config::Action;
@@ -96,6 +98,10 @@ const RESIZE_INTERVAL: Duration = Duration::from_millis(100);
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
 /// SGR 5 blinking text shows for one half period and hides for the next.
 const BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
+/// Half a cursor blink period.
+const CURSOR_BLINK_HALF: Duration = Duration::from_millis(530);
+/// A blinking cursor rests, visible and with no timer, this long after the last input.
+const CURSOR_BLINK_IDLE: Duration = Duration::from_secs(15);
 const EXIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
@@ -184,6 +190,7 @@ fn usage() -> ! {
            --scrollback <LINES> History lines (default: 10000; 0 disables; max: 1000000)\n  \
            --copy-on-select    Copy selected text to the clipboard on mouse release\n  \
            -e, --command ...   Run this command instead of your shell\n  \
+           --install-terminfo  Install the xterm-terminal terminfo entry with tic\n  \
            -h, --help          Show this help\n  \
            -V, --version       Show the version\n\n\
          `terminal show` draws images and prints text files in the terminal it runs in\n\
@@ -268,6 +275,10 @@ struct Session {
     redraw_at: Option<(Instant, Instant)>,
     target: Option<Instant>,
     sequence: usize,
+    /// When the cursor last restarted blinking: input or focus.
+    blink_since: Instant,
+    /// The next cursor blink flip.
+    cursor_blink_at: Option<Instant>,
     #[cfg(target_os = "linux")]
     presentation: Option<present_wayland::Feedback>,
     latency: Option<latency::Latency>,
@@ -523,6 +534,20 @@ fn defer_output(deferring: bool, since_frame: usize, queue_full: bool) -> bool {
 
 fn frame_wakeup(redraw_at: Option<Instant>, deferred: Option<Instant>) -> Option<Instant> {
     redraw_at.or_else(|| deferred.map(|since| since + MAX_DEFER))
+}
+
+/// Whether a cursor blinking since `since` shows at `now`, and when that next changes.
+fn cursor_blink(blinking: bool, since: Instant, now: Instant) -> (bool, Option<Instant>) {
+    let elapsed = now.saturating_duration_since(since);
+    if !blinking || elapsed >= CURSOR_BLINK_IDLE {
+        return (true, None);
+    }
+    let phase = elapsed.as_nanos() / CURSOR_BLINK_HALF.as_nanos();
+    let next = since + CURSOR_BLINK_HALF * (phase as u32 + 1);
+    (
+        phase.is_multiple_of(2),
+        Some(next.min(since + CURSOR_BLINK_IDLE)),
+    )
 }
 
 fn wake_deadline(
@@ -822,6 +847,9 @@ struct App {
     modifiers: ModifiersState,
     held_at_focus: HeldAtFocus,
     focused: bool,
+    /// The window is fully hidden (winit `Occluded`), for OSC 99 `o=invisible`.
+    occluded: bool,
+    notification_throttle: osc_notify::Throttle,
     mouse_pos: PhysicalPosition<f64>,
     left_down: bool,
     /// The left press landed on the pinned command header; swallow its release.
@@ -893,6 +921,8 @@ impl App {
             modifiers: ModifiersState::empty(),
             held_at_focus: HeldAtFocus::default(),
             focused: true,
+            occluded: false,
+            notification_throttle: osc_notify::Throttle::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             left_down: false,
             ledger_click: false,
@@ -949,9 +979,14 @@ impl App {
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let proxy = self.proxy.clone();
         let command_proxy = self.proxy.clone();
+        let mut env = self.config.env.clone();
+        if !env.contains_key("TERM") {
+            let term = terminfo::term(&self.config.term, &self.config.env);
+            env.insert("TERM".into(), term.into());
+        }
         let mut pty = Pty::spawn(
             self.options.command(&self.config),
-            &self.config.env,
+            &env,
             spawn_cols,
             spawn_rows,
             spawn_cell,
@@ -1075,6 +1110,8 @@ impl App {
             redraw_at: None,
             target: None,
             sequence: 0,
+            blink_since: Instant::now(),
+            cursor_blink_at: None,
             #[cfg(target_os = "linux")]
             presentation,
             synchronized_since: None,
@@ -1096,8 +1133,20 @@ impl App {
         let grid_changed = (cols, rows) != (s.term.cols(), s.term.rows());
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
-        if grid_changed {
+        let covered = find_bar_rows(
+            s.window.inner_size().height as f32,
+            self.config.padding * s.window.scale_factor() as f32,
+            s.fonts.metrics.height,
+            rows,
+        );
+        let covered_changed = self
+            .search
+            .as_mut()
+            .is_some_and(|search| std::mem::replace(&mut search.covered_rows, covered) != covered);
+        if grid_changed || covered_changed {
             search::Search::resize(self.search.as_ref(), &mut s.term, cols, rows);
+        }
+        if grid_changed {
             release_freed_memory(&mut s.term);
             if let Some(search) = &mut self.search {
                 search.dirty = true;
@@ -1183,6 +1232,27 @@ impl App {
         if std::mem::take(&mut s.term.bell) && !self.focused {
             s.window
                 .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        }
+        let visible = std::cell::OnceCell::new();
+        for notification in s.term.take_notifications() {
+            if self.config.desktop_notifications
+                && osc_notify::wanted(notification.occasion, self.focused, || {
+                    *visible.get_or_init(|| {
+                        if self.occluded {
+                            return Some(false);
+                        }
+                        let shown = s.window.is_minimized().map(|minimized| !minimized);
+                        #[cfg(target_os = "macos")]
+                        if shown == Some(true) && osc_notify::covered(&s.window) {
+                            return Some(false);
+                        }
+                        shown
+                    })
+                })
+                && self.notification_throttle.allow(Instant::now())
+            {
+                osc_notify::show(notification);
+            }
         }
         if processed > 0 {
             if let Some(log) = &mut s.latency {
@@ -1335,6 +1405,11 @@ impl App {
         .then(present_macos::arm_exit);
         let (blink_visible, blink_flip) = blink_phase(s.blink_epoch, started);
         s.renderer.blink_visible = blink_visible;
+        let blinking = s.term.cursor_blink && s.term.modes.show_cursor && self.focused;
+        let (cursor_visible, cursor_blink_at) =
+            cursor_blink(blinking, s.blink_since, Instant::now());
+        s.renderer.cursor_visible = cursor_visible;
+        s.cursor_blink_at = cursor_blink_at;
         let rendered = s.renderer.render(
             &s.term,
             &mut s.fonts,
@@ -1378,7 +1453,11 @@ impl App {
         }
         let visible_change = reset_view_for_input(&mut s.term, &mut s.scroll);
         s.pty.write(bytes);
-        if visible_change {
+        s.blink_since = Instant::now();
+        if visible_change
+            || !s.renderer.cursor_visible
+            || s.cursor_blink_at.is_none() && s.term.cursor_blink
+        {
             s.request_frame();
         }
     }
@@ -1574,8 +1653,11 @@ impl App {
             } else {
                 None
             };
-            if next.shell != self.config.shell || next.env != self.config.env {
-                diag!("terminal: shell/env changes apply on the next launch");
+            if next.shell != self.config.shell
+                || next.term != self.config.term
+                || next.env != self.config.env
+            {
+                diag!("terminal: shell/term/env changes apply on the next launch");
             }
             let next_vsync_off = !next.vsync && self.config.vsync;
             self.config = next;
@@ -1638,6 +1720,14 @@ impl App {
         match action {
             Action::Search => {
                 let search = self.search.get_or_insert_with(search::Search::default);
+                if let Some(s) = &self.session {
+                    search.covered_rows = find_bar_rows(
+                        s.window.inner_size().height as f32,
+                        self.config.padding * s.window.scale_factor() as f32,
+                        s.fonts.metrics.height,
+                        s.term.rows(),
+                    );
+                }
                 if let Some((text, cursor)) =
                     self.session.as_mut().and_then(|s| s.composition.take())
                 {
@@ -2210,6 +2300,15 @@ fn pointer_in_search_bar(
         && pos.y < size.height as f64
 }
 
+/// How many of the grid's `rows` bottom rows the Find bar is drawn over, wholly or in part.
+fn find_bar_rows(height: f32, padding: f32, cell_height: f32, rows: usize) -> usize {
+    let bar_top =
+        term_render::search_layout(0, 0..0, 0, cell_height, height, cell_height, cell_height)
+            .cursor_area[1];
+    let clear = ((bar_top - padding) / cell_height).floor().max(0.0) as usize;
+    rows.saturating_sub(clear)
+}
+
 fn pointer_in_grid(
     pos: PhysicalPosition<f64>,
     padding: f64,
@@ -2504,6 +2603,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let poll = now + Duration::from_millis(100);
                 deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));
             }
+            if let Some(blink) = s.cursor_blink_at {
+                if now >= blink {
+                    s.cursor_blink_at = None;
+                    s.window.request_redraw();
+                } else {
+                    deadline = Some(deadline.map_or(blink, |deadline| deadline.min(blink)));
+                }
+            }
         }
         deadline = exit_wakeup(deadline, self.exit_deadline);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2539,6 +2646,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 if let Some(s) = &mut self.session {
+                    s.blink_since = Instant::now();
                     if !focused {
                         s.composition.clear();
                         if let Some(search) = &mut self.search {
@@ -2552,6 +2660,7 @@ impl ApplicationHandler<UserEvent> for App {
                     s.window.request_redraw();
                 }
             }
+            WindowEvent::Occluded(occluded) => self.occluded = occluded,
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
                 self.refresh_link();
@@ -2668,6 +2777,9 @@ fn main() {
     unsafe { std::env::remove_var(STARTUP_STDERR) };
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
+    }
+    if std::env::args().nth(1).as_deref() == Some("--install-terminfo") {
+        std::process::exit(terminfo::install());
     }
     let options = match parse_args() {
         Ok(o) => o,
@@ -2976,6 +3088,17 @@ mod tests {
         assert!(!cell_in_preedit(&layout, 2, (2, 7)));
         assert!(!cell_in_preedit(&layout, 2, (1, 4)));
         assert!(!cell_in_preedit(&layout, 2, (-1, 4)));
+    }
+
+    #[test]
+    fn find_bar_rows_counts_rows_it_overlaps() {
+        // 6 px padding, 20 px cells: 10 rows end at 206, the bar starts at 200 and clips row 9.
+        assert_eq!(find_bar_rows(220.0, 6.0, 20.0, 10), 1);
+        // A full spare row below the grid leaves every row clear.
+        assert_eq!(find_bar_rows(240.0, 6.0, 20.0, 10), 0);
+        // Row 8 ends exactly at the bar's top edge, so only row 9 is covered.
+        assert_eq!(find_bar_rows(206.0, 6.0, 20.0, 10), 1);
+        assert_eq!(find_bar_rows(10.0, 6.0, 20.0, 1), 1);
     }
 
     #[test]
@@ -4249,6 +4372,30 @@ mod tests {
         assert_eq!(
             wake_deadline(Some(now + MAX_DEFER), None, Some(now)),
             Some(now)
+        );
+    }
+
+    #[test]
+    fn cursor_blink_flips_then_rests_when_idle() {
+        let since = Instant::now();
+        assert_eq!(cursor_blink(false, since, since), (true, None));
+        assert_eq!(
+            cursor_blink(true, since, since),
+            (true, Some(since + CURSOR_BLINK_HALF))
+        );
+        let hidden = since + CURSOR_BLINK_HALF + Duration::from_millis(1);
+        assert_eq!(
+            cursor_blink(true, since, hidden),
+            (false, Some(since + CURSOR_BLINK_HALF * 2))
+        );
+        let last = since + CURSOR_BLINK_IDLE - Duration::from_millis(1);
+        assert_eq!(
+            cursor_blink(true, since, last).1,
+            Some(since + CURSOR_BLINK_IDLE)
+        );
+        assert_eq!(
+            cursor_blink(true, since, since + CURSOR_BLINK_IDLE),
+            (true, None)
         );
     }
 

@@ -1,0 +1,22 @@
+# terminfo entry for terminal (https://github.com/amagomori/terminal).
+# Install: `terminal --install-terminfo`, or `tic -x xterm-terminal.terminfo`.
+# Without it, terminal sets TERM=xterm-256color.
+#
+# Based on xterm-256color. Added: truecolor (Tc, setrgbf, setrgbb), styled
+# underlines (Smulx; every style is drawn as a single underline for now),
+# bracketed paste (BE, BD, PS, PE), synchronized output (Sync) and window
+# title (hs, tsl, fsl, dsl). Removed: xterm features terminal does not
+# implement (blink, flash, palette and cursor color changes, OSC 52, meta
+# mode, left/right margins, printer and memory lock).
+xterm-terminal|terminal GPU-rendered terminal emulator,
+	Tc, hs,
+	BD=\E[?2004l, BE=\E[?2004h, PE=\E[201~, PS=\E[200~,
+	Smulx=\E[4:%p1%dm,
+	Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
+	dsl=\E]2;\007, fsl=^G, tsl=\E]2;,
+	setrgbb=\E[48;2;%p1%d;%p2%d;%p3%dm,
+	setrgbf=\E[38;2;%p1%d;%p2%d;%p3%dm,
+	blink@, ccc@, initc@, oc@, Cr@, Cs@, Ms@, flash@,
+	smm@, rmm@, mgc@, smglp@, smglr@, smgrp@,
+	mc0@, mc4@, mc5@, mc5i@, meml@, memu@,
+	use=xterm-256color,

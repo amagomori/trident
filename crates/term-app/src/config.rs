@@ -13,11 +13,13 @@ pub struct Config {
     pub command_budget: bool,
     pub command_share: f64,
     pub notify_long_commands_after: u64,
+    pub desktop_notifications: bool,
     pub drop_preview: bool,
     pub paste_protection: bool,
     pub confirm_close: bool,
     pub vsync: bool,
     pub shell: Vec<String>,
+    pub term: String,
     pub env: BTreeMap<String, String>,
     pub themes: theme::Themes,
     pub bindings: BTreeMap<Chord, Action>,
@@ -33,11 +35,13 @@ impl Default for Config {
             command_budget: true,
             command_share: 0.5,
             notify_long_commands_after: 10,
+            desktop_notifications: true,
             drop_preview: true,
             paste_protection: true,
             confirm_close: true,
             vsync: true,
             shell: Vec::new(),
+            term: crate::terminfo::FALLBACK.to_string(),
             env: BTreeMap::new(),
             themes: theme::Themes::default(),
             bindings: default_bindings(),
@@ -53,11 +57,13 @@ struct Raw {
     padding: Option<f32>,
     scrollback: Option<Scrollback>,
     notify_long_commands_after: Option<u64>,
+    desktop_notifications: Option<bool>,
     drop_preview: Option<bool>,
     paste_protection: Option<bool>,
     confirm_close: Option<bool>,
     vsync: Option<bool>,
     shell: Option<Shell>,
+    term: Option<String>,
     env: BTreeMap<String, String>,
     colors: BTreeMap<String, String>,
     theme: Option<theme::Selection>,
@@ -416,6 +422,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         drop_preview: raw.drop_preview.unwrap_or(true),
         paste_protection: raw.paste_protection.unwrap_or(true),
         confirm_close: raw.confirm_close.unwrap_or(true),
+        desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
         ..Config::default()
     };
@@ -458,6 +465,12 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     };
     if config.shell.first().is_some_and(|s| s.is_empty()) {
         return Err(error("shell", "expected a nonempty program"));
+    }
+    if let Some(term) = raw.term {
+        if term.is_empty() || term.contains(['/', ' ']) {
+            return Err(error("term", "expected a terminfo entry name"));
+        }
+        config.term = term;
     }
     config.env = raw.env;
     theme::apply(&mut term_core::colors::Palette::default(), &raw.colors)
@@ -968,6 +981,13 @@ mod tests {
         assert!(parse_text("").unwrap().confirm_close);
         assert!(!parse_text("confirm_close = false").unwrap().confirm_close);
         assert!(parse_text("confirm_close = 1").is_err());
+        assert!(parse_text("").unwrap().desktop_notifications);
+        assert!(
+            !parse_text("desktop_notifications = false")
+                .unwrap()
+                .desktop_notifications
+        );
+        assert!(parse_text("desktop_notifications = 'no'").is_err());
         assert!(parse_text("").unwrap().vsync);
         assert!(!parse_text("vsync = false").unwrap().vsync);
         assert!(parse_text("vsync = 0").is_err());
@@ -1029,6 +1049,13 @@ bright_white = "#fefdfc"
         );
         assert_eq!(config.shell, ["zsh", "-l"]);
         assert_eq!(config.env["TERM"], "custom");
+        assert_eq!(config.term, crate::terminfo::FALLBACK);
+        assert_eq!(
+            parse_text("term = \"xterm-terminal\"").unwrap().term,
+            "xterm-terminal"
+        );
+        assert!(parse_text("term = \"\"").is_err());
+        assert!(parse_text("term = \"../x\"").is_err());
         assert_eq!(config.themes.palette(None).background, (0xab, 0xcd, 0xef));
         assert_eq!(config.themes.palette(None).ansi[15], (254, 253, 252));
         assert_eq!(

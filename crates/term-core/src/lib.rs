@@ -13,9 +13,12 @@ pub mod grapheme;
 mod kitty;
 mod links;
 pub use links::Link;
+mod notifications;
+pub use notifications::{Notification, Occasion, Urgency};
 mod perform;
+mod reflow;
 
-pub use cell::{Cell, Color, Flags, Row, RowFlags};
+pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
 use std::collections::VecDeque;
@@ -42,6 +45,7 @@ struct ShellState {
     input_start: Option<(u64, usize)>,
     commands: VecDeque<Command>,
     budget: budget::Budget,
+    notifications: notifications::Notifications,
 }
 
 /// Commands kept for the pinned header; older ones lose it first.
@@ -248,6 +252,8 @@ pub struct Terminal {
     active_charset: usize,
     pub modes: Modes,
     pub cursor_shape: CursorShape,
+    /// DECSCUSR odd styles and mode 12: the cursor blinks.
+    pub cursor_blink: bool,
     /// Lines ever pushed into the primary scrollback (including ones since dropped).
     history: u64,
     max_scrollback: usize,
@@ -284,6 +290,11 @@ impl Terminal {
 
     pub fn take_command_finished(&mut self) -> Vec<CommandFinished> {
         std::mem::take(&mut self.shell.command_finished)
+    }
+
+    /// Desktop notifications requested with OSC 9, 777 or 99 since the last call.
+    pub fn take_notifications(&mut self) -> Vec<Notification> {
+        self.shell.notifications.take()
     }
 
     /// Put the nearest prompt strictly above/below the viewport top at its top.
@@ -717,6 +728,7 @@ impl Terminal {
                 input_start: None,
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
+                notifications: Default::default(),
             }),
             links: Default::default(),
             graphemes: Default::default(),
@@ -744,6 +756,7 @@ impl Terminal {
                 ..Modes::default()
             },
             cursor_shape: CursorShape::Block,
+            cursor_blink: false,
             history: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             shrunk: false,
@@ -1015,10 +1028,16 @@ impl Terminal {
         self.invalidate_output_ends();
         self.selection = None;
         // A scrolled-back view keeps its top line; one at the bottom follows the bottom.
-        let anchor = (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
+        let mut anchor =
+            (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
         self.display_offset = 0;
         if cols < self.cols || rows < self.rows {
             self.shrunk = true;
+        }
+        // The primary screen rewraps its lines; the alternate one is redrawn by its app.
+        let reflow = cols != self.cols;
+        if reflow {
+            anchor = self.reflow_primary(cols, rows, anchor);
         }
 
         let mut alt_shifted = 0;
@@ -1030,6 +1049,9 @@ impl Terminal {
             } else {
                 &mut self.primary
             };
+            if !alt && reflow {
+                continue;
+            }
             for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
                 row.resize(cols);
             }
@@ -1100,7 +1122,9 @@ impl Terminal {
         self.rows = rows;
         self.cursor.row = self.cursor.row.min(rows - 1);
         self.cursor.col = self.cursor.col.min(cols - 1);
-        self.cursor.pending_wrap = false;
+        if self.alt_active || !reflow {
+            self.cursor.pending_wrap = false;
+        }
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
         self.tabs = default_tabs(cols);
@@ -1858,6 +1882,7 @@ impl Terminal {
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
         let (enabled, share) = self.command_budget();
+        fresh.shell.notifications = self.shell.notifications.reset();
         *self = fresh;
         self.set_command_budget(enabled, share);
         self.title_changed = true;

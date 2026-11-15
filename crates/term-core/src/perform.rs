@@ -1,4 +1,4 @@
-use super::{Charset, Color, CursorShape, Flags, MouseMode, Terminal};
+use super::{Charset, Color, CursorShape, Flags, MouseMode, Terminal, UnderlineStyle};
 use vte::{Params, Perform};
 
 /// The first value of each parameter, with 0 / missing replaced by `default`.
@@ -136,11 +136,14 @@ impl Perform for Terminal {
                 self.report_private_mode(arg(params, 0, 0));
             }
             ('q', [b' ']) => {
-                self.cursor_shape = match arg(params, 0, 0) {
+                let style = arg(params, 0, 0);
+                self.cursor_shape = match style {
                     3 | 4 => CursorShape::Underline,
                     5 | 6 => CursorShape::Bar,
                     _ => CursorShape::Block,
                 };
+                // 0 restores the default steady block; odd styles blink.
+                self.cursor_blink = style % 2 == 1;
             }
             ('r', []) => {
                 let top = n(0) - 1;
@@ -217,17 +220,27 @@ impl Perform for Terminal {
                     _ => std::borrow::Cow::Owned(rest.join(&b';')),
                 };
                 self.cursor.template.hyperlink = if uri.is_empty() {
-                    0
+                    let underline = self.links.underline(self.cursor.template.hyperlink);
+                    self.intern_link(b"", b"", underline, u16::MAX as usize)
                 } else {
                     let id = attributes
                         .split(|&b| b == b':')
                         .find_map(|p| p.strip_prefix(b"id="))
                         .unwrap_or(b"");
-                    self.intern_link(id, &uri, u16::MAX as usize)
+                    let underline = self.links.underline(self.cursor.template.hyperlink);
+                    self.intern_link(id, &uri, underline, u16::MAX as usize)
                 };
             }
             [b"133", mark, args @ ..] => {
                 self.shell_mark(mark, args);
+            }
+            [b"9", rest @ ..] => self.shell.notifications.osc9(rest),
+            [b"777", rest @ ..] => self.shell.notifications.osc777(rest),
+            [b"99", rest @ ..] => {
+                if let Some(reply) = self.shell.notifications.osc99(rest) {
+                    self.responses.extend_from_slice(reply.as_bytes());
+                    self.responses.extend_from_slice(terminator);
+                }
             }
             [b"0" | b"2", rest @ ..] if !rest.is_empty() => {
                 let title = rest
@@ -264,6 +277,7 @@ impl Terminal {
             1 => Some(self.modes.app_cursor),
             6 => Some(self.modes.origin),
             7 => Some(self.modes.autowrap),
+            12 => Some(self.cursor_blink),
             25 => Some(self.modes.show_cursor),
             47 | 1047 | 1049 => Some(self.is_alt_screen()),
             9 => Some(self.modes.mouse == MouseMode::X10),
@@ -329,6 +343,7 @@ impl Terminal {
                 self.goto(0, 0);
             }
             7 => self.modes.autowrap = enable,
+            12 => self.cursor_blink = enable,
             25 => self.modes.show_cursor = enable,
             // 1049 clears the alternate buffer on entry; 1047 clears it on exit.
             47 | 1047 => self.set_alt_screen(enable, false, !enable && mode == 1047),
@@ -377,8 +392,11 @@ impl Terminal {
                 hyperlink: t.hyperlink,
                 ..Default::default()
             };
+            self.set_underline_color(None);
             return;
         }
+        // The underline color lives in the link table, set once the template is free.
+        let mut underline_color = None;
         let mut iter = params.iter();
         while let Some(param) = iter.next() {
             match param[0] {
@@ -386,27 +404,30 @@ impl Terminal {
                     *t = super::Cell {
                         hyperlink: t.hyperlink,
                         ..Default::default()
-                    }
+                    };
+                    underline_color = Some(None);
                 }
                 1 => t.flags.insert(Flags::BOLD),
                 2 => t.flags.insert(Flags::DIM),
                 3 => t.flags.insert(Flags::ITALIC),
-                4 => {
-                    if param.get(1) == Some(&0) {
-                        t.flags.remove(Flags::UNDERLINE);
-                    } else {
-                        t.flags.insert(Flags::UNDERLINE);
-                    }
-                }
+                4 => match param.get(1).copied().unwrap_or(1) {
+                    0 => t.flags.set_underline(None),
+                    1 => t.flags.set_underline(Some(UnderlineStyle::Single)),
+                    2 => t.flags.set_underline(Some(UnderlineStyle::Double)),
+                    3 => t.flags.set_underline(Some(UnderlineStyle::Curly)),
+                    4 => t.flags.set_underline(Some(UnderlineStyle::Dotted)),
+                    5 => t.flags.set_underline(Some(UnderlineStyle::Dashed)),
+                    _ => {}
+                },
                 // Like xterm, rapid blink (6) blinks at the slow rate.
                 5 | 6 => t.flags.insert(Flags::BLINK),
                 7 => t.flags.insert(Flags::INVERSE),
                 8 => t.flags.insert(Flags::HIDDEN),
                 9 => t.flags.insert(Flags::STRIKE),
-                21 => t.flags.insert(Flags::UNDERLINE),
+                21 => t.flags.set_underline(Some(UnderlineStyle::Double)),
                 22 => t.flags.remove(Flags::BOLD | Flags::DIM),
                 23 => t.flags.remove(Flags::ITALIC),
-                24 => t.flags.remove(Flags::UNDERLINE),
+                24 => t.flags.set_underline(None),
                 25 => t.flags.remove(Flags::BLINK),
                 27 => t.flags.remove(Flags::INVERSE),
                 28 => t.flags.remove(Flags::HIDDEN),
@@ -425,10 +446,19 @@ impl Terminal {
                     }
                 }
                 49 => t.bg = Color::DefaultBg,
+                58 => {
+                    if let Some(c) = extended_color(param, &mut iter) {
+                        underline_color = Some(Some(c));
+                    }
+                }
+                59 => underline_color = Some(None),
                 v @ 90..=97 => t.fg = Color::Indexed((v - 90 + 8) as u8),
                 v @ 100..=107 => t.bg = Color::Indexed((v - 100 + 8) as u8),
                 _ => {}
             }
+        }
+        if let Some(underline) = underline_color {
+            self.set_underline_color(underline);
         }
     }
 }

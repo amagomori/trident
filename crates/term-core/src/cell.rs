@@ -1,5 +1,5 @@
 /// A terminal color as the application specified it; resolved to RGB at render time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Color {
     DefaultFg,
     DefaultBg,
@@ -30,6 +30,8 @@ impl Flags {
     pub const BLINK: Flags = Flags(1 << 11);
     /// `c` indexes a grapheme cluster; read it with `Terminal::grapheme`.
     pub const GRAPHEME: Flags = Flags(1 << 12);
+    /// The `UnderlineStyle` of an `UNDERLINE` cell other than a single line (SGR 4:x, 21).
+    pub const UNDERLINE_STYLE: Flags = Flags(0b111 << 13);
 
     pub const fn union(self, other: Flags) -> Flags {
         Flags(self.0 | other.0)
@@ -54,6 +56,45 @@ impl Flags {
 
     pub fn remove(&mut self, other: Flags) {
         self.0 &= !other.0;
+    }
+}
+
+/// How SGR 4:x draws an underline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnderlineStyle {
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+impl Flags {
+    /// The underline drawn under the cell, if any.
+    pub fn underline(self) -> Option<UnderlineStyle> {
+        if !self.contains(Flags::UNDERLINE) {
+            return None;
+        }
+        Some(match (self.0 & Flags::UNDERLINE_STYLE.0) >> 13 {
+            1 => UnderlineStyle::Double,
+            2 => UnderlineStyle::Curly,
+            3 => UnderlineStyle::Dotted,
+            4 => UnderlineStyle::Dashed,
+            _ => UnderlineStyle::Single,
+        })
+    }
+
+    pub fn set_underline(&mut self, style: Option<UnderlineStyle>) {
+        self.remove(Flags::UNDERLINE | Flags::UNDERLINE_STYLE);
+        let Some(style) = style else { return };
+        let bits = match style {
+            UnderlineStyle::Single => 0,
+            UnderlineStyle::Double => 1,
+            UnderlineStyle::Curly => 2,
+            UnderlineStyle::Dotted => 3,
+            UnderlineStyle::Dashed => 4,
+        };
+        self.0 |= Flags::UNDERLINE.0 | bits << 13;
     }
 }
 
@@ -212,7 +253,20 @@ impl Row {
         }
     }
 
-    pub fn resize(&mut self, cols: usize) {
+    /// A row holding `cells`, as reflow builds them.
+    pub(crate) fn from_cells(cells: Vec<Cell>, flags: RowFlags) -> Row {
+        Row {
+            cells,
+            flags,
+            prompt_col: 0,
+            output_col: 0,
+            occupied: u8::MAX,
+            hidden: None,
+        }
+    }
+
+    /// Takes every cell of the row, with the cells hidden by narrowing back in place.
+    pub(crate) fn take_cells(&mut self) -> Vec<Cell> {
         self.touch_all();
         let mut cells = std::mem::take(&mut self.cells);
         if let Some(hidden) = self.hidden.take() {
@@ -231,7 +285,11 @@ impl Row {
             }
             cells.append(&mut hidden);
         }
+        cells
+    }
 
+    pub fn resize(&mut self, cols: usize) {
+        let mut cells = self.take_cells();
         if cells.len() > cols {
             let wide_at_edge = cells[cols - 1].flags.contains(Flags::WIDE);
             let cut = if wide_at_edge { cols - 1 } else { cols };
@@ -384,7 +442,7 @@ impl RowFlags {
     pub const SUCCEEDED: Self = Self(16);
     pub(crate) const OUTPUT_BEFORE_PROMPT: Self = Self(32);
     pub(crate) const OUTPUT_END: Self = Self(64);
-    const WRAPPED: Self = Self(128);
+    pub(crate) const WRAPPED: Self = Self(128);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

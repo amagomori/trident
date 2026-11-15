@@ -8,7 +8,7 @@ use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
 use std::sync::Arc;
 use term_core::colors::Rgb;
-use term_core::{Cell, CursorShape, Flags, Terminal, grapheme};
+use term_core::{Cell, CursorShape, Flags, Terminal, UnderlineStyle, grapheme};
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
 /// Whether `cell` draws something that SGR 5 blinks. The character under a block
@@ -38,6 +38,8 @@ struct Uniforms {
 }
 
 pub struct Renderer {
+    /// The blink phase of a focused cursor; false hides it until the next frame.
+    pub cursor_visible: bool,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -272,6 +274,7 @@ impl Renderer {
             overlays: Vec::new(),
             blink_visible: true,
             blinking: false,
+            cursor_visible: true,
         })
     }
 
@@ -316,6 +319,60 @@ impl Renderer {
             }
         };
         [c(rgb.0), c(rgb.1), c(rgb.2), alpha]
+    }
+
+    fn underline(&self, out: &mut Vec<Instance>, style: UnderlineStyle, u: &Underline) {
+        let Underline {
+            x,
+            y,
+            w,
+            phase,
+            stroke,
+            room,
+            cw,
+            color,
+        } = *u;
+        match style {
+            UnderlineStyle::Single => out.push(self.rect(x, y, w, stroke, color)),
+            UnderlineStyle::Double => {
+                let gap = stroke * 2.0;
+                let second = if room >= gap { y + gap } else { y - gap };
+                out.push(self.rect(x, y, w, stroke, color));
+                out.push(self.rect(x, second, w, stroke, color));
+            }
+            UnderlineStyle::Dotted => {
+                let step = stroke * 2.0;
+                let mut dot = x + (step - phase % step) % step;
+                while dot < x + w {
+                    out.push(self.rect(dot, y, stroke.min(x + w - dot), stroke, color));
+                    dot += step;
+                }
+            }
+            UnderlineStyle::Dashed => {
+                let dash = (cw * 0.6).round().max(1.0);
+                let mut start = x;
+                while start < x + w {
+                    out.push(self.rect(start, y, dash, stroke, color));
+                    start += cw;
+                }
+            }
+            UnderlineStyle::Curly => {
+                // One period per cell, kept inside the cell and joined across neighbors.
+                let amplitude = (stroke * 1.5).max(1.5);
+                let center = y.min(y + room - amplitude).max(y - stroke - amplitude);
+                let step = stroke.max(1.0);
+                let wave = |dx: f32| {
+                    center + amplitude * (std::f32::consts::TAU * (phase + dx) / cw).sin()
+                };
+                let mut dx = 0.0;
+                while dx < w {
+                    let (a, b) = (wave(dx), wave(dx + step));
+                    let width = step.min(w - dx);
+                    out.push(self.rect(x + dx, a.min(b), width, (a - b).abs() + stroke, color));
+                    dx += step;
+                }
+            }
+        }
     }
 
     fn rect(&self, x: f32, y: f32, w: f32, h: f32, rgb: Rgb) -> Instance {
@@ -415,7 +472,9 @@ impl Renderer {
         } = fonts.metrics;
         let selection = term.selection_range();
         let preedit = preedit.filter(|p| !p.text.is_empty() && focused);
-        let cursor = term.cursor_position().filter(|_| preedit.is_none());
+        let cursor = term
+            .cursor_position()
+            .filter(|_| preedit.is_none() && (self.cursor_visible || !focused));
         let block_cursor = focused && term.cursor_shape == CursorShape::Block;
         let mut ok = true;
         self.blinking = false;
@@ -519,12 +578,26 @@ impl Renderer {
                         }
                     }
                 }
-                if (!blinked_off && cell.flags.contains(Flags::UNDERLINE))
-                    || hover
-                        .is_some_and(|link| link.contains(term.viewport_to_point_signed(row, col)))
-                {
-                    let w = cw * cells as f32;
-                    overlays.push(self.rect(x, y + underline_offset, w, stroke, fg));
+                let underline = cell.flags.underline().filter(|_| !blinked_off).or_else(|| {
+                    hover
+                        .is_some_and(|link| link.contains(point))
+                        .then_some(UnderlineStyle::Single)
+                });
+                if let Some(style) = underline {
+                    let color = term
+                        .underline_color(cell)
+                        .map_or(fg, |c| term.palette.resolve(c));
+                    let line = Underline {
+                        x,
+                        y: y + underline_offset,
+                        w: cw * cells as f32,
+                        phase: x - padding,
+                        stroke,
+                        room: ch - underline_offset - stroke,
+                        cw,
+                        color,
+                    };
+                    self.underline(&mut overlays, style, &line);
                 }
                 if !blinked_off && cell.flags.contains(Flags::STRIKE) {
                     let w = cw * cells as f32;
@@ -1003,6 +1076,19 @@ impl Renderer {
         pass.set_vertex_buffer(0, self.instances.slice(..));
         pass.draw(0..4, range);
     }
+}
+
+/// Where one cell's underline goes; `room` is the space left below the line in the cell.
+#[derive(Clone, Copy)]
+struct Underline {
+    x: f32,
+    y: f32,
+    w: f32,
+    phase: f32,
+    stroke: f32,
+    room: f32,
+    cw: f32,
+    color: Rgb,
 }
 
 fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {

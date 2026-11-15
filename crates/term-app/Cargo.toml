@@ -42,7 +42,7 @@ wayland-protocols = { version = "0.32.13", features = ["client"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu.workspace = true
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSBundle", "NSString", "NSError", "NSUUID"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSBundle", "NSString", "NSError", "NSUUID", "NSArray", "NSDictionary", "NSValue"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "block2"] }
 objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLDrawable", "block2", "objc2-core-foundation"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CABase", "objc2-core-foundation"] }

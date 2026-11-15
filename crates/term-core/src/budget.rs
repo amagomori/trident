@@ -72,6 +72,53 @@ impl Terminal {
         self.refresh_budget_pending();
     }
 
+    /// Every recorded line moved by `f`, e.g. by a reflow.
+    pub(crate) fn remap_budget_lines(&mut self, f: impl Fn(u64) -> u64) {
+        let shell = &mut *self.shell;
+        for c in &mut shell.commands {
+            c.output_line = f(c.output_line);
+            if let Some(gap) = &mut c.gap {
+                gap.line = f(gap.line);
+            }
+        }
+        for line in &mut shell.budget.pending {
+            *line = f(*line);
+        }
+    }
+
+    /// Placeholder rows in `first..first + len`, as (index from `first`, text), in order.
+    pub(crate) fn gap_rows(&self, first: u64, len: usize) -> Vec<(usize, String)> {
+        self.shell
+            .commands
+            .iter()
+            .filter_map(|c| {
+                let gap = c.gap?;
+                let i = gap.line.checked_sub(first)? as usize;
+                (i < len).then(|| (i, placeholder_text(c, gap.dropped)))
+            })
+            .collect()
+    }
+
+    /// Evicts rows until scrollback fits `max_scrollback`, through the command budget
+    /// like rows scrolled into history. Returns whether any row went.
+    pub(crate) fn trim_scrollback(&mut self) -> bool {
+        let mut trimmed = false;
+        while self.primary.scrollback.len() > self.max_scrollback {
+            trimmed = true;
+            // trim_command reads display_offset as push_history leaves it mid-push, one row
+            // past the viewport's top line.
+            let viewing = self.display_offset > 0;
+            self.display_offset -= viewing as usize;
+            let evicted = self.budget_armed() && self.evict_from_command().is_some();
+            self.display_offset += viewing as usize;
+            if evicted {
+                continue;
+            }
+            self.primary.scrollback.pop_front();
+        }
+        trimmed
+    }
+
     pub fn command_budget(&self) -> (bool, f64) {
         (self.shell.budget.enabled, self.shell.budget.share)
     }
@@ -296,7 +343,7 @@ impl Terminal {
 }
 
 /// `… 48,213 lines of make output dropped`, naming the command's first word when known.
-fn placeholder_text(c: &crate::Command, dropped: u64) -> String {
+pub(crate) fn placeholder_text(c: &crate::Command, dropped: u64) -> String {
     let name: String = c
         .cells
         .get(c.input_col..)
@@ -332,7 +379,7 @@ fn group_thousands(n: u64) -> String {
     out
 }
 
-fn placeholder_row(cols: usize, text: &str) -> Row {
+pub(crate) fn placeholder_row(cols: usize, text: &str) -> Row {
     let mut row = Row::new(cols, &Cell::default());
     let mut col = 0;
     for c in text.chars() {
