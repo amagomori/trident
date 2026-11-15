@@ -1202,9 +1202,15 @@ impl Terminal {
             let wrapped = self
                 .output_end(line)
                 .map_or(row.wrapped(), |end| end.wrapped);
+            // Block selections copy physical cells, so wrap padding stays as spaces there.
+            let skip = if block {
+                Flags::WIDE_SPACER
+            } else {
+                Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
+            };
             let mut text: String = cells[from..=to]
                 .iter()
-                .filter(|c| !c.flags.contains(Flags::WIDE_SPACER))
+                .filter(|c| !c.flags.intersects(skip))
                 .map(|c| c.c)
                 .collect();
             if !block && !(wrapped && line != end.line) {

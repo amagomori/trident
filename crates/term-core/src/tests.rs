@@ -951,6 +951,34 @@ fn selection_text_joins_wrapped_lines() {
 }
 
 #[test]
+fn selection_text_skips_padding_of_widened_wrapped_lines() {
+    let mut t = term(5, 3, "hello world");
+    t.resize(8, 3);
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(2, 7));
+    assert_eq!(t.selection_text().as_deref(), Some("hello world"));
+    t.start_selection(t.viewport_to_point(0, 2), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 1));
+    assert_eq!(t.selection_text().as_deref(), Some("llo w"));
+    // Text written over the padding is kept.
+    t.advance(b"\x1b[1;6H!");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 4));
+    assert_eq!(t.selection_text().as_deref(), Some("hello! worl"));
+    t.start_selection(t.viewport_to_point(0, 4), SelectionKind::Block);
+    t.update_selection(t.viewport_to_point(1, 6));
+    assert_eq!(t.selection_text().as_deref(), Some("o! \nl  "));
+}
+
+#[test]
+fn selection_text_skips_wide_character_wrap_blank() {
+    let mut t = term(5, 2, "abcd\u{754c}x");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 2));
+    assert_eq!(t.selection_text().as_deref(), Some("abcd\u{754c}x"));
+}
+
+#[test]
 fn block_selection_is_a_rectangle_in_every_drag_direction() {
     let mut t = term(6, 3, "abcdef\r\nghijkl\r\nmnopqr");
     for (a, b) in [
