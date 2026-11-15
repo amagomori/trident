@@ -12,6 +12,15 @@ use term_core::colors::Rgb;
 use term_core::{Cell, CursorShape, Flags, Terminal, UnderlineStyle, grapheme};
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
+/// Compare-with-last-run: rows that differ from the command's previous run.
+const RERUN_COLOR: Rgb = (230, 170, 50);
+const RERUN_REMOVED: Rgb = (220, 50, 47);
+
+fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
+}
+
 /// Whether `cell` draws something that SGR 5 blinks. The character inside a block
 /// cursor, solid or hollow, stays visible in the hidden phase, as in xterm.
 fn blinks(cell: &Cell, under_block_cursor: bool) -> bool {
@@ -83,6 +92,8 @@ pub struct Renderer {
     pub blink_visible: bool,
     /// Whether each drawn row has cells that blink.
     row_blinks: Vec<bool>,
+    /// Compare-with-last-run marks of each drawn row this frame.
+    rerun: Vec<u8>,
     // Reused between frames to avoid allocating.
     row_lens: Vec<u32>,
     staging: Vec<Instance>,
@@ -306,6 +317,7 @@ impl Renderer {
             blink_visible: true,
             cursor_visible: true,
             row_blinks: Vec::new(),
+            rerun: Vec::new(),
             row_lens: Vec::new(),
             staging: Vec::new(),
             #[cfg(target_os = "linux")]
@@ -511,6 +523,8 @@ impl Renderer {
         let mut ok = true;
 
         let first = Damage::first_row(pixel_offset);
+        let mut rerun = std::mem::take(&mut self.rerun);
+        term.rerun_marks(first, &mut rerun);
         let mut damaged = std::mem::take(&mut self.damaged);
         self.damage.update(
             term,
@@ -524,6 +538,7 @@ impl Renderer {
                 hover,
                 atlas: self.atlas.generation,
                 blink_visible: self.blink_visible,
+                rerun: &rerun,
             },
             &mut damaged,
         );
@@ -543,6 +558,13 @@ impl Renderer {
             let row = first + i as isize;
             let line = term.viewport_row_signed(row);
             let y = padding + row as f32 * ch + pixel_offset;
+            if rerun
+                .get(i)
+                .is_some_and(|m| m & term_core::ROW_CHANGED != 0)
+            {
+                let tint = mix(term.palette.background, RERUN_COLOR, 0.14);
+                backgrounds.push(self.rect(padding, y, cw * line.cells.len() as f32, ch, tint));
+            }
             for (col, cell) in line.cells.iter().enumerate() {
                 if cell.flags.contains(Flags::WIDE_SPACER) {
                     continue;
@@ -686,25 +708,34 @@ impl Renderer {
         self.damaged = damaged;
         self.grid = grid;
         for row in -isize::from(pixel_offset > 0.0)..term.rows() as isize {
-            if term
+            let marks = rerun.get((row - first) as usize).copied().unwrap_or(0);
+            let failed = term
                 .viewport_row_signed(row)
                 .flags
-                .contains(term_core::RowFlags::FAILED)
-            {
-                let y = padding + row as f32 * ch + pixel_offset;
-                let top = y.max(padding);
-                let bottom = (y + ch).min(padding + term.rows() as f32 * ch);
-                if bottom > top {
-                    overlays.push(self.rect(
-                        (padding - 3.0).max(0.0),
-                        top,
-                        2.0,
-                        bottom - top,
-                        (220, 50, 47),
-                    ));
-                }
+                .contains(term_core::RowFlags::FAILED);
+            let color = if failed {
+                (220, 50, 47)
+            } else if marks & term_core::ROW_CHANGED != 0 {
+                RERUN_COLOR
+            } else if marks & term_core::ROW_REMOVED_ABOVE == 0 {
+                continue;
+            } else {
+                (0, 0, 0)
+            };
+            let y = padding + row as f32 * ch + pixel_offset;
+            let top = y.max(padding);
+            let bottom = (y + ch).min(padding + term.rows() as f32 * ch);
+            let x = (padding - 3.0).max(0.0);
+            if bottom > top && (failed || marks & term_core::ROW_CHANGED != 0) {
+                overlays.push(self.rect(x, top, 2.0, bottom - top, color));
+            }
+            // Lines of the last run that are gone: a short tick on this row's top edge.
+            if marks & term_core::ROW_REMOVED_ABOVE != 0 && y >= padding {
+                let h = (stroke * 2.0).max(2.0);
+                overlays.push(self.rect(x, y - h / 2.0, padding.max(6.0), h, RERUN_REMOVED));
             }
         }
+        self.rerun = rerun;
         if let Some(bar) = crate::ledger_bar(term, padding, pixel_offset, ch)
             && !self.draw_ledger(term, fonts, padding, &bar, &mut overlays)
         {

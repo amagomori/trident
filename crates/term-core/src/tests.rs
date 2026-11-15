@@ -2399,3 +2399,72 @@ fn resize_while_editing_mid_line_leaves_no_stale_tail() {
         );
     }
 }
+
+fn run(cmd: &str, output: &[&str]) -> String {
+    let mut s = format!("\x1b]133;A\x07$ \x1b]133;B\x07{cmd}\r\n\x1b]133;C\x07");
+    for line in output {
+        s.push_str(line);
+        s.push_str("\r\n");
+    }
+    s.push_str("\x1b]133;D;0\x07");
+    s
+}
+
+fn marked_rows(t: &Terminal) -> Vec<(String, u8)> {
+    let mut marks = Vec::new();
+    t.rerun_marks(0, &mut marks);
+    (0..t.rows())
+        .filter(|&r| marks[r] != 0)
+        .map(|r| (t.viewport_row(r).text(), marks[r]))
+        .collect()
+}
+
+#[test]
+fn rerun_marks_lines_that_differ_from_the_last_run() {
+    let mut input = run("make", &["build a", "took 1.2s", "ok"]);
+    input.push_str(&run("ls", &["x"]));
+    input.push_str(&run("make", &["build a", "warning: b", "took 1.4s", "ok"]));
+    input.push_str("\x1b]133;A\x07$ \x1b]133;B\x07");
+    let t = term(20, 20, &input);
+    assert_eq!(
+        marked_rows(&t),
+        [
+            ("warning: b".to_owned(), crate::ROW_CHANGED),
+            ("took 1.4s".to_owned(), crate::ROW_CHANGED),
+        ]
+    );
+}
+
+#[test]
+fn rerun_marks_removed_lines_and_ignores_first_runs() {
+    let mut input = run("test", &["a", "b", "c"]);
+    let t = term(20, 20, &format!("{input}\x1b]133;A\x07$ "));
+    assert!(marked_rows(&t).is_empty());
+    input.push_str(&run("test", &["a", "c"]));
+    input.push_str(&run("test", &["a", "c"]));
+    let t = term(20, 20, &format!("{input}\x1b]133;A\x07$ "));
+    // The second run keeps its mark; the unchanged third run adds none.
+    let removed = |text: &str| (text.to_owned(), crate::ROW_REMOVED_ABOVE);
+    assert_eq!(marked_rows(&t), [removed("c")]);
+    let mut t = term(20, 20, &input);
+    t.advance(run("test", &["a"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(marked_rows(&t), [removed("c"), removed("$")]);
+}
+
+#[test]
+fn rerun_marks_follow_reflow_and_can_be_turned_off() {
+    let mut input = run("cat", &["0123456789", "same"]);
+    input.push_str(&run("cat", &["0123456789abcdefghij", "same"]));
+    input.push_str("\x1b]133;A\x07$ ");
+    let mut t = term(30, 10, &input);
+    assert_eq!(
+        marked_rows(&t),
+        [("0123456789abcdefghij".to_owned(), crate::ROW_CHANGED)]
+    );
+    t.resize(10, 10);
+    let marked: Vec<String> = marked_rows(&t).into_iter().map(|(text, _)| text).collect();
+    assert_eq!(marked, ["0123456789", "abcdefghij"]);
+    t.set_compare_runs(false);
+    assert!(marked_rows(&t).is_empty());
+}
