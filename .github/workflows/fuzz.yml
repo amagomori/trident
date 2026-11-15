@@ -7,7 +7,8 @@ on:
     inputs:
       seconds:
         description: Fuzzing time in seconds
-        default: "300"
+        type: number
+        default: 300
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,11 +33,16 @@ jobs:
           restore-keys: fuzz-corpus-
       - name: Fuzz
         working-directory: fuzz
+        env:
+          SECONDS_TO_FUZZ: ${{ inputs.seconds || 300 }}
         run: |
+          case "$SECONDS_TO_FUZZ" in
+            ''|*[!0-9]*) echo "seconds must be a whole number" >&2; exit 1 ;;
+          esac
           mkdir -p corpus/terminal
           cp ../crates/term-core/tests/fuzz/* corpus/terminal/
           cargo fuzz run terminal corpus/terminal -- \
-            -dict=terminal.dict -max_total_time=${{ inputs.seconds || 300 }} \
+            -dict=terminal.dict -max_total_time="$SECONDS_TO_FUZZ" \
             -max_len=16384 -rss_limit_mb=2048 -timeout=30
       - name: Save corpus
         if: always()
