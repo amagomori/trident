@@ -1,0 +1,17 @@
+size=6x2 active=primary
+cursor row=0 col=3 visible=true shape=block pending_wrap=false
+cursor attributes: fg=default-fg bg=default-bg flags=[]
+scroll_region=0..=1 history=0 display_offset=0
+primary:
+  row 0 wrap=false text="中\u{301} x   "
+    cells 0..1: fg=default-fg bg=default-bg flags=[wide,grapheme]
+    cells 1..2: fg=default-fg bg=default-bg flags=[wide-spacer]
+    cells 2..6: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="      "
+    cells 0..6: fg=default-fg bg=default-bg flags=[]
+scrollback (oldest first):
+alternate:
+  row 0 wrap=false text="      "
+    cells 0..6: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="      "
+    cells 0..6: fg=default-fg bg=default-bg flags=[]

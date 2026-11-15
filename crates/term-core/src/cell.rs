@@ -28,6 +28,8 @@ impl Flags {
     pub const WIDE_WRAP: Flags = Flags(1 << 10);
     /// SGR 5/6 blink; the renderer toggles the cell's text on a timer.
     pub const BLINK: Flags = Flags(1 << 11);
+    /// `c` indexes a grapheme cluster; read it with `Terminal::grapheme`.
+    pub const GRAPHEME: Flags = Flags(1 << 12);
 
     pub const fn union(self, other: Flags) -> Flags {
         Flags(self.0 | other.0)

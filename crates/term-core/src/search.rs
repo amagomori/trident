@@ -147,7 +147,7 @@ impl SearchJob {
             push_line(text, term, line, last);
             if has_points {
                 for (col, cell) in line_columns(term, line, last) {
-                    push_points(points, line, col, cell);
+                    push_points(points, term, line, col, cell);
                 }
             }
         }
@@ -159,7 +159,7 @@ impl SearchJob {
             points.clear();
             for line in logical_start..=logical_end {
                 for (col, cell) in line_columns(term, line, last) {
-                    push_points(points, line, col, cell);
+                    push_points(points, term, line, col, cell);
                 }
             }
         }
@@ -201,13 +201,19 @@ impl SearchJob {
     }
 }
 
-fn push_points(points: &mut Vec<(Point, Point)>, line: u64, col: usize, cell: &Cell) {
+fn push_points(
+    points: &mut Vec<(Point, Point)>,
+    term: &Terminal,
+    line: u64,
+    col: usize,
+    cell: &Cell,
+) {
     let start = Point { line, col };
     let end = Point {
         line,
         col: col + usize::from(cell.flags.contains(Flags::WIDE)),
     };
-    points.extend(std::iter::repeat_n((start, end), cell.c.len_utf8()));
+    points.extend(std::iter::repeat_n((start, end), term.cell_text_len(cell)));
 }
 
 /// First line of the logical line that ends at `end`.
@@ -272,16 +278,23 @@ fn push_line(text: &mut Vec<u8>, term: &Terminal, line: u64, last: u64) {
     }));
     if seen > 0x7f {
         text.truncate(start);
-        push_utf8(text, cells.iter().enumerate().filter(is_text));
+        push_utf8(text, term, cells.iter().enumerate().filter(is_text));
     }
     if hidden > 0 {
-        push_utf8(text, hidden_text_cells(row, hidden));
+        push_utf8(text, term, hidden_text_cells(row, hidden));
     }
 }
 
-fn push_utf8<'a>(text: &mut Vec<u8>, cells: impl Iterator<Item = (usize, &'a Cell)>) {
+fn push_utf8<'a>(
+    text: &mut Vec<u8>,
+    term: &Terminal,
+    cells: impl Iterator<Item = (usize, &'a Cell)>,
+) {
     for (_, cell) in cells {
-        text.extend_from_slice(cell.c.encode_utf8(&mut [0; 4]).as_bytes());
+        match term.grapheme(cell) {
+            Some(cluster) => text.extend_from_slice(cluster.as_bytes()),
+            None => text.extend_from_slice(cell.c.encode_utf8(&mut [0; 4]).as_bytes()),
+        }
     }
 }
 

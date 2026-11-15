@@ -8,6 +8,7 @@ pub mod search;
 mod ascii;
 mod cell;
 mod ghost;
+pub mod grapheme;
 mod kitty;
 mod links;
 pub use links::Link;
@@ -226,6 +227,7 @@ impl PrintState {
 
 pub struct Terminal {
     links: links::LinkTable,
+    graphemes: grapheme::Graphemes,
     pub palette: colors::Palette,
     cols: usize,
     rows: usize,
@@ -695,6 +697,7 @@ impl Terminal {
                 commands: VecDeque::new(),
             }),
             links: Default::default(),
+            graphemes: Default::default(),
             palette: colors::Palette::default(),
             cols,
             rows,
@@ -1176,16 +1179,17 @@ impl Terminal {
         let row = self.line(point.line);
         let is_word = |c: char| !c.is_whitespace() && !"\"'`()[]{}<>|,;".contains(c);
         let col = point.col.min(self.cols - 1);
-        if !is_word(row.cells[col].c) {
+        let is_word = |cell: &Cell| is_word(self.base_char(cell));
+        if !is_word(&row.cells[col]) {
             return point;
         }
         let mut col = col;
         if forward {
-            while col + 1 < self.cols && is_word(row.cells[col + 1].c) {
+            while col + 1 < self.cols && is_word(&row.cells[col + 1]) {
                 col += 1;
             }
         } else {
-            while col > 0 && is_word(row.cells[col - 1].c) {
+            while col > 0 && is_word(&row.cells[col - 1]) {
                 col -= 1;
             }
         }
@@ -1210,11 +1214,12 @@ impl Terminal {
             } else {
                 Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
             };
-            let mut text: String = cells[from..=to]
-                .iter()
-                .filter(|c| !c.flags.intersects(skip))
-                .map(|c| c.c)
-                .collect();
+            let mut text = String::new();
+            for cell in &cells[from..=to] {
+                if !cell.flags.intersects(skip) {
+                    self.push_cell_text(cell, &mut text);
+                }
+            }
             if !block && !(wrapped && line != end.line) {
                 text.truncate(text.trim_end().len());
             }
@@ -1404,8 +1409,8 @@ impl Terminal {
         };
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
-            // Combining marks and other zero-width characters are not rendered.
             self.print_state.disarm_clear();
+            self.join_zero_width(c);
             return;
         }
 
@@ -1448,7 +1453,8 @@ impl Terminal {
         }
         let mut cell = template;
         cell.c = c;
-        cell.flags.remove(Flags::WIDE | Flags::WIDE_SPACER);
+        cell.flags
+            .remove(Flags::WIDE | Flags::WIDE_SPACER | Flags::GRAPHEME);
         if width == 2 {
             cell.flags.insert(Flags::WIDE);
             let mut spacer = template;
@@ -1843,7 +1849,7 @@ fn clear_wide_pair(cells: &mut [Cell], col: usize) {
         cells[col].flags.remove(Flags::WIDE);
     } else if cell.flags.contains(Flags::WIDE_SPACER) && col > 0 {
         cells[col - 1].c = ' ';
-        cells[col - 1].flags.remove(Flags::WIDE);
+        cells[col - 1].flags.remove(Flags::WIDE | Flags::GRAPHEME);
         cells[col].flags.remove(Flags::WIDE_SPACER);
     }
 }
