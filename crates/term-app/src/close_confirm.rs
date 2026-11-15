@@ -149,12 +149,13 @@ thread_local! {
     static QUIT_HOOK: std::cell::RefCell<Option<QuitHook>> = const { std::cell::RefCell::new(None) };
     /// AppKit waits for `answer_quit` on a quit that `should_terminate` deferred.
     static QUIT_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// The window close `should_terminate` sent is a quit, which asks about every tab.
+    /// The window close `should_terminate` or Close Window sent closes every tab, so it asks
+    /// about all of them.
     static QUIT_CLOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Whether a window's `CloseRequested` came from a quit (see `should_terminate`) rather than
-/// from closing that window or tab; clears it.
+/// Whether a window's `CloseRequested` came from a quit (see `should_terminate`) or from
+/// Close Window (see `close_window`) rather than from closing that one tab; clears it.
 #[cfg(target_os = "macos")]
 pub fn take_quit_close() -> bool {
     QUIT_CLOSE.replace(false)
@@ -205,6 +206,36 @@ unsafe extern "C-unwind" fn should_terminate(
         }
         _ => NS_TERMINATE_NOW,
     })
+}
+
+/// `terminalCloseWindow:`, the app menu's Close Window: each native tab is its own NSWindow,
+/// so a plain `performClose:` would close only the key one; this marks the close as one of
+/// every tab first.
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn close_window(
+    _this: *mut objc2::runtime::AnyObject,
+    _cmd: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
+    QUIT_DEFERRED.set(false);
+    QUIT_CLOSE.set(true);
+    // SAFETY: on the main thread, where AppKit sends menu actions; keyWindow is nil or a
+    // live NSWindow.
+    unsafe {
+        let app: objc2::rc::Retained<objc2::runtime::AnyObject> =
+            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        let key: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+            objc2::msg_send![&*app, keyWindow];
+        match key {
+            Some(key) => {
+                let _: () = objc2::msg_send![
+                    &*key,
+                    performClose: std::ptr::null::<objc2::runtime::AnyObject>()
+                ];
+            }
+            None => QUIT_CLOSE.set(false),
+        }
+    }
 }
 
 /// Whether the quit being handled is a logout, restart or shutdown: an Apple Event quit with a
@@ -320,8 +351,8 @@ pub fn route_app_quit_through_close(
     };
     // SAFETY: called on the main thread once the event loop runs; every message matches the
     // AppKit signature of NSApplication, NSMenu, NSMenuItem and NSView; ns_view is the live
-    // view of `window`, and should_terminate and reply_to_quit have the `Q@:@` and `v@:@`
-    // signatures they are added with.
+    // view of `window`, and should_terminate, reply_to_quit and close_window have the `Q@:@`,
+    // `v@:@` and `v@:@` signatures they are added with.
     unsafe {
         let view: &AnyObject = handle.ns_view.cast().as_ref();
         let ns_window: Option<Retained<AnyObject>> = msg_send![view, window];
@@ -351,6 +382,15 @@ pub fn route_app_quit_through_close(
             reply,
             c"v@:@".as_ptr(),
         );
+        let close_window: Imp = std::mem::transmute(
+            close_window as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        objc2::ffi::class_addMethod(
+            delegate as *const AnyClass as *mut AnyClass,
+            sel!(terminalCloseWindow:),
+            close_window,
+            c"v@:@".as_ptr(),
+        );
         QUIT_HOOK.set(Some(QuitHook {
             window: ns_window,
             running: Box::new(running),
@@ -376,9 +416,11 @@ pub fn route_app_quit_through_close(
                 let close: Retained<AnyObject> = msg_send![
                     close,
                     initWithTitle: &*title,
-                    action: sel!(performClose:),
+                    action: sel!(terminalCloseWindow:),
                     keyEquivalent: &*key
                 ];
+                let target: Option<Retained<AnyObject>> = msg_send![&*app, delegate];
+                let _: () = msg_send![&*close, setTarget: target.as_deref()];
                 const COMMAND: usize = 1 << 20;
                 const SHIFT: usize = 1 << 17;
                 let _: () = msg_send![&*close, setKeyEquivalentModifierMask: COMMAND | SHIFT];
