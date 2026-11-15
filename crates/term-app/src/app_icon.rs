@@ -123,7 +123,7 @@ fn window_icon(icon: AppIcon) -> Option<winit::window::Icon> {
 pub struct Shown {
     icon: Option<AppIcon>,
     #[cfg(target_os = "macos")]
-    menu_bar: Option<(AppIcon, objc2::rc::Retained<objc2_app_kit::NSStatusItem>)>,
+    menu_bar: Option<(AppIcon, macos::StatusItem)>,
 }
 
 impl Shown {
@@ -143,7 +143,7 @@ impl Shown {
             let wanted = menu_bar.then_some(icon);
             if shown != wanted {
                 if let Some((_, item)) = self.menu_bar.take() {
-                    macos::remove_status_item(&item);
+                    item.remove();
                 }
                 self.menu_bar = wanted.and_then(|icon| Some((icon, macos::status_item(icon)?)));
             }
@@ -157,12 +157,13 @@ impl Shown {
 mod macos {
     use super::{AppIcon, MENU_BAR_POINTS};
     use objc2::rc::Retained;
-    use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, sel};
+    use objc2::runtime::{AnyObject, NSObject};
+    use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
         NSApplication, NSBitmapImageRep, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
         NSVariableStatusItemLength,
     };
-    use objc2_foundation::{NSData, NSObjectProtocol, NSSize, NSString};
+    use objc2_foundation::{NSArray, NSData, NSObjectProtocol, NSSize, NSString};
 
     pub fn set_dock(icon: AppIcon) {
         let Some(mtm) = MainThreadMarker::new() else {
@@ -188,14 +189,62 @@ mod macos {
         Some(image)
     }
 
+    define_class!(
+        /// Target of the menu bar item's "Show terminal", which brings back a minimized or
+        /// hidden window; `activate` alone leaves a minimized window in the Dock.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "TerminalMenuBarShow"]
+        struct ShowTarget;
+
+        unsafe impl NSObjectProtocol for ShowTarget {}
+
+        impl ShowTarget {
+            #[unsafe(method(show:))]
+            fn show(&self, _sender: Option<&AnyObject>) {
+                show(self.mtm());
+            }
+        }
+    );
+
+    impl ShowTarget {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            // SAFETY: NSObject's `init` on a fresh allocation.
+            unsafe { msg_send![Self::alloc(mtm), init] }
+        }
+    }
+
+    fn show(mtm: MainThreadMarker) {
+        let app = NSApplication::sharedApplication(mtm);
+        // SAFETY: on the main thread; `windows` is NSApp's NSWindow list, and every message
+        // sent is an NSWindow/NSApplication method with these argument types.
+        unsafe {
+            app.unhide(None);
+            let windows: Retained<NSArray<AnyObject>> = msg_send![&app, windows];
+            for window in windows.iter() {
+                let main: bool = msg_send![&*window, canBecomeMainWindow];
+                let minimized: bool = msg_send![&*window, isMiniaturized];
+                if main && minimized {
+                    let _: () = msg_send![&*window, deminiaturize: None::<&AnyObject>];
+                }
+            }
+            // `activate` is macOS 14+; older systems only have the deprecated variant.
+            if app.respondsToSelector(sel!(activate)) {
+                let _: () = msg_send![&app, activate];
+            } else {
+                let _: () = msg_send![&app, activateIgnoringOtherApps: true];
+            }
+        }
+    }
+
     fn menu_item(
         mtm: MainThreadMarker,
         title: &str,
         action: objc2::runtime::Sel,
-        target: &NSApplication,
+        target: &AnyObject,
     ) -> Retained<NSMenuItem> {
-        // SAFETY: on the main thread; `action` is an NSApplication method taking a sender (or
-        // none, which ignores it), and NSApp outlives the menu.
+        // SAFETY: on the main thread; `action` is a method of `target` taking a sender, and the
+        // target outlives the menu (NSApp, or the ShowTarget kept in StatusItem).
         unsafe {
             let item = NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
@@ -208,9 +257,21 @@ mod macos {
         }
     }
 
+    /// A menu bar item; menu items hold their target weakly, so it keeps the target too.
+    pub struct StatusItem {
+        item: Retained<NSStatusItem>,
+        _show: Retained<ShowTarget>,
+    }
+
+    impl StatusItem {
+        pub fn remove(self) {
+            NSStatusBar::systemStatusBar().removeStatusItem(&self.item);
+        }
+    }
+
     /// A menu bar item showing `icon`, whose menu shows or quits the app (the quit goes through
     /// the close confirmation like Cmd-Q).
-    pub fn status_item(icon: AppIcon) -> Option<Retained<NSStatusItem>> {
+    pub fn status_item(icon: AppIcon) -> Option<StatusItem> {
         let mtm = MainThreadMarker::new()?;
         let image = menu_bar_image(icon)?;
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
@@ -219,21 +280,12 @@ mod macos {
             button.setToolTip(Some(&NSString::from_str("terminal")));
         }
         let app = NSApplication::sharedApplication(mtm);
+        let show = ShowTarget::new(mtm);
         let menu = NSMenu::new(mtm);
-        // `activate` is macOS 14+; `unhide:` also brings the app forward on older systems.
-        let show = if app.respondsToSelector(sel!(activate)) {
-            sel!(activate)
-        } else {
-            sel!(unhide:)
-        };
-        menu.addItem(&menu_item(mtm, "Show terminal", show, &app));
+        menu.addItem(&menu_item(mtm, "Show terminal", sel!(show:), &show));
         menu.addItem(&menu_item(mtm, "Quit terminal", sel!(terminate:), &app));
         item.setMenu(Some(&menu));
-        Some(item)
-    }
-
-    pub fn remove_status_item(item: &NSStatusItem) {
-        NSStatusBar::systemStatusBar().removeStatusItem(item);
+        Some(StatusItem { item, _show: show })
     }
 }
 
