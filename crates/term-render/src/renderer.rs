@@ -8,7 +8,7 @@ use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
 use std::sync::Arc;
 use term_core::colors::Rgb;
-use term_core::{Cell, CursorShape, Flags, Terminal};
+use term_core::{Cell, CursorShape, Flags, Terminal, grapheme};
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
 /// Whether `cell` draws something that SGR 5 blinks. The character under a block
@@ -468,27 +468,53 @@ impl Renderer {
                     self.blinking = true;
                     !self.blink_visible
                 };
-                if !blinked_off && cell.c != ' ' && !cell.flags.contains(Flags::HIDDEN) {
-                    let key = GlyphKey {
-                        c: cell.c,
-                        style: Style::new(
-                            cell.flags.contains(Flags::BOLD),
-                            cell.flags.contains(Flags::ITALIC),
-                        ),
-                        cells: cells as u8,
-                    };
-                    match self.atlas.get(key, fonts, &self.device, &self.queue) {
-                        Ok(Some(g)) => glyphs.push(Instance {
-                            pos: [x + g.left, y + g.top],
-                            size: [g.width, g.height],
-                            // A negative width selects the color atlas.
-                            uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
-                            color: self.color(fg, 1.0),
-                        }),
-                        Ok(None) => {}
-                        Err(_) => {
-                            ok = false;
-                            break 'rows;
+                if !blinked_off && !cell.flags.contains(Flags::HIDDEN) {
+                    let style = Style::new(
+                        cell.flags.contains(Flags::BOLD),
+                        cell.flags.contains(Flags::ITALIC),
+                    );
+                    let cluster = term.grapheme(cell);
+                    let base = term.base_char(cell);
+                    let marks = cluster.into_iter().flat_map(grapheme::overlay_marks);
+                    for (index, c) in std::iter::once(base).chain(marks).enumerate() {
+                        if index == 0 && c == ' ' {
+                            continue;
+                        }
+                        let key = GlyphKey {
+                            c,
+                            style,
+                            cells: if index == 0 { cells as u8 } else { 0 },
+                        };
+                        match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                            Ok(Some(g)) => {
+                                // Center marks over a wide base. Fonts often draw a
+                                // combining mark left of its origin, over the glyph before
+                                // it; those move one more cell right.
+                                let left = match index {
+                                    0 => g.left,
+                                    _ if g.left + g.width / 2.0 < 0.0 => {
+                                        g.left + cw * (cells as f32 + 1.0) / 2.0
+                                    }
+                                    _ => g.left + cw * (cells as f32 - 1.0) / 2.0,
+                                };
+                                glyphs.push(Instance {
+                                    pos: [x + left, y + g.top],
+                                    size: [g.width, g.height],
+                                    // A negative width selects the color atlas.
+                                    uv: [
+                                        g.x,
+                                        g.y,
+                                        if g.color { -g.width } else { g.width },
+                                        g.height,
+                                    ],
+                                    color: self.color(fg, 1.0),
+                                });
+                            }
+                            Ok(None) => {}
+                            Err(_) => {
+                                ok = false;
+                                break 'rows;
+                            }
                         }
                     }
                 }
@@ -797,7 +823,7 @@ impl Renderer {
         for (col, cell) in command.cells[..layout.command_columns].iter().enumerate() {
             if cell.flags.contains(Flags::WIDE_SPACER)
                 || cell.flags.contains(Flags::HIDDEN)
-                || cell.c == ' '
+                || term.base_char(cell) == ' '
             {
                 continue;
             }
@@ -823,7 +849,7 @@ impl Renderer {
                 cell.flags.contains(Flags::BOLD),
                 cell.flags.contains(Flags::ITALIC),
             );
-            glyphs.push((col, cell.c, cells as u8, style, fg));
+            glyphs.push((col, term.base_char(cell), cells as u8, style, fg));
         }
         if let Some(col) = layout.ellipsis {
             glyphs.push((col, '\u{2026}', 1, Style::new(false, false), dim));
