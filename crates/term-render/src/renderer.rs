@@ -442,7 +442,8 @@ impl Renderer {
                 break;
             }
         }
-        if std::mem::take(&mut self.atlas.color_changed) {
+        self.atlas.flush(&self.queue);
+        if std::mem::take(&mut self.atlas.textures_changed) {
             self.bind_group = create_bind_group(
                 &self.device,
                 &self.layout,
