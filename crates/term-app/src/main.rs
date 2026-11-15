@@ -1646,6 +1646,9 @@ impl App {
                 self.select_tab(index);
                 self.window_event(event_loop, id, WindowEvent::Focused(true));
             }
+            WindowEvent::CloseRequested if close_confirm::take_quit_close() => {
+                self.close_requested(event_loop)
+            }
             WindowEvent::CloseRequested => self.close_tab(index, event_loop),
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
             WindowEvent::Occluded(occluded) => {
@@ -3719,6 +3722,10 @@ impl ApplicationHandler<UserEvent> for App {
         let _ = id;
         match event {
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
+            #[cfg(target_os = "macos")]
+            WindowEvent::CloseRequested if close_confirm::take_quit_close() => {
+                self.close_requested(event_loop)
+            }
             #[cfg(target_os = "macos")]
             WindowEvent::CloseRequested => self.close_tab(self.active_tab, event_loop),
             #[cfg(not(target_os = "macos"))]

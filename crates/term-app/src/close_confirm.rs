@@ -149,6 +149,15 @@ thread_local! {
     static QUIT_HOOK: std::cell::RefCell<Option<QuitHook>> = const { std::cell::RefCell::new(None) };
     /// AppKit waits for `answer_quit` on a quit that `should_terminate` deferred.
     static QUIT_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The window close `should_terminate` sent is a quit, which asks about every tab.
+    static QUIT_CLOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a window's `CloseRequested` came from a quit (see `should_terminate`) rather than
+/// from closing that window or tab; clears it.
+#[cfg(target_os = "macos")]
+pub fn take_quit_close() -> bool {
+    QUIT_CLOSE.replace(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -177,9 +186,16 @@ unsafe extern "C-unwind" fn should_terminate(
             // SAFETY: on the main thread.
             let session_ends = unsafe { quit_ends_session() };
             QUIT_DEFERRED.set(session_ends);
-            // SAFETY: window is a live NSWindow and this runs on the main thread.
+            QUIT_CLOSE.set(true);
+            // SAFETY: on the main thread; mainWindow is nil or a live NSWindow, and so is
+            // hook.window, which stands in when the app has no main window.
             let _: () = unsafe {
-                objc2::msg_send![&*hook.window, performClose: std::ptr::null::<objc2::runtime::AnyObject>()]
+                let app: objc2::rc::Retained<objc2::runtime::AnyObject> =
+                    objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+                let main: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+                    objc2::msg_send![&*app, mainWindow];
+                let window = main.as_deref().unwrap_or(&hook.window);
+                objc2::msg_send![window, performClose: std::ptr::null::<objc2::runtime::AnyObject>()]
             };
             if session_ends {
                 NS_TERMINATE_LATER
