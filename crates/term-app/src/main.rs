@@ -2128,7 +2128,10 @@ impl App {
         let running = self
             .session
             .as_ref()
-            .filter(|_| self.config.confirm_close && self.pending_close.is_none())
+            .filter(|_| {
+                self.config.confirm_close
+                    && (self.pending_close.is_none() || self.pending_close_tab.is_some())
+            })
             .and_then(|s| {
                 s.pty.running_program().or_else(|| {
                     self.tabs
@@ -2139,6 +2142,8 @@ impl App {
             });
         match (running, &self.session) {
             (Some(pid), Some(s)) => {
+                // A window close while a tab close is being asked about asks about the window.
+                self.pending_close_tab = None;
                 self.pending_close = Some(close_confirm::process_name(pid));
                 if s.window.is_minimized() == Some(true) {
                     s.window.set_minimized(false);
