@@ -17,15 +17,17 @@ git worktree add ../t-main origin/main && git worktree add ../t-head <head-sha>
 python3 .github/scripts/latency-qa/ab.py --main ../t-main/target/release/terminal \
     --head ../t-head/target/release/terminal --rounds 8 --out ab-out
 python3 .github/scripts/latency-qa/vs_alacritty.py --main ../t-main/target/release/terminal \
-    --head ../t-head/target/release/terminal --alacritty "$(command -v alacritty)" \
-    --rounds 6 --probes 200 --load --out vs-out
+    --head ../t-head/target/release/terminal --rounds 6 --probes 200 --load --out vs-out
 ```
 
 Both write `rows.json` (every run) and `summary.json` into `--out`. Report the timing source
 `ab.py` prints: only `wayland-presentation` is verified presentation; `x11-present`,
 `metal-presented` and `present-return` are labelled unverified. Where every presentation
 callback is a skip (the macOS VM's paravirtual Metal), `ab.py` reports present-return and
-marks fps/wasted n/a; it exits 2 if it gets no echo p50 at all, or if runs mix timing sources. `vs_alacritty.py` measures
+marks fps/wasted n/a. It exits 2 if it gets no echo p50 at all, and exits 2 with no verdict table
+and no `summary.json` if one workload's runs mix timing sources (raw runs stay in `rows.json`). `vs_alacritty.py`
+finds Alacritty on `PATH`, then (macOS) in `/Applications` or `~/Applications`; `--alacritty` takes
+a binary or an `Alacritty.app`. Both scripts check every binary path before the first run. `vs_alacritty.py` measures
 until the pixels change in the captured screen, not photons at the panel.
 
 macOS Alacritty: the Homebrew cask is disabled (Gatekeeper), so use the release DMG:

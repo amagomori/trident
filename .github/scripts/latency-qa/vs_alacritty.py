@@ -12,7 +12,8 @@ shuffled order; reports per-label median-of-medians and p99, and per-round paire
 with 95% bootstrap CIs.
 
   python3 .github/scripts/latency-qa/vs_alacritty.py --head H/release/terminal --main M/release/terminal \
-      --alacritty "$(command -v alacritty)" --rounds 6 --probes 200 --out ~/kan89/vs-x11
+      --rounds 6 --probes 200 --out ~/kan89/vs-x11
+  Alacritty is found on PATH, else in /Applications or ~/Applications (macOS); --alacritty overrides.
   add --load to also run with `cat`-ing a 100 MiB file in the background of the same shell.
 """
 import argparse, json, os, random, shlex, shutil, signal, statistics, subprocess, sys, tempfile, time
@@ -31,6 +32,32 @@ history = 10000
 style = { blinking = "Never" }
 """
 TERMINAL_TOML = "font_size = 14\npadding = 6\nscrollback = 10000\n"
+
+
+MAC_ALACRITTY = ("/Applications/Alacritty.app", "~/Applications/Alacritty.app")
+
+
+def require_executable(ap, flag, path):
+    if not path.is_file() or not os.access(path, os.X_OK):
+        what = "does not exist" if not path.exists() else "is not an executable file"
+        ap.error(f"{flag} {path} {what}")
+
+
+def find_alacritty(ap, given):
+    if given:
+        path = Path(given).expanduser()
+        if path.suffix == ".app" and path.is_dir():
+            path = path / "Contents/MacOS/alacritty"
+        return path
+    found = shutil.which("alacritty")
+    if found:
+        return Path(found)
+    for app in MAC_ALACRITTY if sys.platform == "darwin" else ():
+        path = Path(app).expanduser() / "Contents/MacOS/alacritty"
+        if path.is_file():
+            return path
+    ap.error("no Alacritty found on PATH" + (" or in " + ", ".join(MAC_ALACRITTY) if sys.platform == "darwin" else "")
+             + "; install it or pass --alacritty PATH")
 
 
 def boot_ci(values, n=10000, seed=89):
@@ -213,7 +240,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--head", type=Path, required=True)
     ap.add_argument("--main", type=Path, required=True)
-    ap.add_argument("--alacritty", type=Path, required=True)
+    ap.add_argument("--alacritty", help="Alacritty binary or Alacritty.app (default: PATH, then /Applications)")
     ap.add_argument("--rounds", type=int, default=6)
     ap.add_argument("--probes", type=int, default=200)
     ap.add_argument("--settle", type=float, default=2.0)
@@ -224,6 +251,10 @@ def main():
     args = ap.parse_args()
     if args.rounds < 3:
         ap.error("--rounds must be at least 3 for paired-round CIs")
+    require_executable(ap, "--head", args.head)
+    require_executable(ap, "--main", args.main)
+    args.alacritty = find_alacritty(ap, args.alacritty)
+    require_executable(ap, "--alacritty", args.alacritty)
     args.out = args.out.resolve()  # the probe shell runs in a temp cwd
     mac = sys.platform == "darwin"
     if not mac:

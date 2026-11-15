@@ -21,6 +21,12 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def require_executable(ap, flag, path):
+    if not path.is_file() or not os.access(path, os.X_OK):
+        what = "does not exist" if not path.exists() else "is not an executable file"
+        ap.error(f"{flag} {path} {what}")
+
+
 def boot_ci(values, n=10000, seed=89):
     rng = random.Random(seed)
     meds = sorted(statistics.median(rng.choices(values, k=len(values))) for _ in range(n))
@@ -62,6 +68,10 @@ def main():
     args = ap.parse_args()
     if args.rounds < 3:
         ap.error("--rounds must be at least 3 for paired-round CIs")
+    require_executable(ap, "--main", args.main)
+    require_executable(ap, "--head", args.head)
+    if not args.latency.is_file():
+        ap.error(f"--latency {args.latency} does not exist")
     args.out.mkdir(parents=True, exist_ok=True)
     copy = args.out / "terminal-main-copy"
     shutil.copy2(args.main, copy)
@@ -81,9 +91,18 @@ def main():
                 fps = "n/a" if r["fps"] is None else f"{r['fps']:.1f}"
                 print(f"round {rnd} {workload} {label}: p50 {r['p50_ms']} p99 {r['p99_ms']} "
                       f"fps {fps} wasted {r['wasted']} [{r['timing']}]", file=sys.stderr)
-    timings = {r["timing"] for r in rows}
-    summary = {"timing": sorted(timings), "rounds": args.rounds, "metrics": {}}
-    lines = [f"timing source: {', '.join(sorted(timings))}" + (" (MIXED: rerun)" if len(timings) > 1 else ""),
+    (args.out / "rows.json").write_text(json.dumps(rows, indent=1))
+    timings = {w: sorted({r["timing"] for r in rows if r["workload"] == w}) for w in workloads}
+    mixed = {w: t for w, t in timings.items() if len(t) > 1}
+    if mixed:
+        # Deltas are paired within a workload, so each workload must use one timing source.
+        print("ERROR: mixed timing sources within a workload ("
+              + "; ".join(f"{w}: {', '.join(t)}" for w, t in mixed.items())
+              + "); deltas would compare different endpoints, so no verdict. Rerun; raw runs are in "
+              + str(args.out / "rows.json"), file=sys.stderr)
+        return 2
+    summary = {"timing": {w: t[0] for w, t in timings.items()}, "rounds": args.rounds, "metrics": {}}
+    lines = ["timing source: " + "; ".join(f"{w} {t[0]}" for w, t in timings.items()),
              "| workload | metric | main median | copy median | head median | A/A copy-main [95% CI] | head-main [95% CI] | verdict |",
              "| --- | --- | ---: | ---: | ---: | --- | --- | --- |"]
     for workload in workloads:
@@ -104,17 +123,12 @@ def main():
             f = lambda c: f"{c[0]:+.2f} [{c[1]:+.2f}, {c[2]:+.2f}]"
             lines.append(f"| {workload} | {key} | {med['main']:.2f} | {med['copy']:.2f} | {med['head']:.2f} | "
                          f"{f(aa)} | {f(ab)} | {verdict} |")
-    (args.out / "rows.json").write_text(json.dumps(rows, indent=1))
     (args.out / "summary.json").write_text(json.dumps(summary, indent=1))
     print("\n".join(lines))
     missing = [w for w, k in (("echo", "echo.p50_ms"), ("load", "load.bytes_s"))
                if w in workloads and k not in summary["metrics"]]
     if missing:
         print(f"ERROR: no {', '.join(missing)} result for at least 3 complete rounds", file=sys.stderr)
-        return 2
-    if len(timings) > 1:
-        print(f"ERROR: mixed timing sources ({', '.join(sorted(timings))}); verdicts compare different "
-              "endpoints, rerun", file=sys.stderr)
         return 2
     return 1 if any(m["verdict"] == "REGRESSION" for m in summary["metrics"].values()) else 0
 
