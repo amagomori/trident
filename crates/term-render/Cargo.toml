@@ -17,6 +17,7 @@ pollster.workspace = true
 term-core.workspace = true
 unicode-width.workspace = true
 ttf-parser.workspace = true
+harfrust.workspace = true
 wgpu.workspace = true
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]

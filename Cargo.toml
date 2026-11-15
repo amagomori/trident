@@ -34,6 +34,7 @@ pollster = "0.4"
 portable-pty = "0.9"
 resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "svgz", "raster-images"] }
 ttf-parser = "0.25"
+harfrust = "0.15"
 unicode-width = "0.2"
 vte = "0.15"
 wgpu = "30"

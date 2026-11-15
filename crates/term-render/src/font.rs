@@ -63,6 +63,8 @@ pub struct RasterizedGlyph {
 struct Fallback {
     font: FontArc,
     face: Option<ttf_parser::Face<'static>>,
+    data: &'static [u8],
+    index: u32,
 }
 
 /// Memory-maps a font file for the rest of the program, once per path.
@@ -101,7 +103,12 @@ fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
     let face = ttf_parser::Face::parse(data, *index)
         .ok()
         .filter(color::has_color);
-    Some(Fallback { font, face })
+    Some(Fallback {
+        font,
+        face,
+        data,
+        index: *index,
+    })
 }
 
 pub struct Fonts {
@@ -255,6 +262,41 @@ impl Fonts {
             color: false,
         })
     }
+
+    /// An emoji sequence (ZWJ sequence, flag, skin tone) shaped by the color emoji font
+    /// that draws its first character, when that font draws the whole sequence as one glyph.
+    pub fn rasterize_sequence(&mut self, text: &str, cells: usize) -> Option<RasterizedGlyph> {
+        let metrics = self.metrics;
+        let px = self.px;
+        let fallback = self.fallback_for(text.chars().next()?, true, false)?;
+        let face = fallback.face.as_ref()?;
+        let font = harfrust::Font::new(fallback.data, fallback.index)?;
+        let mut buffer = harfrust::Buffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        harfrust::shape(
+            &harfrust::ShaperFont::new(&font),
+            &mut buffer,
+            harfrust::ShapeOptions::new(),
+        )
+        .ok()?;
+        let mut drawn = buffer
+            .glyph_infos()
+            .iter()
+            .zip(buffer.glyph_positions())
+            .filter(|(_, p)| p.x_advance != 0);
+        let (info, _) = drawn.next()?;
+        if drawn.next().is_some() {
+            return None;
+        }
+        let target = color::Target {
+            width: metrics.width * cells.max(1) as f32,
+            height: metrics.height,
+            baseline: metrics.baseline,
+            px,
+        };
+        color::rasterize(face, ttf_parser::GlyphId(info.glyph_id as u16), target)
+    }
 }
 
 #[cfg(test)]
@@ -340,5 +382,54 @@ mod tests {
             .expect("fallback glyph");
         assert!(!glyph.color);
         assert!(glyph.coverage.iter().any(|&c| c > 0));
+    }
+
+    /// Needs a color emoji font with ZWJ and flag sequences (Noto Color Emoji, Apple Color
+    /// Emoji); skipped without one.
+    #[test]
+    fn emoji_sequences_shape_to_one_color_glyph() {
+        let mut fonts = fonts();
+        if fonts
+            .fallback_for('\u{1f468}', true, false)
+            .is_none_or(|f| f.face.is_none())
+        {
+            eprintln!("no color emoji font on this system; skipping");
+            return;
+        }
+        for text in [
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}",
+            "\u{1f469}\u{200d}\u{1f4bb}",
+            "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
+            "\u{1f1ef}\u{1f1f5}",
+            "\u{1f44d}\u{1f3fd}",
+        ] {
+            let glyph = fonts.rasterize_sequence(text, 2).expect(text);
+            assert!(glyph.color, "{text}");
+            assert!(
+                glyph.width as f32 <= fonts.metrics.width * 2.0 + 1.0,
+                "{text}"
+            );
+        }
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        let family = fonts.rasterize_sequence(family, 2).unwrap();
+        let man = fonts.rasterize('\u{1f468}', Style::Regular, 2).unwrap();
+        assert_ne!(family.coverage, man.coverage);
+        // Two unrelated emoji are not one glyph.
+        assert!(fonts.rasterize_sequence("\u{1f468}\u{1f600}", 2).is_none());
+    }
+
+    /// Needs a font with CJK Extension B (HanaMinB, Noto Serif CJK, SimSun-ExtB); skipped
+    /// without one.
+    #[test]
+    fn cjk_extension_b_comes_from_a_fallback_font() {
+        let mut fonts = fonts();
+        if fonts.fallback_for('\u{20000}', false, false).is_none() {
+            eprintln!("no CJK Extension B font on this system; skipping");
+            return;
+        }
+        for c in ['\u{20000}', '\u{20001}', '\u{2a6d6}'] {
+            let glyph = fonts.rasterize(c, Style::Regular, 2).expect("Ext-B glyph");
+            assert!(glyph.coverage.iter().any(|&v| v > 0));
+        }
     }
 }

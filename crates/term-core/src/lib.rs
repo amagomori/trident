@@ -1598,6 +1598,10 @@ impl Terminal {
             self.join_zero_width(c);
             return;
         }
+        if c as u32 >= 0x80 && self.join_sequence(c) {
+            self.print_state.disarm_clear();
+            return;
+        }
 
         if self.cursor.pending_wrap && self.modes.autowrap {
             self.sync_cursor_row();
