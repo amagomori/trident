@@ -919,6 +919,7 @@ mod tests {
         let mut pty = Pty::spawn(
             &["sh".into(), "-c".into(), script],
             &Default::default(),
+            None,
             80,
             24,
             (8.0, 16.0),
