@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 pub static REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 /// Family name of the bundled fonts.
 pub const FAMILY: &str = "JetBrains Mono";
-const BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
+pub(crate) const BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
 const ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf");
 const BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf");
 
@@ -175,8 +175,9 @@ impl Fonts {
 
     /// The first system font that can draw `c`; with `text_only`, skipping color fonts.
     fn fallback_for(&mut self, c: char, emoji: bool, text_only: bool) -> Option<&Fallback> {
-        let file = self.system.lookup(c, emoji).into_iter().find(|file| {
-            self.fallbacks
+        let fallbacks = &mut self.fallbacks;
+        let file = self.system.find(c, emoji, |file| {
+            fallbacks
                 .entry(file.clone())
                 .or_insert_with(|| load_fallback(file))
                 .as_ref()

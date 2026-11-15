@@ -12,6 +12,28 @@ pub use coretext::SystemFonts;
 #[cfg(not(target_os = "macos"))]
 pub use fontconfig::SystemFonts;
 
+/// The face in a font file or collection whose PostScript name is `postscript`, reading
+/// only each face's `name` table; 0 if none matches.
+#[cfg(any(target_os = "macos", test))]
+fn face_index(data: &[u8], postscript: &str) -> u32 {
+    let name = ttf_parser::Tag::from_bytes(b"name");
+    let count = ttf_parser::fonts_in_collection(data).unwrap_or(1);
+    (0..count)
+        .find(|&i| {
+            ttf_parser::RawFace::parse(data, i)
+                .ok()
+                .and_then(|face| face.table(name))
+                .and_then(ttf_parser::name::Table::parse)
+                .is_some_and(|table| {
+                    table.names.into_iter().any(|n| {
+                        n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME
+                            && n.to_string().as_deref() == Some(postscript)
+                    })
+                })
+        })
+        .unwrap_or(0)
+}
+
 /// Characters that default to emoji presentation take two cells, so a wide character in
 /// the emoji blocks is drawn from a color emoji font in preference to a text font.
 pub fn prefers_emoji(c: char, cells: usize) -> bool {
@@ -86,8 +108,13 @@ mod fontconfig {
             self.sets = Some(sets);
         }
 
-        /// Fonts fontconfig says cover `c`, best first.
-        pub fn lookup(&mut self, c: char, emoji: bool) -> Vec<FontFile> {
+        /// The first of the fonts fontconfig says cover `c`, best first, that `accept`s.
+        pub fn find(
+            &mut self,
+            c: char,
+            emoji: bool,
+            mut accept: impl FnMut(&FontFile) -> bool,
+        ) -> Option<FontFile> {
             self.init();
             let covers =
                 |f: &&Candidate| unsafe { (LIB.FcCharSetHasChar)(f.charset, c as FcChar32) != 0 };
@@ -95,8 +122,9 @@ mod fontconfig {
             emoji_fonts
                 .chain(&self.monospace)
                 .filter(covers)
-                .map(|f| f.file.clone())
-                .collect()
+                .map(|f| &f.file)
+                .find(|f| accept(f))
+                .cloned()
         }
     }
 
@@ -170,10 +198,16 @@ mod coretext {
             SystemFonts { base: None }
         }
 
-        /// The font Core Text picks for `c` (its cascade list already prefers Apple Color
-        /// Emoji for emoji), then the rest of the cascade list, since Core Text can pick fonts
-        /// whose outlines only it can read.
-        pub fn lookup(&mut self, c: char, _emoji: bool) -> Vec<FontFile> {
+        /// The first font that `accept`s, of the one Core Text picks for `c` (its cascade
+        /// list already prefers Apple Color Emoji for emoji) and then the rest of the cascade
+        /// list, since Core Text can pick fonts whose outlines only it can read. The cascade
+        /// list is only read when the picked font is rejected.
+        pub fn find(
+            &mut self,
+            c: char,
+            _emoji: bool,
+            mut accept: impl FnMut(&FontFile) -> bool,
+        ) -> Option<FontFile> {
             let base = self.base.get_or_insert_with(|| unsafe {
                 CTFont::with_name(&CFString::from_str("Menlo"), 14.0, std::ptr::null())
             });
@@ -181,50 +215,72 @@ mod coretext {
             let string = CFString::from_str(c.encode_utf8(&mut buf));
             let range = CFRange::new(0, c.len_utf16() as isize);
             let font = unsafe { base.for_string(&string, range) };
-            let mut files = Vec::new();
             let url = unsafe { font.attribute(kCTFontURLAttribute) };
-            files.extend(file(
-                url,
-                Some(unsafe { font.post_script_name() }.to_string()),
-            ));
-            if let Some(list) = unsafe { base.default_cascade_list_for_languages(None) } {
-                let list: &CFArray<CTFontDescriptor> =
-                    unsafe { &*(&*list as *const CFArray).cast() };
-                for descriptor in list.iter() {
-                    let url = unsafe { descriptor.attribute(kCTFontURLAttribute) };
-                    let name = unsafe { descriptor.attribute(kCTFontNameAttribute) }
-                        .and_then(|n| n.downcast::<CFString>().ok())
-                        .map(|n| n.to_string());
-                    files.extend(file(url, name));
-                }
+            let picked = file(url, Some(unsafe { font.post_script_name() }.to_string()));
+            if picked.as_ref().is_some_and(&mut accept) {
+                return picked;
             }
-            files.dedup();
-            files
+            let list = unsafe { base.default_cascade_list_for_languages(None) }?;
+            let list: &CFArray<CTFontDescriptor> = unsafe { &*(&*list as *const CFArray).cast() };
+            list.iter().find_map(|descriptor| {
+                let url = unsafe { descriptor.attribute(kCTFontURLAttribute) };
+                let name = unsafe { descriptor.attribute(kCTFontNameAttribute) }
+                    .and_then(|n| n.downcast::<CFString>().ok())
+                    .map(|n| n.to_string());
+                let f = file(url, name)?;
+                (picked.as_ref() != Some(&f) && accept(&f)).then_some(f)
+            })
         }
     }
 
     fn file(url: Option<CFRetained<CFType>>, postscript: Option<String>) -> Option<FontFile> {
         let path = url?.downcast::<CFURL>().ok()?.to_file_path()?;
-        let index = postscript.map_or(0, |name| face_index(&path, &name));
+        let index = match postscript {
+            Some(name) => crate::font::map(&path).map_or(0, |data| super::face_index(data, &name)),
+            None => 0,
+        };
         Some((path, index))
     }
+}
 
-    /// Core Text names the font but not its index inside a collection; find it by
-    /// PostScript name.
-    fn face_index(path: &std::path::Path, postscript: &str) -> u32 {
-        let Ok(data) = crate::font::map(path) else {
-            return 0;
-        };
-        let count = ttf_parser::fonts_in_collection(data).unwrap_or(1);
-        (0..count)
-            .find(|&i| {
-                ttf_parser::Face::parse(data, i).is_ok_and(|face| {
-                    face.names().into_iter().any(|n| {
-                        n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME
-                            && n.to_string().as_deref() == Some(postscript)
-                    })
-                })
-            })
-            .unwrap_or(0)
+#[cfg(test)]
+mod tests {
+    use super::face_index;
+    use crate::font::{BOLD, REGULAR};
+
+    /// A font collection holding `fonts` in order.
+    fn collection(fonts: &[&[u8]]) -> Vec<u8> {
+        let mut data = b"ttcf\x00\x01\x00\x00".to_vec();
+        data.extend((fonts.len() as u32).to_be_bytes());
+        let mut offset = data.len() + 4 * fonts.len();
+        let mut faces = Vec::new();
+        for font in fonts {
+            data.extend((offset as u32).to_be_bytes());
+            let mut face = font.to_vec();
+            let tables = u16::from_be_bytes([face[4], face[5]]) as usize;
+            for record in (12..12 + 16 * tables).step_by(16) {
+                let at = record + 8;
+                let table = u32::from_be_bytes(face[at..at + 4].try_into().unwrap());
+                face[at..at + 4].copy_from_slice(&(table + offset as u32).to_be_bytes());
+            }
+            offset += face.len();
+            faces.push(face);
+        }
+        faces.into_iter().for_each(|face| data.extend(face));
+        data
+    }
+
+    #[test]
+    fn a_single_font_is_face_zero() {
+        assert_eq!(face_index(REGULAR, "JetBrainsMono-Regular"), 0);
+    }
+
+    #[test]
+    fn a_collection_face_is_found_by_postscript_name() {
+        let data = collection(&[REGULAR, BOLD]);
+        assert_eq!(ttf_parser::fonts_in_collection(&data), Some(2));
+        assert_eq!(face_index(&data, "JetBrainsMono-Regular"), 0);
+        assert_eq!(face_index(&data, "JetBrainsMono-Bold"), 1);
+        assert_eq!(face_index(&data, "NoSuchFont"), 0);
     }
 }
