@@ -618,7 +618,7 @@ fn same_host(a: &str, b: &str) -> bool {
             .unwrap_or_default()
             .to_ascii_lowercase()
     };
-    a.eq_ignore_ascii_case(b) || short(a) == short(b)
+    a.eq_ignore_ascii_case(b) || (!a.contains('.') || !b.contains('.')) && short(a) == short(b)
 }
 
 fn hostname() -> Option<String> {
@@ -3065,6 +3065,7 @@ mod tests {
         );
         assert!(super::same_host("mac.local", "MAC"));
         assert!(!super::same_host("mac.local", "box.local"));
+        assert!(!super::same_host("dev.office.example", "dev.cloud.example"));
     }
 
     #[test]
