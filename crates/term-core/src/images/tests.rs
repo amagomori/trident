@@ -649,3 +649,95 @@ fn reflow_moves_placements_with_their_cells() {
     assert_eq!((p.line, p.col), (1, 2));
     assert_eq!(rows(&t), [1]);
 }
+
+/// What bash 5.1 and zsh 5.8 send after SIGWINCH with `$ ` as the prompt.
+const PROMPT_REDRAWS: [&[u8]; 2] = [b"\r\x1b[K$ ", b"\r\r\x1b[0m\x1b[27m\x1b[24m\x1b[J$ "];
+
+/// Image 1 on rows 1-2, the prompt on its second row, then a resize while the shell edits.
+fn prompt_over_image(redraw: &[u8]) -> Terminal {
+    let mut t = term();
+    place_at(&mut t, 1, 0);
+    t.advance(b"\x1b[3;1H$ ");
+    t.resize_while_editing(8, 5, &mut []);
+    t.advance(redraw);
+    t
+}
+
+#[test]
+fn prompt_redraw_after_resize_keeps_images_it_overlaps() {
+    for redraw in PROMPT_REDRAWS {
+        let mut t = prompt_over_image(redraw);
+        assert_eq!(rows(&t), [1]);
+        // Editing the line keeps it too, across more resizes and redraws.
+        t.advance(b"ls\x08\x08\x1b[K");
+        t.resize_while_editing(10, 5, &mut []);
+        t.advance(redraw);
+        assert_eq!(rows(&t), [1]);
+        // Once the line is run, erasing its cells deletes it again.
+        t.advance(b"\r\n\x1b[2;1H\x1b[K");
+        assert!(t.visible_placements().is_empty());
+    }
+}
+
+#[test]
+fn prompt_redraw_keeps_images_cut_off_by_narrowing() {
+    let mut t = term();
+    place_at(&mut t, 1, 6);
+    t.advance(b"\x1b[3;1H$ ");
+    t.resize_while_editing(5, 5, &mut []);
+    t.advance(b"\x1b[A\r\x1b[K\x1b[B$ ");
+    t.resize_while_editing(10, 5, &mut []);
+    assert_eq!(rows(&t), [1]);
+    assert_eq!(t.visible_placements()[0].placement.col, 6);
+}
+
+#[test]
+fn explicit_clears_delete_images_during_a_prompt_redraw() {
+    let clears: [&[u8]; 6] = [
+        b"\x1b[H\x1b[2J",
+        b"\x1b[?2J",
+        b"\x1bc",
+        b"\x1b_Ga=d,d=i,i=1\x1b\\",
+        b"\x1b_Ga=d,d=a\x1b\\",
+        b"\x1b#8",
+    ];
+    for redraw in PROMPT_REDRAWS {
+        for clear in clears {
+            let mut t = prompt_over_image(redraw);
+            t.advance(clear);
+            assert!(t.visible_placements().is_empty(), "{clear:?}");
+        }
+    }
+}
+
+#[test]
+fn erases_delete_images_without_a_line_editor() {
+    // A program's own redraw after a resize (no line editor) still deletes what it erases.
+    for redraw in PROMPT_REDRAWS {
+        let mut t = term();
+        place_at(&mut t, 1, 0);
+        t.advance(b"\x1b[3;1H$ ");
+        t.resize(8, 5);
+        t.advance(redraw);
+        assert!(t.visible_placements().is_empty());
+    }
+    // So do erases on the alternate screen.
+    let mut t = term();
+    t.advance(b"\x1b[?1049h");
+    place_at(&mut t, 1, 0);
+    t.advance(b"\x1b[3;1H");
+    t.resize_while_editing(8, 5, &mut []);
+    t.advance(b"\r\x1b[K");
+    assert!(t.visible_placements().is_empty());
+}
+
+#[test]
+fn shell_input_zone_counts_as_line_editing() {
+    // OSC 133 B marks the input, so the redraw is the shell's even without `editing`.
+    let mut t = term();
+    place_at(&mut t, 1, 0);
+    t.advance(b"\x1b[3;1H\x1b]133;A\x07$ \x1b]133;B\x07");
+    t.resize(8, 5);
+    t.advance(b"\r\x1b[K\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(rows(&t), [1]);
+}
