@@ -354,9 +354,9 @@ def changelog(tag, since=None, cwd=ROOT, repo=REPO):
         lines += [f"- {title} ([#{n}](https://github.com/{repo}/pull/{n}))" for n, title in prs]
     else:
         lines.append("No pull requests merged since the last release.")
-    lines += ["", "Builds are unsigned. On macOS, open Trident.app from the .dmg with "
-              "right-click > Open the first time (or run `xattr -dr com.apple.quarantine "
-              "/Applications/Trident.app`). Verify downloads with `sha256sum -c SHA256SUMS`."]
+    lines += ["", "Builds are unsigned, so macOS reports a downloaded .dmg as damaged: run "
+              f"`xattr -d com.apple.quarantine {NAME}-{tag.removeprefix('v')}-macos-universal.dmg` "
+              "before opening it. Verify downloads with `sha256sum -c SHA256SUMS`."]
     if since:
         lines += ["", f"**Full changelog**: https://github.com/{repo}/compare/{since}...{tag}"]
     return "\n".join(lines) + "\n"

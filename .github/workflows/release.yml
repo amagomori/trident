@@ -29,6 +29,8 @@ jobs:
           version=$(python3 .github/scripts/release/release.py version --tag "$GITHUB_REF_NAME")
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - run: python3 -m unittest discover -s .github/scripts/release
+      - name: Date packaged files by the tagged commit
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
       - run: cargo build --release --locked -p term-app
       - name: Fetch appimagetool
         run: |

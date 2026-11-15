@@ -207,6 +207,7 @@ class Changelog(unittest.TestCase):
                                  "- KAN-2: Second feature ([#2](https://github.com/o/r/pull/2))"])
         self.assertIn("https://github.com/o/r/compare/v0.1.0...v0.2.0", notes)
         self.assertIn("unsigned", notes)
+        self.assertIn("xattr -d com.apple.quarantine Trident-0.2.0-macos-universal.dmg", notes)
 
     def test_first_release_lists_everything(self):
         notes = release.changelog("v0.1.0", cwd=self.repo, repo="o/r")
@@ -220,6 +221,10 @@ class Workflow(unittest.TestCase):
         text = (release.ROOT / ".github/workflows/release.yml").read_text()
         trigger = re.search(r"^on:\n((?:[ ].*\n|\n)*)", text, re.M).group(1)
         self.assertEqual(re.sub(r"\s+", " ", trigger).strip(), 'push: tags: ["v*"]')
+
+    def test_linux_files_dated_by_the_tagged_commit(self):
+        text = (release.ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn('echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"', text)
 
 
 if __name__ == "__main__":
