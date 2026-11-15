@@ -26,6 +26,8 @@ impl Flags {
     pub const PAD: Flags = Flags(1 << 9);
     /// Unprinted padding before a soft wrap, from a wide character or widening the row.
     pub const WIDE_WRAP: Flags = Flags(1 << 10);
+    /// SGR 5/6 blink; the renderer toggles the cell's text on a timer.
+    pub const BLINK: Flags = Flags(1 << 11);
 
     pub const fn union(self, other: Flags) -> Flags {
         Flags(self.0 | other.0)

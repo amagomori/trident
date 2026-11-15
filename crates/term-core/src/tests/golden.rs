@@ -736,6 +736,24 @@ fn cases() -> Vec<Case> {
             2,
             b"\x1b[91;104mA\x1b[38;5;200;48;5;236mB\x1b[38;2;1;2;3;48:2::4:5:6mC\x1b[39;49mD",
         ),
+        (
+            "sgr_extended_color_forms",
+            8,
+            2,
+            b"\x1b[48;2;7;8;9mA\x1b[38:5:100mB\x1b[48:5:17mC\x1b[38:2:10:20:30mD\x1b[48:2:40:50:60mE\x1b[38:2::70:80:90;49mF\x1b[0mG",
+        ),
+        (
+            "sgr_bright_colors",
+            10,
+            2,
+            b"\x1b[90;100mA\x1b[97;107mB\x1b[93;41mC\x1b[32;103mD\x1b[39mE\x1b[49mF\x1b[21mG\x1b[mH",
+        ),
+        (
+            "sgr_blink",
+            8,
+            2,
+            b"\x1b[5mA\x1b[25mB\x1b[6mC\x1b[0mD\x1b[1;5;31mE\x1b[22;25mF\x1b[5m\x1b[mG",
+        ),
         ("cjk_wrap", 5, 3, "a你好b".as_bytes()),
         ("cjk_edge", 4, 2, "abc你".as_bytes()),
         (
@@ -878,6 +896,7 @@ fn attributes(cell: &Cell) -> String {
         (Flags::DIM, "dim"),
         (Flags::ITALIC, "italic"),
         (Flags::UNDERLINE, "underline"),
+        (Flags::BLINK, "blink"),
         (Flags::INVERSE, "inverse"),
         (Flags::HIDDEN, "hidden"),
         (Flags::STRIKE, "strike"),
