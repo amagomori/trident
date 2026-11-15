@@ -52,10 +52,7 @@ pub fn install() -> i32 {
     match install_with(&BTreeMap::new()) {
         Ok(warnings) => {
             eprint!("{warnings}");
-            println!(
-                "trident: installed the {NAME} terminfo entry; set term = \"{NAME}\" in the \
-                 config to use it (ssh hosts need the entry too, see the README)"
-            );
+            println!("{}", installed_message());
             0
         }
         Err(e) => {
@@ -63,6 +60,16 @@ pub fn install() -> i32 {
             1
         }
     }
+}
+
+/// Where the ssh and macOS install notes for the entry live.
+const USAGE_DOC: &str = "docs/usage.md#terminfo";
+
+fn installed_message() -> String {
+    format!(
+        "trident: installed the {NAME} terminfo entry; set term = \"{NAME}\" in the \
+         config to use it (ssh hosts need the entry too, see {USAGE_DOC})"
+    )
 }
 
 /// Runs tic with `env` and returns its warnings. tic leaves an alias file
@@ -157,6 +164,27 @@ mod tests {
             eprintln!("tic not found; skipping");
         }
         found
+    }
+
+    /// The install message points at the doc that has the ssh notes.
+    #[test]
+    fn installed_message_points_at_usage_doc() {
+        let message = installed_message();
+        assert!(message.contains("see docs/usage.md#terminfo"), "{message}");
+        assert!(!message.contains("README"), "{message}");
+        let (path, anchor) = USAGE_DOC.split_once('#').unwrap();
+        let doc = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path),
+        )
+        .unwrap();
+        let section = doc
+            .split("\n## ")
+            .find(|s| s.lines().next().unwrap().to_lowercase() == anchor)
+            .unwrap_or_else(|| panic!("no #{anchor} section in {path}"));
+        assert!(section.contains("ssh"), "{section}");
+        assert!(section.contains(&format!("infocmp -x {NAME}")), "{section}");
     }
 
     #[test]
