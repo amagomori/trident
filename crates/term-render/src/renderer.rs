@@ -423,16 +423,15 @@ impl Renderer {
                     fg = (mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2));
                 }
                 let point = term.viewport_to_point_signed(row, col);
-                if let Some(search) = search {
-                    let index = search.matches.partition_point(|m| m.end < point);
-                    if search.matches.get(index).is_some_and(|m| m.contains(point)) {
-                        bg = if search.current == Some(index) {
-                            (205, 130, 40)
-                        } else {
-                            (75, 75, 135)
-                        };
-                        fg = (255, 255, 255);
-                    }
+                if let Some(search) = search
+                    && let Some(index) = term_core::search::highlighted(search.matches, point, cell)
+                {
+                    bg = if search.current == Some(index) {
+                        (205, 130, 40)
+                    } else {
+                        (75, 75, 135)
+                    };
+                    fg = (255, 255, 255);
                 }
                 if term.is_selected(selection, point) {
                     bg = term.palette.selection;
