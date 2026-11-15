@@ -18,6 +18,7 @@ drop_preview = true         # false: file drops insert only the shell-quoted pat
 paste_protection = true     # false: never confirm multi-line or control-character pastes
 clipboard_read = false      # true: let programs read the clipboard with OSC 52
 confirm_close = true        # false: close the window at once even while a program runs
+compare_runs = true         # false: don't mark output that changed since the last run (or use the [compare_runs] table below)
 desktop_notifications = true # false: ignore OSC 9/777/99 notification requests
 vsync = true                # false: present without waiting for vblank (lower latency, may tear)
 app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset (see App icons in usage.md)
@@ -84,6 +85,29 @@ With OSC 133 marks, a command whose output outgrows its share keeps its first an
 lines and drops the middle, leaving one dim line such as `… 48,213 lines of make output
 dropped`, so earlier commands stay in history. Without marks, eviction is oldest-first.
 Both settings are live-reloaded.
+
+With OSC 133 marks, a command's output is compared with the last run of the same command
+line: changed lines get an amber tint and a bar in the left margin, and a red tick marks
+where lines were removed. Text that varies on every run is ignored, so a rerun whose only changes are
+timings shows no marks while a changed test result does. The default patterns cover ISO
+dates and times, clock and elapsed times (`07:02:11`), durations (`0.42s`, `12 ms`,
+`1m3s`), PIDs (`pid 4242`, `process 31337`, a `[1] 12345` job notice) and temp paths
+(`/tmp/…`, `/var/folders/…`, `/var/tmp/…`, `/dev/shm/…`, `.tmpXXXXXX`). Add your own
+with the table form of `compare_runs`:
+
+```toml
+[compare_runs]
+enabled = true              # same as compare_runs = true
+default_ignore = true       # false: drop the built-in patterns above
+ignore = ['build #\d+', 'seed=\w+'] # extra regular expressions, matched per logical line
+```
+
+Patterns use Rust `regex` syntax; each match counts as equal to any other match, so
+`seed=1` and `seed=99` compare equal. An invalid pattern is a config error naming it.
+Comparison is on by default: it runs only when a command ends, on at most 20,000 output
+lines, and output is never altered, only marked. All three settings are live-reloaded;
+changing the patterns forgets earlier runs (marks already shown stay), so the next run of
+each command is compared from then on.
 
 Shell integration uses OSC 133 marks emitted by your shell. With integration enabled,
 clearing at a prompt preserves the screen in scrollback (explicit scrollback clears

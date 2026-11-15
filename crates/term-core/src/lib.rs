@@ -24,7 +24,7 @@ mod rerun;
 pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
-pub use rerun::{ROW_CHANGED, ROW_REMOVED_ABOVE};
+pub use rerun::{DEFAULT_IGNORE, Ignore, ROW_CHANGED, ROW_REMOVED_ABOVE};
 use std::collections::VecDeque;
 use std::time::Instant;
 

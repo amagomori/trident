@@ -1455,6 +1455,44 @@ mod bench {
         Images,
         /// Search over this many history lines of `a`s for the query.
         Search(usize, &'static str),
+        /// The second of two OSC 133 runs of one command near the compare and budget caps,
+        /// with compare-with-last-run on or off; every line differs when `rewrite`.
+        Rerun {
+            compare: bool,
+            rewrite: bool,
+        },
+    }
+
+    /// Output lines per run: just under `rerun::MAX_LINES` and the 20,000-line per-command
+    /// share of a 40,000-line history.
+    const RERUN_LINES: usize = 19_500;
+
+    /// One `cargo test`-like run: every line has a timestamp and a duration, and every
+    /// 500th line's result depends on `run` (or every line, when `rewrite`).
+    fn rerun_output(run: usize, rewrite: bool) -> Vec<u8> {
+        let mut out = b"\x1b]133;A\x07$ \x1b]133;B\x07cargo test\r\n\x1b]133;C\x07".to_vec();
+        for i in 0..RERUN_LINES {
+            let result = if rewrite || (i % 500 == 0 && run % 2 == 1) {
+                "FAILED"
+            } else {
+                "ok"
+            };
+            let line = if rewrite {
+                format!("[run {run}] test suite::case_{i} ... {result}\r\n")
+            } else {
+                format!(
+                    "[2026-11-15T07:{:02}:{:02}.{:03}Z] test suite::case_{i} ... {result} ({}.{:03}s)\r\n",
+                    run % 60,
+                    i % 60,
+                    i % 1000,
+                    run,
+                    (i * 7 + run) % 1000
+                )
+            };
+            out.extend_from_slice(line.as_bytes());
+        }
+        out.extend_from_slice(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        out
     }
 
     const WORKLOADS: &[(&str, Kind)] = &[
@@ -1465,6 +1503,27 @@ mod bench {
         ("alt_screen", Kind::Throughput(alt_screen, usize::MAX)),
         ("unicode", Kind::Throughput(unicode, usize::MAX)),
         ("scroll_region", Kind::Throughput(scroll_region, usize::MAX)),
+        (
+            "osc133_rerun",
+            Kind::Rerun {
+                compare: true,
+                rewrite: false,
+            },
+        ),
+        (
+            "osc133_rerun_off",
+            Kind::Rerun {
+                compare: false,
+                rewrite: false,
+            },
+        ),
+        (
+            "osc133_rerun_rewrite",
+            Kind::Rerun {
+                compare: true,
+                rewrite: true,
+            },
+        ),
         (
             "dense_ascii_macos",
             Kind::Throughput(dense_ascii, MACOS_BATCH),
@@ -1564,6 +1623,23 @@ mod bench {
                         })
                         .collect();
                     ("bytes", input.len(), secs)
+                }
+                Kind::Rerun { compare, rewrite } => {
+                    let first = rerun_output(0, *rewrite);
+                    let second = rerun_output(1, *rewrite);
+                    let secs: Vec<f64> = (0..iters)
+                        .map(|_| {
+                            let mut term = Terminal::new(COLS, ROWS);
+                            term.set_scrollback_limit(2 * 20_000);
+                            term.set_command_budget(true, 0.5);
+                            term.set_compare_runs(*compare);
+                            term.advance(&first);
+                            let start = Instant::now();
+                            measured_advance(&mut term, &second, LINUX_BATCH);
+                            start.elapsed().as_secs_f64()
+                        })
+                        .collect();
+                    ("bytes", second.len(), secs)
                 }
                 Kind::Keystrokes => {
                     let screen = dense_ascii();
@@ -2428,11 +2504,73 @@ fn rerun_marks_lines_that_differ_from_the_last_run() {
     let t = term(20, 20, &input);
     assert_eq!(
         marked_rows(&t),
-        [
-            ("warning: b".to_owned(), crate::ROW_CHANGED),
-            ("took 1.4s".to_owned(), crate::ROW_CHANGED),
-        ]
+        [("warning: b".to_owned(), crate::ROW_CHANGED)]
     );
+}
+
+fn cargo_test(results: &[&str], secs: &str, pid: u32) -> Vec<String> {
+    let mut out = vec![
+        format!("   Compiling app v0.1.0 at 2026-11-15T07:02:{secs}Z"),
+        format!("    Finished `test` profile in {secs}.5s"),
+        format!("     Running /tmp/cargo-{pid}/deps/app-1a2b (pid {pid})"),
+    ];
+    out.extend(results.iter().map(|r| format!("test {r}")));
+    out.push(format!("test result: ok. finished in 0.{secs}s"));
+    out
+}
+
+#[test]
+fn rerun_ignores_timing_but_marks_a_changed_test_result() {
+    let rerun = |a: Vec<String>, b: Vec<String>, ignore: &crate::Ignore| {
+        let mut t = Terminal::new(80, 20);
+        t.set_compare_ignore(ignore);
+        let a: Vec<&str> = a.iter().map(String::as_str).collect();
+        let b: Vec<&str> = b.iter().map(String::as_str).collect();
+        t.advance(run("cargo test", &a).as_bytes());
+        t.advance(run("cargo test", &b).as_bytes());
+        t.advance(b"\x1b]133;A\x07$ ");
+        marked_rows(&t)
+    };
+    let defaults = crate::Ignore::default();
+    let first = cargo_test(&["a ... ok", "b ... ok"], "11", 4242);
+    let timing_only = cargo_test(&["a ... ok", "b ... ok"], "37", 5151);
+    assert!(rerun(first.clone(), timing_only.clone(), &defaults).is_empty());
+    let failed = cargo_test(&["a ... ok", "b ... FAILED"], "37", 5151);
+    assert_eq!(
+        rerun(first.clone(), failed, &defaults),
+        [("test b ... FAILED".to_owned(), crate::ROW_CHANGED)]
+    );
+    // With no patterns, every volatile line lights up.
+    let none = crate::Ignore::new::<&str>(&[]).unwrap();
+    assert_eq!(rerun(first, timing_only, &none).len(), 4);
+}
+
+#[test]
+fn new_ignore_patterns_forget_stored_runs_but_keep_marks() {
+    let mut t = Terminal::new(40, 20);
+    t.advance(run("make", &["build #1", "ok"]).as_bytes());
+    t.advance(run("make", &["build #2", "ok"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(
+        marked_rows(&t),
+        [("build #2".to_owned(), crate::ROW_CHANGED)]
+    );
+    let builds = crate::Ignore::new(&[r"#\d+"]).unwrap();
+    t.set_compare_ignore(&builds);
+    assert_eq!(marked_rows(&t).len(), 1);
+    // The run before the change isn't compared with the next one.
+    t.advance(run("make", &["build #3", "failed"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(marked_rows(&t).len(), 1);
+    t.advance(run("make", &["build #4", "failed"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(marked_rows(&t).len(), 1);
+    // Setting the same patterns again keeps the stored runs.
+    t.set_compare_ignore(&crate::Ignore::new(&[r"#\d+"]).unwrap());
+    t.advance(run("make", &["build #5", "ok"]).as_bytes());
+    t.advance(b"\x1b]133;A\x07$ ");
+    let marked: Vec<String> = marked_rows(&t).into_iter().map(|(text, _)| text).collect();
+    assert_eq!(marked, ["build #2", "ok"]);
 }
 
 #[test]

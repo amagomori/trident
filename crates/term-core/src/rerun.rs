@@ -1,11 +1,16 @@
 //! Compare with last run: when a command ends, its output is diffed line by line against
 //! the previous run of the same command text, and the lines that differ are kept on the
 //! command (in absolute lines, like its OSC 133 marks) for the renderer to mark. Runs only
-//! when a command ends; nothing here touches the output path.
+//! when a command ends; nothing here touches the output path. Text matching the ignore
+//! patterns (timestamps, durations, PIDs, temp paths by default) is masked before lines
+//! are compared, so runs that differ only there have no marks.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use crate::{Command, Flags, Terminal};
 
@@ -21,8 +26,74 @@ const MAX_STORED: usize = 200_000;
 /// Edits past which the diff gives up and marks the whole differing middle.
 const MAX_EDITS: usize = 1_000;
 
+/// Default ignore patterns: timestamps, durations, PIDs and temp paths.
+pub const DEFAULT_IGNORE: &[&str] = &[
+    // ISO 8601 dates and date-times: 2026-11-15, 2026-11-15T07:02:11.123Z.
+    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?",
+    // Clock times and elapsed times: 07:02:11, 00:01:23.5.
+    r"(?-u:\b)\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?(?-u:\b)",
+    // Durations: 0.42s, 12 ms, 1m3s, 0m0.123s, 3 minutes.
+    r"(?-u:\b)\d+(?:\.\d+)? ?(?:ns|us|µs|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))*(?-u:\b)",
+    // PIDs: pid 1234, PID=1234, process 1234, a shell's `[1] 12345` job notice.
+    r"(?i)(?-u:\b)(?:pid[ :=#]*\d+|process(?: id)?[ :=#]+\d{3,})|^\[\d+\] \d+$",
+    // Temp paths: /tmp/..., /var/folders/... (macOS $TMPDIR), /dev/shm/..., Rust's `.tmpXXXXXX`.
+    r#"(?:^|[\s'"(=:,\[<])(?:/private)?(?:/var/folders|/var/tmp|/tmp|/dev/shm)/[^\s'")\]>,:]+|\.tmp[A-Za-z0-9]{6}(?-u:\b)"#,
+];
+
+static DEFAULT_REGEX: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Ignore::compile(DEFAULT_IGNORE).expect("default ignore patterns"));
+
+/// Patterns whose matches are ignored when a run is compared with the previous one.
+#[derive(Clone, Debug)]
+pub struct Ignore(Option<Regex>);
+
+impl Default for Ignore {
+    /// [`DEFAULT_IGNORE`].
+    fn default() -> Self {
+        Ignore(DEFAULT_REGEX.clone())
+    }
+}
+
+impl PartialEq for Ignore {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_ref().map(Regex::as_str) == other.0.as_ref().map(Regex::as_str)
+    }
+}
+
+impl Ignore {
+    /// Compiles `patterns` (regular expressions, matched per logical line); an empty list
+    /// ignores nothing. The error names the first invalid pattern.
+    pub fn new<S: AsRef<str>>(patterns: &[S]) -> Result<Self, String> {
+        Self::compile(patterns).map(Ignore)
+    }
+
+    fn compile<S: AsRef<str>>(patterns: &[S]) -> Result<Option<Regex>, String> {
+        let mut joined = Vec::with_capacity(patterns.len());
+        for pattern in patterns {
+            let pattern = pattern.as_ref();
+            Regex::new(pattern).map_err(|e| format!("invalid pattern {pattern:?}: {e}"))?;
+            joined.push(format!("(?:{pattern})"));
+        }
+        if joined.is_empty() {
+            return Ok(None);
+        }
+        Regex::new(&joined.join("|"))
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+
+    /// `line` with every ignored match replaced by one placeholder character.
+    fn mask<'a>(&self, line: &'a str) -> std::borrow::Cow<'a, str> {
+        match &self.0 {
+            Some(re) => re.replace_all(line, "\u{1}"),
+            None => line.into(),
+        }
+    }
+}
+
 pub(crate) struct Runs {
     pub enabled: bool,
+    pub ignore: Ignore,
     /// Line hashes of each command's latest run, by command text.
     last: HashMap<String, Vec<u64>>,
     /// Command texts, least recently run first.
@@ -34,6 +105,7 @@ impl Default for Runs {
     fn default() -> Self {
         Runs {
             enabled: true,
+            ignore: Ignore::default(),
             last: HashMap::new(),
             order: VecDeque::new(),
             stored: 0,
@@ -108,6 +180,7 @@ impl Terminal {
         }
         shell.runs = Runs {
             enabled,
+            ignore: std::mem::take(&mut shell.runs.ignore),
             ..Runs::default()
         };
         if !enabled {
@@ -119,6 +192,20 @@ impl Terminal {
 
     pub fn compare_runs(&self) -> bool {
         self.shell.runs.enabled
+    }
+
+    /// Sets what compare-with-last-run ignores. New patterns forget the stored runs, which
+    /// were hashed with the old ones; marks already shown stay.
+    pub fn set_compare_ignore(&mut self, ignore: &Ignore) {
+        let runs = &mut self.shell.runs;
+        if runs.ignore == *ignore {
+            return;
+        }
+        *runs = Runs {
+            enabled: runs.enabled,
+            ignore: ignore.clone(),
+            ..Runs::default()
+        };
     }
 
     /// Diffs the command at `index`, which just ended, against its previous run.
@@ -145,16 +232,26 @@ impl Terminal {
                 starts.push(line);
             }
             let row = self.line(line);
-            text.extend(
+            let last = !row.wrapped() || line + 1 == end;
+            // Trailing blanks would be trimmed below; skip them up front.
+            let used = if last {
                 row.cells
+                    .iter()
+                    .rposition(|cell| !cell.c.is_whitespace())
+                    .map_or(0, |i| i + 1)
+            } else {
+                row.cells.len()
+            };
+            text.extend(
+                row.cells[..used]
                     .iter()
                     .filter(|cell| !cell.flags.contains(Flags::WIDE_SPACER))
                     .map(|cell| cell.c),
             );
-            if !row.wrapped() || line + 1 == end {
+            if last {
                 text.truncate(text.trim_end().len());
                 let mut h = DefaultHasher::new();
-                text.hash(&mut h);
+                self.shell.runs.ignore.mask(&text).hash(&mut h);
                 hashes.push(h.finish());
                 text.clear();
                 if hashes.len() > MAX_LINES {
@@ -357,7 +454,7 @@ fn backtrack(trace: &[Vec<isize>], n: isize, m: isize) -> Vec<Edit> {
 #[cfg(test)]
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
-    use super::{Diff, diff};
+    use super::{DEFAULT_IGNORE, Diff, Ignore, diff};
 
     fn d(old: &[u64], new: &[u64]) -> Diff {
         diff(old, new)
@@ -404,5 +501,82 @@ mod tests {
             .map(|i| if i == 0 || i == 4999 { i } else { i + 10_000 })
             .collect();
         assert_eq!(d(&old, &new).changed, [1..4999]);
+    }
+
+    fn masked(line: &str) -> String {
+        Ignore::default().mask(line).replace('\u{1}', "_")
+    }
+
+    #[test]
+    fn defaults_mask_timestamps() {
+        assert_eq!(masked("[2026-11-15T07:02:11.123Z] start"), "[_] start");
+        assert_eq!(masked("2026-11-15 07:02:11+01:00 start"), "_ start");
+        assert_eq!(masked("on 2026-11-15"), "on _");
+        assert_eq!(
+            masked("Sun Nov 15 07:02:11 PST 2026"),
+            "Sun Nov 15 _ PST 2026"
+        );
+        assert_eq!(masked("elapsed 00:01:23.5"), "elapsed _");
+    }
+
+    #[test]
+    fn defaults_mask_durations() {
+        assert_eq!(
+            masked("test result: ok. 3 passed; 0 failed; finished in 0.42s"),
+            "test result: ok. 3 passed; 0 failed; finished in _"
+        );
+        assert_eq!(
+            masked("==== 3 passed in 1.20s ===="),
+            "==== 3 passed in _ ===="
+        );
+        assert_eq!(masked("real\t0m0.123s"), "real\t_");
+        assert_eq!(masked("took 12 ms, then 1h2m3s"), "took _, then _");
+        assert_eq!(masked("ok  \tpkg/a\t0.012s"), "ok  \tpkg/a\t_");
+        assert_eq!(
+            masked("Finished `dev` profile in 3.5 secs"),
+            "Finished `dev` profile in _"
+        );
+        // Counts and words that only start with a unit letter stay.
+        assert_eq!(
+            masked("1 skipped, 2 messages, 3 hits"),
+            "1 skipped, 2 messages, 3 hits"
+        );
+        assert_eq!(masked("v1.2.3 x86_64 404"), "v1.2.3 x86_64 404");
+    }
+
+    #[test]
+    fn defaults_mask_pids() {
+        assert_eq!(masked("server pid 4242 started"), "server _ started");
+        assert_eq!(masked("(PID=77) exited"), "(_) exited");
+        assert_eq!(masked("process 31337 exited"), "_ exited");
+        assert_eq!(masked("[1] 12345"), "_");
+        assert_eq!(masked("process 3 of 10"), "process 3 of 10");
+        assert_eq!(masked("array[1] 12345 items"), "array[1] 12345 items");
+    }
+
+    #[test]
+    fn defaults_mask_temp_paths() {
+        assert_eq!(masked("wrote /tmp/tmp.Xa81kQ/out.log"), "wrote_");
+        // The character before the path is masked with it.
+        assert_eq!(masked("at '/var/folders/zz/abc/T/x.rs':3"), "at _':3");
+        assert_eq!(masked("/tmp/build-1/a.o"), "_");
+        assert_eq!(masked("into .tmpA1b2C3"), "into _");
+        // Project paths that only contain a `tmp` directory stay.
+        assert_eq!(
+            masked("src/tmp/a.rs and /home/u/tmp/b"),
+            "src/tmp/a.rs and /home/u/tmp/b"
+        );
+    }
+
+    #[test]
+    fn ignore_patterns_are_configurable() {
+        let none = Ignore::new::<&str>(&[]).unwrap();
+        assert_eq!(none.mask("took 1.2s"), "took 1.2s");
+        let custom = Ignore::new(&[r"build #\d+"]).unwrap();
+        assert_eq!(custom.mask("build #12 took 1.2s"), "\u{1} took 1.2s");
+        assert_eq!(Ignore::new(DEFAULT_IGNORE).unwrap(), Ignore::default());
+        assert_ne!(custom, Ignore::default());
+        let err = Ignore::new(&["ok", "(unclosed"]).unwrap_err();
+        assert!(err.starts_with("invalid pattern \"(unclosed\""), "{err}");
     }
 }
