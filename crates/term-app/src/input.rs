@@ -186,18 +186,18 @@ pub fn encode_mouse(
 }
 
 /// Whether a click or wheel event goes to the program instead of local selection and
-/// scrolling. Shift always keeps it local; like xterm, X10 mode (DECSET 9) reports only
-/// unmodified buttons.
+/// scrolling. Shift always keeps it local; like xterm, X10 mode (DECSET 9) also keeps
+/// Ctrl local and reports Alt as a plain press.
 pub fn tracks_mouse(mode: MouseMode, mods: ModifiersState) -> bool {
     match mode {
         MouseMode::Off => false,
-        MouseMode::X10 => !(mods.shift_key() || mods.alt_key() || mods.control_key()),
+        MouseMode::X10 => !(mods.shift_key() || mods.control_key()),
         MouseMode::Click | MouseMode::Drag | MouseMode::Motion => !mods.shift_key(),
     }
 }
 
 /// Encodes a mouse report for `mode`: X10 sends button presses only, without modifier
-/// bits; the other modes report as [`encode_mouse`] does.
+/// bits or wheel events (as xterm); the other modes report as [`encode_mouse`] does.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_mouse_report(
     mode: MouseMode,
@@ -211,7 +211,13 @@ pub fn encode_mouse_report(
 ) -> Option<Vec<u8>> {
     match mode {
         MouseMode::Off => None,
-        MouseMode::X10 if !pressed || motion => None,
+        MouseMode::X10
+            if !pressed
+                || motion
+                || matches!(button, MouseButton::WheelUp | MouseButton::WheelDown) =>
+        {
+            None
+        }
         MouseMode::X10 => encode_mouse(button, true, false, col, row, ModifiersState::empty(), sgr),
         MouseMode::Click | MouseMode::Drag | MouseMode::Motion => {
             encode_mouse(button, pressed, motion, col, row, mods, sgr)
@@ -351,9 +357,13 @@ mod tests {
             x10(MouseButton::Right, true, false, none, false),
             Some(vec![0x1b, b'[', b'M', 34, 37, 42])
         );
+        for wheel in [MouseButton::WheelUp, MouseButton::WheelDown] {
+            assert_eq!(x10(wheel, true, false, none, false), None);
+            assert_eq!(x10(wheel, true, false, none, true), None);
+        }
         assert_eq!(
-            x10(MouseButton::WheelDown, true, false, none, false),
-            Some(vec![0x1b, b'[', b'M', 32 + 65, 37, 42])
+            x10(MouseButton::Left, true, false, ModifiersState::ALT, false),
+            Some(vec![0x1b, b'[', b'M', 32, 37, 42])
         );
         assert_eq!(
             x10(MouseButton::Middle, true, false, none, true),
@@ -408,9 +418,12 @@ mod tests {
             assert!(tracks_mouse(mode, none), "{mode:?}");
             assert!(tracks_mouse(mode, ModifiersState::SUPER), "{mode:?}");
             assert!(!tracks_mouse(mode, ModifiersState::SHIFT), "{mode:?}");
-            for mods in [ModifiersState::CONTROL, ModifiersState::ALT] {
-                assert_eq!(tracks_mouse(mode, mods), mode != MouseMode::X10, "{mode:?}");
-            }
+            assert!(tracks_mouse(mode, ModifiersState::ALT), "{mode:?}");
+            assert_eq!(
+                tracks_mouse(mode, ModifiersState::CONTROL),
+                mode != MouseMode::X10,
+                "{mode:?}"
+            );
         }
     }
 }
