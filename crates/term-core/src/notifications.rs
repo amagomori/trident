@@ -178,12 +178,16 @@ impl Notifications {
             pending.occasion = occasion;
         }
         let is_title = kind == b"title";
+        if !pending.carry.is_empty() && (!base64 || pending.carry_title != is_title) {
+            let carry = std::mem::take(&mut pending.carry);
+            if let Ok(bytes) = crate::kitty::BASE64.decode(&carry) {
+                let field = pending.field(pending.carry_title);
+                extend(field, &bytes);
+            }
+        }
         let decoded;
         let payload: &[u8] = if base64 {
             let mut data = std::mem::take(&mut pending.carry);
-            if pending.carry_title != is_title {
-                data.clear();
-            }
             data.extend_from_slice(&payload);
             let whole = if done {
                 data.len()
@@ -200,13 +204,7 @@ impl Notifications {
         } else {
             &payload
         };
-        let field = if is_title {
-            &mut pending.title
-        } else {
-            &mut pending.body
-        };
-        let room = MAX_BYTES.saturating_sub(field.len());
-        field.extend_from_slice(&payload[..payload.len().min(room)]);
+        extend(pending.field(is_title), payload);
         if done {
             self.push(Notification {
                 title: text(&pending.title),
@@ -222,6 +220,21 @@ impl Notifications {
         }
         None
     }
+}
+
+impl Pending {
+    fn field(&mut self, title: bool) -> &mut Vec<u8> {
+        if title {
+            &mut self.title
+        } else {
+            &mut self.body
+        }
+    }
+}
+
+fn extend(field: &mut Vec<u8>, bytes: &[u8]) {
+    let room = MAX_BYTES.saturating_sub(field.len());
+    field.extend_from_slice(&bytes[..bytes.len().min(room)]);
 }
 
 fn is_conemu_command(param: &[u8]) -> bool {

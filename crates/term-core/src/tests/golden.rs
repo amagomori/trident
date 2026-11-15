@@ -1203,6 +1203,10 @@ fn desktop_notification_sequences() {
         (b"\x1b]99;e=1;SGk7dGhlcmU=\x1b\\", vec![n("Hi;there", "")]),
         (b"\x1b]99;e=1;!!\x1b\\", vec![]),
         (
+            b"\x1b]99;i=s:d=0:e=1;SGk\x1b\\\x1b]99;i=s:p=body;World\x1b\\",
+            vec![n("Hi", "World")],
+        ),
+        (
             b"\x1b]99;i=s:d=0:e=1;SGk7\x1b\\\x1b]99;i=s:d=0:e=1;dGhl\x1b\\\x1b]99;i=s:e=1;cmU=\x1b\\",
             vec![n("Hi;there", "")],
         ),
