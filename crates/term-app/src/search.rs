@@ -73,11 +73,7 @@ impl Search {
     }
     /// Restart the search, scanning the newest lines now and the rest in later `advance` calls.
     pub fn refresh(&mut self, term: &mut Terminal, reset: bool) {
-        let previous = self
-            .current
-            .and_then(|i| self.matches.get(i))
-            .copied()
-            .or(self.keep);
+        let previous = self.selected();
         self.matches.clear();
         self.current = None;
         self.dirty = false;
@@ -168,10 +164,18 @@ impl Search {
         }
     }
 
+    /// The selected match, also while a re-scan has yet to find it again.
+    fn selected(&self) -> Option<Match> {
+        self.current
+            .and_then(|i| self.matches.get(i))
+            .copied()
+            .or(self.keep)
+    }
+
     /// Resize `term`, keeping the selected match in view if it was on screen.
     pub fn resize(search: Option<&Self>, term: &mut Terminal, cols: usize, rows: usize) {
         let shown = search
-            .and_then(|search| search.matches.get(search.current?))
+            .and_then(Self::selected)
             .map(|found| found.start.line)
             .filter(|&line| term.line_visible(line));
         term.resize(cols, rows);
@@ -447,6 +451,37 @@ mod tests {
         Search::resize(Some(&search), &mut term, 20, 3);
         assert!(!term.line_visible(line));
         assert_eq!(term.viewport_to_point(0, 0).line, top);
+    }
+
+    #[test]
+    fn resize_during_rescan_keeps_selected_match_in_view() {
+        let mut term = Terminal::new(20, 20);
+        term.set_scrollback_limit(100_000);
+        for i in 0..50_000 {
+            term.advance(if i == 5_000 {
+                b"needle\r\n"
+            } else {
+                b"hay\r\n"
+            });
+        }
+        let mut search = Search::default();
+        search.insert("needle", &mut term);
+        search.advance(&mut term, None);
+        let line = search.matches[search.current.unwrap()].start.line;
+        term.scroll_to_line(line - 17);
+        for rows in [15, 6, 3] {
+            // A re-scan after the last resize that has not yet reached the match again.
+            search.refresh(&mut term, false);
+            search.job = term.search_job(&search.query, false).ok();
+            search.matches.clear();
+            search.current = None;
+            assert!(search.keep.is_some() && search.searching());
+            Search::resize(Some(&search), &mut term, 20, rows);
+            assert!(term.line_visible(line), "{rows} rows");
+        }
+        search.advance(&mut term, None);
+        assert_eq!(search.matches[search.current.unwrap()].start.line, line);
+        assert!(term.line_visible(line));
     }
 
     #[test]
