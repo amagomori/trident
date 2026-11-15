@@ -9,8 +9,8 @@ and samples the app's own CPU (all threads, not the shell or cat) across that sp
 Reports the median of per-round paired changes (head vs main, copy vs main) with 95%
 bootstrap CIs; exit 1 on a wall-time regression beyond A/A noise. Linux and macOS.
 
-  python3 .github/scripts/pgrp-qa/cpu_ab.py --main ../t-main/target/release/terminal \
-      --head ../t-head/target/release/terminal --rounds 16 --out cpu-ab
+  python3 .github/scripts/pgrp-qa/cpu_ab.py --main ../t-main/target/release/trident \
+      --head ../t-head/target/release/trident --rounds 16 --out cpu-ab
 """
 import argparse, ctypes, ctypes.util, hashlib, json, os, platform, random, shutil, signal
 import statistics, subprocess, sys, tempfile, time

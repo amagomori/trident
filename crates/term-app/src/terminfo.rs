@@ -50,13 +50,13 @@ pub fn install() -> i32 {
     match tic(&[]) {
         Ok(()) => {
             println!(
-                "terminal: installed the {NAME} terminfo entry; set term = \"{NAME}\" in the \
+                "trident: installed the {NAME} terminfo entry; set term = \"{NAME}\" in the \
                  config to use it (ssh hosts need the entry too, see the README)"
             );
             0
         }
         Err(e) => {
-            eprintln!("terminal: {e}");
+            eprintln!("trident: {e}");
             1
         }
     }

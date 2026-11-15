@@ -939,7 +939,7 @@ impl App {
         let watcher = config::watch(path, move || {
             let _ = wake.send_event(UserEvent::ConfigChanged);
         })
-        .map_err(|e| diag!("terminal: config reload unavailable: {e}"))
+        .map_err(|e| diag!("trident: config reload unavailable: {e}"))
         .ok();
         App {
             startup_stderr: false,
@@ -982,7 +982,7 @@ impl App {
             Ok(fonts) => fonts,
             Err(error) if self.options.font.is_none() => {
                 let error = format!(
-                    "terminal: {}:1:1: font: {error}",
+                    "trident: {}:1:1: font: {error}",
                     self.options.config_path.display()
                 );
                 diag!("{error}");
@@ -1042,8 +1042,12 @@ impl App {
         )?;
         pty.set_command_notifications(self.config.notify_long_commands_after != 0)?;
         let attrs = Window::default_attributes()
-            .with_title("terminal")
+            .with_title("Trident")
             .with_inner_size(logical_size);
+        #[cfg(target_os = "linux")]
+        let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+            attrs, "trident", "trident",
+        );
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -1058,7 +1062,7 @@ impl App {
         };
         let size = window.inner_size();
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
-        diag!("terminal: rendering with {}", renderer.adapter_info);
+        diag!("trident: rendering with {}", renderer.adapter_info);
         warn_vsync_unsupported(&self.config, &renderer);
 
         let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
@@ -1102,7 +1106,7 @@ impl App {
             if let Err(error) =
                 present_macos::install(renderer.gpu_device(), start, lines, self.proxy.clone())
             {
-                diag!("terminal: presentation feedback unavailable: {error}");
+                diag!("trident: presentation feedback unavailable: {error}");
             }
         }
         #[cfg(target_os = "linux")]
@@ -1122,7 +1126,7 @@ impl App {
                 match present_wayland::Feedback::new(window.clone(), start, lines) {
                     Ok(feedback) => Some(feedback),
                     Err(error) => {
-                        diag!("terminal: presentation feedback unavailable: {error}");
+                        diag!("trident: presentation feedback unavailable: {error}");
                         None
                     }
                 }
@@ -1488,7 +1492,7 @@ impl App {
         if rendered {
             if self.startup_stderr {
                 if let Err(error) = finish_startup_stderr() {
-                    let _ = writeln!(std::io::stderr(), "terminal: startup stderr: {error}");
+                    let _ = writeln!(std::io::stderr(), "trident: startup stderr: {error}");
                     std::process::exit(1);
                 }
                 self.startup_stderr = false;
@@ -1629,7 +1633,7 @@ impl App {
         self.process_output();
         let Some(s) = &mut self.session else { return };
         let Some(bytes) = drop_files::quoted_path(&path) else {
-            diag!("terminal: cannot drop a path containing control characters");
+            diag!("trident: cannot drop a path containing control characters");
             return;
         };
         // `write_input` can no longer see this scroll or the preview, so track them here.
@@ -1668,7 +1672,7 @@ impl App {
             self.appearance_watch = appearance::watch(move |theme| {
                 let _ = proxy.send_event(UserEvent::Appearance(generation, theme));
             })
-            .map_err(|e| diag!("terminal: cannot watch OS appearance: {e}"))
+            .map_err(|e| diag!("trident: cannot watch OS appearance: {e}"))
             .ok();
         }
     }
@@ -1707,7 +1711,7 @@ impl App {
                 Some(
                     Fonts::new(next.font.as_deref(), size * scale as f32).map_err(|e| {
                         format!(
-                            "terminal: {}:1:1: font: {e}",
+                            "trident: {}:1:1: font: {e}",
                             self.options.config_path.display()
                         )
                     })?,
@@ -1719,7 +1723,7 @@ impl App {
                 || next.term != self.config.term
                 || next.env != self.config.env
             {
-                diag!("terminal: shell/term/env changes apply on the next launch");
+                diag!("trident: shell/term/env changes apply on the next launch");
             }
             let next_vsync_off = !next.vsync && self.config.vsync;
             self.config = next;
@@ -1838,7 +1842,7 @@ impl App {
                                         Ok(status) if !status.success() => {
                                             let _ = writeln!(
                                                 std::io::stderr(),
-                                                "terminal: new window exited with {status}"
+                                                "trident: new window exited with {status}"
                                             );
                                         }
                                         Err(error) => {
@@ -2333,7 +2337,7 @@ fn pty_resize_needed(grid_changed: bool, previous_cell: (f32, f32), cell: (f32, 
 
 fn warn_vsync_unsupported(config: &config::Config, renderer: &Renderer) {
     if !config.vsync && !renderer.vsync_optional {
-        diag!("terminal: vsync = false: this GPU surface only supports vsync; keeping it on");
+        diag!("trident: vsync = false: this GPU surface only supports vsync; keeping it on");
     }
 }
 
@@ -2841,6 +2845,11 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 fn main() {
+    // The app menu's About/Hide/Quit items name the process; outside a bundle that is
+    // the lowercase binary name.
+    #[cfg(target_os = "macos")]
+    objc2_foundation::NSProcessInfo::processInfo()
+        .setProcessName(&objc2_foundation::NSString::from_str("Trident"));
     let startup_stderr = std::env::var_os(STARTUP_STDERR).is_some();
     // SAFETY: main has not started any threads or spawned the PTY yet.
     unsafe { std::env::remove_var(STARTUP_STDERR) };
@@ -2859,25 +2868,25 @@ fn main() {
             ..o
         },
         Err(e) => {
-            diag!("terminal: {e}");
+            diag!("trident: {e}");
             std::process::exit(2);
         }
     };
     let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
         Ok(l) => l,
         Err(e) => {
-            diag!("terminal: cannot start event loop: {e}");
+            diag!("trident: cannot start event loop: {e}");
             std::process::exit(1);
         }
     };
     let mut app = App::new(options, event_loop.create_proxy());
     app.startup_stderr = startup_stderr;
     if let Err(e) = event_loop.run_app(&mut app) {
-        diag!("terminal: {e}");
+        diag!("trident: {e}");
         std::process::exit(1);
     }
     if let Some(e) = app.error {
-        diag!("terminal: {e}");
+        diag!("trident: {e}");
         std::process::exit(1);
     }
 }

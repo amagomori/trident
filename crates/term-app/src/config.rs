@@ -360,19 +360,32 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
 }
 
 pub fn default_path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        })
-        .join("terminal/config.toml")
+    default_path_in(
+        &std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+            }),
+    )
+}
+
+/// `trident/config.toml` under `dir`, or the pre-rename `terminal/config.toml` while
+/// only that one exists.
+fn default_path_in(dir: &Path) -> PathBuf {
+    let path = dir.join("trident/config.toml");
+    let legacy = dir.join("terminal/config.toml");
+    if !path.exists() && legacy.exists() {
+        legacy
+    } else {
+        path
+    }
 }
 
 pub(crate) fn diagnostic(path: &Path, text: &str, offset: usize, message: &str) -> String {
     let prefix = &text[..offset.min(text.len())];
     let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
     let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
-    format!("terminal: {}:{line}:{column}: {message}", path.display())
+    format!("trident: {}:{line}:{column}: {message}", path.display())
 }
 
 pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
@@ -632,6 +645,25 @@ mod tests {
                 Err(e) => panic!("create {}: {e}", dir.display()),
             }
         }
+    }
+
+    #[test]
+    fn default_path_falls_back_to_the_pre_rename_config() {
+        let dir = unique_temp_dir("trident-default-path");
+        let path = dir.join("trident/config.toml");
+        let legacy = dir.join("terminal/config.toml");
+        assert_eq!(default_path_in(&dir), path);
+
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "font_size = 17\n").unwrap();
+        assert_eq!(default_path_in(&dir), legacy);
+        assert_eq!(load(&default_path_in(&dir)).unwrap().font_size, 17.0);
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "font_size = 18\n").unwrap();
+        assert_eq!(default_path_in(&dir), path);
+        assert_eq!(load(&default_path_in(&dir)).unwrap().font_size, 18.0);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     struct WatchTest {

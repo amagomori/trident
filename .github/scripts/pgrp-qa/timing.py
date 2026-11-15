@@ -16,15 +16,15 @@ a notification server, e.g. Plasma); macOS the app's `osascript display notifica
 (unbundled binary), found by listing the app's children every 2 ms. Times are wall clock on the same machine.
 
 A title run is complete only when every title sent was seen; a notify run only when a Notify
-call with app_name "terminal" arrives (other clients' notifications on the bus are ignored).
+call with app_name "Trident" (or pre-rename "terminal") arrives (other clients' notifications on the bus are ignored).
 
 Fails (exit 1) when, for any scenario, an expected event never arrives on head, or head's
 median latency exceeds main's by more than max(20 ms, 10%); for the notify scenarios the
 allowance is at least the watcher's 200 ms poll: notify latency is bimodal (about 20 ms or
 about 180 ms, by poll phase) on identical builds, so a 6-run median flips between the modes.
 
-  python3 .github/scripts/pgrp-qa/timing.py --main ../t-main/target/release/terminal \
-      --head ../t-head/target/release/terminal --runs 6 --out timing
+  python3 .github/scripts/pgrp-qa/timing.py --main ../t-main/target/release/trident \
+      --head ../t-head/target/release/trident --runs 6 --out timing
 """
 import argparse, ctypes, ctypes.util, json, os, platform, random, re, shutil, signal, statistics, subprocess
 import sys, tempfile, threading, time
@@ -33,7 +33,7 @@ from pathlib import Path
 MAC = platform.system() == "Darwin"
 SCENARIOS = ["title-idle", "title-flood", "notify-quiet", "notify-flood"]
 NOTIFY_POLL_MS = 200
-APP_NAME = "terminal"  # command_notify.rs: notify_rust appname
+APP_NAMES = ("Trident", "terminal")  # command_notify.rs: notify_rust appname (before/after rename)
 RUN_SH = r"""#!/bin/bash
 set -m
 cd "$1"
@@ -146,7 +146,7 @@ class Linux:
             if m:
                 call = float(m.group(1))
             elif call is not None and (m := re.match(r'\s*string "(.*)"$', l)):
-                if m.group(1) == APP_NAME:
+                if m.group(1) in APP_NAMES:
                     notes.append(call)
                 call = None
         self.titles.stop()

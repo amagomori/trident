@@ -44,11 +44,11 @@ def build_app(checkout: Path, out_dir: Path, label: str, env: dict[str, str] | N
     )
     for line in result.stdout.splitlines():
         msg = json.loads(line)
-        if msg.get("reason") == "compiler-artifact" and msg["target"]["name"] == "terminal":
+        if msg.get("reason") == "compiler-artifact" and msg["target"]["name"] in ("trident", "terminal"):
             copy = out_dir / f"{label}-terminal"
             shutil.copy2(msg["executable"], copy)
             return copy
-    raise RuntimeError(f"no `terminal` binary built in {checkout}")
+    raise RuntimeError(f"no `trident` binary built in {checkout}")
 
 
 def cpu_secs(pid: int) -> float:

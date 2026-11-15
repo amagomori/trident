@@ -13,12 +13,12 @@ for anything that counts as evidence; `--xvfb` is a smoke check only.
 ```sh
 git worktree add ../t-main origin/main && git worktree add ../t-head <head-sha>
 for d in ../t-main ../t-head; do (cd $d && CARGO_TARGET_DIR=$PWD/target cargo build --release -p term-app); done
-python3 .github/scripts/pgrp-qa/cpu_ab.py --main ../t-main/target/release/terminal \
-    --head ../t-head/target/release/terminal --rounds 16 --out cpu-ab
-python3 .github/scripts/pgrp-qa/modes.py --main ../t-main/target/release/terminal \
-    --head ../t-head/target/release/terminal --runs 5 --out modes
-python3 .github/scripts/pgrp-qa/timing.py --main ../t-main/target/release/terminal \
-    --head ../t-head/target/release/terminal --runs 6 --out timing
+python3 .github/scripts/pgrp-qa/cpu_ab.py --main ../t-main/target/release/trident \
+    --head ../t-head/target/release/trident --rounds 16 --out cpu-ab
+python3 .github/scripts/pgrp-qa/modes.py --main ../t-main/target/release/trident \
+    --head ../t-head/target/release/trident --runs 5 --out modes
+python3 .github/scripts/pgrp-qa/timing.py --main ../t-main/target/release/trident \
+    --head ../t-head/target/release/trident --runs 6 --out timing
 ```
 
 All three write `rows.json` (every run) into `--out`; `cpu_ab.py` also writes `summary.json`
