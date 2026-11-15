@@ -636,7 +636,7 @@ impl Renderer {
                         cw,
                         color,
                     };
-                    self.underline(&mut overlays, style, &line);
+                    self.underline(overlays, style, &line);
                 }
                 if !blinked_off && cell.flags.contains(Flags::STRIKE) {
                     let w = cw * cells as f32;
