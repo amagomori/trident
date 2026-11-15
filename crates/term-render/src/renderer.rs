@@ -80,6 +80,8 @@ pub struct Renderer {
     // Reused between frames to avoid allocating.
     row_lens: Vec<u32>,
     staging: Vec<Instance>,
+    #[cfg(target_os = "linux")]
+    shm: Option<crate::present_shm::ShmPresenter>,
 }
 
 fn present_mode(vsync: bool) -> wgpu::PresentMode {
@@ -129,6 +131,17 @@ impl Renderer {
             ..Default::default()
         }))
         .map_err(|e| format!("cannot open GPU device: {e}"))?;
+
+        #[cfg(target_os = "linux")]
+        let shm = window.window_handle().ok().and_then(|handle| {
+            match crate::present_shm::ShmPresenter::new(handle.as_raw(), &info)? {
+                Ok(shm) => Some(shm),
+                Err(error) => {
+                    eprintln!("terminal: shared-memory presentation unavailable: {error}");
+                    None
+                }
+            }
+        });
 
         let caps = surface.get_capabilities(&adapter);
         let vsync_optional = caps
@@ -289,6 +302,8 @@ impl Renderer {
             row_blinks: Vec::new(),
             row_lens: Vec::new(),
             staging: Vec::new(),
+            #[cfg(target_os = "linux")]
+            shm,
         })
     }
 
@@ -1074,6 +1089,18 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
         if let Some(pre_present) = pre_present {
             pre_present();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(shm) = &mut self.shm {
+            let (width, height) = (self.config.width, self.config.height);
+            match shm.present(&self.device, &frame.texture, width, height) {
+                // The unpresented frame is discarded; its pixels are already on screen.
+                Ok(()) => return true,
+                Err(error) => {
+                    eprintln!("terminal: shared-memory presentation failed: {error}");
+                    self.shm = None;
+                }
+            }
         }
         self.queue.present(frame);
         true

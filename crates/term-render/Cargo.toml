@@ -22,6 +22,11 @@ wgpu.workspace = true
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 yeslogic-fontconfig-sys.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+glow = "0.17"
+libc.workspace = true
+x11rb = { version = "0.13", features = ["shm"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation.workspace = true
 objc2-core-text.workspace = true
