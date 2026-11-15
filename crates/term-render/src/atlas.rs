@@ -270,6 +270,9 @@ pub struct Atlas {
     sequences: HashMap<Box<str>, Vec<SequenceGlyph>>,
 }
 
+/// Cached sequences past which the ones no font draws are dropped.
+const MAX_SEQUENCES: usize = 4096;
+
 /// An emoji sequence's style, cells and glyph.
 type SequenceGlyph = (Style, u8, Option<AtlasGlyph>);
 
@@ -343,6 +346,11 @@ impl Atlas {
         }
         let raster = fonts.rasterize_sequence(text, cells as usize);
         let glyph = self.place(raster, device, queue)?;
+        // Sequences no font draws take no atlas space, so `clear` would never drop them.
+        if glyph.is_none() && self.sequences.len() >= MAX_SEQUENCES {
+            self.sequences
+                .retain(|_, glyphs| glyphs.iter().any(|&(.., g)| g.is_some()));
+        }
         self.sequences
             .entry(text.into())
             .or_default()
