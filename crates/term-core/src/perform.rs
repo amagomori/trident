@@ -229,6 +229,14 @@ impl Perform for Terminal {
             [b"133", mark, args @ ..] => {
                 self.shell_mark(mark, args);
             }
+            [b"9", rest @ ..] => self.shell.notifications.osc9(rest),
+            [b"777", rest @ ..] => self.shell.notifications.osc777(rest),
+            [b"99", rest @ ..] => {
+                if let Some(reply) = self.shell.notifications.osc99(rest) {
+                    self.responses.extend_from_slice(reply.as_bytes());
+                    self.responses.extend_from_slice(terminator);
+                }
+            }
             [b"0" | b"2", rest @ ..] if !rest.is_empty() => {
                 let title = rest
                     .iter()

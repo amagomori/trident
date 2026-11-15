@@ -12,6 +12,8 @@ mod ghost;
 mod kitty;
 mod links;
 pub use links::Link;
+mod notifications;
+pub use notifications::{Notification, Occasion, Urgency};
 mod perform;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags};
@@ -41,6 +43,7 @@ struct ShellState {
     input_start: Option<(u64, usize)>,
     commands: VecDeque<Command>,
     budget: budget::Budget,
+    notifications: notifications::Notifications,
 }
 
 /// Commands kept for the pinned header; older ones lose it first.
@@ -282,6 +285,11 @@ impl Terminal {
 
     pub fn take_command_finished(&mut self) -> Vec<CommandFinished> {
         std::mem::take(&mut self.shell.command_finished)
+    }
+
+    /// Desktop notifications requested with OSC 9, 777 or 99 since the last call.
+    pub fn take_notifications(&mut self) -> Vec<Notification> {
+        self.shell.notifications.take()
     }
 
     /// Put the nearest prompt strictly above/below the viewport top at its top.
@@ -715,6 +723,7 @@ impl Terminal {
                 input_start: None,
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
+                notifications: Default::default(),
             }),
             links: Default::default(),
             palette: colors::Palette::default(),
@@ -1852,6 +1861,7 @@ impl Terminal {
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
         let (enabled, share) = self.command_budget();
+        fresh.shell.notifications = self.shell.notifications.reset();
         *self = fresh;
         self.set_command_budget(enabled, share);
         self.title_changed = true;

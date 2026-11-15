@@ -80,26 +80,60 @@ fn message(finished: &Finished) -> String {
 }
 
 pub fn notify(finished: Finished) {
-    let message = message(&finished);
+    show(
+        message(&finished),
+        String::new(),
+        term_core::Urgency::Normal,
+    );
+}
+
+/// Shows a desktop notification from a background thread. With an empty `body`, Linux
+/// shows `title` as the summary and macOS shows it under the app name.
+pub fn show(title: String, body: String, urgency: term_core::Urgency) {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let _ = std::thread::Builder::new()
-            .name("command-notification".into())
+            .name("notification".into())
             .spawn(move || {
                 #[cfg(target_os = "linux")]
-                if let Err(error) = notify_rust::Notification::new()
-                    .summary(&message)
-                    .appname("terminal")
-                    .show()
                 {
-                    diag!("terminal: notification failed: {error}");
+                    let mut notification = notify_rust::Notification::new();
+                    notification
+                        .summary(&title)
+                        .appname("terminal")
+                        .urgency(match urgency {
+                            term_core::Urgency::Low => notify_rust::Urgency::Low,
+                            term_core::Urgency::Normal => notify_rust::Urgency::Normal,
+                            term_core::Urgency::Critical => notify_rust::Urgency::Critical,
+                        });
+                    if !body.is_empty() {
+                        notification.body(&markup_escape(&body));
+                    }
+                    if let Err(error) = notification.show() {
+                        diag!("terminal: notification failed: {error}");
+                    }
                 }
                 #[cfg(target_os = "macos")]
-                notify_macos(&message);
+                {
+                    let _ = urgency;
+                    if body.is_empty() {
+                        notify_macos("terminal", &title);
+                    } else {
+                        notify_macos(&title, &body);
+                    }
+                }
             });
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let _ = message;
+    let _ = (title, body, urgency);
+}
+
+/// Notification servers may render body markup; show program-supplied text literally.
+#[cfg(any(target_os = "linux", test))]
+fn markup_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -108,7 +142,7 @@ fn applescript_string(value: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn notify_macos(message: &str) {
+fn notify_macos(title: &str, message: &str) {
     use block2::RcBlock;
     use objc2::runtime::Bool;
     use objc2_foundation::{NSBundle, NSError, NSString, NSUUID};
@@ -119,8 +153,9 @@ fn notify_macos(message: &str) {
 
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
         let script = format!(
-            "display notification {} with title \"terminal\"",
-            applescript_string(message)
+            "display notification {} with title {}",
+            applescript_string(message),
+            applescript_string(title)
         );
         match std::process::Command::new("/usr/bin/osascript")
             .args(["-e", &script])
@@ -136,14 +171,14 @@ fn notify_macos(message: &str) {
         return;
     }
 
-    let message = message.to_owned();
+    let (title, message) = (title.to_owned(), message.to_owned());
     let authorized = RcBlock::new(move |granted: Bool, error: *mut NSError| {
         if !error.is_null() || !granted.as_bool() {
             diag!("terminal: notification authorization denied or failed");
             return;
         }
         let content = UNMutableNotificationContent::new();
-        content.setTitle(&NSString::from_str("terminal"));
+        content.setTitle(&NSString::from_str(&title));
         content.setBody(&NSString::from_str(&message));
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSUUID::UUID().UUIDString(),
@@ -546,6 +581,14 @@ mod tests {
         ] {
             assert_eq!(applescript_string(input), expected);
         }
+    }
+
+    #[test]
+    fn markup_is_escaped() {
+        assert_eq!(
+            markup_escape("<b>a</b> & <a href=\"x\">"),
+            "&lt;b&gt;a&lt;/b&gt; &amp; &lt;a href=\"x\"&gt;"
+        );
     }
 
     #[test]
