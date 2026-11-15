@@ -344,14 +344,14 @@ def cask(version, sha256, base=None):
     strategy :github_latest
   end
 
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
 
   app "{NAME}.app"
   binary "#{{appdir}}/{NAME}.app/Contents/MacOS/{PACKAGE}"
 
   # Only ad-hoc signed, so Gatekeeper refuses to open a quarantined copy.
-  postflight do
-    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{{appdir}}/{NAME}.app"]
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{{{appdir}}}}/{NAME}.app"]
   end
 
   zap trash: [
