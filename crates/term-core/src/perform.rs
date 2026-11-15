@@ -522,6 +522,11 @@ impl Terminal {
                 out.push_str(&format!(";4:{n}"));
             }
         }
+        match self.links.underline(t.hyperlink) {
+            Some(Color::Indexed(i)) => out.push_str(&format!(";58:5:{i}")),
+            Some(Color::Rgb(r, g, b)) => out.push_str(&format!(";58:2::{r}:{g}:{b}")),
+            _ => {}
+        }
         for (color, base, bright) in [(t.fg, 30, 90), (t.bg, 40, 100)] {
             match color {
                 Color::Indexed(i) if i < 8 => out.push_str(&format!(";{}", base + i as u16)),

@@ -1491,6 +1491,10 @@ fn golden_conformance_reports() {
             b"\x1b[1;3;4:3;7;31;104m\x1bP$qm\x1b\\\x1b[38;5;200;48;2;1;2;3m\x1bP$qm\x1b\\\x1b[m",
         ),
         (
+            "DECRQSS SGR underline color",
+            b"\x1b[4;58:5:9m\x1bP$qm\x1b\\\x1b[58:2::10:20:30m\x1bP$qm\x1b\\\x1b[m",
+        ),
+        (
             "DECRQSS DECSTBM",
             b"\x1b[2;3r\x1bP$qr\x1b\\\x1b[r\x1bP$qr\x1b\\",
         ),
