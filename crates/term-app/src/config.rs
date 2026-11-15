@@ -24,6 +24,7 @@ pub struct Config {
     pub vsync: bool,
     pub app_icon: AppIcon,
     pub menu_bar_icon: bool,
+    pub auto_secure_input: bool,
     pub shell: Vec<String>,
     pub term: String,
     pub env: BTreeMap<String, String>,
@@ -53,6 +54,7 @@ impl Default for Config {
             vsync: true,
             app_icon: AppIcon::default(),
             menu_bar_icon: true,
+            auto_secure_input: true,
             shell: Vec::new(),
             term: crate::terminfo::FALLBACK.to_string(),
             env: BTreeMap::new(),
@@ -80,6 +82,7 @@ struct Raw {
     vsync: Option<bool>,
     app_icon: Option<String>,
     menu_bar_icon: Option<bool>,
+    auto_secure_input: Option<bool>,
     shell: Option<Shell>,
     term: Option<String>,
     env: BTreeMap<String, String>,
@@ -494,6 +497,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
         menu_bar_icon: raw.menu_bar_icon.unwrap_or(true),
+        auto_secure_input: raw.auto_secure_input.unwrap_or(true),
         ..Config::default()
     };
     if let Some(name) = raw.app_icon {
@@ -992,6 +996,17 @@ mod tests {
         );
         assert!(parse_text("app_icon = 3").is_err());
         assert!(parse_text("menu_bar_icon = \"no\"").is_err());
+    }
+
+    #[test]
+    fn auto_secure_input() {
+        assert!(parse_text("").unwrap().auto_secure_input);
+        assert!(
+            !parse_text("auto_secure_input = false")
+                .unwrap()
+                .auto_secure_input
+        );
+        assert!(parse_text("auto_secure_input = 1").is_err());
     }
 
     #[test]

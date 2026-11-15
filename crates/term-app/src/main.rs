@@ -28,6 +28,8 @@ mod present_wayland;
 mod progress;
 mod pty;
 mod search;
+#[cfg(any(target_os = "macos", test))]
+mod secure_input;
 mod show;
 mod terminfo;
 mod theme;
@@ -909,6 +911,8 @@ struct App {
     modifiers: ModifiersState,
     held_at_focus: HeldAtFocus,
     focused: bool,
+    #[cfg(target_os = "macos")]
+    secure_input: secure_input::SecureInput,
     /// The window is fully hidden (winit `Occluded`), for OSC 99 `o=invisible`.
     occluded: bool,
     notification_throttle: osc_notify::Throttle,
@@ -992,6 +996,8 @@ impl App {
             modifiers: ModifiersState::empty(),
             held_at_focus: HeldAtFocus::default(),
             focused: true,
+            #[cfg(target_os = "macos")]
+            secure_input: Default::default(),
             occluded: false,
             notification_throttle: osc_notify::Throttle::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
@@ -2622,6 +2628,15 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(s) = &mut self.session {
             s.pty.refresh_flow();
         }
+        #[cfg(target_os = "macos")]
+        self.secure_input.set(
+            self.config.auto_secure_input
+                && self.focused
+                && self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.pty.password_input()),
+        );
         self.refresh_link();
         if let Some(s) = &mut self.session
             && std::mem::take(&mut s.pty.flow_redraw)
@@ -2769,6 +2784,11 @@ impl ApplicationHandler<UserEvent> for App {
                     deadline = Some(deadline.map_or(blink, |deadline| deadline.min(blink)));
                 }
             }
+        }
+        #[cfg(target_os = "macos")]
+        if self.config.auto_secure_input && self.focused && self.session.is_some() {
+            let poll = now + secure_input::POLL;
+            deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));
         }
         if let Some(due) = self.show_icons_when_idle() {
             deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
