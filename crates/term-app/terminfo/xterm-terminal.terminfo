@@ -8,6 +8,10 @@
 # title (hs, tsl, fsl, dsl). Removed: xterm features terminal does not
 # implement (blink, flash, palette and cursor color changes, OSC 52, meta
 # mode, left/right margins, printer and memory lock).
+# Cursor visibility leaves blinking (mode 12) alone: cnorm only shows the
+# cursor, so a blinking DECSCUSR style set before it (tmux sends Ss, then
+# cnorm on every cursor show) keeps blinking. cvvis is dropped because its
+# ?12h would outlive cnorm.
 xterm-terminal|terminal GPU-rendered terminal emulator,
 	Tc, hs,
 	BD=\E[?2004l, BE=\E[?2004h, PE=\E[201~, PS=\E[200~,
@@ -16,6 +20,7 @@ xterm-terminal|terminal GPU-rendered terminal emulator,
 	dsl=\E]2;\007, fsl=^G, tsl=\E]2;,
 	setrgbb=\E[48;2;%p1%d;%p2%d;%p3%dm,
 	setrgbf=\E[38;2;%p1%d;%p2%d;%p3%dm,
+	cnorm=\E[?25h, cvvis@,
 	blink@, ccc@, initc@, oc@, Cr@, Cs@, Ms@, flash@,
 	smm@, rmm@, mgc@, smglp@, smglr@, smgrp@,
 	mc0@, mc4@, mc5@, mc5i@, meml@, memu@,
