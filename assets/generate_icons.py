@@ -6,6 +6,8 @@ For each icon it writes:
                         canvas (Apple's icon grid) at 16-1024 px, 1x and 2x.
   <name>-menubar.png    18x18 menu bar image (1x), body at 16 px with 1 px margin.
   <name>-menubar@2x.png 36x36 menu bar image (2x).
+and, for the default icon only, the Linux hicolor set:
+  tide-<size>.png       the body scaled to 824/1024 on a transparent <size> canvas.
 
 Needs Pillow. Run from anywhere: python3 assets/generate_icons.py
 """
@@ -36,6 +38,8 @@ GRID = 1024
 BODY = 824
 MENU_POINTS = 18
 MENU_BODY_POINTS = 16
+LINUX_ICON = "tide"
+LINUX_SIZES = [16, 24, 32, 48, 64, 128, 256, 512]
 
 
 def png(image: Image.Image) -> bytes:
@@ -73,6 +77,10 @@ def main() -> None:
         for scale, suffix in ((1, ""), (2, "@2x")):
             menu = fit(source, MENU_POINTS * scale, MENU_BODY_POINTS * scale)
             (OUT / f"{name}-menubar{suffix}.png").write_bytes(png(menu))
+        if name == LINUX_ICON:
+            for size in LINUX_SIZES:
+                image = fit(source, size, round(size * BODY / GRID))
+                (OUT / f"{name}-{size}.png").write_bytes(png(image))
 
 
 if __name__ == "__main__":

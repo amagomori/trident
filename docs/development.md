@@ -40,11 +40,32 @@ python3 .github/scripts/release/release.py linux --binary target/release/trident
 python3 .github/scripts/release/release.py macos --binary trident-universal --version 0.1.0 --out dist
 python3 .github/scripts/release/release.py checksums dist
 python3 .github/scripts/release/release.py changelog --tag v0.1.0
+python3 .github/scripts/release/release.py packages --version 0.1.0 --sums dist/SHA256SUMS \
+  --out packages [--base-url file://$PWD/dist]
 python3 -m unittest discover -s .github/scripts/release
 ```
 
 The .deb needs `dpkg-deb` and `tic`; the .dmg needs macOS. `release.yml` pins appimagetool and its
 runtime by SHA-256.
+
+### Homebrew and the AUR
+
+After a stable (non-prerelease) tag is published, the `packages` job writes the Homebrew cask
+(`trident.rb`) and the AUR `trident-bin` `PKGBUILD` and `.SRCINFO` from the release's
+`SHA256SUMS`, uploads them as the `packages` artifact, and pushes them:
+
+- `Casks/trident.rb` to [amagomori/homebrew-tap](https://github.com/amagomori/homebrew-tap), when
+  the `HOMEBREW_TAP_TOKEN` secret holds a token that can push there
+  (`brew install --cask amagomori/tap/trident`).
+- `PKGBUILD` and `.SRCINFO` to `ssh://aur@aur.archlinux.org/trident-bin.git`, when the
+  `AUR_SSH_KEY` secret holds the private key of the AUR account that maintains `trident-bin`.
+
+Each push is skipped until its secret is set, and re-running the job for a published release
+pushes nothing new. `--base-url` points the files at local artifacts, to try them before tagging
+(`makepkg` in the `aur` directory, or `brew install --cask` from a local tap on macOS).
+
+The Linux `.desktop` entry is `packaging/linux/trident.desktop`; the tarball, .deb and AppImage
+install it with the `hicolor` icons `assets/generate_icons.py` writes to `assets/icons/tide-*.png`.
 
 ## Measuring latency
 

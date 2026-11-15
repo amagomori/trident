@@ -17,6 +17,14 @@ ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITT
        "GIT_COMMITTER_EMAIL": "t@example.com", "GIT_CONFIG_GLOBAL": os.devnull,
        "GIT_CONFIG_NOSYSTEM": "1"}
 HAS_DEB = shutil.which("dpkg-deb") and shutil.which("tic")
+SUMS = "aa" * 32 + "  Trident-1.2.3-macos-universal.dmg\n" + "bb" * 32 + \
+    "  Trident-1.2.3-linux-x86_64.tar.gz\n"
+
+
+def png_size(path):
+    data = Path(path).read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", path
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
 
 
 class Base(unittest.TestCase):
@@ -60,8 +68,10 @@ class Linux(Base):
             exe = members[f"{top}/bin/trident"]
             self.assertEqual(exe.mode, 0o755)
             self.assertEqual((exe.uid, exe.gid, exe.mtime), (0, 0, 0))
+            for size in release.ICON_SIZES:
+                icon = f"{top}/share/icons/hicolor/{size}x{size}/apps/trident.png"
+                self.assertEqual(members[icon].mode, 0o644, icon)
             for name in ("share/applications/trident.desktop",
-                         "share/icons/hicolor/256x256/apps/trident.png",
                          "share/trident/terminfo/xterm-trident.terminfo",
                          "share/trident/shell-integration/terminal.bash",
                          "share/trident/shell-integration/terminal.zsh",
@@ -163,6 +173,111 @@ class MacOS(Base):
             release.macos(self.binary, "1.2.3", self.tmp / "dist")
 
 
+class Desktop(unittest.TestCase):
+    def test_entry(self):
+        text = release.DESKTOP.read_text()
+        for line in ("[Desktop Entry]", "Type=Application", "Name=Trident", "Exec=trident",
+                     "TryExec=trident", "Icon=trident", "StartupWMClass=trident",
+                     "Categories=System;TerminalEmulator;"):
+            self.assertIn(line, text.splitlines())
+        if shutil.which("desktop-file-validate"):
+            subprocess.run(["desktop-file-validate", release.DESKTOP], check=True)
+
+    def test_icons_are_square_at_every_size(self):
+        for size in release.ICON_SIZES:
+            path = release.ROOT / f"assets/icons/{release.ICON}-{size}.png"
+            self.assertEqual(png_size(path), (size, size), path)
+
+
+class Packages(Base):
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "SHA256SUMS").write_text(SUMS)
+
+    def test_cask(self):
+        text = release.cask("1.2.3", "aa" * 32)
+        self.assertTrue(text.startswith('cask "trident" do\n  version "1.2.3"\n'))
+        self.assertIn(f'  sha256 "{"aa" * 32}"\n', text)
+        self.assertIn('  url "https://github.com/amagomori/terminal/releases/download/'
+                      'v#{version}/Trident-#{version}-macos-universal.dmg"\n', text)
+        self.assertIn('  app "Trident.app"\n', text)
+        self.assertIn('  binary "#{appdir}/Trident.app/Contents/MacOS/trident"\n', text)
+        self.assertIn("strategy :github_latest", text)
+        self.assertTrue(text.endswith("end\n"))
+        if shutil.which("ruby"):
+            path = self.tmp / "trident.rb"
+            path.write_text(text)
+            subprocess.run(["ruby", "-c", path], check=True, capture_output=True)
+
+    def test_pkgbuild(self):
+        text = release.pkgbuild("1.2.3", "bb" * 32)
+        lines = text.splitlines()
+        for line in ("pkgname=trident-bin", "_tag=1.2.3", "pkgver=1.2.3", "pkgrel=1",
+                     "arch=('x86_64')", "provides=('trident')", "conflicts=('trident')",
+                     f"sha256sums=('{'bb' * 32}')",
+                     'source=("Trident-${_tag}-linux-x86_64.tar.gz::https://github.com/amagomori/'
+                     'terminal/releases/download/v${_tag}/Trident-${_tag}-linux-x86_64.tar.gz")'):
+            self.assertIn(line, lines)
+        self.assertIn('  install -Dm755 bin/trident "$pkgdir/usr/bin/trident"', lines)
+        if shutil.which("bash"):
+            subprocess.run(["bash", "-n"], input=text, text=True, check=True)
+
+    def test_srcinfo_matches_pkgbuild(self):
+        text = release.srcinfo("1.2.3", "bb" * 32)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "pkgbase = trident-bin")
+        self.assertEqual(lines[-1], "pkgname = trident-bin")
+        self.assertIn("\tsource = Trident-1.2.3-linux-x86_64.tar.gz::https://github.com/amagomori/"
+                      "terminal/releases/download/v1.2.3/Trident-1.2.3-linux-x86_64.tar.gz", lines)
+        self.assertIn(f"\tsha256sums = {'bb' * 32}", lines)
+        self.assertIn("\tpkgver = 1.2.3", lines)
+        if shutil.which("makepkg"):
+            (self.tmp / "PKGBUILD").write_text(release.pkgbuild("1.2.3", "bb" * 32))
+            printed = subprocess.run(["makepkg", "--printsrcinfo"], cwd=self.tmp, check=True,
+                                     capture_output=True, text=True).stdout
+            self.assertEqual(printed, text)
+
+    def test_aur_version_sorts_prereleases_first(self):
+        self.assertEqual(release.aur_version("1.2.3"), "1.2.3")
+        self.assertEqual(release.aur_version("1.2.3-rc.1"), "1.2.3rc.1")
+        if shutil.which("vercmp"):
+            out = subprocess.run(["vercmp", "1.2.3rc.1", "1.2.3"], capture_output=True, text=True)
+            self.assertEqual(out.stdout.strip(), "-1")
+
+    def test_packages_uses_release_checksums(self):
+        made = release.packages("1.2.3", self.tmp / "SHA256SUMS", self.tmp / "out")
+        self.assertEqual([p.relative_to(self.tmp / "out").as_posix() for p in made],
+                         ["trident.rb", "aur/PKGBUILD", "aur/.SRCINFO"])
+        self.assertIn("aa" * 32, made[0].read_text())
+        self.assertIn("bb" * 32, made[1].read_text())
+        self.assertIn("bb" * 32, made[2].read_text())
+
+    def test_base_url_and_missing_asset(self):
+        text = release.srcinfo("1.2.3", "bb", base="file:///srv")
+        self.assertIn("::file:///srv/Trident-1.2.3-linux-x86_64.tar.gz", text)
+        with self.assertRaises(release.ReleaseError):
+            release.sha256_of(self.tmp / "SHA256SUMS", "Trident-9.9.9-linux-x86_64.tar.gz")
+
+    def test_push_package(self):
+        script = Path(release.__file__).with_name("push_package.sh")
+        remote = self.tmp / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", remote], check=True)
+        cask = self.tmp / "trident.rb"
+        env = {**os.environ, **ENV, "BRANCH": "main"}
+        for content, expect in (("one", "pushed"), ("one", "already up to date"),
+                                ("two", "pushed")):
+            cask.write_text(content)
+            out = subprocess.run([script, remote, "Casks", f"trident {content}", cask], env=env,
+                                 check=True, capture_output=True, text=True).stdout
+            self.assertIn(expect, out)
+        show = subprocess.run(["git", "--git-dir", remote, "log", "--format=%s", "main"],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertEqual(show.split("\n")[:2], ["trident two", "trident one"])
+        blob = subprocess.run(["git", "--git-dir", remote, "show", "main:Casks/trident.rb"],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertEqual(blob, "two")
+
+
 class Checksums(Base):
     def test_sha256sums(self):
         (self.tmp / "b.deb").write_bytes(b"deb")
@@ -219,6 +334,14 @@ class Workflow(unittest.TestCase):
         text = (release.ROOT / ".github/workflows/release.yml").read_text()
         trigger = re.search(r"^on:\n((?:[ ].*\n|\n)*)", text, re.M).group(1)
         self.assertEqual(re.sub(r"\s+", " ", trigger).strip(), 'push: tags: ["v*"]')
+
+    def test_packages_follow_stable_releases(self):
+        text = (release.ROOT / ".github/workflows/release.yml").read_text()
+        job = text[text.index("\n  packages:\n"):]
+        self.assertIn("needs: publish", job)
+        self.assertIn("if: ${{ !contains(github.ref_name, '-') }}", job)
+        self.assertIn("if: env.HOMEBREW_TAP_TOKEN != ''", job)
+        self.assertIn("if: env.AUR_SSH_KEY != ''", job)
 
 
 if __name__ == "__main__":

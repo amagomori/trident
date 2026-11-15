@@ -103,3 +103,47 @@ jobs:
           case "$version" in *-*) prerelease=--prerelease ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Trident $version" \
             --notes-file notes.md $prerelease
+
+  # Homebrew and the AUR follow stable releases only. Each push is skipped until its secret is set:
+  # HOMEBREW_TAP_TOKEN can push to amagomori/homebrew-tap, AUR_SSH_KEY is the AUR account's key.
+  packages:
+    needs: publish
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          version=$(python3 .github/scripts/release/release.py version --tag "$GITHUB_REF_NAME")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --dir dist
+      - run: >
+          python3 .github/scripts/release/release.py packages
+          --version "${{ steps.version.outputs.version }}" --sums dist/SHA256SUMS --out packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: packages
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Update the Homebrew tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        run: >
+          .github/scripts/release/push_package.sh
+          "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/amagomori/homebrew-tap.git"
+          Casks "trident ${{ steps.version.outputs.version }}" packages/trident.rb
+      - name: Update the AUR
+        if: env.AUR_SSH_KEY != ''
+        run: |
+          install -dm700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes" BRANCH=master
+          .github/scripts/release/push_package.sh ssh://aur@aur.archlinux.org/trident-bin.git . \
+            "Update to ${{ steps.version.outputs.version }}" packages/aur/PKGBUILD packages/aur/.SRCINFO

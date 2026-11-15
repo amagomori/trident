@@ -12,7 +12,12 @@
 
 ## Install
 
-Download a build from [Releases](https://github.com/amagomori/terminal/releases):
+- **macOS** with [Homebrew](https://brew.sh): `brew install --cask amagomori/tap/trident`;
+  `brew upgrade` picks up new releases.
+- **Arch Linux**: install [`trident-bin`](https://aur.archlinux.org/packages/trident-bin) from the
+  AUR, e.g. `yay -S trident-bin`.
+
+Or download a build from [Releases](https://github.com/amagomori/terminal/releases):
 
 - **macOS** (11 or newer, Apple silicon and Intel): `Trident-<version>-macos-universal.dmg`; drag
   Trident to Applications. Builds are unsigned, so the first time right-click Trident.app and
