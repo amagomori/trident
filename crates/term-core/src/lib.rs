@@ -1990,11 +1990,7 @@ impl Terminal {
         fresh.parser = std::mem::take(&mut self.parser);
         let (enabled, share) = self.command_budget();
         fresh.shell.notifications = self.shell.notifications.reset();
-        fresh.shell.runs = rerun::Runs {
-            enabled: self.shell.runs.enabled,
-            ignore: std::mem::take(&mut self.shell.runs.ignore),
-            ..rerun::Runs::default()
-        };
+        fresh.shell.runs = self.shell.runs.forget();
         *self = fresh;
         self.set_command_budget(enabled, share);
         self.title_changed = true;

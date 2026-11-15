@@ -114,18 +114,28 @@ impl Default for Runs {
 }
 
 impl Runs {
+    /// These settings with no stored runs.
+    pub(crate) fn forget(&mut self) -> Runs {
+        Runs {
+            enabled: self.enabled,
+            ignore: std::mem::take(&mut self.ignore),
+            ..Runs::default()
+        }
+    }
+
     /// Stores `hashes` as `key`'s latest run and returns the run it replaces.
     fn replace(&mut self, key: String, hashes: Vec<u64>) -> Option<Vec<u64>> {
         if let Some(i) = self.order.iter().position(|k| *k == key) {
             self.order.remove(i);
         }
-        self.stored += hashes.len();
+        // Each run also counts one line for itself, so commands with no output are bounded.
+        self.stored += hashes.len() + 1;
         let previous = self.last.insert(key.clone(), hashes);
-        self.stored -= previous.as_ref().map_or(0, Vec::len);
+        self.stored -= previous.as_ref().map_or(0, |h| h.len() + 1);
         self.order.push_back(key);
         while self.stored > MAX_STORED && self.order.len() > 1 {
             let oldest = self.order.pop_front().unwrap();
-            self.stored -= self.last.remove(&oldest).map_or(0, |h| h.len());
+            self.stored -= self.last.remove(&oldest).map_or(0, |h| h.len() + 1);
         }
         previous
     }
@@ -501,6 +511,16 @@ mod tests {
             .map(|i| if i == 0 || i == 4999 { i } else { i + 10_000 })
             .collect();
         assert_eq!(d(&old, &new).changed, [1..4999]);
+    }
+
+    #[test]
+    fn runs_without_output_are_bounded() {
+        let mut runs = super::Runs::default();
+        for i in 0..super::MAX_STORED + 10 {
+            runs.replace(format!("cd {i}"), Vec::new());
+        }
+        assert_eq!(runs.last.len(), super::MAX_STORED);
+        assert_eq!(runs.order.len(), super::MAX_STORED);
     }
 
     fn masked(line: &str) -> String {
