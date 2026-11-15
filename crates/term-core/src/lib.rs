@@ -1053,6 +1053,12 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
+        self.resize_tracking(cols, rows, &mut []);
+    }
+
+    /// [`Self::resize`], moving `points` (absolute primary-screen positions) along with
+    /// the text when the primary screen rewraps.
+    pub fn resize_tracking(&mut self, cols: usize, rows: usize, points: &mut [Point]) {
         let cols = cols.max(2);
         let rows = rows.max(1);
         if cols == self.cols && rows == self.rows {
@@ -1070,7 +1076,7 @@ impl Terminal {
         // The primary screen rewraps its lines; the alternate one is redrawn by its app.
         let reflow = cols != self.cols;
         if reflow {
-            anchor = self.reflow_primary(cols, rows, anchor);
+            anchor = self.reflow_primary(cols, rows, anchor, points);
         }
 
         let mut alt_shifted = 0;

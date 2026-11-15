@@ -176,14 +176,18 @@ impl Search {
 
     /// Resize `term`, keeping the selected match in view if it was on screen.
     pub fn resize(search: Option<&Self>, term: &mut Terminal, cols: usize, rows: usize) {
-        let shown = search
+        let Some(found) = search
             .and_then(Self::selected)
-            .filter(|found| term.line_visible(found.start.line));
-        term.resize(cols, rows);
-        if let Some(found) = shown {
-            let covered = search.map_or(0, |search| search.covered_rows);
-            term.reveal_lines(found.start.line, found.end.line, covered);
-        }
+            .filter(|found| term.line_visible(found.start.line))
+        else {
+            term.resize(cols, rows);
+            return;
+        };
+        // A rewrap moves the match to other lines.
+        let mut points = [found.start, found.end];
+        term.resize_tracking(cols, rows, &mut points);
+        let covered = search.map_or(0, |search| search.covered_rows);
+        term.reveal_lines(points[0].line, points[1].line, covered);
     }
 
     fn reveal(&self, term: &mut Terminal) {
@@ -541,6 +545,36 @@ mod tests {
         term.scroll_to_line(start - 4);
         Search::resize(Some(&search), &mut term, 10, 5);
         assert!(above_bar(&term, start) && above_bar(&term, end));
+    }
+
+    #[test]
+    fn narrowing_keeps_match_moved_by_rewrap_above_find_bar() {
+        let mut term = Terminal::new(20, 6);
+        term.set_scrollback_limit(1_000);
+        for i in 0..200 {
+            term.advance(match i {
+                99 => b"xxxxxxxxxxxxxxx\r\n",
+                100 => b"SPANHIT\r\n",
+                _ => b"hay\r\n",
+            });
+        }
+        let mut search = Search::default();
+        search.insert("SPANHIT", &mut term);
+        search.advance(&mut term, None);
+        search.covered_rows = 1;
+        let line = search.matches[search.current.unwrap()].start.line;
+        // The match sits just above the Find bar, below a line that wraps once narrowed.
+        term.scroll_to_line(line - 4);
+
+        Search::resize(Some(&search), &mut term, 10, 6);
+        let found = term.search("SPANHIT", false).unwrap()[0];
+        let top = term.viewport_to_point(0, 0).line;
+        assert!((top..top + 5).contains(&found.start.line));
+        assert!((top..top + 5).contains(&found.end.line));
+        assert_eq!(
+            term.viewport_row((found.start.line - top) as usize).cells[0].c,
+            'S'
+        );
     }
 
     #[test]

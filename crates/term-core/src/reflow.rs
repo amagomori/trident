@@ -1,6 +1,6 @@
 //! Rewrapping the primary screen and its scrollback to a new width.
 
-use crate::{Cell, Flags, Row, RowFlags, Terminal};
+use crate::{Cell, Flags, Point, Row, RowFlags, Terminal};
 
 /// Where an old row went: its logical line became new rows `first..first + count`,
 /// and the row's cells start `base` cells into that line.
@@ -103,12 +103,13 @@ impl Terminal {
     /// Rejoins the soft-wrapped lines of the primary screen and its scrollback and wraps
     /// them again at `cols`, keeping the cursor on the cell it was on, and sizes the
     /// screen to `rows`. `view_top` is the viewport's top line when scrolled back; returns
-    /// where that line went.
+    /// where that line went. `points` are moved to where their cells went.
     pub(crate) fn reflow_primary(
         &mut self,
         cols: usize,
         rows: usize,
         view_top: Option<u64>,
+        points: &mut [Point],
     ) -> Option<u64> {
         let old_rows = self.rows;
         let old_first = self.history - self.primary.scrollback.len() as u64;
@@ -263,6 +264,9 @@ impl Terminal {
             old_len,
             new_len: new.len(),
         };
+        for point in points.iter_mut() {
+            (point.line, point.col) = map.line(point.line, point.col, false);
+        }
         for (i, flags, prompt_col, output_col, len) in marks.drain(..) {
             move_marks(&mut new, &map, i, flags, prompt_col, output_col, len);
         }
