@@ -331,6 +331,9 @@ impl Terminal {
             }
             self.images.generation += 1;
         }
+        for point in &mut self.tracked {
+            point.line = cut.map(point.line);
+        }
         if let Some(selection) = &mut self.selection {
             let map = |point: Point| Point {
                 line: cut.map(point.line),
