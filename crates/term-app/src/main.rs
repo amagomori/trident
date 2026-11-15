@@ -5,6 +5,8 @@ macro_rules! diag {
     }};
 }
 
+#[cfg(target_os = "macos")]
+mod app_icon;
 #[cfg(target_os = "linux")]
 mod appearance;
 mod clipboard;
@@ -2210,6 +2212,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match self.start(event_loop) {
             Ok(session) => {
+                #[cfg(target_os = "macos")]
+                app_icon::set_default();
                 #[cfg(target_os = "macos")]
                 close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
                 #[cfg(target_os = "macos")]
