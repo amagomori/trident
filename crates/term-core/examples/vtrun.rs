@@ -139,7 +139,7 @@ mod unix {
 
     fn spawn(program: &[String], cols: usize, rows: usize) -> (i32, i32) {
         let (mut master, mut slave) = (0, 0);
-        let size = libc::winsize {
+        let mut size = libc::winsize {
             ws_row: rows as u16,
             ws_col: cols as u16,
             ws_xpixel: 0,
@@ -156,8 +156,8 @@ mod unix {
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &size,
+                std::ptr::null_mut(),
+                &mut size,
             ) != 0
             {
                 panic!("openpty failed");
