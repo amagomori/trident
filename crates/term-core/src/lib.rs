@@ -7,6 +7,7 @@ pub mod search;
 
 mod ascii;
 mod cell;
+#[cfg(feature = "fuzz")]
 #[doc(hidden)]
 pub mod fuzz;
 mod ghost;

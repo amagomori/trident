@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-term-core = { path = "../crates/term-core" }
+term-core = { path = "../crates/term-core", features = ["fuzz"] }
 
 # Outside the main workspace: cargo-fuzz builds it with nightly and sanitizer flags.
 [workspace]
