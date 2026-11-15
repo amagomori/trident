@@ -3,6 +3,8 @@ set 42: changed to Some(Normal(42))
 same again: unchanged
 set without percent: changed to Some(Normal(0))
 set 250: changed to Some(Normal(100))
+set 60 first: changed to Some(Normal(60))
+set huge: changed to Some(Normal(100))
 set 60: changed to Some(Normal(60))
 error keeps percent: changed to Some(Error(Some(60)))
 error 10: changed to Some(Error(Some(10)))

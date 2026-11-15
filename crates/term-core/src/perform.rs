@@ -278,10 +278,12 @@ impl Terminal {
     #[inline(never)]
     fn progress_report(&mut self, args: &[&[u8]]) {
         fn number(param: &[u8]) -> Option<u32> {
-            if param.is_empty() || param.len() > 9 || !param.iter().all(u8::is_ascii_digit) {
+            if param.is_empty() || !param.iter().all(u8::is_ascii_digit) {
                 return None;
             }
-            std::str::from_utf8(param).ok()?.parse().ok()
+            Some(param.iter().fold(0u32, |n, &d| {
+                n.saturating_mul(10).saturating_add(u32::from(d - b'0'))
+            }))
         }
         let state = match args.first() {
             None | Some(&b"") => 0,

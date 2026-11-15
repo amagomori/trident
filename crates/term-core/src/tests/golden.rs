@@ -1518,6 +1518,8 @@ fn golden_progress_reports() {
         ("same again", b"\x1b]9;4;1;42\x1b\\"),
         ("set without percent", b"\x1b]9;4;1\x07"),
         ("set 250", b"\x1b]9;4;1;250\x07"),
+        ("set 60 first", b"\x1b]9;4;1;60\x07"),
+        ("set huge", b"\x1b]9;4;1;99999999999999999999\x07"),
         ("set 60", b"\x1b]9;4;1;60\x07"),
         ("error keeps percent", b"\x1b]9;4;2\x07"),
         ("error 10", b"\x1b]9;4;2;10\x07"),
