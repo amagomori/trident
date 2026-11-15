@@ -2,21 +2,23 @@
 //! PTY's foreground would kill it, so the close waits for confirmation first.
 
 /// The confirmation prompt shown in the banner while a close waits; `program` is the
-/// foreground program's name when it could be read.
-pub fn prompt(program: Option<&str>) -> String {
+/// foreground program's name when it could be read, and `tab` says a tab is closing
+/// rather than the window.
+pub fn prompt(program: Option<&str>, tab: bool) -> String {
     let what = match program {
         Some(name) => format!("{name} is still running."),
         None => "A program is still running.".to_owned(),
     };
-    format!("{what} Close the window? Enter closes, Esc cancels")
+    let target = if tab { "tab" } else { "window" };
+    format!("{what} Close the {target}? Enter closes, Esc cancels")
 }
 
 /// The banner while a close waits: its prompt, then any other banner text.
 #[cold]
-pub fn banner(program: Option<&str>, other: Option<String>) -> String {
+pub fn banner(program: Option<&str>, tab: bool, other: Option<String>) -> String {
     match other {
-        Some(other) => format!("{} | {other}", prompt(program)),
-        None => prompt(program),
+        Some(other) => format!("{} | {other}", prompt(program, tab)),
+        None => prompt(program, tab),
     }
 }
 
@@ -369,15 +371,19 @@ mod tests {
     #[test]
     fn prompt_names_the_program() {
         assert_eq!(
-            prompt(Some("vim")),
+            prompt(Some("vim"), false),
             "vim is still running. Close the window? Enter closes, Esc cancels"
         );
         assert_eq!(
-            prompt(None),
+            prompt(None, false),
             "A program is still running. Close the window? Enter closes, Esc cancels"
         );
         assert_eq!(
-            banner(Some("ssh"), Some("Output paused".into())),
+            prompt(Some("sleep"), true),
+            "sleep is still running. Close the tab? Enter closes, Esc cancels"
+        );
+        assert_eq!(
+            banner(Some("ssh"), false, Some("Output paused".into())),
             "ssh is still running. Close the window? Enter closes, Esc cancels | Output paused"
         );
     }

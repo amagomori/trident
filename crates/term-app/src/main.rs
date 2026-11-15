@@ -1942,7 +1942,11 @@ impl App {
             None => banner,
         };
         let banner = match &self.pending_close {
-            Some(program) => Some(close_confirm::banner(program.as_deref(), banner)),
+            Some(program) => Some(close_confirm::banner(
+                program.as_deref(),
+                self.pending_close_tab.is_some(),
+                banner,
+            )),
             None => banner,
         };
         let started = Instant::now();
