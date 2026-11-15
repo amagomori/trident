@@ -368,3 +368,26 @@ fn next_prompt_above_the_moved_output_start() {
     }
     assert!(lines(&t).contains(&"line 99".to_string()));
 }
+
+#[test]
+fn lines_inserted_over_a_full_screen_keep_the_running_command() {
+    let mut t = Terminal::new(40, 5);
+    t.set_scrollback_limit(100);
+    for name in ["alpha", "beta", "gamma"] {
+        t.advance(command(name, 3).as_bytes());
+    }
+    // The prompt and the output start sit at the bottom of a full screen, so the
+    // inserted lines push both off it.
+    t.advance(format!("{PROMPT}seq\r\n\x1b]133;C\x07\x1b[1;1H\x1b[3L").as_bytes());
+    let mut out = String::new();
+    for i in 1..=3000 {
+        out.push_str(&format!("{i}\r\n"));
+    }
+    t.advance(out.as_bytes());
+    let lines = lines(&t);
+    assert_eq!(lines[0], "$ alpha", "{lines:?}");
+    assert_eq!(lines[8], "$ gamma", "{lines:?}");
+    let placeholders = lines.iter().filter(|l| l.starts_with('\u{2026}')).count();
+    assert_eq!(placeholders, 1, "{lines:?}");
+    assert!(lines.contains(&"3000".to_string()), "{lines:?}");
+}

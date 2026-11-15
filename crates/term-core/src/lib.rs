@@ -516,7 +516,11 @@ impl Terminal {
         let mut i = commands.partition_point(|c| c.next_prompt.is_some_and(|next| next < top));
         while i < commands.len() {
             let command = &mut commands[i];
-            let Some(input_line) = shift(command.input_line) else {
+            let running = command.next_prompt.is_none();
+            // A running command keeps its budget when its prompt is pushed off: its
+            // output still follows, from just below the region.
+            let Some(input_line) = shift(command.input_line).or(running.then_some(bottom + 1))
+            else {
                 commands.remove(i);
                 continue;
             };
