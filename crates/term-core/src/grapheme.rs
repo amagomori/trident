@@ -32,6 +32,7 @@ pub(crate) struct Graphemes {
     lookup: HashMap<Box<str>, u32>,
     free: Vec<u32>,
     next_release: usize,
+    releases: u64,
 }
 
 impl Graphemes {
@@ -72,12 +73,16 @@ impl Graphemes {
 
     /// Frees every entry not marked in `used`.
     fn retain(&mut self, used: &[bool]) {
+        let free = self.free.len();
         for (index, entry) in self.entries.iter_mut().enumerate() {
             if !used[index] && !entry.is_empty() {
                 self.lookup.remove(&**entry);
                 *entry = Box::from("");
                 self.free.push(index as u32);
             }
+        }
+        if self.free.len() > free {
+            self.releases += 1;
         }
     }
 }
@@ -119,6 +124,12 @@ impl Terminal {
         } else {
             None
         }
+    }
+
+    /// Counts the scans that freed clusters. A freed index can be handed to a different
+    /// cluster, so cells compared across a change of this count may look unchanged when not.
+    pub fn grapheme_releases(&self) -> u64 {
+        self.graphemes.releases
     }
 
     /// The character a cell shows, without the marks of its cluster.
@@ -273,8 +284,9 @@ mod tests {
         let mut t = Terminal::new(5, 3);
         t.advance("he\u{301}llo wo\u{308}rld".as_bytes());
         t.resize(8, 3);
+        // Reflow rejoins the three rows into two at the new width.
         t.start_selection(Point { line: 0, col: 0 }, SelectionKind::Simple);
-        t.update_selection(Point { line: 2, col: 7 });
+        t.update_selection(Point { line: 1, col: 7 });
         assert_eq!(t.selection_text().unwrap(), "he\u{301}llo wo\u{308}rld");
         let mut t = Terminal::new(5, 2);
         t.advance("abcd\u{754c}\u{301}x".as_bytes());

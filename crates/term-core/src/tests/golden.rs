@@ -295,7 +295,56 @@ fn shell_output_snapshot_lifetime() {
 }
 
 #[test]
-fn shell_output_start_is_clamped_on_resize() {
+fn shell_marks_follow_reflow() {
+    let rows = |t: &Terminal| -> Vec<_> {
+        t.primary
+            .scrollback
+            .iter()
+            .chain(&t.primary.lines)
+            .map(|r| (r.text(), r.flags, r.prompt_col, r.output_col))
+            .collect()
+    };
+    let mut t = Terminal::new(20, 6);
+    t.advance(
+        b"\x1b]133;A\x07$ \x1b]133;B\x07echo 0123456789abcdef\x1b]133;C\x07\r\n\
+          out-line-that-wraps-once\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07",
+    );
+    let original = rows(&t);
+    t.resize(8, 6);
+    let first = t.first_line();
+    let prompt: Vec<_> = (first..first + 3).map(|l| t.line(l).flags).collect();
+    assert!(prompt.iter().all(|f| f.contains(RowFlags::PROMPT)));
+    assert!(prompt[0].contains(RowFlags::PROMPT_START) && prompt[0].contains(RowFlags::SUCCEEDED));
+    assert!(!prompt[1].contains(RowFlags::PROMPT_START));
+    assert!(!t.line(first + 3).flags.contains(RowFlags::PROMPT));
+    let command = &t.shell.commands[0];
+    assert_eq!(
+        (command.prompt_line, command.input_line, command.input_col),
+        (first, first, 2)
+    );
+    let next = command.next_prompt.unwrap();
+    assert!(t.line(next).flags.contains(RowFlags::PROMPT_START));
+    assert_eq!(t.line(next).text(), "$");
+    assert_eq!(t.cursor_position(), Some((t.rows() - 1, 2)));
+    t.select_command_output();
+    assert_eq!(
+        t.selection_text().as_deref(),
+        Some("out-line-that-wraps-once")
+    );
+    t.jump_to_prompt(true);
+    assert_eq!(t.display_offset() as u64, t.history - first);
+
+    t.resize(20, 6);
+    assert_eq!(rows(&t), original);
+    t.select_command_output();
+    assert_eq!(
+        t.selection_text().as_deref(),
+        Some("out-line-that-wraps-once")
+    );
+}
+
+#[test]
+fn shell_output_start_follows_reflow() {
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ run\x1b]133;B\x07\x1b]133;C\x07result\x1b]133;D;0\x07");
     t.select_command_output();
@@ -303,16 +352,15 @@ fn shell_output_start_is_clamped_on_resize() {
     t.resize(4, 5);
     t.select_command_output();
     let (start, _) = t.selection_range().unwrap();
-    assert_eq!(start.col, 0);
-    assert_eq!(start.line, t.first_line());
-    assert_eq!(t.selection_text().as_deref(), Some("$ ru"));
+    assert_eq!(start, Point { line: 1, col: 1 });
+    assert_eq!(t.selection_text().as_deref(), Some("result"));
 
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ run\x1b]133;C\x07result\x1b]133;D;0\x07");
     t.resize(8, 3);
     t.select_command_output();
     assert_eq!(t.selection_range().unwrap().0, Point { line: 0, col: 5 });
-    assert_eq!(t.selection_text().as_deref(), Some("res"));
+    assert_eq!(t.selection_text().as_deref(), Some("result"));
 }
 
 #[test]
@@ -769,6 +817,24 @@ fn cases() -> Vec<Case> {
             "a你b好cd\x1b[1;3H\x1b[3X".as_bytes(),
         ),
         (
+            "erase_characters_wide_left_half_background",
+            6,
+            1,
+            "\x1b[41m你好x\x1b[44m\x1b[1;1H\x1b[X".as_bytes(),
+        ),
+        (
+            "erase_characters_wide_split_background",
+            8,
+            1,
+            "\x1b[41ma你b好cd\x1b[44m\x1b[1;3H\x1b[3X".as_bytes(),
+        ),
+        (
+            "erase_line_wide_split_background",
+            8,
+            2,
+            "\x1b[41ma你b好cd\r\na你b好cd\x1b[44m\x1b[1;3H\x1b[K\x1b[2;5H\x1b[1K".as_bytes(),
+        ),
+        (
             "erase_display_end",
             4,
             3,
@@ -976,6 +1042,36 @@ fn cases() -> Vec<Case> {
             b"\x1b[1;31m\x1b[58:2::1:2:3ma\x1b[58;2;0;0;0mb\x1b[58;5;4mc\x1b[59md",
         ),
         ("invalid_utf8", 6, 2, b"a\xffb\r\nZ"),
+        (
+            "osc_window_title",
+            6,
+            2,
+            b"a\x1b]2;first\x07b\x1b]0;second;title\x1b\\c",
+        ),
+        (
+            "osc8_hyperlink",
+            8,
+            2,
+            b"a\x1b]8;;https://example.com\x07bc\x1b]8;;\x07d\x1b]8;id=x;file:///tmp\x1b\\e\x1b]8;;\x1b\\f",
+        ),
+        (
+            "osc52_clipboard_store",
+            6,
+            2,
+            b"a\x1b]52;c;aGVsbG8=\x07b\x1b]52;p;d29ybGQ\x1b\\c",
+        ),
+        (
+            "osc52_clipboard_query",
+            6,
+            2,
+            b"a\x1b]52;c;?\x07b\x1b]52;q;aGk=\x07\x1b]52;c;!!\x07c",
+        ),
+        (
+            "osc7_working_directory",
+            6,
+            2,
+            b"a\x1b]7;file://box/home/me/my%20dir\x07b\x1b]7;bogus\x1b\\c",
+        ),
     ];
     let mut cases: Vec<_> = inputs
         .iter()
@@ -994,6 +1090,36 @@ fn cases() -> Vec<Case> {
         input: b"one\r\ntwo\r\nthree",
         resize: Some((6, 2)),
     });
+    type Reflow = (&'static str, usize, usize, &'static [u8], (usize, usize));
+    let reflows: &[Reflow] = &[
+        ("reflow_narrow", 8, 3, b"0123456789\r\n$ ", (4, 3)),
+        ("reflow_widen", 4, 4, b"0123456789\r\n$ ", (8, 4)),
+        ("reflow_pending_wrap", 8, 2, b"abcdefgh", (4, 2)),
+        ("reflow_wide_char", 5, 3, "ab\u{754c}cd".as_bytes(), (3, 3)),
+        (
+            "reflow_styled",
+            6,
+            3,
+            b"\x1b[1;31mabc\x1b[42mdefgh\x1b[m!",
+            (4, 3),
+        ),
+        (
+            "reflow_alternate",
+            8,
+            3,
+            b"0123456789\x1b[?1049hfullscreen app",
+            (4, 3),
+        ),
+    ];
+    for &(name, cols, rows, input, resize) in reflows {
+        cases.push(Case {
+            name,
+            cols,
+            rows,
+            input,
+            resize: Some(resize),
+        });
+    }
     cases
 }
 
@@ -1041,6 +1167,12 @@ fn attributes(t: &Terminal, cell: &Cell) -> String {
     );
     if let Some(c) = t.underline_color(cell) {
         write!(out, " underline-color={}", color(c)).unwrap();
+    }
+    if t.links
+        .get(cell.hyperlink)
+        .is_some_and(|(_, uri)| !uri.is_empty())
+    {
+        write!(out, " link={}", cell.hyperlink).unwrap();
     }
     out
 }
@@ -1105,6 +1237,26 @@ fn snapshot(t: &Terminal) -> String {
         t.primary.scrollback.iter(),
     );
     rows(&mut out, t, "alternate", t.alternate.lines.iter());
+    if let Some(title) = &t.title {
+        writeln!(out, "title: {title:?}").unwrap();
+    }
+    for index in 1..=t.links.len() as u16 {
+        if let Some((id, uri)) = t.links.get(index).filter(|(_, uri)| !uri.is_empty()) {
+            let (id, uri) = (String::from_utf8_lossy(id), String::from_utf8_lossy(uri));
+            writeln!(out, "link {index}: id={id:?} uri={uri:?}").unwrap();
+        }
+    }
+    for request in &t.shell.clipboard {
+        writeln!(out, "clipboard request: {request:?}").unwrap();
+    }
+    if let Some(cwd) = t.working_directory() {
+        writeln!(
+            out,
+            "working directory: host={:?} path={:?}",
+            cwd.host, cwd.path
+        )
+        .unwrap();
+    }
     out
 }
 
@@ -1508,4 +1660,68 @@ fn desktop_notification_query_and_limits() {
             },
         ]
     );
+}
+
+#[test]
+fn golden_progress_reports() {
+    let steps: &[(&str, &[u8])] = &[
+        ("default", b""),
+        ("set 42", b"\x1b]9;4;1;42\x07"),
+        ("same again", b"\x1b]9;4;1;42\x1b\\"),
+        ("set without percent", b"\x1b]9;4;1\x07"),
+        ("set 250", b"\x1b]9;4;1;250\x07"),
+        ("set 60 first", b"\x1b]9;4;1;60\x07"),
+        ("set huge", b"\x1b]9;4;1;99999999999999999999\x07"),
+        ("set 60", b"\x1b]9;4;1;60\x07"),
+        ("error keeps percent", b"\x1b]9;4;2\x07"),
+        ("error 10", b"\x1b]9;4;2;10\x07"),
+        ("indeterminate", b"\x1b]9;4;3\x07"),
+        ("paused after indeterminate", b"\x1b]9;4;4\x07"),
+        ("paused 75", b"\x1b]9;4;4;75\x07"),
+        ("unknown state", b"\x1b]9;4;5;20\x07"),
+        ("bad percent", b"\x1b]9;4;1;4x\x07"),
+        ("bad state", b"\x1b]9;4;-1;20\x07"),
+        ("remove", b"\x1b]9;4;0;0\x07"),
+        ("remove again", b"\x1b]9;4;0\x07"),
+        ("set 5", b"\x1b]9;4;1;5\x07"),
+        ("empty state removes", b"\x1b]9;4;\x07"),
+        ("set 7", b"\x1b]9;4;1;7\x07"),
+        ("bare 9;4 removes", b"\x1b]9;4\x07"),
+        ("notification is not progress", b"\x1b]9;build done\x07"),
+        ("set 33 amid text", b"a\x1b]9;4;1;33\x07b"),
+        ("RIS", b"\x1bc"),
+        ("RIS again", b"\x1bc"),
+    ];
+    let run = |bytewise: bool| {
+        let mut term = Terminal::new(5, 2);
+        let mut out = String::new();
+        for &(label, bytes) in steps {
+            if bytewise {
+                for byte in bytes.chunks(1) {
+                    term.advance(byte);
+                }
+            } else {
+                term.advance(bytes);
+            }
+            let change = match term.take_progress() {
+                Some(progress) => format!("changed to {progress:?}"),
+                None => "unchanged".to_string(),
+            };
+            writeln!(out, "{label}: {change}").unwrap();
+        }
+        out
+    };
+    let actual = run(false);
+    assert_eq!(actual, run(true));
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden/progress_reports.snap");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(path, &actual).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(path).unwrap();
+        assert!(
+            expected == actual,
+            "{}",
+            difference("progress_reports", &expected, &actual)
+        );
+    }
 }

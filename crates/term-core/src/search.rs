@@ -394,6 +394,27 @@ impl Terminal {
                 .min(self.scrollback_len() as u64) as usize;
         }
     }
+
+    /// Bring history lines `start..=end` into the top `rows - covered` screen rows (the rest sit
+    /// under an overlay): center an off-screen `start` as [`Self::reveal_line`] does, then scroll
+    /// just far enough to show `end` too, keeping `start` in view.
+    pub fn reveal_lines(&mut self, start: u64, end: u64, covered: usize) {
+        let view = self.rows.saturating_sub(covered).max(1) as u64;
+        let top = self.history - self.display_offset as u64;
+        let mut want = top;
+        if !(want..want + view).contains(&start) {
+            want = start.saturating_sub(view / 2).max(self.first_line());
+        }
+        if !(want..want + view).contains(&end) {
+            want = (end + 1).saturating_sub(view).min(start);
+        }
+        if want != top {
+            self.display_offset = self
+                .history
+                .saturating_sub(want)
+                .min(self.scrollback_len() as u64) as usize;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -530,6 +551,8 @@ mod tests {
     #[test]
     fn resized_wide_wrap_padding_stays_synthetic() {
         let mut t = Terminal::new(4, 2);
+        // Rows are cut, not rewrapped, on the alternate screen.
+        t.advance(b"\x1b[?1049h");
         t.advance("abc界".as_bytes());
         for cols in [6, 4, 3, 6] {
             t.resize(cols, 2);
@@ -543,6 +566,7 @@ mod tests {
             assert!(t.search("c 界", false).unwrap().is_empty());
         }
         let mut t = Terminal::new(4, 2);
+        t.advance(b"\x1b[?1049h");
         t.advance(b"abcde");
         t.resize(6, 2);
         assert_eq!(
@@ -558,6 +582,8 @@ mod tests {
     #[test]
     fn narrowed_wrapped_trailing_space_is_restored() {
         let mut t = Terminal::new(4, 2);
+        // Rows are cut, not rewrapped, on the alternate screen.
+        t.advance(b"\x1b[?1049h");
         t.advance(b"abc e");
         let expected = t.search("c e", false).unwrap();
         assert_eq!(expected.len(), 1);
@@ -591,8 +617,12 @@ mod tests {
             }
             for width in [cols + 4, cols, cols + 8, cols] {
                 t.resize(width, 3);
-                assert_eq!(t.search(query, false).unwrap(), expected);
-                assert_eq!(t.search(&regex::escape(query), true).unwrap(), expected);
+                let found = t.search(query, false).unwrap();
+                assert_eq!(found.len(), 1);
+                if width == cols {
+                    assert_eq!(found, expected);
+                }
+                assert_eq!(t.search(&regex::escape(query), true).unwrap(), found);
                 assert!(t.search("absent", false).unwrap().is_empty());
                 assert!(t.search("[", true).is_err());
             }
@@ -623,6 +653,8 @@ mod tests {
     #[test]
     fn widened_wrap_padding_is_not_highlighted() {
         let mut t = Terminal::new(10, 3);
+        // Rows are cut, not rewrapped, on the alternate screen.
+        t.advance(b"\x1b[?1049h");
         t.advance(b"zzzzzzWRAPSPAN");
         let expected = points(&[
             (0, 6),
@@ -641,6 +673,8 @@ mod tests {
         }
 
         let mut t = Terminal::new(4, 2);
+
+        t.advance(b"\x1b[?1049h");
         t.advance("abc界".as_bytes());
         for cols in [4, 6] {
             t.resize(cols, 2);
@@ -656,6 +690,8 @@ mod tests {
     #[test]
     fn narrowed_rows_search_their_hidden_cells() {
         let mut t = Terminal::new(6, 3);
+        // Rows are cut, not rewrapped, on the alternate screen.
+        t.advance(b"\x1b[?1049h");
         t.advance("abcdefGHIJ\r\nshort line here\r\nab界".as_bytes());
         let queries = ["cdef", "fG", "ce", "line here", "b界", "ab", "e$", "J$"];
         let expected: Vec<_> = queries
@@ -688,6 +724,8 @@ mod tests {
             ("\x1b[4hX", "Xabc  界"),
         ] {
             let mut t = Terminal::new(4, 2);
+            // Rows are cut, not rewrapped, on the alternate screen.
+            t.advance(b"\x1b[?1049h");
             t.advance("abc界".as_bytes());
             t.resize(6, 2);
             t.advance(b"\x1b[1;1H");
@@ -700,6 +738,36 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn reveal_lines_keeps_both_rows_above_covered_rows() {
+        let mut t = Terminal::new(4, 4);
+        t.set_scrollback_limit(100);
+        for _ in 0..20 {
+            t.advance(b"x\r\n");
+        }
+        let top = |t: &Terminal| t.viewport_to_point(0, 0).line;
+        t.scroll_to_line(5);
+        // Already in the clear rows: nothing moves.
+        t.reveal_lines(6, 7, 1);
+        assert_eq!(top(&t), 5);
+        // The end row sits under the overlay: scroll just enough to lift it out.
+        t.reveal_lines(7, 8, 1);
+        assert_eq!(top(&t), 6);
+        // Without an overlay the bottom row counts.
+        t.scroll_to_line(5);
+        t.reveal_lines(7, 8, 0);
+        assert_eq!(top(&t), 5);
+        // Off screen: centered in the clear rows, then the end is shown.
+        t.reveal_lines(15, 16, 1);
+        assert_eq!(top(&t), 14);
+        // Taller than the clear rows: the start stays at the top.
+        t.reveal_lines(2, 9, 1);
+        assert_eq!(top(&t), 2);
+        // Everything covered still leaves one row.
+        t.reveal_lines(12, 13, 9);
+        assert_eq!(top(&t), 12);
     }
 
     #[test]

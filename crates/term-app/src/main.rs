@@ -25,6 +25,7 @@ mod paste;
 mod present_macos;
 #[cfg(target_os = "linux")]
 mod present_wayland;
+mod progress;
 mod pty;
 mod search;
 mod show;
@@ -44,7 +45,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use term_core::{MouseMode, Point, SelectionKind, Terminal};
+use term_core::{ClipboardRequest, MouseMode, Point, SelectionKind, Terminal};
 #[cfg(test)]
 use term_render::PADDING;
 use term_render::{Fonts, Renderer};
@@ -59,6 +60,7 @@ use winit::window::{Theme, Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
+const WORKING_DIRECTORY: &str = "TERMINAL_WORKING_DIRECTORY";
 /// Bounds how long startup waits for the portal's color scheme before the
 /// first PTY output is parsed; the read overlaps window and GPU setup.
 #[cfg(target_os = "linux")]
@@ -150,6 +152,7 @@ struct Options {
     option_as_alt: bool,
     copy_on_select: bool,
     command: Vec<String>,
+    working_directory: Option<PathBuf>,
 }
 
 impl Options {
@@ -216,6 +219,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
         option_as_alt: !cfg!(target_os = "macos"),
         copy_on_select: false,
         command: Vec::new(),
+        working_directory: None,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -292,6 +296,9 @@ struct Session {
     blink_epoch: Instant,
     /// When blinking text on screen next flips.
     blink_at: Option<Instant>,
+    /// The title set by OSC 0/2, shown after any OSC 9;4 progress.
+    title: String,
+    progress: Option<term_core::Progress>,
 }
 
 #[derive(Default)]
@@ -592,6 +599,37 @@ impl HeldAtFocus {
 
 fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) -> bool {
     (repeat || held_at_focus) && matches!(action, Action::NewWindow)
+}
+
+/// The directory a new window should start in: the shell's OSC 7 directory when it is
+/// on this machine and still exists.
+fn local_working_directory(cwd: Option<&term_core::WorkingDirectory>) -> Option<PathBuf> {
+    let cwd = cwd?;
+    let local = cwd.host.is_empty()
+        || cwd.host.eq_ignore_ascii_case("localhost")
+        || hostname().is_some_and(|name| same_host(&name, &cwd.host));
+    let path = PathBuf::from(&cwd.path);
+    (local && path.is_absolute() && path.is_dir()).then_some(path)
+}
+
+fn same_host(a: &str, b: &str) -> bool {
+    let short = |name: &str| {
+        name.split('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+    a.eq_ignore_ascii_case(b) || (!a.contains('.') || !b.contains('.')) && short(a) == short(b)
+}
+
+fn hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for its length; gethostname writes at most that many bytes.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8(buf[..len].to_vec()).ok()
 }
 
 fn inherit_new_window_stderr(kind: Option<FileType>) -> bool {
@@ -995,6 +1033,7 @@ impl App {
         let mut pty = Pty::spawn(
             self.options.command(&self.config),
             &env,
+            self.options.working_directory.as_deref(),
             spawn_cols,
             spawn_rows,
             spawn_cell,
@@ -1129,6 +1168,8 @@ impl App {
             output: PendingOutput::default(),
             blink_epoch: Instant::now(),
             blink_at: None,
+            title: String::new(),
+            progress: None,
         })
     }
 
@@ -1141,8 +1182,20 @@ impl App {
         let grid_changed = (cols, rows) != (s.term.cols(), s.term.rows());
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
-        if grid_changed {
+        let covered = find_bar_rows(
+            s.window.inner_size().height as f32,
+            self.config.padding * s.window.scale_factor() as f32,
+            s.fonts.metrics.height,
+            rows,
+        );
+        let covered_changed = self
+            .search
+            .as_mut()
+            .is_some_and(|search| std::mem::replace(&mut search.covered_rows, covered) != covered);
+        if grid_changed || covered_changed {
             search::Search::resize(self.search.as_ref(), &mut s.term, cols, rows);
+        }
+        if grid_changed {
             release_freed_memory(&mut s.term);
             if let Some(search) = &mut self.search {
                 search.dirty = true;
@@ -1221,9 +1274,30 @@ impl App {
         }
         let responses = s.term.take_responses();
         s.pty.write(&responses);
-        if let Some(title) = s.term.take_title() {
+        for request in s.term.take_clipboard_requests() {
+            match request {
+                ClipboardRequest::Store { primary, text } => self.clipboard.set(text, primary),
+                ClipboardRequest::Load { primary, .. } if self.config.clipboard_read => {
+                    let text = self.clipboard.get(primary).unwrap_or_default();
+                    if let Some(reply) = request.reply(&text) {
+                        s.pty.write(&reply);
+                    }
+                }
+                ClipboardRequest::Load { .. } => {}
+            }
+        }
+        let title = s.term.take_title();
+        let progress = s.term.take_progress();
+        if title.is_some() || progress.is_some() {
+            if let Some(title) = title {
+                s.title = title;
+            }
+            if let Some(progress) = progress {
+                s.progress = progress;
+                progress::set_dock_badge(progress::badge(progress).as_deref());
+            }
             s.window
-                .set_title(if title.is_empty() { "terminal" } else { &title });
+                .set_title(&progress::window_title(&s.title, s.progress));
         }
         if std::mem::take(&mut s.term.bell) && !self.focused {
             s.window
@@ -1721,6 +1795,14 @@ impl App {
         match action {
             Action::Search => {
                 let search = self.search.get_or_insert_with(search::Search::default);
+                if let Some(s) = &self.session {
+                    search.covered_rows = find_bar_rows(
+                        s.window.inner_size().height as f32,
+                        self.config.padding * s.window.scale_factor() as f32,
+                        s.fonts.metrics.height,
+                        s.term.rows(),
+                    );
+                }
                 if let Some((text, cursor)) =
                     self.session.as_mut().and_then(|s| s.composition.take())
                 {
@@ -1733,10 +1815,14 @@ impl App {
                 }
             }
             Action::NewWindow => {
+                let working_directory = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| local_working_directory(s.term.working_directory()));
                 if let Err(error) =
                     std::thread::Builder::new()
                         .name("new-window".into())
-                        .spawn(|| {
+                        .spawn(move || {
                             let result = std::env::current_exe().and_then(|exe| {
                                 let (stderr, startup_stderr) = new_window_stderr();
                                 let mut command = std::process::Command::new(exe);
@@ -1747,6 +1833,9 @@ impl App {
                                     .stderr(stderr);
                                 if startup_stderr {
                                     command.env(STARTUP_STDERR, "1");
+                                }
+                                if let Some(dir) = working_directory {
+                                    command.env(WORKING_DIRECTORY, dir);
                                 }
                                 command.spawn()
                             });
@@ -2293,6 +2382,15 @@ fn pointer_in_search_bar(
         && pos.y < size.height as f64
 }
 
+/// How many of the grid's `rows` bottom rows the Find bar is drawn over, wholly or in part.
+fn find_bar_rows(height: f32, padding: f32, cell_height: f32, rows: usize) -> usize {
+    let bar_top =
+        term_render::search_layout(0, 0..0, 0, cell_height, height, cell_height, cell_height)
+            .cursor_area[1];
+    let clear = ((bar_top - padding) / cell_height).floor().max(0.0) as usize;
+    rows.saturating_sub(clear)
+}
+
 fn pointer_in_grid(
     pos: PhysicalPosition<f64>,
     padding: f64,
@@ -2764,6 +2862,9 @@ fn main() {
     let startup_stderr = std::env::var_os(STARTUP_STDERR).is_some();
     // SAFETY: main has not started any threads or spawned the PTY yet.
     unsafe { std::env::remove_var(STARTUP_STDERR) };
+    let working_directory = std::env::var_os(WORKING_DIRECTORY).map(PathBuf::from);
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(WORKING_DIRECTORY) };
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
@@ -2771,7 +2872,10 @@ fn main() {
         std::process::exit(terminfo::install());
     }
     let options = match parse_args() {
-        Ok(o) => o,
+        Ok(o) => Options {
+            working_directory: working_directory.filter(|dir| dir.is_dir()),
+            ..o
+        },
         Err(e) => {
             diag!("terminal: {e}");
             std::process::exit(2);
@@ -2953,6 +3057,72 @@ mod tests {
     }
 
     #[test]
+    fn new_windows_start_in_local_osc7_directories() {
+        let dir = std::env::temp_dir();
+        let cwd = |host: &str, path: &std::path::Path| term_core::WorkingDirectory {
+            host: host.into(),
+            path: path.to_str().unwrap().into(),
+        };
+        let here = super::hostname().unwrap();
+        for host in ["", "localhost", "LOCALHOST", &here, &here.to_uppercase()] {
+            assert_eq!(
+                super::local_working_directory(Some(&cwd(host, &dir))).as_deref(),
+                Some(dir.as_path()),
+                "{host:?}"
+            );
+        }
+        assert_eq!(super::local_working_directory(None), None);
+        let missing = dir.join("terminal-osc7-missing-dir");
+        assert_eq!(
+            super::local_working_directory(Some(&cwd("", &missing))),
+            None
+        );
+        assert_eq!(
+            super::local_working_directory(Some(&cwd("some-other-host.example", &dir))),
+            None
+        );
+        assert!(super::same_host("mac.local", "MAC"));
+        assert!(!super::same_host("mac.local", "box.local"));
+        assert!(!super::same_host("dev.office.example", "dev.cloud.example"));
+    }
+
+    #[test]
+    fn bash_integration_reports_non_ascii_directories() {
+        let dir =
+            std::env::temp_dir().join(format!("terminal-osc7 \u{e9}%x-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../shell-integration/terminal.bash"
+        );
+        let output = std::process::Command::new("bash")
+            .args([
+                "--norc",
+                "-ic",
+                r#"source "$1"; _terminal_report_cwd"#,
+                "bash",
+                script,
+            ])
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let mut terminal = term_core::Terminal::new(10, 2);
+        terminal.advance(&output.stdout);
+        let reported = terminal
+            .working_directory()
+            .and_then(|cwd| std::fs::canonicalize(&cwd.path).ok());
+        let expected = dir.canonicalize().ok();
+        std::fs::remove_dir(&dir).unwrap();
+        assert!(
+            reported.is_some() && reported == expected,
+            "{:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
     fn new_window_stderr_inherits_only_files_and_character_devices() {
         use std::os::unix::net::UnixStream;
         let file = File::open(std::env::current_exe().unwrap()).unwrap();
@@ -3077,6 +3247,17 @@ mod tests {
         assert!(!cell_in_preedit(&layout, 2, (2, 7)));
         assert!(!cell_in_preedit(&layout, 2, (1, 4)));
         assert!(!cell_in_preedit(&layout, 2, (-1, 4)));
+    }
+
+    #[test]
+    fn find_bar_rows_counts_rows_it_overlaps() {
+        // 6 px padding, 20 px cells: 10 rows end at 206, the bar starts at 200 and clips row 9.
+        assert_eq!(find_bar_rows(220.0, 6.0, 20.0, 10), 1);
+        // A full spare row below the grid leaves every row clear.
+        assert_eq!(find_bar_rows(240.0, 6.0, 20.0, 10), 0);
+        // Row 8 ends exactly at the bar's top edge, so only row 9 is covered.
+        assert_eq!(find_bar_rows(206.0, 6.0, 20.0, 10), 1);
+        assert_eq!(find_bar_rows(10.0, 6.0, 20.0, 1), 1);
     }
 
     #[test]
@@ -3224,6 +3405,7 @@ mod tests {
             font: None,
             font_size: super::DEFAULT_FONT_SIZE,
             command: Vec::new(),
+            working_directory: None,
             option_as_alt: true,
             copy_on_select: false,
         };

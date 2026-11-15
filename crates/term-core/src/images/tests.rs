@@ -374,7 +374,9 @@ fn resize_keeps_placements_on_their_cells() {
     let mut t = term();
     t.advance(b"\x1b[2;1Hab");
     place_at(&mut t, 1, 6);
-    // Narrowing past the image keeps it anchored; widening shows it again.
+    // Narrowing past the image keeps it anchored; widening shows it again. (With the
+    // cursor still on its row, the row would rewrap to keep the cursor's cell.)
+    t.advance(b"\x1b[4;1H");
     t.resize(5, 5);
     assert_eq!(t.screen().placements[0].col, 6);
     assert!(t.visible_placements().is_empty());
@@ -584,6 +586,7 @@ fn alignment_pattern_removes_placements() {
 fn images_past_the_right_edge_can_be_evicted() {
     let mut t = term();
     place_at(&mut t, 1, 6);
+    t.advance(b"\x1b[4;1H");
     t.resize(5, 5);
     t.set_image_quota(2 * 20 * 40 * 4);
     t.add_image(2, image(20, 40)).unwrap();
@@ -630,4 +633,19 @@ fn image_versions_do_not_repeat_after_reset() {
     t.add_image(1, image(4, 4)).unwrap();
     let (_, after) = t.image_with_version(1).unwrap();
     assert_ne!(before, after);
+}
+
+#[test]
+fn reflow_moves_placements_with_their_cells() {
+    let mut t = term();
+    t.advance(b"0123456789abcdef");
+    place_at(&mut t, 1, 2);
+    t.advance(b"\x1b[5;1H");
+    t.resize(4, 5);
+    let p = &t.primary.placements[0];
+    assert_eq!((p.line, p.col), (3, 0));
+    t.resize(10, 5);
+    let p = &t.primary.placements[0];
+    assert_eq!((p.line, p.col), (1, 2));
+    assert_eq!(rows(&t), [1]);
 }

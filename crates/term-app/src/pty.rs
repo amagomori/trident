@@ -4,7 +4,7 @@ use crate::flow_control::FlowSettings;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -26,6 +26,12 @@ const FOREGROUND_INTERVAL: Duration = Duration::from_millis(5);
 /// Reads starting within this many bytes of an escape byte are always checked too, since
 /// they may finish a sequence split across reads.
 const ESCAPE_TAIL: usize = 64;
+/// How long the reader retries an empty PTY before it sleeps in `poll`. A blocking read
+/// sleeps and wakes once per call, and macOS returns at most 1 KiB per read, which capped a
+/// 100 MiB `cat` at about 1.4 s; a short spin picks up the writer's next chunk without that
+/// round trip, and an idle PTY still costs nothing once the spin gives up.
+#[cfg(unix)]
+const READ_SPIN: Duration = Duration::from_micros(20);
 
 /// Shell output read but not yet parsed, as one buffer: small reads (macOS returns about
 /// 1 KiB per read) still reach the parser as one batch.
@@ -229,6 +235,90 @@ fn buffered_output(fd: std::os::fd::RawFd) -> u64 {
     }
 }
 
+/// Sleeps until `fd` is ready for `events`, or has hung up.
+#[cfg(unix)]
+fn wait_until(fd: BorrowedFd, events: libc::c_short) -> std::io::Result<()> {
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: poll reads and writes one live pollfd.
+        if unsafe { libc::poll(&mut poll, 1, -1) } >= 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_nonblocking(fd: BorrowedFd) -> std::io::Result<()> {
+    // SAFETY: fcntl only reads and sets the status flags of a live descriptor.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Reads a non-blocking PTY master: spins `READ_SPIN` on an empty PTY, then polls.
+#[cfg(unix)]
+struct SpinReader(std::fs::File);
+
+#[cfg(unix)]
+impl Read for SpinReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut empty_since = None;
+        loop {
+            match self.0.read(buf) {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let since = *empty_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= READ_SPIN {
+                        wait_until(self.0.as_fd(), libc::POLLIN)?;
+                        empty_since = None;
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                result => return result,
+            }
+        }
+    }
+}
+
+/// `write_all` for a PTY master shared with the non-blocking reader: a full input
+/// buffer waits for room instead of failing.
+fn write_all_waiting(
+    writer: &mut impl Write,
+    #[cfg(unix)] fd: Option<BorrowedFd>,
+    mut bytes: &[u8],
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        match writer.write(bytes) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => bytes = &bytes[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                #[cfg(unix)]
+                if let Some(fd) = fd {
+                    wait_until(fd, libc::POLLOUT)?;
+                    continue;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    writer.flush()
+}
+
 fn size(cols: usize, rows: usize, cell_w: f32, cell_h: f32) -> PtySize {
     PtySize {
         rows: rows as u16,
@@ -381,10 +471,13 @@ fn shell_name(program: &str) -> Option<&str> {
 
 impl Pty {
     /// Starts `command` (the user's login shell when empty). `wake` is called from the
-    /// reader thread when output is ready, and with `true` once the shell exits.
+    /// reader thread when output is ready, and with `true` once the shell exits. It starts in
+    /// `cwd` when given, else in this process's directory (`$HOME` when that is `/`).
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         command: &[String],
         env: &std::collections::BTreeMap<String, String>,
+        cwd: Option<&std::path::Path>,
         cols: usize,
         rows: usize,
         cell: (f32, f32),
@@ -409,7 +502,9 @@ impl Pty {
         for (key, value) in env {
             cmd.env(key, value);
         }
-        if let Some(home) = std::env::var_os("HOME")
+        if let Some(dir) = cwd {
+            cmd.cwd(dir);
+        } else if let Some(home) = std::env::var_os("HOME")
             && std::env::current_dir()
                 .map(|d| d == std::path::Path::new("/"))
                 .unwrap_or(true)
@@ -435,6 +530,22 @@ impl Pty {
             .transpose()
             .map_err(|e| format!("cannot clone pty: {e}"))?;
 
+        #[cfg(unix)]
+        let mut reader: Box<dyn Read + Send> = match &foreground_fd {
+            Some(fd) => {
+                let fd = fd
+                    .try_clone()
+                    .map_err(|e| format!("cannot read pty: {e}"))?;
+                // The flag is on the master's shared open file, so the writer waits for room too.
+                set_nonblocking(fd.as_fd()).map_err(|e| format!("cannot read pty: {e}"))?;
+                Box::new(SpinReader(fd.into()))
+            }
+            None => pair
+                .master
+                .try_clone_reader()
+                .map_err(|e| format!("cannot read pty: {e}"))?,
+        };
+        #[cfg(not(unix))]
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -469,10 +580,13 @@ impl Pty {
             .name("pty-writer".into())
             .spawn(move || {
                 for input in input_rx {
-                    if writer
-                        .write_all(&input.bytes)
-                        .and_then(|_| writer.flush())
-                        .is_err()
+                    if write_all_waiting(
+                        &mut writer,
+                        #[cfg(unix)]
+                        writer_fd.as_ref().map(|fd| fd.as_fd()),
+                        &input.bytes,
+                    )
+                    .is_err()
                     {
                         break;
                     }
@@ -724,11 +838,116 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    fn nonblocking_pipe() -> (std::fs::File, std::fs::File) {
+        use std::os::fd::FromRawFd;
+        let mut fds = [0; 2];
+        // SAFETY: pipe writes two new descriptors into fds.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both descriptors were just created and are owned here.
+        let (r, w) = unsafe {
+            (
+                std::os::fd::OwnedFd::from_raw_fd(fds[0]),
+                std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+            )
+        };
+        set_nonblocking(r.as_fd()).unwrap();
+        set_nonblocking(w.as_fd()).unwrap();
+        (r.into(), w.into())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_spin_reader_waits_for_late_output_and_sees_the_end() {
+        let (r, mut w) = nonblocking_pipe();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            w.write_all(b"late").unwrap();
+        });
+        let mut reader = SpinReader(r);
+        let mut buf = [0u8; 16];
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"late");
+        writer.join().unwrap();
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_waits_for_room_in_a_full_nonblocking_pty() {
+        let (mut r, mut w) = nonblocking_pipe();
+        let sent: Vec<u8> = (0..1 << 20).map(|i| (i % 251) as u8).collect();
+        let expected = sent.clone();
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match r.read(&mut buf) {
+                    Ok(0) => return got,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+        });
+        let fd = w.try_clone().unwrap();
+        write_all_waiting(&mut w, Some(fd.as_fd()), &sent).unwrap();
+        drop((w, fd));
+        assert!(reader.join().unwrap() == expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_large_paste_and_its_output_cross_the_pty_intact() {
+        let dir = std::env::temp_dir().join(format!("terminal-paste-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("paste");
+        let line = [b'x'; 63];
+        let lines = 4096;
+        let mut paste = Vec::new();
+        for _ in 0..lines {
+            paste.extend_from_slice(&line);
+            paste.push(b'\n');
+        }
+        let script = format!(
+            "stty -echo; head -c {} > '{}'; printf done; head -c 3000000 /dev/zero | tr '\\0' x",
+            paste.len(),
+            file.display()
+        );
+        let mut pty = Pty::spawn(
+            &["sh".into(), "-c".into(), script],
+            &Default::default(),
+            None,
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        pty.write(&paste);
+        let mut output = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while output.iter().filter(|&&b| b == b'x').count() < 3_000_000 {
+            assert!(Instant::now() < deadline, "got {} bytes", output.len());
+            output.extend_from_slice(&pty.take_output().bytes);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(output.windows(4).any(|w| w == b"done"));
+        assert_eq!(std::fs::read(&file).unwrap(), paste);
+        drop(pty);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn notifications_start_disabled_and_can_be_reloaded() {
         let mut pty = Pty::spawn(
             &["/bin/sh".into()],
             &Default::default(),
+            None,
             80,
             24,
             (8.0, 16.0),
@@ -760,6 +979,7 @@ mod tests {
                 "-i".into(),
             ],
             &Default::default(),
+            None,
             80,
             24,
             (8.0, 16.0),
@@ -788,6 +1008,31 @@ mod tests {
         );
         pty.write(b"\x03");
         wait_for(&mut pty, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_starts_in_the_requested_directory() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let mut pty = Pty::spawn(
+            &["/bin/sh".into(), "-c".into(), "pwd; sleep 5".into()],
+            &Default::default(),
+            Some(&dir),
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let expected = format!("{}\r\n", dir.display());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while !String::from_utf8_lossy(&seen).contains(&expected) {
+            assert!(Instant::now() < deadline, "output: {seen:?}");
+            seen.extend_from_slice(&pty.take_output().bytes);
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Every argv form QA tried on #71 and #60 (as the shell sees it after `env` or a path),
@@ -929,7 +1174,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let mut pty = Pty::spawn(&[], &env, 80, 24, (8.0, 16.0), |_| {}, |_| {}).unwrap();
+        let mut pty = Pty::spawn(&[], &env, None, 80, 24, (8.0, 16.0), |_| {}, |_| {}).unwrap();
         assert_eq!(pty.output.probe.login.as_deref(), Some("-myshell"));
         let wait_for = |pty: &mut Pty, running: bool| {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -968,6 +1213,7 @@ mod tests {
             let mut pty = Pty::spawn(
                 &[shell.into(), "-c".into(), "sleep 30; true".into()],
                 &Default::default(),
+                None,
                 80,
                 24,
                 (8.0, 16.0),
@@ -1008,6 +1254,7 @@ mod tests {
                 "-i".into(),
             ],
             &Default::default(),
+            None,
             80,
             24,
             (8.0, 16.0),
@@ -1027,6 +1274,7 @@ mod tests {
         let mut pty = Pty::spawn(
             &["sleep".into(), "30".into()],
             &Default::default(),
+            None,
             80,
             24,
             (8.0, 16.0),
@@ -1055,6 +1303,7 @@ mod tests {
             Pty::spawn(
                 &["/nonexistent/terminal-test-shell".into()],
                 &Default::default(),
+                None,
                 80,
                 24,
                 (8.0, 16.0),

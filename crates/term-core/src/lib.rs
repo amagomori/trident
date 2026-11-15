@@ -15,7 +15,10 @@ mod links;
 pub use links::Link;
 mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
+mod osc;
+pub use osc::{ClipboardRequest, WorkingDirectory};
 mod perform;
+mod reflow;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
@@ -45,6 +48,33 @@ struct ShellState {
     commands: VecDeque<Command>,
     budget: budget::Budget,
     notifications: notifications::Notifications,
+    progress: Option<Progress>,
+    progress_changed: bool,
+    cwd: Option<WorkingDirectory>,
+    clipboard: Vec<ClipboardRequest>,
+}
+
+/// Progress a program reports with ConEmu's `OSC 9 ; 4 ; state ; percent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// State 1: running, at this percentage.
+    Normal(u8),
+    /// State 2: failed, with the last percentage if one is known.
+    Error(Option<u8>),
+    /// State 3: running, with no percentage.
+    Indeterminate,
+    /// State 4: paused, with the last percentage if one is known.
+    Paused(Option<u8>),
+}
+
+impl Progress {
+    fn percent(&self) -> Option<u8> {
+        match *self {
+            Progress::Normal(percent) => Some(percent),
+            Progress::Error(percent) | Progress::Paused(percent) => percent,
+            Progress::Indeterminate => None,
+        }
+    }
 }
 
 /// Commands kept for the pinned header; older ones lose it first.
@@ -265,6 +295,8 @@ pub struct Terminal {
     /// How many lines the view is scrolled back from the bottom.
     display_offset: usize,
     pub selection: Option<Selection>,
+    /// Positions [`Self::resize_tracking`] moves along with the lines while it runs.
+    tracked: Vec<Point>,
     title: Option<String>,
     title_changed: bool,
     /// Replies (device attributes, cursor reports...) to write back to the shell.
@@ -728,6 +760,10 @@ impl Terminal {
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
                 notifications: Default::default(),
+                progress: None,
+                progress_changed: false,
+                cwd: None,
+                clipboard: Vec::new(),
             }),
             links: Default::default(),
             graphemes: Default::default(),
@@ -763,6 +799,7 @@ impl Terminal {
             print_state: PrintState::EMPTY,
             display_offset: 0,
             selection: None,
+            tracked: Vec::new(),
             title: None,
             title_changed: false,
             responses: Vec::new(),
@@ -912,6 +949,12 @@ impl Terminal {
         }
     }
 
+    /// The progress report, when it changed since the last call; `Some(None)` once it
+    /// is removed.
+    pub fn take_progress(&mut self) -> Option<Option<Progress>> {
+        std::mem::take(&mut self.shell.progress_changed).then_some(self.shell.progress)
+    }
+
     pub fn is_alt_screen(&self) -> bool {
         self.alt_active
     }
@@ -1019,6 +1062,12 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
+        self.resize_tracking(cols, rows, &mut []);
+    }
+
+    /// [`Self::resize`], moving `points` (absolute primary-screen positions) along with
+    /// the text when the primary screen rewraps or the command budget cuts lines.
+    pub fn resize_tracking(&mut self, cols: usize, rows: usize, points: &mut [Point]) {
         let cols = cols.max(2);
         let rows = rows.max(1);
         if cols == self.cols && rows == self.rows {
@@ -1026,11 +1075,18 @@ impl Terminal {
         }
         self.invalidate_output_ends();
         self.selection = None;
+        self.tracked.extend_from_slice(points);
         // A scrolled-back view keeps its top line; one at the bottom follows the bottom.
-        let anchor = (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
+        let mut anchor =
+            (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
         self.display_offset = 0;
         if cols < self.cols || rows < self.rows {
             self.shrunk = true;
+        }
+        // The primary screen rewraps its lines; the alternate one is redrawn by its app.
+        let reflow = cols != self.cols;
+        if reflow {
+            anchor = self.reflow_primary(cols, rows, anchor);
         }
 
         let mut alt_shifted = 0;
@@ -1042,6 +1098,9 @@ impl Terminal {
             } else {
                 &mut self.primary
             };
+            if !alt && reflow {
+                continue;
+            }
             for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
                 row.resize(cols);
             }
@@ -1112,7 +1171,9 @@ impl Terminal {
         self.rows = rows;
         self.cursor.row = self.cursor.row.min(rows - 1);
         self.cursor.col = self.cursor.col.min(cols - 1);
-        self.cursor.pending_wrap = false;
+        if self.alt_active || !reflow {
+            self.cursor.pending_wrap = false;
+        }
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
         self.tabs = default_tabs(cols);
@@ -1125,6 +1186,9 @@ impl Terminal {
         }
         if let Some(top) = anchor {
             self.scroll_to_line(top);
+        }
+        for (point, tracked) in points.iter_mut().zip(self.tracked.drain(..)) {
+            *point = tracked;
         }
     }
 
@@ -1573,14 +1637,21 @@ impl Terminal {
         let blank = Cell::blank(&self.cursor.template);
         let to = to.min(self.cols);
         let line = &mut self.lines_mut()[row];
-        let to = to.min(line.cells.len());
+        let mut to = to.min(line.cells.len());
         if from >= to {
             return;
         }
+        // Like xterm, a wide character split by the erase is blanked whole
+        // with the current background.
+        let mut from = from;
+        if from > 0 && line.cells[from].flags.contains(Flags::WIDE_SPACER) {
+            from -= 1;
+        }
+        if to < line.cells.len() && line.cells[to - 1].flags.contains(Flags::WIDE) {
+            to += 1;
+        }
         let to_end = to == line.cells.len();
         let tail_kept = to_end && line.occupied() <= from && line.cells.last() == Some(&blank);
-        clear_wide_pair(&mut line.cells, from);
-        clear_wide_pair(&mut line.cells, to - 1);
         line.cells[from..to].fill(blank);
         if !to_end {
             line.touch(to);
@@ -1862,6 +1933,7 @@ impl Terminal {
         let (cols, rows) = (self.cols, self.rows);
         let max_scrollback = self.max_scrollback;
         let mut fresh = Terminal::new(cols, rows);
+        fresh.shell.progress_changed = self.shell.progress.is_some() || self.shell.progress_changed;
         fresh.max_scrollback = max_scrollback;
         fresh.shrunk = self.shrunk || !self.primary.scrollback.is_empty();
         fresh.recycled_memory_freed = self.recycled_memory_freed;

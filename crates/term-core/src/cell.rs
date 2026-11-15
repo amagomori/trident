@@ -253,7 +253,20 @@ impl Row {
         }
     }
 
-    pub fn resize(&mut self, cols: usize) {
+    /// A row holding `cells`, as reflow builds them.
+    pub(crate) fn from_cells(cells: Vec<Cell>, flags: RowFlags) -> Row {
+        Row {
+            cells,
+            flags,
+            prompt_col: 0,
+            output_col: 0,
+            occupied: u8::MAX,
+            hidden: None,
+        }
+    }
+
+    /// Takes every cell of the row, with the cells hidden by narrowing back in place.
+    pub(crate) fn take_cells(&mut self) -> Vec<Cell> {
         self.touch_all();
         let mut cells = std::mem::take(&mut self.cells);
         if let Some(hidden) = self.hidden.take() {
@@ -272,7 +285,11 @@ impl Row {
             }
             cells.append(&mut hidden);
         }
+        cells
+    }
 
+    pub fn resize(&mut self, cols: usize) {
+        let mut cells = self.take_cells();
         if cells.len() > cols {
             let wide_at_edge = cells[cols - 1].flags.contains(Flags::WIDE);
             let cut = if wide_at_edge { cols - 1 } else { cols };
@@ -425,7 +442,7 @@ impl RowFlags {
     pub const SUCCEEDED: Self = Self(16);
     pub(crate) const OUTPUT_BEFORE_PROMPT: Self = Self(32);
     pub(crate) const OUTPUT_END: Self = Self(64);
-    const WRAPPED: Self = Self(128);
+    pub(crate) const WRAPPED: Self = Self(128);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

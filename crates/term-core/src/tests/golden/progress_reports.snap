@@ -1,0 +1,26 @@
+default: unchanged
+set 42: changed to Some(Normal(42))
+same again: unchanged
+set without percent: changed to Some(Normal(0))
+set 250: changed to Some(Normal(100))
+set 60 first: changed to Some(Normal(60))
+set huge: changed to Some(Normal(100))
+set 60: changed to Some(Normal(60))
+error keeps percent: changed to Some(Error(Some(60)))
+error 10: changed to Some(Error(Some(10)))
+indeterminate: changed to Some(Indeterminate)
+paused after indeterminate: changed to Some(Paused(None))
+paused 75: changed to Some(Paused(Some(75)))
+unknown state: unchanged
+bad percent: unchanged
+bad state: unchanged
+remove: changed to None
+remove again: unchanged
+set 5: changed to Some(Normal(5))
+empty state removes: changed to None
+set 7: changed to Some(Normal(7))
+bare 9;4 removes: changed to None
+notification is not progress: unchanged
+set 33 amid text: changed to Some(Normal(33))
+RIS: changed to None
+RIS again: unchanged

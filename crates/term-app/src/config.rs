@@ -17,6 +17,7 @@ pub struct Config {
     pub desktop_notifications: bool,
     pub drop_preview: bool,
     pub paste_protection: bool,
+    pub clipboard_read: bool,
     pub confirm_close: bool,
     pub vsync: bool,
     pub app_icon: AppIcon,
@@ -43,6 +44,7 @@ impl Default for Config {
             desktop_notifications: true,
             drop_preview: true,
             paste_protection: true,
+            clipboard_read: false,
             confirm_close: true,
             vsync: true,
             app_icon: AppIcon::default(),
@@ -68,6 +70,7 @@ struct Raw {
     desktop_notifications: Option<bool>,
     drop_preview: Option<bool>,
     paste_protection: Option<bool>,
+    clipboard_read: Option<bool>,
     confirm_close: Option<bool>,
     vsync: Option<bool>,
     app_icon: Option<String>,
@@ -431,6 +434,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         font: raw.font,
         drop_preview: raw.drop_preview.unwrap_or(true),
         paste_protection: raw.paste_protection.unwrap_or(true),
+        clipboard_read: raw.clipboard_read.unwrap_or(false),
         confirm_close: raw.confirm_close.unwrap_or(true),
         desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
@@ -1027,6 +1031,8 @@ mod tests {
         assert!(parse_text("").unwrap().drop_preview);
         assert!(!parse_text("drop_preview = false").unwrap().drop_preview);
         assert!(parse_text("").unwrap().paste_protection);
+        assert!(!parse_text("").unwrap().clipboard_read);
+        assert!(parse_text("clipboard_read = true").unwrap().clipboard_read);
         assert!(
             !parse_text("paste_protection = false")
                 .unwrap()
