@@ -140,7 +140,7 @@ impl Terminal {
             .filter(|c| {
                 budget > 0
                     && c.next_prompt
-                        .is_some_and(|end| end - c.output_line > budget)
+                        .is_some_and(|end| end.saturating_sub(c.output_line) > budget)
             })
             .map(|c| c.prompt_line)
             .collect();
@@ -155,7 +155,7 @@ impl Terminal {
         };
         let over = c
             .next_prompt
-            .is_some_and(|end| end - c.output_line > budget);
+            .is_some_and(|end| end.saturating_sub(c.output_line) > budget);
         if budget > 0 && over && self.shell.budget.pending.last() != Some(&c.prompt_line) {
             let line = c.prompt_line;
             self.shell.budget.pending.push(line);

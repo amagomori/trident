@@ -354,3 +354,17 @@ fn inserted_lines_move_the_output_start() {
     let placeholders = lines.iter().filter(|l| l.starts_with('\u{2026}')).count();
     assert_eq!(placeholders, 1, "{lines:?}");
 }
+
+#[test]
+fn next_prompt_above_the_moved_output_start() {
+    let mut t = Terminal::new(40, 30);
+    t.set_scrollback_limit(32);
+    t.advance(format!("{PROMPT}make\r\n\x1b]133;C\x07").as_bytes());
+    // Lines inserted at the output start push it below where the next prompt is drawn.
+    t.advance(b"\x1b[2;1H\x1b[10L\x1b]133;D;0\x07");
+    t.advance(PROMPT.as_bytes());
+    for i in 0..100 {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+    assert!(lines(&t).contains(&"line 99".to_string()));
+}
