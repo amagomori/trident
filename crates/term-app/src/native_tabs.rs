@@ -122,14 +122,14 @@ unsafe extern "C-unwind" fn new_window_for_tab(_: *mut AnyObject, _: Sel, _: *mu
     });
 }
 
-/// The Window menu's own items as (title, action, Command key), `None` for a separator.
-/// AppKit adds the tab items (Show Tab Bar, Show All Tabs, Show Next/Previous Tab, Move Tab
+/// The Window menu's own items as (title, action), `None` for a separator. None has a key
+/// equivalent, so every chord stays with `config.bindings`. AppKit adds the tab items (Show Tab Bar, Show All Tabs, Show Next/Previous Tab, Move Tab
 /// to New Window, Merge All Windows) and the window list to it.
-const WINDOW_MENU: [Option<(&str, &std::ffi::CStr, &str)>; 4] = [
-    Some(("Minimize", c"performMiniaturize:", "m")),
-    Some(("Zoom", c"performZoom:", "")),
+const WINDOW_MENU: [Option<(&str, &std::ffi::CStr)>; 4] = [
+    Some(("Minimize", c"performMiniaturize:")),
+    Some(("Zoom", c"performZoom:")),
     None,
-    Some(("Bring All to Front", c"arrangeInFront:", "")),
+    Some(("Bring All to Front", c"arrangeInFront:")),
 ];
 
 /// Adds a Window menu to the menu bar and makes it the app's windows menu, which is where
@@ -150,14 +150,14 @@ pub fn install_window_menu() {
         let title = NSString::from_str("Window");
         let menu: Allocated<AnyObject> = msg_send![class!(NSMenu), alloc];
         let menu: Retained<AnyObject> = msg_send![menu, initWithTitle: &*title];
+        let no_key = NSString::from_str("");
         for entry in WINDOW_MENU {
             let item: Retained<AnyObject> = match entry {
-                Some((title, action, key)) => {
+                Some((title, action)) => {
                     let title = NSString::from_str(title);
-                    let key = NSString::from_str(key);
                     let action = Sel::register(action);
                     let item: Allocated<AnyObject> = msg_send![class!(NSMenuItem), alloc];
-                    msg_send![item, initWithTitle: &*title, action: action, keyEquivalent: &*key]
+                    msg_send![item, initWithTitle: &*title, action: action, keyEquivalent: &*no_key]
                 }
                 None => msg_send![class!(NSMenuItem), separatorItem],
             };
@@ -191,18 +191,6 @@ pub fn neighbor_in(order: &[usize], closing: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn window_menu_keys_leave_bound_chords_alone() {
-        use crate::config::{Chord, default_bindings_for};
-        let macos = default_bindings_for(true);
-        for (title, _, key) in WINDOW_MENU.into_iter().flatten() {
-            if !key.is_empty() {
-                let chord = Chord::parse(&format!("super+{key}")).unwrap();
-                assert!(!macos.contains_key(&chord), "{title} takes a bound chord");
-            }
-        }
-    }
 
     #[test]
     fn stepping_follows_the_tab_bar_order_and_wraps() {
