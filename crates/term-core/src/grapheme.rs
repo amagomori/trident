@@ -487,11 +487,23 @@ mod tests {
     }
 
     #[test]
+    fn a_sequence_continues_after_the_cursor_is_restored() {
+        let mut t = Terminal::new(20, 2);
+        t.advance("\u{1f469}\u{200d}\x1b7\x1b[2;1Hx\x1b8\u{1f4bb}|".as_bytes());
+        let row = t.viewport_row(0);
+        assert_eq!(
+            t.grapheme(&row.cells[0]),
+            Some("\u{1f469}\u{200d}\u{1f4bb}")
+        );
+        assert_eq!(t.base_char(&row.cells[2]), '|');
+    }
+
+    #[test]
     fn a_line_editor_counts_each_codepoint() {
         // Readline and zle move over and erase sequences per codepoint, as main draws them.
         let family = "\u{1f468}\u{200d}\u{1f469}";
         let mut t = Terminal::new(10, 2);
-        t.set_line_editing(true);
+        t.set_line_editing(Some(0));
         t.advance(format!("{family}\u{1f1ef}\u{1f1f5}\u{261d}\u{1f3fd}").as_bytes());
         let row = t.viewport_row(0);
         assert_eq!(t.base_char(&row.cells[0]), '\u{1f468}');
@@ -504,9 +516,21 @@ mod tests {
         // Backspace over the last codepoint and redraw the rest of the line, as readline does.
         t.advance(b"\x08\x08\x1b[K");
         assert_eq!(t.base_char(&t.viewport_row(0).cells[6]), '\u{261d}');
-        // Accepting the line ends the editor's output; the command's joins.
-        t.advance(format!("\r\n{family}|").as_bytes());
+        // A line feed the editor draws itself (a multi-row redraw) keeps its widths.
+        t.advance(format!("\r\n{family}\x1b[A").as_bytes());
+        assert_eq!(t.base_char(&t.viewport_row(1).cells[2]), '\u{1f469}');
+        // The line feed after the user sends the line accepts it; the command's output joins.
+        t.line_sent();
+        t.advance(format!("\r\n\r\n{family}|").as_bytes());
         assert_eq!(t.grapheme(&t.viewport_row(1).cells[0]), Some(family));
+
+        // Output read before the editor's starts joins, whatever the reads it is split into.
+        let mut t = Terminal::new(10, 2);
+        t.set_line_editing(Some(family.len() + 3));
+        t.advance(&family.as_bytes()[..4]);
+        t.advance(format!("{}|\r\n{family}", &family[4..]).as_bytes());
+        assert_eq!(t.grapheme(&t.viewport_row(0).cells[0]), Some(family));
+        assert_eq!(t.base_char(&t.viewport_row(1).cells[2]), '\u{1f469}');
 
         // The same in the shell's input zone (OSC 133 B), without the PTY's modes.
         let mut t = Terminal::new(10, 2);

@@ -43,6 +43,10 @@ struct ShellState {
     zone: Zone,
     marks_seen: bool,
     line_editor: bool,
+    /// Bytes still to parse before a line editor's output starts (`set_line_editing`).
+    editor_after: Option<usize>,
+    /// The user sent a line since the last line feed (`line_sent`).
+    line_sent: bool,
     command_finished: Vec<CommandFinished>,
     mark_line: Option<u64>,
     output_ends: Vec<OutputEnd>,
@@ -271,6 +275,12 @@ impl PrintState {
         }
     }
 
+    /// Lets the next character look for a joiner before the cursor, which it can no longer
+    /// rule out from what was printed last.
+    fn allow_join(&mut self) {
+        self.0 |= Self::JOINER;
+    }
+
     fn clear_armed(&self) -> bool {
         self.0 & Self::CLEAR_ARMED != 0
     }
@@ -353,11 +363,25 @@ struct Reports {
 }
 
 impl Terminal {
-    /// Tells the terminal whether the output it is about to parse is a line editor's (readline,
-    /// zle), as the app reads it from the PTY's modes, until the next line feed. See
-    /// `per_codepoint_widths`.
-    pub fn set_line_editing(&mut self, editing: bool) {
-        self.shell.line_editor = editing;
+    /// Tells the terminal where a line editor's output (readline, zle) starts in the bytes it
+    /// is about to parse, as the app reads it from the PTY's modes: `Some(n)` after the next
+    /// `n` bytes, `None` if they hold none. See `per_codepoint_widths`.
+    pub fn set_line_editing(&mut self, from: Option<usize>) {
+        self.shell.line_editor = from == Some(0);
+        self.shell.editor_after = from.filter(|&n| n > 0);
+    }
+
+    /// Tells the terminal the user sent a line (Enter, or a paste with one): the editor's next
+    /// line feed accepts it, and what follows is the command's output.
+    pub fn line_sent(&mut self) {
+        self.shell.line_sent = true;
+    }
+
+    fn feed_line(&mut self) {
+        if std::mem::take(&mut self.shell.line_sent) {
+            self.shell.line_editor = false;
+            self.shell.editor_after = None;
+        }
     }
 
     /// Whether characters take their own `wcwidth` cells, as line editors count them, instead
@@ -818,6 +842,8 @@ impl Terminal {
                 zone: Zone::None,
                 marks_seen: false,
                 line_editor: false,
+                editor_after: None,
+                line_sent: false,
                 command_finished: Vec::new(),
                 mark_line: None,
                 output_ends: Vec::new(),
@@ -892,6 +918,20 @@ impl Terminal {
 
     /// Feed bytes from the shell.
     pub fn advance(&mut self, bytes: &[u8]) {
+        if let Some(n) = self.shell.editor_after {
+            if bytes.len() <= n {
+                self.shell.editor_after = Some(n - bytes.len());
+            } else {
+                self.shell.editor_after = None;
+                self.advance_parsed(&bytes[..n]);
+                self.shell.line_editor = true;
+                return self.advance_parsed(&bytes[n..]);
+            }
+        }
+        self.advance_parsed(bytes);
+    }
+
+    fn advance_parsed(&mut self, bytes: &[u8]) {
         let mut parser = std::mem::take(&mut self.parser);
         let ground = self.parser_ground;
         let mut rest = bytes;
@@ -2009,6 +2049,7 @@ impl Terminal {
         }
         self.cursor.row = self.cursor.row.min(self.rows - 1);
         self.cursor.col = self.cursor.col.min(self.cols - 1);
+        self.print_state.allow_join();
     }
 
     fn set_alt_screen(&mut self, enable: bool, save_cursor: bool, clear: bool) {

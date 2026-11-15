@@ -139,8 +139,8 @@ struct Pending {
     unchecked_from: Option<usize>,
     /// Bytes read since the last escape byte, if any.
     since_escape: Option<usize>,
-    /// Whether a line editor's modes were set at every read queued, if any is.
-    editing: Option<bool>,
+    /// Start of the reads queued since the last one without a line editor's modes.
+    editing_from: Option<usize>,
 }
 
 impl Pending {
@@ -183,7 +183,7 @@ impl Pending {
     }
 
     fn append(&mut self, bytes: &[u8], checked: bool, editing: bool) {
-        self.editing = Some(self.editing.unwrap_or(true) && editing);
+        self.editing_from = editing.then(|| self.editing_from.unwrap_or(self.bytes.len()));
         if !checked && self.unchecked_from.is_none() {
             self.unchecked_from = Some(self.bytes.len());
         }
@@ -199,7 +199,8 @@ impl Pending {
         Output {
             bytes: std::mem::take(&mut self.bytes),
             shell_returns: std::mem::take(&mut self.shell_returns),
-            line_editing: self.editing.take().unwrap_or(false),
+            line_editing: self.editing_from.take(),
+            line_sent: false,
         }
     }
 
@@ -213,9 +214,11 @@ impl Pending {
 pub struct Output {
     pub bytes: Vec<u8>,
     pub shell_returns: Vec<usize>,
-    /// Every read of these bytes found a line editor's modes (see `Pty::line_editing`):
-    /// the shell's echo and redraws, which it measures one codepoint at a time.
-    pub line_editing: bool,
+    /// Where the trailing reads that found a line editor's modes (see `Pty::line_editing`)
+    /// start: the shell's echo and redraws, which it measures one codepoint at a time.
+    pub line_editing: Option<usize>,
+    /// The user sent a line since the last output was taken.
+    pub line_sent: bool,
 }
 
 #[derive(Default)]
@@ -239,6 +242,8 @@ impl Foreground {
 pub struct Pty {
     pub flow: crate::flow_control::FlowControl,
     pub flow_redraw: bool,
+    /// The user sent a line since the output was last taken (see `Output::line_sent`).
+    line_sent: bool,
     master: Box<dyn MasterPty + Send>,
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Input>,
@@ -724,6 +729,7 @@ impl Pty {
         Ok(Pty {
             flow: Default::default(),
             flow_redraw: false,
+            line_sent: false,
             master: pair.master,
             input,
             pause_boundary: None,
@@ -791,7 +797,8 @@ impl Pty {
     /// Everything the shell wrote since the last call.
     pub fn take_output(&mut self) -> Output {
         let mut p = self.output.pending.lock().unwrap();
-        let output = p.take_output(Instant::now(), || self.output.probe.shell());
+        let mut output = p.take_output(Instant::now(), || self.output.probe.shell());
+        output.line_sent = std::mem::take(&mut self.line_sent);
         if !output.bytes.is_empty() {
             if let Some(boundary) = &self.pause_boundary {
                 self.flow
@@ -815,6 +822,7 @@ impl Pty {
         if bytes.is_empty() {
             return;
         }
+        self.line_sent |= memchr::memchr2(b'\r', b'\n', bytes).is_some();
         let settings = self.flow_flags().unwrap_or_default();
         self.flow_redraw |= self.flow.input(
             bytes,
@@ -1402,6 +1410,9 @@ mod tests {
             loop {
                 let output = pty.take_output();
                 term.set_line_editing(output.line_editing);
+                if output.line_sent {
+                    term.line_sent();
+                }
                 term.advance(&output.bytes);
                 if done(term) && pty.output.pending.lock().unwrap().bytes.is_empty() {
                     return;
@@ -1693,6 +1704,25 @@ mod tests {
         let checked = pending.check_foreground(at, bytes, || shell);
         pending.append(bytes, checked, false);
         checked
+    }
+
+    #[test]
+    fn line_editing_starts_after_the_last_read_without_its_modes() {
+        let mut pending = Pending::default();
+        pending.append(b"edit", true, true);
+        pending.append(b"output\n", true, false);
+        pending.append(b"prompt", true, true);
+        pending.append(b"echo", true, true);
+        assert_eq!(
+            pending.take_output(Instant::now(), || None).line_editing,
+            Some(11)
+        );
+        pending.append(b"edit", true, true);
+        pending.append(b"output", true, false);
+        assert_eq!(
+            pending.take_output(Instant::now(), || None).line_editing,
+            None
+        );
     }
 
     #[test]
