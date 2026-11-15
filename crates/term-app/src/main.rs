@@ -978,11 +978,16 @@ fn wait_window(
     }
 }
 
-/// Checks that a window can start `program`, looking it up on `path` as the PTY does.
-fn find_program(program: &str, path: Option<&std::ffi::OsStr>) -> Result<(), String> {
+/// Checks that a window can start `program`, looking it up on `path` as the PTY does:
+/// relative paths and `PATH` entries resolve against `home`, the new window's directory.
+fn find_program(
+    program: &str,
+    path: Option<&std::ffi::OsStr>,
+    home: &std::path::Path,
+) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let runnable = |candidate: &std::path::Path| {
-        std::fs::metadata(candidate)
+        std::fs::metadata(home.join(candidate))
             .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
     };
     if program.contains('/') {
@@ -3252,8 +3257,9 @@ impl App {
                         .map(Into::into)
                         .or_else(|| std::env::var_os(name))
                 };
-                let opened =
-                    find_program(&self.config.pager[0], var("PATH").as_deref()).and_then(|()| {
+                let home = var("HOME").map(PathBuf::from).unwrap_or_default();
+                let opened = find_program(&self.config.pager[0], var("PATH").as_deref(), &home)
+                    .and_then(|()| {
                         write_pager_file(&output).map_err(|error| format!("pager: {error}"))
                     });
                 match opened {
@@ -4921,8 +4927,14 @@ mod tests {
         std::fs::set_permissions(&runnable, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
         let path = std::env::join_paths(["/nonexistent".as_ref(), dir.as_path()]).unwrap();
-        assert_eq!(find_program("pager", Some(&path)), Ok(()));
-        assert_eq!(find_program(runnable.to_str().unwrap(), None), Ok(()));
+        let root = std::path::Path::new("/");
+        assert_eq!(find_program("pager", Some(&path), root), Ok(()));
+        assert_eq!(find_program(runnable.to_str().unwrap(), None, root), Ok(()));
+        let parent = dir.parent().unwrap();
+        let name = dir.file_name().unwrap().to_str().unwrap();
+        assert_eq!(find_program(&format!("{name}/pager"), None, parent), Ok(()));
+        let relative = std::ffi::OsString::from(name);
+        assert_eq!(find_program("pager", Some(&relative), parent), Ok(()));
         for (program, path) in [
             ("pager", None),
             ("notes", Some(path.as_os_str())),
@@ -4931,7 +4943,7 @@ mod tests {
             (dir.to_str().unwrap(), Some(path.as_os_str())),
             ("/nonexistent/less", Some(path.as_os_str())),
         ] {
-            let error = find_program(program, path).unwrap_err();
+            let error = find_program(program, path, std::path::Path::new("/")).unwrap_err();
             assert!(
                 error.starts_with("pager: ") && error.contains(program),
                 "{error}"
