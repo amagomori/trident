@@ -8,8 +8,16 @@ use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
 use std::sync::Arc;
 use term_core::colors::Rgb;
-use term_core::{CursorShape, Flags, Terminal};
+use term_core::{Cell, CursorShape, Flags, Terminal};
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
+
+/// Whether `cell` draws something that SGR 5 blinks. The character under a block
+/// cursor stays visible in the hidden phase, as in xterm.
+fn blinks(cell: &Cell, under_block_cursor: bool) -> bool {
+    let drawn = (cell.c != ' ' && !cell.flags.contains(Flags::HIDDEN))
+        || cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKE);
+    drawn && cell.flags.contains(Flags::BLINK) && !under_block_cursor
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -456,9 +464,7 @@ impl Renderer {
                     backgrounds.push(self.rect(x, y, cw * cells as f32, ch, bg));
                 }
 
-                let drawn = (cell.c != ' ' && !cell.flags.contains(Flags::HIDDEN))
-                    || cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKE);
-                let blinked_off = drawn && cell.flags.contains(Flags::BLINK) && {
+                let blinked_off = blinks(cell, is_cursor && block_cursor) && {
                     self.blinking = true;
                     !self.blink_visible
                 };
@@ -1034,4 +1040,28 @@ fn create_bind_group(
             },
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(c: char, flags: Flags) -> Cell {
+        Cell {
+            c,
+            flags,
+            ..Cell::default()
+        }
+    }
+
+    #[test]
+    fn blink_keeps_the_character_under_a_block_cursor() {
+        let b = cell('B', Flags::BLINK);
+        assert!(blinks(&b, false));
+        assert!(!blinks(&b, true));
+        assert!(blinks(&cell(' ', Flags::BLINK | Flags::UNDERLINE), false));
+        assert!(!blinks(&cell(' ', Flags::BLINK), false));
+        assert!(!blinks(&cell('B', Flags::BLINK | Flags::HIDDEN), false));
+        assert!(!blinks(&cell('B', Flags::default()), false));
+    }
 }
