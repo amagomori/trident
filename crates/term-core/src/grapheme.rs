@@ -67,7 +67,7 @@ impl Graphemes {
     }
 
     fn needs_release(&self) -> bool {
-        self.free.is_empty() && self.entries.len() >= self.next_release.max(MIN_RELEASE)
+        self.free.is_empty() && self.entries.len() >= self.next_release.clamp(MIN_RELEASE, CAPACITY)
     }
 
     /// Frees every entry not marked in `used`.
@@ -290,6 +290,15 @@ mod tests {
         let cell = t.viewport_row(0).cells[0];
         let cluster = t.grapheme(&cell).unwrap();
         assert!(cluster.starts_with(char::from_u32(0x4e00 + 39_999 % 0x5000).unwrap()));
+    }
+
+    #[test]
+    fn full_table_is_released_however_big_the_grid() {
+        let mut t = Terminal::new(4, 2);
+        t.graphemes.next_release = usize::MAX;
+        t.graphemes.entries = vec![Box::from("x\u{301}"); CAPACITY];
+        t.advance("e\u{301}".as_bytes());
+        assert_eq!(t.grapheme(&t.viewport_row(0).cells[0]), Some("e\u{301}"));
     }
 
     #[test]
