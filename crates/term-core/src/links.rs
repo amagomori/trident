@@ -663,6 +663,8 @@ mod tests {
     fn wrapped_url_keeps_cells_hidden_by_narrowing() {
         let uri = "https://example.com/abcdefghijklmnop";
         let mut t = Terminal::new(20, 4);
+        // Rows are cut, not rewrapped, on the alternate screen.
+        t.advance(b"\x1b[?1049h");
         t.advance(uri.as_bytes());
         t.resize(30, 4);
         t.resize(10, 4);
@@ -676,6 +678,7 @@ mod tests {
 
         // A URL that starts in the hidden part is highlighted from the next row.
         let mut t = Terminal::new(20, 4);
+        t.advance(b"\x1b[?1049h");
         t.advance(b"0123456789abc https://e.com/xyz");
         t.resize(10, 4);
         let link = t.link_at(Point { line: 1, col: 0 }).unwrap();
@@ -686,6 +689,7 @@ mod tests {
 
         // Writing over the stand-in for a hidden wide character drops that character.
         let mut w = Terminal::new(14, 4);
+        w.advance(b"\x1b[?1049h");
         w.advance("https://abcd界ef/ghij".as_bytes());
         w.resize(13, 4);
         w.advance(b"\x1b[1;13Hx");

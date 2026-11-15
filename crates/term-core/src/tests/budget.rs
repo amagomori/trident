@@ -391,3 +391,109 @@ fn lines_inserted_over_a_full_screen_keep_the_running_command() {
     assert_eq!(placeholders, 1, "{lines:?}");
     assert!(lines.contains(&"3000".to_string()), "{lines:?}");
 }
+
+#[test]
+fn reflow_keeps_the_placeholder_on_one_row() {
+    let mut t = Terminal::new(40, 5);
+    t.set_scrollback_limit(100);
+    t.set_command_budget(true, 0.8);
+    for name in ["alpha", "beta", "gamma"] {
+        t.advance(command(name, 3).as_bytes());
+    }
+    let mut running = format!("{PROMPT}make\r\n\x1b]133;C\x07");
+    for i in 0..2000 {
+        running.push_str(&format!("make {i}\r\n"));
+    }
+    t.advance(running.as_bytes());
+    let full = lines(&t);
+    let placeholder = full
+        .iter()
+        .find(|l| l.starts_with('\u{2026}'))
+        .unwrap()
+        .clone();
+    assert!(placeholder.ends_with("dropped"), "{placeholder}");
+    t.resize(20, 5);
+    let narrow = lines(&t);
+    let at = narrow
+        .iter()
+        .position(|l| l.starts_with('\u{2026}'))
+        .unwrap();
+    assert_eq!(
+        narrow[at],
+        placeholder[..placeholder.char_indices().nth(20).unwrap().0]
+    );
+    assert!(narrow[at + 1].starts_with("make "), "{narrow:?}");
+    t.resize(40, 5);
+    let lines = lines(&t);
+    let placeholders: Vec<&String> = lines.iter().filter(|l| l.starts_with('\u{2026}')).collect();
+    assert_eq!(placeholders, [&placeholder], "{lines:?}");
+    assert_eq!(lines[0], "$ alpha", "{lines:?}");
+    assert_eq!(lines[12], "$ make");
+    assert!(lines.contains(&"make 1999".to_string()));
+    // More output keeps growing the same gap.
+    t.advance(b"make 2000\r\nmake 2001\r\n");
+    let lines = self::lines(&t);
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with('\u{2026}')).count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(lines[0], "$ alpha", "{lines:?}");
+}
+
+#[test]
+fn reflow_keeps_a_scrolled_back_view_on_its_line() {
+    let mut t = Terminal::new(40, 5);
+    for i in 0..30 {
+        t.advance(format!("line {i} {}\r\n", "x".repeat(30)).as_bytes());
+    }
+    let line = line_of(&t, &format!("line 10 {}", "x".repeat(30)));
+    t.scroll_to_line(line);
+    t.resize(20, 5);
+    assert_eq!(t.viewport_row(0).text().trim_end(), "line 10 xxxxxxxxxxxx");
+    t.resize(40, 5);
+    assert_eq!(
+        t.viewport_row(0).text().trim_end(),
+        format!("line 10 {}", "x".repeat(30))
+    );
+}
+
+fn narrowing_overflows_the_budget(view: &str) -> Terminal {
+    let mut t = Terminal::new(40, 5);
+    t.set_scrollback_limit(100);
+    t.set_command_budget(true, 0.8);
+    for name in ["alpha", "beta", "gamma"] {
+        t.advance(command(name, 3).as_bytes());
+    }
+    let mut running = format!("{PROMPT}make\r\n\x1b]133;C\x07");
+    for i in 0..60 {
+        running.push_str(&format!("make {i:02} {}\r\n", "y".repeat(30)));
+    }
+    t.advance(running.as_bytes());
+    let line = line_of(&t, view);
+    t.scroll_to_line(line);
+    t.resize(20, 5);
+    t
+}
+
+#[test]
+fn reflow_trimming_the_budget_keeps_a_view_on_the_oldest_line() {
+    let t = narrowing_overflows_the_budget("$ alpha");
+    assert_eq!(t.viewport_row(0).text().trim_end(), "$ alpha");
+    let lines = lines(&t);
+    assert_eq!(lines[0], "$ alpha", "{lines:?}");
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with('\u{2026}')).count(),
+        1
+    );
+}
+
+#[test]
+fn reflow_trimming_the_budget_moves_a_view_in_the_cut_to_the_placeholder() {
+    let t = narrowing_overflows_the_budget(&format!("make 15 {}", "y".repeat(30)));
+    assert!(
+        t.viewport_row(0).text().starts_with('\u{2026}'),
+        "{:?}",
+        t.viewport_row(0).text()
+    );
+}

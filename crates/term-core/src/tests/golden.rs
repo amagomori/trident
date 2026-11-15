@@ -295,7 +295,56 @@ fn shell_output_snapshot_lifetime() {
 }
 
 #[test]
-fn shell_output_start_is_clamped_on_resize() {
+fn shell_marks_follow_reflow() {
+    let rows = |t: &Terminal| -> Vec<_> {
+        t.primary
+            .scrollback
+            .iter()
+            .chain(&t.primary.lines)
+            .map(|r| (r.text(), r.flags, r.prompt_col, r.output_col))
+            .collect()
+    };
+    let mut t = Terminal::new(20, 6);
+    t.advance(
+        b"\x1b]133;A\x07$ \x1b]133;B\x07echo 0123456789abcdef\x1b]133;C\x07\r\n\
+          out-line-that-wraps-once\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07",
+    );
+    let original = rows(&t);
+    t.resize(8, 6);
+    let first = t.first_line();
+    let prompt: Vec<_> = (first..first + 3).map(|l| t.line(l).flags).collect();
+    assert!(prompt.iter().all(|f| f.contains(RowFlags::PROMPT)));
+    assert!(prompt[0].contains(RowFlags::PROMPT_START) && prompt[0].contains(RowFlags::SUCCEEDED));
+    assert!(!prompt[1].contains(RowFlags::PROMPT_START));
+    assert!(!t.line(first + 3).flags.contains(RowFlags::PROMPT));
+    let command = &t.shell.commands[0];
+    assert_eq!(
+        (command.prompt_line, command.input_line, command.input_col),
+        (first, first, 2)
+    );
+    let next = command.next_prompt.unwrap();
+    assert!(t.line(next).flags.contains(RowFlags::PROMPT_START));
+    assert_eq!(t.line(next).text(), "$");
+    assert_eq!(t.cursor_position(), Some((t.rows() - 1, 2)));
+    t.select_command_output();
+    assert_eq!(
+        t.selection_text().as_deref(),
+        Some("out-line-that-wraps-once")
+    );
+    t.jump_to_prompt(true);
+    assert_eq!(t.display_offset() as u64, t.history - first);
+
+    t.resize(20, 6);
+    assert_eq!(rows(&t), original);
+    t.select_command_output();
+    assert_eq!(
+        t.selection_text().as_deref(),
+        Some("out-line-that-wraps-once")
+    );
+}
+
+#[test]
+fn shell_output_start_follows_reflow() {
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ run\x1b]133;B\x07\x1b]133;C\x07result\x1b]133;D;0\x07");
     t.select_command_output();
@@ -303,16 +352,15 @@ fn shell_output_start_is_clamped_on_resize() {
     t.resize(4, 5);
     t.select_command_output();
     let (start, _) = t.selection_range().unwrap();
-    assert_eq!(start.col, 0);
-    assert_eq!(start.line, t.first_line());
-    assert_eq!(t.selection_text().as_deref(), Some("$ ru"));
+    assert_eq!(start, Point { line: 1, col: 1 });
+    assert_eq!(t.selection_text().as_deref(), Some("result"));
 
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ run\x1b]133;C\x07result\x1b]133;D;0\x07");
     t.resize(8, 3);
     t.select_command_output();
     assert_eq!(t.selection_range().unwrap().0, Point { line: 0, col: 5 });
-    assert_eq!(t.selection_text().as_deref(), Some("res"));
+    assert_eq!(t.selection_text().as_deref(), Some("result"));
 }
 
 #[test]
@@ -994,6 +1042,36 @@ fn cases() -> Vec<Case> {
         input: b"one\r\ntwo\r\nthree",
         resize: Some((6, 2)),
     });
+    type Reflow = (&'static str, usize, usize, &'static [u8], (usize, usize));
+    let reflows: &[Reflow] = &[
+        ("reflow_narrow", 8, 3, b"0123456789\r\n$ ", (4, 3)),
+        ("reflow_widen", 4, 4, b"0123456789\r\n$ ", (8, 4)),
+        ("reflow_pending_wrap", 8, 2, b"abcdefgh", (4, 2)),
+        ("reflow_wide_char", 5, 3, "ab\u{754c}cd".as_bytes(), (3, 3)),
+        (
+            "reflow_styled",
+            6,
+            3,
+            b"\x1b[1;31mabc\x1b[42mdefgh\x1b[m!",
+            (4, 3),
+        ),
+        (
+            "reflow_alternate",
+            8,
+            3,
+            b"0123456789\x1b[?1049hfullscreen app",
+            (4, 3),
+        ),
+    ];
+    for &(name, cols, rows, input, resize) in reflows {
+        cases.push(Case {
+            name,
+            cols,
+            rows,
+            input,
+            resize: Some(resize),
+        });
+    }
     cases
 }
 

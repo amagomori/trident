@@ -16,6 +16,7 @@ pub use links::Link;
 mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod perform;
+mod reflow;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
@@ -1027,10 +1028,16 @@ impl Terminal {
         self.invalidate_output_ends();
         self.selection = None;
         // A scrolled-back view keeps its top line; one at the bottom follows the bottom.
-        let anchor = (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
+        let mut anchor =
+            (self.display_offset > 0).then(|| self.history - self.display_offset as u64);
         self.display_offset = 0;
         if cols < self.cols || rows < self.rows {
             self.shrunk = true;
+        }
+        // The primary screen rewraps its lines; the alternate one is redrawn by its app.
+        let reflow = cols != self.cols;
+        if reflow {
+            anchor = self.reflow_primary(cols, rows, anchor);
         }
 
         let mut alt_shifted = 0;
@@ -1042,6 +1049,9 @@ impl Terminal {
             } else {
                 &mut self.primary
             };
+            if !alt && reflow {
+                continue;
+            }
             for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
                 row.resize(cols);
             }
@@ -1112,7 +1122,9 @@ impl Terminal {
         self.rows = rows;
         self.cursor.row = self.cursor.row.min(rows - 1);
         self.cursor.col = self.cursor.col.min(cols - 1);
-        self.cursor.pending_wrap = false;
+        if self.alt_active || !reflow {
+            self.cursor.pending_wrap = false;
+        }
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
         self.tabs = default_tabs(cols);
