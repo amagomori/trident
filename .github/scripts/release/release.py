@@ -321,9 +321,15 @@ def git(*args, cwd=ROOT):
                           text=True).stdout
 
 
-def previous_tag(tag, cwd=ROOT):
-    result = subprocess.run(["git", "describe", "--tags", "--abbrev=0", "--match", "v*",
-                             f"{tag}^"], cwd=cwd, capture_output=True, text=True)
+def tag_exists(tag, cwd=ROOT):
+    return subprocess.run(["git", "rev-parse", "--verify", "-q", f"refs/tags/{tag}"], cwd=cwd,
+                          capture_output=True).returncode == 0
+
+
+def previous_tag(rev, cwd=ROOT):
+    """The last v* tag reachable from rev, not counting rev itself."""
+    result = subprocess.run(["git", "describe", "--tags", "--abbrev=0", "--match", "v*", rev],
+                            cwd=cwd, capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else None
 
 
@@ -346,8 +352,10 @@ def merged_prs(rev, cwd=ROOT):
 
 
 def changelog(tag, since=None, cwd=ROOT, repo=REPO):
-    since = since or previous_tag(tag, cwd)
-    prs = merged_prs(f"{since}..{tag}" if since else tag, cwd)
+    """Release notes for tag; before the tag exists, for HEAD as if it were tagged."""
+    rev = tag if tag_exists(tag, cwd) else "HEAD"
+    since = since or previous_tag(f"{tag}^" if rev == tag else rev, cwd)
+    prs = merged_prs(f"{since}..{rev}" if since else rev, cwd)
     lines = [f"## {NAME} {tag.removeprefix('v')}", ""]
     if prs:
         lines += ["### Merged pull requests", ""]
@@ -380,7 +388,7 @@ def main(argv=None):
     p = sub.add_parser("checksums")
     p.add_argument("dir", type=Path)
     p = sub.add_parser("changelog")
-    p.add_argument("--tag", required=True)
+    p.add_argument("--tag", required=True, help="release tag (HEAD stands in until it exists)")
     p.add_argument("--since", help="previous tag (default: the last v* tag before --tag)")
     args = ap.parse_args(argv)
     try:

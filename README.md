@@ -24,6 +24,8 @@ Download a build from [Releases](https://github.com/amagomori/terminal/releases)
 - **Any Linux** (glibc 2.35 or newer): `chmod +x Trident-<version>-x86_64.AppImage` and run it, or
   unpack the tarball into `~/.local`:
   `tar xzf Trident-<version>-linux-x86_64.tar.gz -C ~/.local --strip-components=1`.
+  The app menu entry runs `trident` from your login `PATH`, so log out and back in if `~/.local/bin`
+  was not there before.
 
 `SHA256SUMS` lists every file's checksum (`sha256sum -c SHA256SUMS`).
 

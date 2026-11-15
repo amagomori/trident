@@ -34,14 +34,26 @@ The packaging lives in `.github/scripts/release/release.py`, so artifacts can be
 locally before tagging:
 
 ```sh
+# Linux
 cargo build --release -p term-app
 python3 .github/scripts/release/release.py linux --binary target/release/trident --version 0.1.0 \
   --out dist [--appimagetool appimagetool-x86_64.AppImage --runtime runtime-x86_64]
+
+# macOS: a universal binary, as release.yml builds it
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+export MACOSX_DEPLOYMENT_TARGET=11.0
+cargo build --release -p term-app --target aarch64-apple-darwin
+cargo build --release -p term-app --target x86_64-apple-darwin
+lipo -create -output trident-universal \
+  target/aarch64-apple-darwin/release/trident target/x86_64-apple-darwin/release/trident
 python3 .github/scripts/release/release.py macos --binary trident-universal --version 0.1.0 --out dist
+
 python3 .github/scripts/release/release.py checksums dist
 python3 .github/scripts/release/release.py changelog --tag v0.1.0
 python3 -m unittest discover -s .github/scripts/release
 ```
+
+Until the tag exists, `changelog` writes the notes for `HEAD` as if it were tagged.
 
 The .deb needs `dpkg-deb` and `tic`; the .dmg needs macOS. `release.yml` pins appimagetool and its
 runtime by SHA-256.
