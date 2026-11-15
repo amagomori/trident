@@ -33,6 +33,8 @@ pub(crate) struct LinkTable {
     spare: Vec<u8>,
     /// Table size at which unreferenced entries are released before growing further.
     next_release: usize,
+    /// Counts the releases and compactions that changed which entry an index names.
+    releases: u64,
 }
 
 struct Span {
@@ -166,6 +168,7 @@ impl LinkTable {
     /// Frees the entries not marked in `used` (by index) for reuse, keeping every
     /// other index, and repacks the stored bytes. Returns whether any was freed.
     fn release(&mut self, used: &[bool]) -> bool {
+        let free = self.free.len();
         let mut bytes = std::mem::take(&mut self.spare);
         bytes.clear();
         bytes.reserve(self.bytes.len());
@@ -187,6 +190,9 @@ impl LinkTable {
             }
         }
         self.spare = std::mem::replace(&mut self.bytes, bytes);
+        if self.free.len() > free {
+            self.releases += 1;
+        }
         !self.free.is_empty()
     }
 
@@ -195,6 +201,7 @@ impl LinkTable {
     pub(crate) fn compact(&mut self, used: &[bool]) -> Vec<u16> {
         let old = std::mem::take(self);
         self.next_release = old.next_release;
+        self.releases = old.releases + 1;
         let mut kept = std::collections::HashMap::new();
         let mut remap = vec![0; used.len()];
         for index in 1..=old.len() as u16 {
@@ -253,6 +260,13 @@ impl Terminal {
             return 0;
         }
         self.links.insert(id, uri, underline, slot)
+    }
+
+    /// Counts the link table scans that freed or renumbered entries. A freed index can be
+    /// handed to a different link or underline color, so cells compared across a change of
+    /// this count may look unchanged when not.
+    pub fn link_releases(&self) -> u64 {
+        self.links.releases
     }
 
     /// The SGR 58 underline color of `cell`; `None` draws the underline in the text color.

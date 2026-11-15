@@ -19,6 +19,7 @@ struct FrameKey {
     palette: Palette,
     atlas: u64,
     graphemes: u64,
+    links: u64,
     /// Highlights are keyed by absolute line, so they move when the viewport does.
     top: Option<Point>,
     selection: Option<((Point, Point), SelectionKind)>,
@@ -82,6 +83,7 @@ impl Damage {
             palette: term.palette.clone(),
             atlas: frame.atlas,
             graphemes: term.grapheme_releases(),
+            links: term.link_releases(),
             top: highlights.then(|| term.viewport_to_point_signed(first, 0)),
             selection: term
                 .selection_range()
@@ -266,6 +268,25 @@ mod tests {
         while term.grapheme_releases() == releases {
             let base = char::from_u32(0x4e00 + i).unwrap();
             term.advance(format!("\x1b[3;1H{base}\u{301}").as_bytes());
+            i += 1;
+        }
+        term.advance(b"\x1b[3;1Hc");
+        assert_eq!(damaged(&mut damage, &term, &frame(&term)), [0, 1, 2]);
+    }
+
+    #[test]
+    fn freeing_links_damages_every_row() {
+        let mut term = Terminal::new(20, 3);
+        term.advance(b"\x1b[4;58;5;1ma\r\nb");
+        let mut damage = Damage::default();
+        damaged(&mut damage, &term, &frame(&term));
+        // Distinct underline colors overwriting one cell until a release scan frees the older
+        // ones, whose indices a later color may then reuse in a cell that compares equal.
+        let releases = term.link_releases();
+        let mut i = 0u32;
+        while term.link_releases() == releases {
+            let (r, g, b) = (i & 0xff, i >> 8 & 0xff, i >> 16);
+            term.advance(format!("\x1b[3;1H\x1b[58;2;{r};{g};{b}mc").as_bytes());
             i += 1;
         }
         term.advance(b"\x1b[3;1Hc");
