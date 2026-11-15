@@ -17,6 +17,7 @@ fn input_cursor_ignores_visibility_but_tracks_viewport_and_alternate_screen() {
     assert_eq!(t.input_cursor_position(), Some((2, 0)));
 }
 
+mod budget;
 mod golden;
 
 #[test]

@@ -1,0 +1,144 @@
+size=40x4 active=primary
+cursor row=3 col=2 visible=true shape=block pending_wrap=false
+cursor attributes: fg=default-fg bg=default-bg flags=[]
+scroll_region=0..=3 history=20010 display_offset=0
+primary:
+  row 0 wrap=false text="make 19997                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="make 19998                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 2 wrap=false text="make 19999                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 3 wrap=false text="$                                       "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+scrollback (oldest first):
+  row 0 wrap=false text="$ alpha                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="alpha 0                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 2 wrap=false text="alpha 1                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 3 wrap=false text="alpha 2                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 4 wrap=false text="$ beta                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 5 wrap=false text="beta 0                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 6 wrap=false text="beta 1                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 7 wrap=false text="beta 2                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 8 wrap=false text="$ gamma                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 9 wrap=false text="gamma 0                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 10 wrap=false text="gamma 1                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 11 wrap=false text="gamma 2                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 12 wrap=false text="$ make                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 13 wrap=false text="make 0                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 14 wrap=false text="make 1                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 15 wrap=false text="make 2                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 16 wrap=false text="make 3                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 17 wrap=false text="make 4                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 18 wrap=false text="make 5                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 19 wrap=false text="make 6                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 20 wrap=false text="make 7                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 21 wrap=false text="make 8                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 22 wrap=false text="make 9                                  "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 23 wrap=false text="make 10                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 24 wrap=false text="make 11                                 "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 25 wrap=false text="… 19,951 lines of make output dropped   "
+    cells 0..37: fg=default-fg bg=default-bg flags=[dim]
+    cells 37..40: fg=default-fg bg=default-bg flags=[]
+  row 26 wrap=false text="make 19963                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 27 wrap=false text="make 19964                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 28 wrap=false text="make 19965                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 29 wrap=false text="make 19966                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 30 wrap=false text="make 19967                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 31 wrap=false text="make 19968                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 32 wrap=false text="make 19969                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 33 wrap=false text="make 19970                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 34 wrap=false text="make 19971                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 35 wrap=false text="make 19972                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 36 wrap=false text="make 19973                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 37 wrap=false text="make 19974                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 38 wrap=false text="make 19975                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 39 wrap=false text="make 19976                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 40 wrap=false text="make 19977                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 41 wrap=false text="make 19978                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 42 wrap=false text="make 19979                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 43 wrap=false text="make 19980                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 44 wrap=false text="make 19981                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 45 wrap=false text="make 19982                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 46 wrap=false text="make 19983                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 47 wrap=false text="make 19984                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 48 wrap=false text="make 19985                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 49 wrap=false text="make 19986                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 50 wrap=false text="make 19987                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 51 wrap=false text="make 19988                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 52 wrap=false text="make 19989                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 53 wrap=false text="make 19990                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 54 wrap=false text="make 19991                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 55 wrap=false text="make 19992                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 56 wrap=false text="make 19993                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 57 wrap=false text="make 19994                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 58 wrap=false text="make 19995                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 59 wrap=false text="make 19996                              "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+alternate:
+  row 0 wrap=false text="                                        "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="                                        "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 2 wrap=false text="                                        "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]
+  row 3 wrap=false text="                                        "
+    cells 0..40: fg=default-fg bg=default-bg flags=[]

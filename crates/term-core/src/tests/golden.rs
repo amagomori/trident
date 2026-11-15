@@ -1131,3 +1131,43 @@ fn golden_terminal_state() {
         }
     }
 }
+
+#[test]
+fn golden_command_budget() {
+    let mut input = String::new();
+    for (name, lines) in [("alpha", 3), ("beta", 3), ("gamma", 3), ("make", 20_000)] {
+        input.push_str(&format!(
+            "\x1b]133;A\x07$ \x1b]133;B\x07{name}\r\n\x1b]133;C\x07"
+        ));
+        for i in 0..lines {
+            input.push_str(&format!("{name} {i}\r\n"));
+        }
+        input.push_str("\x1b]133;D;0\x07");
+    }
+    input.push_str("\x1b]133;A\x07$ \x1b]133;B\x07");
+    let run = |bytewise: bool| {
+        let mut t = Terminal::new(40, 4);
+        t.set_scrollback_limit(100);
+        if bytewise {
+            for byte in input.as_bytes().chunks(1) {
+                t.advance(byte);
+            }
+        } else {
+            t.advance(input.as_bytes());
+        }
+        snapshot(&t)
+    };
+    let actual = run(false);
+    assert!(actual == run(true), "bytewise differs");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/golden/command_budget.snap");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(path, &actual).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(path).unwrap();
+        assert!(
+            expected == actual,
+            "{}",
+            difference("command_budget", &expected, &actual)
+        );
+    }
+}
