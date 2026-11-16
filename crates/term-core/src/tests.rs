@@ -2837,7 +2837,7 @@ fn prompt_click_stops_before_a_greyed_autosuggestion() {
 fn prompt_click_excludes_suggestion_spaces_and_separate_right_prompts() {
     for grey in ["90", "38;5;240", "38;2;85;85;85", "2"] {
         for (typed, suggestion) in [("echo", " hello world"), ("echo hel", "lo world")] {
-            for right_prompt in ["", "\x1b[1;40H\x1b[33mRIGHT-CLOCK\x1b[m"] {
+            for right_prompt in ["", "\x1b[1;50H\x1b[33mRIGHT-CLOCK\x1b[m"] {
                 let t = term(
                     60,
                     4,
@@ -2867,6 +2867,23 @@ fn prompt_click_excludes_suggestion_spaces_and_separate_right_prompts() {
     // Leading spaces in the same style as typed input remain navigable.
     let t = term(30, 4, "\x1b]133;A\x07$ \x1b]133;B\x07echo  hi\x1b[4D");
     assert_eq!(click(&t, 0, 29), Some(PromptClick::Move(4)));
+}
+
+#[test]
+fn prompt_click_keeps_syntax_coloured_input_suffixes_reachable() {
+    for spaces in [" ", "  ", "     "] {
+        let t = term(
+            40,
+            4,
+            &format!(
+                "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[90mecho\x1b[m{spaces}\x1b[33mhello\x1b[m\x1b[1;3H"
+            ),
+        );
+        assert_eq!(
+            click(&t, 0, 39),
+            Some(PromptClick::Move((9 + spaces.len()) as isize))
+        );
+    }
 }
 
 #[test]

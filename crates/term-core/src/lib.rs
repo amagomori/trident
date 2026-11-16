@@ -408,7 +408,7 @@ impl Terminal {
         let mut text_end = 0;
         // Where a run of suggestion-styled text starts, and its style.
         let mut faint_run: Option<(usize, (Color, bool))> = None;
-        let mut faint_gap = false;
+        let mut faint_gap = 0;
         let mut suggestion_start = None;
         let mut count = 0;
         let mut click = None;
@@ -433,13 +433,17 @@ impl Terminal {
                                 faint_run = Some((count, style));
                             }
                         } else if faint_run.is_some() {
-                            faint_gap = true;
+                            faint_gap += 1;
                         }
                     }
                     if cell.c != ' ' {
-                        // A separate right prompt must not replace a suggestion's
-                        // boundary with its own text end.
-                        if faint_gap
+                        // Right prompts sit at the row's edge after padding, not a
+                        // word separator within syntax-coloured editable text.
+                        if faint_gap > 1
+                            && cells[c..]
+                                .iter()
+                                .rposition(|cell| cell.c != ' ')
+                                .is_some_and(|last| c + last + 2 >= cells.len())
                             && let Some((start, _)) = faint_run
                             && cursor.is_some_and(|cursor| cursor <= start)
                         {
@@ -449,7 +453,7 @@ impl Terminal {
                             Some(run) if run.1 == style => Some(run),
                             _ => suggestion_style(cell).then_some((count, style)),
                         };
-                        faint_gap = false;
+                        faint_gap = 0;
                         text_end = count + 1;
                     }
                     count += 1;
