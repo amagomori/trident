@@ -103,7 +103,9 @@ substitute a Linux binary for the Mac build or label a single-architecture Mac b
 At the authorized publication window, the release owner can tag the verified commit and
 upload the four artifacts plus `SHA256SUMS` with `gh release create --verify-tag`, using
 `notes.md`. This is a publishing action, not part of preparation. Do not also run the automatic
-publisher for the same tag. Updating the tap and AUR afterward is a separate publishing step:
+publisher for the same tag: cancel any tag-triggered Release run and confirm it has stopped
+before uploading manually, checking first whether it already created a release. Updating the
+tap and AUR afterward is a separate publishing step:
 use the generated package files, the existing `push_package.sh` and the same stable/newest
 release checks as the workflow, with the already provisioned credentials. Never create new
 credentials just to rehearse a release. If credentials are unavailable locally, retain the
