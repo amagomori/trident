@@ -5,6 +5,8 @@
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabBar {
     pub titles: Vec<String>,
+    /// Tabs that rang the bell while in the background, marked until shown.
+    pub bells: Vec<bool>,
     pub active: usize,
     pub hover: Option<TabHit>,
 }

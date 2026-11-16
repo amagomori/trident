@@ -8,6 +8,7 @@ macro_rules! diag {
 mod app_icon;
 #[cfg(target_os = "linux")]
 mod appearance;
+mod bell;
 mod clipboard;
 mod close_confirm;
 mod command_notify;
@@ -368,6 +369,8 @@ struct Pane {
     output: PendingOutput,
     title: String,
     progress: Option<term_core::Progress>,
+    /// Set by a bell while the tab is in the background, until it is shown.
+    bell: bell::Mark,
     #[cfg(target_os = "macos")]
     window: TabWindow,
 }
@@ -415,6 +418,7 @@ impl Pane {
             output: PendingOutput::default(),
             title: String::new(),
             progress: None,
+            bell: bell::Mark::default(),
             #[cfg(target_os = "macos")]
             window,
         }
@@ -1146,6 +1150,7 @@ struct App {
     /// The window is fully hidden (winit `Occluded`), for OSC 99 `o=invisible`.
     occluded: bool,
     notification_throttle: osc_notify::Throttle,
+    flash: bell::Flash,
     mouse_pos: PhysicalPosition<f64>,
     typing_pointer: pointer::TypingPointer,
     left_down: bool,
@@ -1243,6 +1248,7 @@ impl App {
             secure_input: Default::default(),
             occluded: false,
             notification_throttle: osc_notify::Throttle::default(),
+            flash: bell::Flash::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             typing_pointer: pointer::TypingPointer::default(),
             left_down: false,
@@ -1725,7 +1731,9 @@ impl App {
         let pending_paste = self.pending_paste.take();
         let pending_close = self.pending_close.take();
         let tab_hover = self.tab_hover.take();
+        let flash = std::mem::take(&mut self.flash);
         f(self);
+        self.flash = flash;
         self.tab_hover = tab_hover;
         self.pending_close = pending_close;
         self.pending_paste = pending_paste;
@@ -1812,6 +1820,7 @@ impl App {
             s.pty.write(b"\x1b[O");
         }
         s.swap_pane(&mut pane);
+        pane.bell.show();
         #[cfg(not(target_os = "macos"))]
         s.renderer.forget_frame();
         #[cfg(target_os = "macos")]
@@ -2042,18 +2051,21 @@ impl App {
             changed |= pane.progress != progress;
             pane.progress = progress;
         }
+        let bell = std::mem::take(&mut pane.term.bell);
+        changed |= bell && pane.bell.ring(false);
         #[cfg(target_os = "macos")]
         {
             if changed {
-                pane.window
-                    .window
-                    .set_title(&progress::window_title(&pane.title, pane.progress));
+                pane.window.window.set_title(
+                    &pane
+                        .bell
+                        .title(&progress::window_title(&pane.title, pane.progress)),
+                );
             }
             if !pane.window.occluded {
                 pane.window.window.request_redraw();
             }
         }
-        let bell = std::mem::take(&mut pane.term.bell);
         for notification in pane.term.take_notifications() {
             if self.config.desktop_notifications
                 && osc_notify::wanted(notification.occasion, self.focused, || Some(false))
@@ -2333,9 +2345,14 @@ impl App {
             s.window
                 .set_title(&progress::window_title(&s.title, s.progress));
         }
-        if std::mem::take(&mut s.term.bell) && !self.focused {
-            s.window
-                .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        if std::mem::take(&mut s.term.bell) {
+            if !self.focused {
+                s.window
+                    .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+            }
+            if self.config.visual_bell && self.flash.ring(Instant::now()) {
+                s.window.request_redraw();
+            }
         }
         let visible = std::cell::OnceCell::new();
         for notification in s.term.take_notifications() {
@@ -2518,11 +2535,17 @@ impl App {
             cursor_blink(blinking, s.blink_since, Instant::now());
         s.renderer.cursor_visible = cursor_visible;
         s.cursor_blink_at = cursor_blink_at;
+        s.renderer.flash = self.flash.showing(Instant::now());
         let tab_bar = (s.tab_bar > 0).then(|| term_render::TabBar {
             titles: self
                 .tabs
                 .iter()
                 .map(|pane| tab_title(pane.as_ref().map_or(&s.title, |pane| &pane.title)))
+                .collect(),
+            bells: self
+                .tabs
+                .iter()
+                .map(|pane| pane.as_ref().is_some_and(|pane| pane.bell.is_set()))
                 .collect(),
             active: self.active_tab,
             hover: self.tab_hover,
@@ -3983,6 +4006,13 @@ impl ApplicationHandler<UserEvent> for App {
             deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));
         }
         if let Some(due) = self.show_icons_when_idle() {
+            deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
+        }
+        if self.flash.expire(now) {
+            if let Some(s) = &self.session {
+                s.window.request_redraw();
+            }
+        } else if let Some(due) = self.flash.deadline() {
             deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
         }
         deadline = exit_wakeup(deadline, self.exit_deadline);
