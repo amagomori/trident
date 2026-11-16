@@ -1,8 +1,12 @@
 # Usage
 
+This page shows how to run Trident and use it day to day: the command line, keys and mouse,
+tabs, search, selection, pasting and the built-in file viewer. For settings, see
+[Configuration](configuration.md).
+
 ## Command line
 
-```
+```text
 trident [OPTIONS] [-e COMMAND [ARGS...]]
 
   --config <PATH>     Override the TOML config file location
@@ -17,23 +21,25 @@ trident [OPTIONS] [-e COMMAND [ARGS...]]
 
 ## Terminfo
 
-It starts your login shell (`$SHELL`) with `TERM=xterm-256color`. Trident also
-ships an `xterm-trident` terminfo entry
-([crates/term-app/terminfo/xterm-trident.terminfo](../crates/term-app/terminfo/xterm-trident.terminfo))
-that extends xterm-256color with truecolor (`Tc`, `setrgbf`/`setrgbb`), styled
-underlines (`Smulx`), bracketed paste (`BE`/`BD`/`PS`/`PE`), synchronized
-output (`Sync`) and the window title (`tsl`/`fsl`), and drops the xterm
-features Trident lacks. To use it, install it once with
-`trident --install-terminfo` (or `/usr/bin/tic -x` on that file) and set
-`term = "xterm-trident"` in the config. The pre-rename name `xterm-terminal`
-stays an alias, and installing over an entry compiled under that name replaces it.
-Trident then sets that TERM when the
-system ncurses (`/usr/bin/infocmp` when present) finds the entry, and falls back
-to `xterm-256color` when it does not. On macOS, install with `/usr/bin/tic`: an
-entry compiled by Homebrew's ncurses can't be read by the system tools, so
-Trident falls back. ssh passes TERM to the remote host, where curses programs
-fail unless the entry is installed there too; copy it with
-`infocmp -x xterm-trident | ssh host -- tic -x /dev/stdin`.
+Trident starts your login shell (`$SHELL`) with `TERM=xterm-256color`. It also ships an
+`xterm-trident` terminfo entry, which adds truecolor, styled underlines, bracketed paste,
+synchronized output and the window title, and drops xterm features Trident lacks. To use it:
+
+1. Install the entry: `trident --install-terminfo`. On macOS, this uses `/usr/bin/tic`; an entry
+   compiled by Homebrew's ncurses can't be read by the system tools.
+2. Set `term = "xterm-trident"` in the config.
+
+If the system can't find the entry, Trident falls back to `xterm-256color`. The old name
+`xterm-terminal` works as an alias.
+
+ssh passes `TERM` to the remote host, so install the entry there too:
+
+```sh
+infocmp -x xterm-trident | ssh host -- tic -x /dev/stdin
+```
+
+For the full capability list, see
+[xterm-trident.terminfo](../crates/term-app/terminfo/xterm-trident.terminfo).
 
 ## Keyboard and mouse
 
@@ -54,123 +60,116 @@ fail unless the entry is installed there too; copy it with
 | Scroll back | Shift+PageUp/PageDown, Shift+Home/End, mouse wheel | same |
 | Clear scrollback | Cmd+K | — |
 
-Each window has a tab bar above the grid. Click a tab to show it, click its × (or
-middle-click the tab) to close it, and click + to open a new one. Every tab runs its own
-shell in its own PTY; tabs in the background keep running and update their titles, and
-closing one never stops the others. A new tab starts in the active tab's directory when
-the shell reports it with OSC 7, the same way a new window does. Closing a tab that is
-running a program asks first (see `confirm_close`); closing the last tab closes the window.
-Set `tab_bar = "auto"` to show the bar only while a window has two or more tabs.
+## Tabs
 
-On macOS tabs are native AppKit window tabs, like Terminal.app's: the system draws the tab
-bar (shown once a window has two tabs), and its + button,
-the close buttons, dragging tabs to reorder them or out into their own window, and the
-tab shortcuts all work as above, following the order the tab bar shows. The Window menu
-has Show Tab Bar, Show All Tabs, Show Next/Previous Tab, Move Tab to New Window and Merge
-All Windows. `tab_bar` only applies on Linux.
+Every tab runs its own shell. Background tabs keep running and update their titles, and closing
+one never stops the others. A new tab starts in the active tab's directory when the shell reports
+it with OSC 7.
 
-Search updates as you type across scrollback and the active screen, joining soft wraps.
-It ignores case unless the query contains an uppercase character. Enter or Up moves
-to the next older match; Shift+Enter or Down moves newer, wrapping at either end.
-Alt+R (or Ctrl+R) toggles regular expressions. Backspace edits the query; Escape
-closes search and clears highlights without changing the scroll position.
+- To switch tabs, click a tab. To close one, click its **×** or middle-click it. To open one,
+  click **+**.
+- Closing a tab that's running a program asks first (see `confirm_close`). Closing the last tab
+  closes the window.
+- On Linux, to show the tab bar only while a window has two or more tabs, set `tab_bar = "auto"`.
 
-Hold Shift to select text while a program (vim, tmux, htop) is using the mouse.
-For a rectangle in these programs, hold Shift+Alt (Shift+Option on macOS).
-Shift-click keeps the original anchor and selection shape; without an existing
-selection, it starts a normal drag. Rectangular copies keep spaces and put each
-screen row on its own line, even across soft wraps. Wide characters are copied whole.
+On macOS, tabs are native window tabs, like Terminal.app's. The system shows the tab bar once a
+window has two tabs, and you can drag tabs to reorder them or into their own window. The
+**Window** menu has the usual tab commands, such as **Move Tab to New Window** and **Merge All
+Windows**.
 
-Clipboard copy-on-select is off by default; launch with `--copy-on-select` to copy
-on mouse release as well as with the copy shortcut. Linux's primary selection is
-always updated on release, independently of this option. Option-drag works on
-macOS whether or not `--option-as-alt` is set.
+## Search
 
-## Pasting
+Search updates as you type, across scrollback and the screen, and matches across soft-wrapped
+lines. It ignores case unless the query has an uppercase letter.
 
-When the running program has not enabled bracketed paste, a pasted line break acts as
-Enter and runs the command at once. Such pastes, and pastes containing other control
-characters (tab excepted), first show a banner: Enter pastes, Escape cancels, and other
-keys are ignored while it is shown. With bracketed paste on, text pastes directly with
-every ESC stripped. Set `paste_protection = false` to always paste immediately.
+- Enter or Up moves to the next older match. Shift+Enter or Down moves to the next newer one.
+  Search wraps at either end.
+- Alt+R or Ctrl+R toggles regular expressions.
+- Escape closes search and clears highlights without changing the scroll position.
 
-Programs can copy to the clipboard (`c`) or, on Linux, the primary selection (`p`) with
-OSC 52, which also works through ssh and tmux (`set -g set-clipboard on`), for example
-`printf '\e]52;c;%s\a' "$(printf hello | base64)"`. Reading the clipboard back with an
-`OSC 52 ; c ; ?` query is off by default because any program, including one on a remote
-host, could read what you copied; set `clipboard_read = true` to answer such queries.
-On X11 a copy larger than the X server's maximum request size (about 16 MiB with
-BIG-REQUESTS) is ignored and the clipboard keeps its previous contents.
+## Selection
 
-Closing the window at an idle shell prompt quits at once. While another program holds the
-Trident's foreground (vim, ssh, a build), a banner names it and asks first: Enter (or a
-second close) closes the window, Escape keeps it, and other keys are ignored while it is
-shown. A command started with `-e` (`trident -e vim`, `trident -e sh -c make`) counts as a
-running program too, unless it is a shell at its prompt. On macOS, Close Window
-(Cmd-Shift-W) and every app quit (Cmd-Q, the Quit menu, Dock > Quit, logging out) ask the
-same way. Set `confirm_close = false` to always close immediately.
+- While a program such as vim, tmux or htop uses the mouse, hold Shift to select text. For a
+  rectangle, hold Shift+Alt (Shift+Option on macOS).
+- Shift-click extends the current selection, keeping its anchor and shape.
+- Rectangular copies keep spaces and put each screen row on its own line.
+- Selecting doesn't copy to the clipboard unless you launch with `--copy-on-select`. On Linux,
+  selecting always sets the primary selection.
+
+## Paste
+
+If the running program hasn't enabled bracketed paste, a pasted line break runs the command at
+once. So before Trident pastes text with a line break or another control character (except tab),
+it shows a banner: Enter pastes and Escape cancels. With bracketed paste on, text pastes directly
+with every ESC removed. To always paste immediately, set `paste_protection = false`.
+
+### Clipboard from programs
+
+Programs can copy to the clipboard with OSC 52, including through ssh and tmux
+(`set -g set-clipboard on`):
+
+```sh
+printf '\e]52;c;%s\a' "$(printf hello | base64)"
+```
+
+On Linux, use `p` instead of `c` for the primary selection. Programs can't read the clipboard
+back unless you set `clipboard_read = true`, because any program, including one on a remote host,
+could then read what you copied.
+
+## Close confirmation
+
+Closing a window at an idle shell prompt closes it at once. If a program such as vim, ssh or a
+build is running, a banner names it and asks first: Enter or a second close closes the window,
+and Escape keeps it. A command started with `-e` counts as a running program, unless it's a shell
+at its prompt. On macOS, Close Window and quitting the app ask the same way. To always close
+immediately, set `confirm_close = false`.
 
 ## Secure Keyboard Entry
 
-On macOS, Trident turns on Secure Keyboard Entry while the program in its foreground reads a
-password (echo off with the line still edited by the terminal, as sudo, ssh, passwd and
-`read -s` set it), so other apps can't watch the keystrokes. It is held only while the window
-is focused and is released as soon as the prompt ends. Prompts inside an ssh session or other
-raw-mode programs can't be told apart and are not covered. Set `auto_secure_input = false` to
-never turn it on.
+On macOS, Trident turns on Secure Keyboard Entry while a program such as sudo, ssh, passwd or
+`read -s` asks for a password, so other apps can't watch your keystrokes. It's on only while the
+window is focused, and it turns off when the prompt ends. It doesn't cover password prompts inside
+an ssh session or other full-screen programs. To turn it off, set `auto_secure_input = false`.
 
 ## Desktop notifications
 
-Programs can raise a desktop notification with OSC 9 (`printf '\e]9;Build done\a'`), OSC 777
-(`printf '\e]777;notify;Title;Body\a'`), or the kitty OSC 99 protocol (title and body
-parts, chunking with `d=0`, base64 with `e=1`, urgency `u=0..2`, occasion `o=always`,
-`unfocused` or `invisible`, `p=?` capability queries, and `i=` ids: a notification with the
-same id replaces the earlier one; on macOS only when run from an app bundle, since a bare binary
-posts through `osascript`, which can't replace). Notifications are shown in the order they were sent;
-`invisible` counts a window as hidden when it is minimized, occluded, or on macOS fully covered by
-other apps' windows. ConEmu's numeric OSC 9 commands
-(`9;4;…` progress and the like) are not notifications. At most five are shown per ten
-seconds; title and body are capped at 1024 characters and shown as plain text. Set
-`desktop_notifications = false` to ignore them.
+Programs can show a desktop notification with OSC 9, OSC 777 or the
+[kitty notification protocol](https://sw.kovidgoyal.net/kitty/desktop-notifications/) (OSC 99):
+
+```sh
+printf '\e]9;Build done\a'
+printf '\e]777;notify;Title;Body\a'
+```
+
+Trident shows at most five notifications per ten seconds, as plain text up to 1,024 characters.
+To ignore them, set `desktop_notifications = false`.
 
 ## App icons
 
 `app_icon` picks the Dock icon on macOS and the window icon on Linux from eight variants:
 `tide` (default), `lagoon`, `dusk`, `reef`, `kelp`, `midnight`, `golden` and `sunset`
-(case-insensitive). On macOS the same icon also shows as a menu bar item whose menu brings the
-window forward or quits; set `menu_bar_icon = false` to hide it. Both apply on config reload. An
-unknown name logs a warning and uses `tide` instead of rejecting the file.
+(case-insensitive). On macOS, the same icon also shows in the menu bar, with a menu that brings
+the window forward or quits. To hide it, set `menu_bar_icon = false`. Both settings apply when the
+config reloads. An unknown name logs a warning and uses `tide`.
 
-Each variant ships as `assets/icons/<name>.icns` (16 to 1024 px, 1x and 2x, the artwork on
-Apple's 824/1024 icon grid) and 18 pt menu bar images at 1x and 2x
-(`<name>-menubar.png`, `<name>-menubar@2x.png`). After editing a source image in `assets/`,
-regenerate them with `python3 assets/generate_icons.py` (needs Pillow).
+## Drop files
 
-## Dropping files
+Drop a local file onto the window to type its shell-quoted path followed by a space. The command
+doesn't run.
 
-Drop a local file from your file manager onto the window to insert its POSIX-shell-quoted
-path plus a space, without executing it. Images supported by `trident show` (including
-SVG) also get a thumbnail above the current prompt, at most 32 columns by 6 rows.
-Set `drop_preview = false` in the live-reloaded config for path-only drops. Text, PDFs,
-unreadable/corrupt files, directories, and files over 16 MiB always get just the path.
-Names containing line-editor control characters are rejected. Preview decoding is
-synchronous; previews are skipped in alternate-screen/mouse-reporting
-apps, and prompt relocation assumes a simple single-line shell prompt, not a TUI/tmux pane.
-With a wrapped command, including Bash readline's eager wrap at the right margin, the
-preview can appear between the command's rows instead of above the whole command.
-The typed text and dropped path are preserved; use `drop_preview = false` for path-only
-drops without this layout limitation.
+- Images that `trident show` can draw also get a thumbnail above the prompt, up to 32 columns by 6
+  rows. To insert only the path, set `drop_preview = false`.
+- Other files, directories, and files over 16 MiB get only the path.
+- Full-screen programs such as vim and tmux get only the path.
+- With a multi-line prompt or a long command that wraps, the thumbnail can appear in the middle of
+  the command. Your typed text and the path are kept.
 
-Linux X11 uses winit's Xdnd file-drop event. macOS Finder uses the same `DroppedFile`
-event via AppKit. On a Wayland desktop, running `env -u WAYLAND_DISPLAY trident`
-selects XWayland; drops from X11/XWayland file managers are supported there. Drops
-from native Wayland apps are not supported yet, even into an XWayland terminal
-(verified with native Wayland Dolphin under Sway). A native Wayland terminal cannot
-receive file drops through winit 0.30 either.
+On Linux, drops work from X11 apps. On a Wayland desktop, run `env -u WAYLAND_DISPLAY trident` to
+accept drops from X11 apps; drops from native Wayland apps aren't supported.
 
-## Viewing files
+## View files
 
-```
+```text
 trident show [--width N] [--height N] [--fit] FILE...
 
   --width N    Draw images N columns wide
@@ -178,19 +177,20 @@ trident show [--width N] [--height N] [--fit] FILE...
   --fit        Scale images up or down to fill the window
 ```
 
-Run it inside the terminal (or kitty, Ghostty, WezTerm) to see a file without
-another tool. The type comes from the file's contents, not its name: PNG, JPEG,
-GIF (first frame), WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG are drawn with the
-kitty graphics protocol, shrunk to fit the window; text files are printed with
-control characters made visible; other files get a one-line summary such as
-`ELF executable, 16.2 KiB`. A missing, unreadable or corrupt file prints an error
-and the command exits with status 1. Sample files live in `crates/term-app/samples`.
+`trident show` displays a file in the terminal; it also works in kitty, Ghostty and WezTerm. It
+picks the type from the file's contents, not its name:
 
-Inside tmux, `trident show` sends images through tmux's passthrough. tmux 3.3 and
-later drop passthrough unless `allow-passthrough` is on, so, like `kitten icat`,
-`trident show` turns it on for the pane it runs in. To have it on everywhere, add this
-to `~/.tmux.conf`:
+- Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG) are drawn shrunk to fit
+  the window. GIFs show their first frame.
+- Text files are printed with control characters made visible.
+- Other files get a one-line summary, such as `ELF executable, 16.2 KiB`.
 
-```
+A missing, unreadable or corrupt file prints an error, and the command exits with status 1. For
+sample files, see `crates/term-app/samples`.
+
+Inside tmux, `trident show` turns on `allow-passthrough` for its pane, which tmux 3.3 and later
+need for images. To turn it on for every pane, add this line to `~/.tmux.conf`:
+
+```text
 set -g allow-passthrough on
 ```
