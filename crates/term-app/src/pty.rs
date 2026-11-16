@@ -10,6 +10,24 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// A window started from `/` (as from Finder) runs in the inherited home, not an
+/// `[env].HOME` override. Pager lookup and PTY spawning must use the same directory.
+pub fn default_working_directory() -> Option<std::path::PathBuf> {
+    inherited_working_directory(
+        std::env::current_dir().ok(),
+        std::env::var_os("HOME").map(Into::into),
+    )
+}
+
+fn inherited_working_directory(
+    current: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    current
+        .filter(|dir| dir != std::path::Path::new("/"))
+        .or(home)
+}
+
 /// Output the reader thread queues before it waits for the UI, once it also holds
 /// `MIN_LINES` lines. That many lines is well past a screen plus default scrollback, so a
 /// flood's batch is long enough to skip building the lines it evicts, even with long lines.
@@ -224,7 +242,7 @@ pub struct Pty {
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Input>,
     pause_boundary: Option<Arc<AtomicU64>>,
-    /// `None` only once `drop` has handed it to the reaper thread.
+    /// `None` once `drop` has handed it to the reaper thread or `exit_code` has reaped it.
     child: Option<Box<dyn Child + Send + Sync>>,
     output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
@@ -520,14 +538,11 @@ impl Pty {
         for (key, value) in env {
             cmd.env(key, value);
         }
-        if let Some(dir) = cwd {
-            cmd.cwd(dir);
-        } else if let Some(home) = std::env::var_os("HOME")
-            && std::env::current_dir()
-                .map(|d| d == std::path::Path::new("/"))
-                .unwrap_or(true)
+        if let Some(dir) = cwd
+            .map(std::path::PathBuf::from)
+            .or_else(default_working_directory)
         {
-            cmd.cwd(home);
+            cmd.cwd(dir);
         }
         // portable-pty starts the default shell as a login shell, with argv[0] `-<basename>`.
         let login = cmd.is_default_prog().then(|| {
@@ -699,6 +714,24 @@ impl Pty {
         })
     }
 
+    /// The command's exit code, waiting up to `within` for it to exit after its output
+    /// ended. `None` while it still runs or when a signal ended it.
+    pub fn exit_code(&mut self, within: Duration) -> Option<u32> {
+        let deadline = Instant::now() + within;
+        let status = loop {
+            match self.child.as_mut()?.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        };
+        // Reaped, so `drop` must not signal its pid, which may be reused by now.
+        self.child = None;
+        status.signal().is_none().then(|| status.exit_code())
+    }
+
     pub fn set_command_notifications(&mut self, enabled: bool) -> Result<(), String> {
         #[cfg(unix)]
         {
@@ -729,9 +762,27 @@ impl Pty {
         Ok(())
     }
 
+    /// The shell's process id.
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.child.as_ref()?.process_id()
+    }
+
     /// The process group of a program running in the foreground instead of the shell.
     pub fn running_program(&self) -> Option<i32> {
         self.output.probe.program()
+    }
+
+    /// The terminal's foreground process group: the running program, else the shell.
+    pub fn foreground_process(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            let fd = self.output.probe.fd.as_ref()?;
+            // SAFETY: fd is a PTY master descriptor owned by this probe.
+            let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+            (group > 0).then_some(group)
+        }
+        #[cfg(not(unix))]
+        None
     }
 
     /// Whether a program holds the foreground, as a check that outlives this borrow, for the
@@ -906,6 +957,35 @@ impl Drop for Pty {
     }
 }
 
+/// Hangs up on the shell of every one of `ptys` at once, killing one that lingers, and waits
+/// for them: an app quit on macOS ends the process from AppKit, which never drops the PTYs.
+pub fn hang_up_all<'a>(ptys: impl IntoIterator<Item = &'a mut Pty>) {
+    fn hang_up(mut child: Box<dyn Child + Send + Sync>) {
+        match child.kill() {
+            Ok(()) => drop(child.wait()),
+            Err(_) => drop(child.try_wait()),
+        }
+    }
+    let mut hang_ups = Vec::new();
+    for child in ptys.into_iter().filter_map(|pty| pty.child.take()) {
+        // The child is sent only once its thread exists, so a failed spawn still hangs up.
+        let (send, receive) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("pty-hang-up".into())
+            .spawn(move || receive.recv().map(hang_up))
+        {
+            Ok(thread) => {
+                let _ = send.send(child);
+                hang_ups.push(thread);
+            }
+            Err(_) => hang_up(child),
+        }
+    }
+    for hang_up in hang_ups {
+        let _ = hang_up.join();
+    }
+}
+
 /// Hangs up on `child`, killing it if it lingers, and waits for it so it never stays a
 /// zombie: a shell that outlives portable-pty's grace period gets SIGKILL and no wait. The
 /// wait runs on its own thread, as it can outlast the UI's frame.
@@ -923,6 +1003,23 @@ fn reap(mut child: Box<dyn Child + Send + Sync>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_directory_uses_inherited_home_only_from_root_or_unknown_cwd() {
+        let home = std::path::PathBuf::from("/inherited-home");
+        let cwd = std::path::PathBuf::from("/project");
+        for current in [None, Some("/".into())] {
+            assert_eq!(
+                inherited_working_directory(current, Some(home.clone())),
+                Some(home.clone())
+            );
+        }
+        assert_eq!(
+            inherited_working_directory(Some(cwd.clone()), Some(home)),
+            Some(cwd)
+        );
+        assert_eq!(inherited_working_directory(Some("/".into()), None), None);
+    }
 
     #[cfg(unix)]
     fn nonblocking_pipe() -> (std::fs::File, std::fs::File) {
@@ -1168,6 +1265,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn exit_code_reports_how_the_command_exited() {
+        let spawn = |script: &str| {
+            Pty::spawn(
+                &["/bin/sh".into(), "-c".into(), script.into()],
+                &Default::default(),
+                None,
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap()
+        };
+        assert_eq!(spawn("exit 2").exit_code(Duration::from_secs(10)), Some(2));
+        assert_eq!(spawn("exit 0").exit_code(Duration::from_secs(10)), Some(0));
+        assert_eq!(
+            spawn("kill -TERM $$").exit_code(Duration::from_secs(10)),
+            None
+        );
+        let mut running = spawn("sleep 30");
+        assert_eq!(running.exit_code(Duration::from_millis(50)), None);
+        assert!(
+            running.child.is_some(),
+            "a running command stays for drop to reap"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn drop_reaps_a_shell_that_ignores_hangup() {
         let mut pty = Pty::spawn(
             &[
@@ -1199,6 +1326,59 @@ mod tests {
             assert!(Instant::now() < deadline, "shell {pid} was not reaped");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hang_up_all_reaps_every_shell_before_returning() {
+        let spawn = || {
+            Pty::spawn(
+                &[
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "trap '' HUP; echo ready; while :; do sleep 1; done".into(),
+                ],
+                &Default::default(),
+                None,
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap()
+        };
+        let mut ptys = [spawn(), spawn(), spawn()];
+        let pids: Vec<libc::pid_t> = ptys
+            .iter()
+            .map(|pty| pty.child.as_ref().unwrap().process_id().unwrap() as libc::pid_t)
+            .collect();
+        for pty in &mut ptys {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut seen = Vec::new();
+            while !String::from_utf8_lossy(&seen).contains("ready\r\n") {
+                assert!(Instant::now() < deadline, "output: {seen:?}");
+                seen.extend_from_slice(&pty.take_output().bytes);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let started = Instant::now();
+        hang_up_all(ptys.iter_mut());
+        // The three grace periods overlap.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // A zombie still answers signal 0; only a reaped pid is gone.
+        for pid in pids {
+            assert_ne!(
+                unsafe { libc::kill(pid, 0) },
+                0,
+                "shell {pid} was not reaped"
+            );
+        }
+        assert!(ptys.iter().all(|pty| pty.child.is_none()));
     }
 
     /// Every argv form QA tried on #71 and #60 (as the shell sees it after `env` or a path),

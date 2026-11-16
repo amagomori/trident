@@ -20,11 +20,14 @@ pub struct Config {
     pub notify_long_commands_after: u64,
     pub desktop_notifications: bool,
     pub drop_preview: bool,
+    pub hover_preview: bool,
     pub paste_protection: bool,
+    pub trim_paste: bool,
     pub clipboard_read: bool,
     pub compare_runs: bool,
     pub compare_ignore: term_core::Ignore,
     pub confirm_close: bool,
+    pub visual_bell: bool,
     pub tab_bar: TabBarMode,
     pub vsync: bool,
     pub app_icon: AppIcon,
@@ -35,6 +38,9 @@ pub struct Config {
     pub window_rows: Option<usize>,
     pub remember_window_size: bool,
     pub shell: Vec<String>,
+    pub pager: Vec<String>,
+    /// The editor for `path:line` links; empty uses `$VISUAL`/`$EDITOR`.
+    pub editor: Vec<String>,
     pub term: String,
     pub env: BTreeMap<String, String>,
     pub themes: theme::Themes,
@@ -58,11 +64,14 @@ impl Default for Config {
             notify_long_commands_after: 10,
             desktop_notifications: true,
             drop_preview: true,
+            hover_preview: false,
             paste_protection: true,
+            trim_paste: true,
             clipboard_read: false,
             compare_runs: true,
             compare_ignore: term_core::Ignore::default(),
             confirm_close: true,
+            visual_bell: false,
             tab_bar: TabBarMode::Always,
             vsync: true,
             app_icon: AppIcon::default(),
@@ -73,6 +82,8 @@ impl Default for Config {
             window_rows: None,
             remember_window_size: true,
             shell: Vec::new(),
+            pager: ["less", "-R", "+G"].map(String::from).to_vec(),
+            editor: Vec::new(),
             term: crate::terminfo::FALLBACK.to_string(),
             env: BTreeMap::new(),
             themes: theme::Themes::default(),
@@ -95,10 +106,13 @@ struct Raw {
     notify_long_commands_after: Option<u64>,
     desktop_notifications: Option<bool>,
     drop_preview: Option<bool>,
+    hover_preview: Option<bool>,
     paste_protection: Option<bool>,
+    trim_paste: Option<bool>,
     clipboard_read: Option<bool>,
     compare_runs: Option<CompareRunsEntry>,
     confirm_close: Option<bool>,
+    visual_bell: Option<bool>,
     tab_bar: Option<String>,
     vsync: Option<bool>,
     app_icon: Option<String>,
@@ -109,6 +123,8 @@ struct Raw {
     window_rows: Option<u64>,
     remember_window_size: Option<bool>,
     shell: Option<Shell>,
+    pager: Option<Shell>,
+    editor: Option<Shell>,
     term: Option<String>,
     env: BTreeMap<String, String>,
     colors: BTreeMap<String, String>,
@@ -278,6 +294,7 @@ pub enum Action {
     JumpToPromptDown,
     SelectCommandOutput,
     ToggleFullscreen,
+    ShowLastCommandOutput,
     None,
     Send(String),
 }
@@ -310,6 +327,7 @@ impl Action {
                 "jump_to_prompt_down" => Self::JumpToPromptDown,
                 "select_command_output" => Self::SelectCommandOutput,
                 "toggle_fullscreen" => Self::ToggleFullscreen,
+                "show_last_command_output" => Self::ShowLastCommandOutput,
                 "none" => Self::None,
                 _ => match name
                     .strip_prefix("select_tab_")
@@ -438,6 +456,11 @@ fn shell_integration_bindings() {
                 "select_command_output",
                 Action::SelectCommandOutput,
             ),
+            (
+                if macos { "shift+g" } else { "g" },
+                "show_last_command_output",
+                Action::ShowLastCommandOutput,
+            ),
         ] {
             assert_eq!(
                 defaults[&Chord::parse(&format!("{prefix}+{key}")).unwrap()],
@@ -507,6 +530,10 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
             Chord::parse("super+shift+a").unwrap(),
             Action::SelectCommandOutput,
         );
+        bindings.insert(
+            Chord::parse("super+shift+g").unwrap(),
+            Action::ShowLastCommandOutput,
+        );
         bindings.insert(Chord::parse("super+k").unwrap(), Action::Clear);
         for (key, action) in [
             ("=", Action::Increase),
@@ -523,6 +550,10 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
         bindings.insert(
             Chord::parse("ctrl+shift+a").unwrap(),
             Action::SelectCommandOutput,
+        );
+        bindings.insert(
+            Chord::parse("ctrl+shift+g").unwrap(),
+            Action::ShowLastCommandOutput,
         );
     }
     let fullscreen = if macos { "ctrl+super+f" } else { "f11" };
@@ -619,9 +650,12 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         font_italic: raw.font_italic,
         font_bold_italic: raw.font_bold_italic,
         drop_preview: raw.drop_preview.unwrap_or(true),
+        hover_preview: raw.hover_preview.unwrap_or(false),
         paste_protection: raw.paste_protection.unwrap_or(true),
+        trim_paste: raw.trim_paste.unwrap_or(true),
         clipboard_read: raw.clipboard_read.unwrap_or(false),
         confirm_close: raw.confirm_close.unwrap_or(true),
+        visual_bell: raw.visual_bell.unwrap_or(false),
         desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
         menu_bar_icon: raw.menu_bar_icon.unwrap_or(true),
@@ -723,6 +757,22 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     };
     if config.shell.first().is_some_and(|s| s.is_empty()) {
         return Err(error("shell", "expected a nonempty program"));
+    }
+    match raw.pager {
+        Some(Shell::Program(program)) => config.pager = vec![program],
+        Some(Shell::Command(command)) => config.pager = command,
+        None => {}
+    }
+    if config.pager.first().is_none_or(|s| s.is_empty()) {
+        return Err(error("pager", "expected a nonempty program"));
+    }
+    config.editor = match raw.editor {
+        Some(Shell::Program(command)) => command.split_whitespace().map(str::to_owned).collect(),
+        Some(Shell::Command(command)) => command,
+        None => Vec::new(),
+    };
+    if config.editor.first().is_some_and(|s| s.is_empty()) {
+        return Err(error("editor", "expected a nonempty program"));
     }
     if let Some(term) = raw.term {
         if term.is_empty() || term.contains(['/', ' ']) {
@@ -1327,6 +1377,8 @@ mod tests {
     fn defaults_and_full_config() {
         assert!(parse_text("").unwrap().drop_preview);
         assert!(!parse_text("drop_preview = false").unwrap().drop_preview);
+        assert!(!parse_text("").unwrap().hover_preview);
+        assert!(parse_text("hover_preview = true").unwrap().hover_preview);
         assert!(parse_text("").unwrap().paste_protection);
         assert!(!parse_text("").unwrap().clipboard_read);
         assert!(parse_text("clipboard_read = true").unwrap().clipboard_read);
@@ -1354,9 +1406,14 @@ mod tests {
                 .unwrap()
                 .paste_protection
         );
+        assert!(parse_text("").unwrap().trim_paste);
+        assert!(!parse_text("trim_paste = false").unwrap().trim_paste);
         assert!(parse_text("").unwrap().confirm_close);
         assert!(!parse_text("confirm_close = false").unwrap().confirm_close);
         assert!(parse_text("confirm_close = 1").is_err());
+        assert!(!parse_text("").unwrap().visual_bell);
+        assert!(parse_text("visual_bell = true").unwrap().visual_bell);
+        assert!(parse_text("visual_bell = 'yes'").is_err());
         assert!(parse_text("").unwrap().desktop_notifications);
         assert!(
             !parse_text("desktop_notifications = false")
@@ -1451,6 +1508,36 @@ bright_white = "#fefdfc"
             parse_text("shell = '/bin/zsh'").unwrap().shell,
             ["/bin/zsh"]
         );
+        assert_eq!(
+            parse_text("editor = 'code --goto {file}:{line}'")
+                .unwrap()
+                .editor,
+            ["code", "--goto", "{file}:{line}"]
+        );
+        assert_eq!(
+            parse_text("editor = ['/Applications/My Editor', '{file}']")
+                .unwrap()
+                .editor,
+            ["/Applications/My Editor", "{file}"]
+        );
+        assert!(parse_text("").unwrap().editor.is_empty());
+        assert!(parse_text("editor = ''").unwrap().editor.is_empty());
+        assert!(parse_text("editor = ['']").unwrap_err().contains("editor"));
+    }
+
+    #[test]
+    fn pager_defaults_to_less_and_accepts_a_program_or_command() {
+        assert_eq!(parse_text("").unwrap().pager, ["less", "-R", "+G"]);
+        assert_eq!(parse_text("pager = 'most'").unwrap().pager, ["most"]);
+        assert_eq!(
+            parse_text("pager = ['bat', '--paging=always']")
+                .unwrap()
+                .pager,
+            ["bat", "--paging=always"]
+        );
+        for text in ["pager = ''", "pager = []", "pager = ['']"] {
+            assert!(parse_text(text).unwrap_err().contains("pager"), "{text}");
+        }
     }
 
     #[test]

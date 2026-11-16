@@ -55,6 +55,7 @@ For the full capability list, see
 | Close window (every tab in it) | Cmd+Shift+W | — |
 | Next / previous tab | Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+PageDown / Ctrl+PageUp, Ctrl+Tab / Ctrl+Shift+Tab |
 | Go to tab 1-8 / last tab | Cmd+1..8 / Cmd+9 | Alt+1..8 / Alt+9 |
+| Open the last command's output in a pager (needs shell integration) | Cmd+Shift+G | Ctrl+Shift+G |
 | Scroll one line up / down | Cmd+Option+Up/Down | Ctrl+Alt+Shift+Up/Down |
 | Bigger / smaller / reset font | Cmd+= / Cmd+- / Cmd+0 | Ctrl+Shift+= / Ctrl+Shift+- / Ctrl+Shift+0 |
 | Scroll back | Shift+PageUp/PageDown, Shift+Home/End, mouse wheel | same |
@@ -77,6 +78,27 @@ On macOS, tabs are native window tabs, like Terminal.app's. The system shows the
 window has two tabs, and you can drag tabs to reorder them or into their own window. The
 **Window** menu has the usual tab commands, such as **Move Tab to New Window** and **Merge All
 Windows**.
+
+## Links
+
+Hold Cmd (macOS) or Ctrl (Linux) over a link to underline it, and click to open it. Links are
+OSC 8 hyperlinks, `http`, `https`, `ftp`, `file` and `mailto` URLs, and file references printed by
+compilers, linters, test runners and grep, such as `src/main.rs:10:5`, `--> src/lib.rs:7:13`,
+`main.go:5:2:`, `Makefile:12:`, `at f (/srv/app.js:12:9)` and Python's `File "app.py", line 12`.
+
+- A file reference is a link only when the file exists. Relative paths are tried against the
+  shell's directory (OSC 7), then the foreground program's working directory. `~/` is your home
+  directory.
+- Clicking a file reference opens it at that line in `editor` from the config file, filling in its
+  `{file}`, `{line}` and `{column}` arguments. If no argument names the file, it's appended.
+- Without `editor`, Trident uses `$VISUAL` or `$EDITOR` (from `[env]` first) with that editor's
+  own line syntax. It knows vim and nvim, nano, emacs, helix, micro, kakoune, VS Code, Cursor,
+  Sublime Text, Zed and TextMate, and opens `ed` at the top of the file (`red`, which only edits
+  files in its working directory, starts in the file's directory); any other editor gets
+  `+line file`. Quoted words in the variable, such as an editor path with spaces, stay one argument.
+- Terminal editors such as vim, nano and `emacs -nw` open in a new Trident window. GUI editors run
+  directly.
+- With no editor set at all, the file goes to `open` or `xdg-open`, which can't jump to the line.
 
 ## Search
 
@@ -104,6 +126,10 @@ once. So before Trident pastes text with a line break or another control charact
 it shows a banner: Enter pastes and Escape cancels. With bracketed paste on, text pastes directly
 with every ESC removed. To always paste immediately, set `paste_protection = false`.
 
+A single-line paste loses its trailing whitespace, so a copied command ending in a newline pastes
+without the banner and without running. Pastes of several lines keep every newline. To paste
+text exactly as copied, set `trim_paste = false`.
+
 ### Clipboard from programs
 
 Programs can copy to the clipboard with OSC 52, including through ssh and tmux
@@ -122,7 +148,8 @@ could then read what you copied.
 Closing a window at an idle shell prompt closes it at once. If a program such as vim, ssh or a
 build is running, a banner names it and asks first: Enter or a second close closes the window,
 and Escape keeps it. A command started with `-e` counts as a running program, unless it's a shell
-at its prompt. On macOS, Close Window and quitting the app ask the same way. To always close
+at its prompt. On macOS, Close Window and quitting the app ask the same way, and quitting closes
+every window opened with New Window, each asking for its own running program. To always close
 immediately, set `confirm_close = false`.
 
 ## Secure Keyboard Entry
@@ -144,6 +171,14 @@ printf '\e]777;notify;Title;Body\a'
 
 Trident shows at most five notifications per ten seconds, as plain text up to 1,024 characters.
 To ignore them, set `desktop_notifications = false`.
+
+## Bell
+
+A BEL (`printf '\a'`) in an unfocused window asks for attention (the taskbar or Dock icon).
+A bell in a background tab marks that tab until it is shown: a `●` before its title in the
+Linux tab bar, a `🔔` prefix on the macOS tab title. Set `visual_bell = true` to also flash
+the active tab's grid for about 120 ms; a stream of bells (`yes $'\a'`) flashes once until
+it pauses for a quarter second.
 
 ## App icons
 
@@ -167,6 +202,21 @@ doesn't run.
 
 On Linux, drops work from X11 apps. On a Wayland desktop, run `env -u WAYLAND_DISPLAY trident` to
 accept drops from X11 apps; drops from native Wayland apps aren't supported.
+
+## Hover previews
+
+With `hover_preview = true` in the config, hold Ctrl (Cmd on macOS) with the pointer over a file
+path in the output to see a small card next to it:
+
+- Images get a thumbnail and PDFs their first page.
+- Text files show their first lines, or the lines around `path:line` when a line is given.
+- Directories list their entries.
+
+Paths are found in `ls` columns, `git status` and `git diff` output, compiler and traceback
+locations, and quoted names. Ctrl-click or Cmd-click still opens links. Relative paths start at the
+directory the shell last reported with OSC 7, else the working directory of the foreground program
+or the shell. While the shell reports a directory on another host (as over ssh), nothing is
+previewed. PDF pages come from `pdftoppm` (poppler-utils) on Linux and Quick Look on macOS.
 
 ## View files
 

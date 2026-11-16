@@ -242,6 +242,39 @@ impl ImagePipeline {
             let gpu = self.upload(device, queue, uniforms, image, version);
             self.textures.insert(q.image_id, gpu);
         }
+        self.write_instances(device, queue);
+    }
+
+    /// Shows `image` alone at `pos`, unscaled, for an overlay drawn over the whole window;
+    /// re-uploads only when `version` changes.
+    pub fn prepare_single(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uniforms: &wgpu::Buffer,
+        image: Option<(&Image, u64, [f32; 2])>,
+    ) {
+        let Some((image, version, pos)) = image else {
+            self.quads.clear();
+            self.textures.clear();
+            return;
+        };
+        if self.textures.get(&0).map(|g| g.version) != Some(version) {
+            let gpu = self.upload(device, queue, uniforms, image, version);
+            self.textures.clear();
+            self.textures.insert(0, gpu);
+        }
+        self.quads = vec![Quad {
+            image_id: 0,
+            layer: Layer::AboveText,
+            pos,
+            size: [image.width as f32, image.height as f32],
+            uv: [0.0, 0.0, 1.0, 1.0],
+        }];
+        self.write_instances(device, queue);
+    }
+
+    fn write_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         if self.quads.len() > self.instance_capacity {
             self.instance_capacity = self.quads.len().next_power_of_two();
             self.instances = create_instance_buffer(device, self.instance_capacity);
