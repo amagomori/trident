@@ -924,6 +924,35 @@ impl Drop for Pty {
     }
 }
 
+/// Hangs up on the shell of every one of `ptys` at once, killing one that lingers, and waits
+/// for them: an app quit on macOS ends the process from AppKit, which never drops the PTYs.
+pub fn hang_up_all<'a>(ptys: impl IntoIterator<Item = &'a mut Pty>) {
+    fn hang_up(mut child: Box<dyn Child + Send + Sync>) {
+        match child.kill() {
+            Ok(()) => drop(child.wait()),
+            Err(_) => drop(child.try_wait()),
+        }
+    }
+    let mut hang_ups = Vec::new();
+    for child in ptys.into_iter().filter_map(|pty| pty.child.take()) {
+        // The child is sent only once its thread exists, so a failed spawn still hangs up.
+        let (send, receive) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("pty-hang-up".into())
+            .spawn(move || receive.recv().map(hang_up))
+        {
+            Ok(thread) => {
+                let _ = send.send(child);
+                hang_ups.push(thread);
+            }
+            Err(_) => hang_up(child),
+        }
+    }
+    for hang_up in hang_ups {
+        let _ = hang_up.join();
+    }
+}
+
 /// Hangs up on `child`, killing it if it lingers, and waits for it so it never stays a
 /// zombie: a shell that outlives portable-pty's grace period gets SIGKILL and no wait. The
 /// wait runs on its own thread, as it can outlast the UI's frame.
@@ -1247,6 +1276,59 @@ mod tests {
             assert!(Instant::now() < deadline, "shell {pid} was not reaped");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hang_up_all_reaps_every_shell_before_returning() {
+        let spawn = || {
+            Pty::spawn(
+                &[
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "trap '' HUP; echo ready; while :; do sleep 1; done".into(),
+                ],
+                &Default::default(),
+                None,
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap()
+        };
+        let mut ptys = [spawn(), spawn(), spawn()];
+        let pids: Vec<libc::pid_t> = ptys
+            .iter()
+            .map(|pty| pty.child.as_ref().unwrap().process_id().unwrap() as libc::pid_t)
+            .collect();
+        for pty in &mut ptys {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut seen = Vec::new();
+            while !String::from_utf8_lossy(&seen).contains("ready\r\n") {
+                assert!(Instant::now() < deadline, "output: {seen:?}");
+                seen.extend_from_slice(&pty.take_output().bytes);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let started = Instant::now();
+        hang_up_all(ptys.iter_mut());
+        // The three grace periods overlap.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // A zombie still answers signal 0; only a reaped pid is gone.
+        for pid in pids {
+            assert_ne!(
+                unsafe { libc::kill(pid, 0) },
+                0,
+                "shell {pid} was not reaped"
+            );
+        }
+        assert!(ptys.iter().all(|pty| pty.child.is_none()));
     }
 
     /// Every argv form QA tried on #71 and #60 (as the shell sees it after `env` or a path),

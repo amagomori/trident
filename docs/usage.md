@@ -105,6 +105,10 @@ once. So before Trident pastes text with a line break or another control charact
 it shows a banner: Enter pastes and Escape cancels. With bracketed paste on, text pastes directly
 with every ESC removed. To always paste immediately, set `paste_protection = false`.
 
+A single-line paste loses its trailing whitespace, so a copied command ending in a newline pastes
+without the banner and without running. Pastes of several lines keep every newline. To paste
+text exactly as copied, set `trim_paste = false`.
+
 ### Clipboard from programs
 
 Programs can copy to the clipboard with OSC 52, including through ssh and tmux
@@ -123,7 +127,8 @@ could then read what you copied.
 Closing a window at an idle shell prompt closes it at once. If a program such as vim, ssh or a
 build is running, a banner names it and asks first: Enter or a second close closes the window,
 and Escape keeps it. A command started with `-e` counts as a running program, unless it's a shell
-at its prompt. On macOS, Close Window and quitting the app ask the same way. To always close
+at its prompt. On macOS, Close Window and quitting the app ask the same way, and quitting closes
+every window opened with New Window, each asking for its own running program. To always close
 immediately, set `confirm_close = false`.
 
 ## Secure Keyboard Entry
@@ -145,6 +150,14 @@ printf '\e]777;notify;Title;Body\a'
 
 Trident shows at most five notifications per ten seconds, as plain text up to 1,024 characters.
 To ignore them, set `desktop_notifications = false`.
+
+## Bell
+
+A BEL (`printf '\a'`) in an unfocused window asks for attention (the taskbar or Dock icon).
+A bell in a background tab marks that tab until it is shown: a `●` before its title in the
+Linux tab bar, a `🔔` prefix on the macOS tab title. Set `visual_bell = true` to also flash
+the active tab's grid for about 120 ms; a stream of bells (`yes $'\a'`) flashes once until
+it pauses for a quarter second.
 
 ## App icons
 

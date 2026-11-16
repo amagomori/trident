@@ -8,6 +8,7 @@ macro_rules! diag {
 mod app_icon;
 #[cfg(target_os = "linux")]
 mod appearance;
+mod bell;
 mod clipboard;
 mod close_confirm;
 mod command_notify;
@@ -412,6 +413,8 @@ struct Pane {
     output: PendingOutput,
     title: String,
     progress: Option<term_core::Progress>,
+    /// Set by a bell while the tab is in the background, until it is shown.
+    bell: bell::Mark,
     #[cfg(target_os = "macos")]
     window: TabWindow,
 }
@@ -459,6 +462,7 @@ impl Pane {
             output: PendingOutput::default(),
             title: String::new(),
             progress: None,
+            bell: bell::Mark::default(),
             #[cfg(target_os = "macos")]
             window,
         }
@@ -893,6 +897,10 @@ fn open_window(
     pager: Option<PagerWindow>,
 ) {
     let cleanup = pager.as_ref().map(|pager| pager.file.clone());
+    // Capture on the UI thread before moving into the window launcher. Pager windows
+    // belong to the same app quit group as ordinary New Window windows.
+    #[cfg(target_os = "macos")]
+    let quit_group = close_confirm::current_quit_group();
     let spawned = std::thread::Builder::new()
         .name(label.replace(' ', "-"))
         .spawn(move || {
@@ -912,6 +920,10 @@ fn open_window(
                 }
                 if let Some(cells) = cells {
                     command.env(WINDOW_CELLS, cells);
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(group) = quit_group {
+                    command.env(close_confirm::QUIT_GROUP, group);
                 }
                 if let Some(pager) = &pager {
                     command.env(REMOVE_ON_EXIT, &pager.file);
@@ -1372,6 +1384,7 @@ struct App {
     /// The window is fully hidden (winit `Occluded`), for OSC 99 `o=invisible`.
     occluded: bool,
     notification_throttle: osc_notify::Throttle,
+    flash: bell::Flash,
     mouse_pos: PhysicalPosition<f64>,
     typing_pointer: pointer::TypingPointer,
     left_down: bool,
@@ -1470,6 +1483,7 @@ impl App {
             secure_input: Default::default(),
             occluded: false,
             notification_throttle: osc_notify::Throttle::default(),
+            flash: bell::Flash::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             typing_pointer: pointer::TypingPointer::default(),
             left_down: false,
@@ -1952,7 +1966,9 @@ impl App {
         let pending_paste = self.pending_paste.take();
         let pending_close = self.pending_close.take();
         let tab_hover = self.tab_hover.take();
+        let flash = std::mem::take(&mut self.flash);
         f(self);
+        self.flash = flash;
         self.tab_hover = tab_hover;
         self.pending_close = pending_close;
         self.pending_paste = pending_paste;
@@ -2039,6 +2055,7 @@ impl App {
             s.pty.write(b"\x1b[O");
         }
         s.swap_pane(&mut pane);
+        pane.bell.show();
         #[cfg(not(target_os = "macos"))]
         s.renderer.forget_frame();
         #[cfg(target_os = "macos")]
@@ -2269,18 +2286,21 @@ impl App {
             changed |= pane.progress != progress;
             pane.progress = progress;
         }
+        let bell = std::mem::take(&mut pane.term.bell);
+        changed |= bell && pane.bell.ring(false);
         #[cfg(target_os = "macos")]
         {
             if changed {
-                pane.window
-                    .window
-                    .set_title(&progress::window_title(&pane.title, pane.progress));
+                pane.window.window.set_title(
+                    &pane
+                        .bell
+                        .title(&progress::window_title(&pane.title, pane.progress)),
+                );
             }
             if !pane.window.occluded {
                 pane.window.window.request_redraw();
             }
         }
-        let bell = std::mem::take(&mut pane.term.bell);
         for notification in pane.term.take_notifications() {
             if self.config.desktop_notifications
                 && osc_notify::wanted(notification.occasion, self.focused, || Some(false))
@@ -2560,9 +2580,14 @@ impl App {
             s.window
                 .set_title(&progress::window_title(&s.title, s.progress));
         }
-        if std::mem::take(&mut s.term.bell) && !self.focused {
-            s.window
-                .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        if std::mem::take(&mut s.term.bell) {
+            if !self.focused {
+                s.window
+                    .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+            }
+            if self.config.visual_bell && self.flash.ring(Instant::now()) {
+                s.window.request_redraw();
+            }
         }
         let visible = std::cell::OnceCell::new();
         for notification in s.term.take_notifications() {
@@ -2750,11 +2775,17 @@ impl App {
             cursor_blink(blinking, s.blink_since, Instant::now());
         s.renderer.cursor_visible = cursor_visible;
         s.cursor_blink_at = cursor_blink_at;
+        s.renderer.flash = self.flash.showing(Instant::now());
         let tab_bar = (s.tab_bar > 0).then(|| term_render::TabBar {
             titles: self
                 .tabs
                 .iter()
                 .map(|pane| tab_title(pane.as_ref().map_or(&s.title, |pane| &pane.title)))
+                .collect(),
+            bells: self
+                .tabs
+                .iter()
+                .map(|pane| pane.as_ref().is_some_and(|pane| pane.bell.is_set()))
                 .collect(),
             active: self.active_tab,
             hover: self.tab_hover,
@@ -2854,14 +2885,19 @@ impl App {
             return;
         }
         let Some(s) = &self.session else { return };
+        let text = if self.config.trim_paste {
+            paste::trim(&text)
+        } else {
+            &text
+        };
         if self.config.paste_protection
-            && paste::needs_confirmation(&text, s.term.modes.bracketed_paste)
+            && paste::needs_confirmation(text, s.term.modes.bracketed_paste)
         {
-            self.pending_paste = Some(text);
+            self.pending_paste = Some(text.to_owned());
             s.window.request_redraw();
             return;
         }
-        self.send_paste(&text);
+        self.send_paste(text);
     }
 
     fn send_paste(&mut self, text: &str) {
@@ -3940,12 +3976,19 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     /// A macOS app quit ends the process from AppKit without returning from the event loop,
-    /// so the latency log is written and the pager file removed here as well.
+    /// so the latency log, every tab's shell, and the pager file are cleaned up here
+    /// instead of when the session drops.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(s) = &mut self.session {
             s.latency.take();
         }
         self.save_window_state();
+        pty::hang_up_all(
+            self.session
+                .iter_mut()
+                .map(|s| &mut s.pty)
+                .chain(self.tabs.iter_mut().flatten().map(|pane| &mut pane.pty)),
+        );
         remove_on_exit();
     }
 
@@ -4218,6 +4261,13 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(due) = self.show_icons_when_idle() {
             deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
         }
+        if self.flash.expire(now) {
+            if let Some(s) = &self.session {
+                s.window.request_redraw();
+            }
+        } else if let Some(due) = self.flash.deadline() {
+            deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
+        }
         deadline = exit_wakeup(deadline, self.exit_deadline);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if self.exit_deadline.is_some() && self.exit_presentation.target.is_some() {
@@ -4434,10 +4484,14 @@ fn main() {
     unsafe { std::env::remove_var(STARTUP_STDERR) };
     let working_directory = std::env::var_os(WORKING_DIRECTORY).map(PathBuf::from);
     let window_cells = std::env::var(WINDOW_CELLS).ok();
+    #[cfg(target_os = "macos")]
+    let quit_group = std::env::var(close_confirm::QUIT_GROUP).ok();
     // SAFETY: as above.
     unsafe {
         std::env::remove_var(WORKING_DIRECTORY);
         std::env::remove_var(WINDOW_CELLS);
+        #[cfg(target_os = "macos")]
+        std::env::remove_var(close_confirm::QUIT_GROUP);
     }
     if let Some(path) = std::env::var_os(REMOVE_ON_EXIT) {
         remove_on_signal(path.as_ref());
@@ -4445,6 +4499,8 @@ fn main() {
         // SAFETY: as above.
         unsafe { std::env::remove_var(REMOVE_ON_EXIT) };
     }
+    #[cfg(target_os = "macos")]
+    close_confirm::join_quit_group(quit_group);
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
