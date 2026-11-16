@@ -200,6 +200,18 @@ pub fn watch_command_moves() {
     });
 }
 
+/// Whether `window` is in native fullscreen, as AppKit reports it: unlike winit's own
+/// state, this also holds for a tab added to a group that is already fullscreen.
+pub fn is_fullscreen(window: &Window) -> bool {
+    const FULL_SCREEN: usize = 1 << 14;
+    let Some(window) = ns_window(window) else {
+        return false;
+    };
+    // SAFETY: a live NSWindow on the main thread; styleMask is an NSWindowStyleMask.
+    let mask: usize = unsafe { msg_send![&*window, styleMask] };
+    mask & FULL_SCREEN != 0
+}
+
 /// The Window menu's items as (title, action), `None` for a separator. None has a key
 /// equivalent, so every chord stays with `config.bindings`. The tab items are the
 /// standard NSWindow tab actions, so AppKit validates them, retitles Show/Hide Tab Bar

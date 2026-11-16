@@ -401,6 +401,7 @@ struct TabWindow {
     drawable_wait: Option<Instant>,
     occluded: bool,
     normal_cells: (usize, usize),
+    normal_frame: Option<Frame>,
 }
 
 impl Pane {
@@ -829,6 +830,31 @@ fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) 
         )
 }
 
+/// A window's outer position and inner size.
+#[cfg(any(target_os = "macos", test))]
+type Frame = (PhysicalPosition<i32>, PhysicalSize<u32>);
+
+/// Whether `window` is fullscreen. On macOS this includes a native tab opened while its
+/// group was fullscreen, which AppKit takes into fullscreen without telling winit.
+fn is_fullscreen(window: &Window) -> bool {
+    #[cfg(target_os = "macos")]
+    if native_tabs::is_fullscreen(window) {
+        return true;
+    }
+    window.fullscreen().is_some()
+}
+
+/// The frame a new native tab's window opens at: the active window's, or while it is
+/// fullscreen the one it had before, which AppKit restores the whole tab group to.
+#[cfg(any(target_os = "macos", test))]
+fn new_tab_frame(fullscreen: bool, current: Option<Frame>, normal: Option<Frame>) -> Option<Frame> {
+    if fullscreen {
+        normal.or(current)
+    } else {
+        current
+    }
+}
+
 /// The fullscreen state `toggle_fullscreen` asks for: borderless on the current monitor,
 /// or windowed again.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -1199,6 +1225,9 @@ struct App {
     /// The window's latest size in cells while neither maximized nor fullscreen; on macOS,
     /// each native tab's window keeps its own, swapped in with the tab.
     normal_cells: (usize, usize),
+    /// The window's frame while not fullscreen, swapped in with the tab like `normal_cells`.
+    #[cfg(target_os = "macos")]
+    normal_frame: Option<Frame>,
     icons: app_icon::Shown,
     /// Until the startup icons are set up: the latest time to do it.
     icons_latest: Option<Instant>,
@@ -1312,6 +1341,8 @@ impl App {
             config,
             config_error,
             normal_cells: window_state::DEFAULT_CELLS,
+            #[cfg(target_os = "macos")]
+            normal_frame: None,
             icons: app_icon::Shown::default(),
             icons_latest: None,
             output_at: Instant::now(),
@@ -1448,6 +1479,13 @@ impl App {
                 .map_err(|e| format!("cannot create window: {e}"))?,
         );
         window.set_ime_allowed(true);
+        #[cfg(target_os = "macos")]
+        {
+            self.normal_frame = window
+                .outer_position()
+                .ok()
+                .map(|position| (position, window.inner_size()));
+        }
         let scale = window.scale_factor();
         let fonts = if scale == guess {
             guessed_fonts
@@ -1610,6 +1648,18 @@ impl App {
         Ok(pty)
     }
 
+    /// Remembers the active window's frame unless it is fullscreen, for `open_tab_window`.
+    #[cfg(target_os = "macos")]
+    fn note_normal_frame(&mut self) {
+        let Some(s) = &self.session else { return };
+        if is_fullscreen(&s.window) {
+            return;
+        }
+        if let Ok(position) = s.window.outer_position() {
+            self.normal_frame = Some((position, s.size));
+        }
+    }
+
     /// The tab bar's height with `tabs` tabs open, 0 when it is hidden.
     fn save_window_state(&self) {
         let Some(s) = self
@@ -1620,7 +1670,7 @@ impl App {
             return;
         };
         let maximized = s.window.is_maximized();
-        let cells = if maximized || s.window.fullscreen().is_some() {
+        let cells = if maximized || is_fullscreen(&s.window) {
             self.normal_cells
         } else {
             (s.term.cols(), s.term.rows())
@@ -1732,11 +1782,22 @@ impl App {
     fn open_tab_window(&self, event_loop: &ActiveEventLoop) -> Result<TabWindow, String> {
         use winit::platform::macos::WindowAttributesExtMacOS;
         let s = self.session.as_ref().ok_or("no window")?;
+        let current = s
+            .window
+            .outer_position()
+            .ok()
+            .map(|position| (position, s.size));
+        let (position, size) = new_tab_frame(is_fullscreen(&s.window), current, self.normal_frame)
+            .map_or((None, s.size), |(position, size)| (Some(position), size));
         let attrs = Window::default_attributes()
             .with_title("Trident")
-            .with_inner_size(s.size)
+            .with_inner_size(size)
             .with_visible(false)
             .with_tabbing_identifier(native_tabs::TABBING_IDENTIFIER);
+        let attrs = match position {
+            Some(position) => attrs.with_position(position),
+            None => attrs,
+        };
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -1765,6 +1826,7 @@ impl App {
             drawable_wait: None,
             occluded: false,
             normal_cells: self.normal_cells,
+            normal_frame: self.normal_frame,
         })
     }
 
@@ -1817,6 +1879,7 @@ impl App {
         s.swap_pane(&mut pane);
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
         std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
+        std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
         let latency = s.latency.take();
         let search = self.search.take();
         let focused = std::mem::replace(&mut self.focused, false);
@@ -1833,6 +1896,7 @@ impl App {
         self.search = search;
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
         std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
+        std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
         if let Some(s) = &mut self.session {
             s.latency = latency;
             s.swap_pane(&mut pane);
@@ -1880,8 +1944,10 @@ impl App {
                     s.size = size;
                     s.renderer.resize(size.width, size.height);
                 }
+                app.note_normal_frame();
                 app.resize_grid();
             }),
+            WindowEvent::Moved(_) => self.with_tab_shown(index, App::note_normal_frame),
             WindowEvent::ScaleFactorChanged { .. } => {
                 self.with_tab_shown(index, |app| app.set_font_size(app.font_size))
             }
@@ -1919,6 +1985,7 @@ impl App {
         {
             std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
             std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
+            std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
             native_tabs::show(&s.window);
         }
         self.tabs[self.active_tab] = Some(pane);
@@ -2291,7 +2358,7 @@ impl App {
             }
         }
         let grid_changed = (cols, rows) != (s.term.cols(), s.term.rows());
-        if grid_changed && !s.window.is_maximized() && s.window.fullscreen().is_none() {
+        if grid_changed && !s.window.is_maximized() && !is_fullscreen(&s.window) {
             self.normal_cells = (cols, rows);
         }
         s.term
@@ -4198,8 +4265,12 @@ impl ApplicationHandler<UserEvent> for App {
                     s.resize.schedule(Instant::now());
                     s.window.request_redraw();
                 }
+                #[cfg(target_os = "macos")]
+                self.note_normal_frame();
                 self.update_ime_cursor_area();
             }
+            #[cfg(target_os = "macos")]
+            WindowEvent::Moved(_) => self.note_normal_frame(),
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
                 self.typing_pointer.show();
@@ -4747,6 +4818,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn new_tabs_open_at_the_frame_from_before_fullscreen() {
+        let normal = (PhysicalPosition::new(120, 80), PhysicalSize::new(1000, 600));
+        let full = (PhysicalPosition::new(0, 0), PhysicalSize::new(1980, 1200));
+        assert_eq!(new_tab_frame(true, Some(full), Some(normal)), Some(normal));
+        assert_eq!(new_tab_frame(true, Some(full), None), Some(full));
+        assert_eq!(new_tab_frame(false, Some(normal), Some(full)), Some(normal));
+        assert_eq!(new_tab_frame(false, None, Some(normal)), None);
     }
 
     #[test]
