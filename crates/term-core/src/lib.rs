@@ -385,14 +385,14 @@ impl Terminal {
     }
 
     /// Whether characters take their own `wcwidth` cells, as line editors count them, instead
-    /// of joining into emoji sequences: in the shell's prompt or input (OSC 133), or, without
-    /// those marks, in a line editor's output. A sequence the editor moves over or erases one
-    /// codepoint at a time would otherwise leave the screen out of step with its line.
+    /// of joining into emoji sequences: in the shell's prompt or input (OSC 133), or in a line
+    /// editor's output elsewhere (a REPL a command runs, or a shell without those marks). A
+    /// sequence the editor moves over or erases one codepoint at a time would otherwise leave
+    /// the screen out of step with its line.
     pub(crate) fn per_codepoint_widths(&self) -> bool {
         match self.shell.zone {
             Zone::Prompt | Zone::Input => true,
-            Zone::Output => false,
-            Zone::None => self.shell.line_editor,
+            Zone::Output | Zone::None => self.shell.line_editor,
         }
     }
 

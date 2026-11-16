@@ -153,6 +153,52 @@ fn continues_sequence(cluster: &str, c: char) -> bool {
     last == Some('\u{200D}') && first.is_some_and(pictographic)
 }
 
+/// The cluster the ghost parser (see `ghost.rs`) last printed, so skipped output moves the
+/// cursor over emoji sequences as `join_sequence` does.
+#[derive(Default)]
+pub(crate) struct GhostCluster {
+    text: String,
+    wide: bool,
+    /// The cursor (column, pending wrap) right after it; anything else moved past it.
+    end: Option<(usize, bool)>,
+}
+
+impl GhostCluster {
+    pub(crate) fn start(&mut self, c: char, wide: bool, end: (usize, bool)) {
+        self.text.clear();
+        self.text.push(c);
+        self.wide = wide;
+        self.end = Some(end);
+    }
+
+    pub(crate) fn push_zero_width(&mut self, c: char, at: (usize, bool)) {
+        if self.end == Some(at) {
+            self.text.push(c);
+        }
+    }
+
+    pub(crate) fn forget(&mut self) {
+        self.end = None;
+    }
+
+    /// Whether `c`, printed with the cursor at `at`, joins the cluster; it then needs
+    /// widening when this returns `Some(true)`.
+    pub(crate) fn join(&mut self, c: char, at: (usize, bool)) -> Option<bool> {
+        if self.end != Some(at)
+            || !(pictographic(c) || regional(c))
+            || !continues_sequence(&self.text, c)
+        {
+            return None;
+        }
+        self.text.push(c);
+        Some(!std::mem::replace(&mut self.wide, true))
+    }
+
+    pub(crate) fn moved_to(&mut self, end: (usize, bool)) {
+        self.end = Some(end);
+    }
+}
+
 /// Whether `cluster` is an emoji sequence the renderer shapes as one glyph.
 pub fn is_emoji_sequence(cluster: &str) -> bool {
     let mut chars = cluster.chars();
@@ -308,6 +354,21 @@ impl Terminal {
             self.widen_sequence(row, col);
         }
         true
+    }
+
+    /// The cluster before the cursor, where skipped output starts.
+    pub(crate) fn ghost_cluster(&self) -> GhostCluster {
+        let Some((row, col)) = self.cluster_cell() else {
+            return GhostCluster::default();
+        };
+        let cell = self.screen().lines[row].cells[col];
+        let mut text = String::new();
+        self.push_cell_text(&cell, &mut text);
+        GhostCluster {
+            text,
+            wide: cell.flags.contains(Flags::WIDE),
+            end: Some((self.cursor.col, self.cursor.pending_wrap)),
+        }
     }
 
     /// Gives the emoji sequence in the narrow cell `(row, col)` two columns, like a wide
@@ -579,6 +640,20 @@ mod tests {
         let row = t.viewport_row(1);
         assert_eq!(t.grapheme(&row.cells[0]), Some(family));
         assert_eq!(t.base_char(&row.cells[2]), '|');
+    }
+
+    #[test]
+    fn a_line_editor_in_a_command_counts_each_codepoint() {
+        // A REPL's readline in an OSC 133 shell's output zone moves per codepoint too.
+        let family = "\u{1f468}\u{200d}\u{1f469}";
+        let mut t = Terminal::new(10, 3);
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07python3\r\n\x1b]133;C\x07");
+        t.set_line_editing(Some(0));
+        t.advance(format!(">>> {family}").as_bytes());
+        assert_eq!(t.base_char(&t.viewport_row(1).cells[6]), '\u{1f469}');
+        t.line_sent();
+        t.advance(format!("\r\n{family}|").as_bytes());
+        assert_eq!(t.grapheme(&t.viewport_row(2).cells[0]), Some(family));
     }
 
     #[test]

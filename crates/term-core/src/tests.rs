@@ -843,6 +843,23 @@ fn synchronized_advance_preserves_plain_flood_batching() {
 }
 
 #[test]
+fn skipped_output_moves_the_cursor_over_emoji_sequences_like_built_output() {
+    // Line feeds without carriage returns carry the column into the rows that are built.
+    let line = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{1f1ef}\u{1f1f5}\u{1f44d}\u{1f3fd}x\n";
+    let batch = line.repeat(DEFAULT_SCROLLBACK + 100) + "|";
+    let mut ghosted = term(80, 4, "");
+    assert!(ghosted.ghost_split(batch.as_bytes()).is_some());
+    ghosted.advance(batch.as_bytes());
+    let mut built = term(80, 4, "");
+    for chunk in batch.as_bytes().chunks(DEFAULT_SCROLLBACK) {
+        assert!(built.ghost_split(chunk).is_none());
+        built.advance(chunk);
+    }
+    assert_eq!(ghosted.cursor_position(), built.cursor_position());
+    assert_eq!(screen(&ghosted), screen(&built));
+}
+
+#[test]
 fn synchronized_end_uses_parser_boundaries() {
     let mut t = term(10, 2, "\x1b[?2026h");
     let title = b"\x1b]2;literal ?2026l\x07";
