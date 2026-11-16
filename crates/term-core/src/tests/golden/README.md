@@ -1,34 +1,55 @@
 # Terminal-state goldens
 
-Run: `cargo test -p term-core golden` (headless, no extra dependencies).
+Golden tests feed raw input bytes to `term_core::Terminal` and compare the resulting state with a
+checked-in `<name>.snap`. They're for contributors who change VT behavior. They run headless and
+need nothing beyond `cargo`.
 
-Update intentionally: `UPDATE_GOLDEN=1 cargo test -p term-core golden`.
-Review every changed snapshot against VT behavior before committing. Normal runs
-fail on missing files or mismatches and print the case name and changed lines.
+## Run
 
-Every VT ticket adds regression cases to `cases()` in `../golden.rs`: a unique
-name, initial columns/rows and raw input bytes. Optional resize runs after input.
-Update to create the matching `<name>.snap`, inspect it, then run without update.
-Do not bless incorrect behavior; report terminal bugs separately.
+```sh
+cargo test -p term-core golden
+```
 
-Format: zero-based cursor/row/cell coordinates; attribute ranges are half-open.
-Quoted row text uses Rust string escaping, preserves trailing blanks, and has
-one Unicode scalar per cell (including wide spacers). Named fg/bg and flags for
-every cell are encoded in consecutive attribute runs. Both screens are always
-included, even when empty, as is primary scrollback in oldest-first order.
-Cursor template attributes and scroll region are included for diagnostic context.
+A missing snapshot or a mismatch fails the test and prints the case name and the changed lines.
 
-Each case also checks all two-chunk splits and valid UTF-8 inputs bytewise against
-the same snapshot. Invalid UTF-8 splits are only after ASCII bytes because vte
-can consume invalid UTF-8 differently at other boundaries. No output is normalized
-away. The baseline cases cover basic shell-era VT behavior; extended SGR, CJK,
-alternate screen, regions and resize cases protect currently implemented features,
-not a claim of complete VT conformance or resize reflow support.
+## Add a case
 
-`*-output.hex` captures interactive zsh 5.8.1, bash 5.1.16 and fish 3.3.1
-with the repository's shell snippets on an 80x24 PTY (`TERM=xterm-256color`,
-`LC_ALL=C.UTF-8`). Records are `case|expected UTF-8 hex|PTY output hex`;
-`startup` initializes the terminal before the commands. Cases execute `printf
-abc`, `printf 'abc\r'`, `printf 'abc\rx'`, CJK, 180 x characters, two lines,
-empty output and `false`. The golden test replays whole chunks and bytewise,
-asserting copied command output and exactly one completion with the right status.
+1. Add a case to `cases()` in `../golden.rs`: a unique name, initial columns and rows, the raw
+   input bytes and, optionally, a resize that runs after the input.
+2. Write its snapshot: `UPDATE_GOLDEN=1 cargo test -p term-core golden`.
+3. Check the new `<name>.snap` against the expected VT behavior, then run without
+   `UPDATE_GOLDEN` to confirm it passes.
+
+Every VT change adds regression cases. If a snapshot shows wrong behavior, don't commit it; file
+the terminal bug separately. Review every changed snapshot the same way when you update existing
+cases.
+
+## Snapshot format
+
+- Cursor, row and cell coordinates are zero-based. Attribute ranges are half-open.
+- Row text is quoted with Rust string escaping, keeps trailing blanks and has one Unicode scalar
+  per cell, including wide-character spacers.
+- Foreground, background and flags for every cell are encoded as consecutive attribute runs.
+- Both screens are always included, even when empty, plus primary scrollback oldest first.
+- The cursor template attributes and scroll region are included for diagnosis.
+- No output is normalized away.
+
+## Split input
+
+Each case also replays every two-chunk split of its input, and valid UTF-8 input byte by byte,
+against the same snapshot. Invalid UTF-8 is split only after ASCII bytes, because the parser can
+consume invalid UTF-8 differently at other boundaries.
+
+## Shell output captures
+
+`*-output.hex` files capture interactive zsh 5.8.1, bash 5.1.16 and fish 3.3.1 running the
+repository's shell integration on an 80x24 PTY (`TERM=xterm-256color`, `LC_ALL=C.UTF-8`).
+
+- Each record is `case|expected UTF-8 hex|PTY output hex`. The `startup` record initializes the
+  terminal before the commands.
+- The cases run `printf abc`, `printf 'abc\r'`, `printf 'abc\rx'`, CJK text, 180 `x` characters,
+  two lines, empty output and `false`.
+- The test replays each capture in whole chunks and byte by byte. It checks the copied command
+  output and that exactly one command completes, with the right exit status.
+
+The cases cover implemented behavior. They don't claim complete VT conformance.
