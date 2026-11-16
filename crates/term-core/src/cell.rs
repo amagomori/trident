@@ -127,6 +127,53 @@ impl Default for Cell {
 }
 
 impl Cell {
+    const SGR_FLAGS: Flags = Flags::BOLD
+        .union(Flags::DIM)
+        .union(Flags::ITALIC)
+        .union(Flags::UNDERLINE)
+        .union(Flags::BLINK)
+        .union(Flags::INVERSE)
+        .union(Flags::HIDDEN)
+        .union(Flags::STRIKE);
+
+    /// Whether both cells render with the same SGR attributes and colors.
+    pub(crate) fn same_sgr(&self, other: &Cell) -> bool {
+        self.fg == other.fg
+            && self.bg == other.bg
+            && self.flags.bits() & Self::SGR_FLAGS.bits()
+                == other.flags.bits() & Self::SGR_FLAGS.bits()
+    }
+
+    /// Appends one SGR sequence that resets and then sets this cell's attributes and colors.
+    pub(crate) fn push_sgr(&self, out: &mut String) {
+        use std::fmt::Write;
+        out.push_str("\x1b[0");
+        for (flag, code) in [
+            (Flags::BOLD, ";1"),
+            (Flags::DIM, ";2"),
+            (Flags::ITALIC, ";3"),
+            (Flags::UNDERLINE, ";4"),
+            (Flags::BLINK, ";5"),
+            (Flags::INVERSE, ";7"),
+            (Flags::HIDDEN, ";8"),
+            (Flags::STRIKE, ";9"),
+        ] {
+            if self.flags.contains(flag) {
+                out.push_str(code);
+            }
+        }
+        for (color, base) in [(self.fg, 30), (self.bg, 40)] {
+            let _ = match color {
+                Color::Indexed(n) if n < 8 => write!(out, ";{}", base + u32::from(n)),
+                Color::Indexed(n) if n < 16 => write!(out, ";{}", base + 52 + u32::from(n)),
+                Color::Indexed(n) => write!(out, ";{};5;{n}", base + 8),
+                Color::Rgb(r, g, b) => write!(out, ";{};2;{r};{g};{b}", base + 8),
+                Color::DefaultFg | Color::DefaultBg => Ok(()),
+            };
+        }
+        out.push('m');
+    }
+
     /// A blank cell that keeps the background of `template`, as erase operations require.
     pub fn blank(template: &Cell) -> Cell {
         Cell {

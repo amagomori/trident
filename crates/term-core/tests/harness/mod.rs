@@ -140,7 +140,10 @@ impl Fuzz {
                 let _ = t.selection_text();
             }
             6 => t.jump_to_prompt(rng.below(2) == 0),
-            7 => t.select_command_output(),
+            7 => {
+                t.select_command_output();
+                let _ = t.last_command_output();
+            }
             8 => {
                 let line = point(t, rng).line;
                 t.scroll_to_line(line);
