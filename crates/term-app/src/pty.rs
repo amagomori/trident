@@ -1371,8 +1371,9 @@ mod tests {
             .is_ok()
         {
             // zsh draws a ZWJ as `<200d>` unless COMBINING_CHARS is set.
+            // No flag: a zsh built with Unicode 9 widths (macOS) counts each regional
+            // indicator as two columns where libc counts one, so no single width fits both.
             line_editor_session(&["zsh", "-f", "-i"], "\u{1f44d}\u{1f3fd}");
-            line_editor_session(&["zsh", "-f", "-i"], "\u{1f1ef}\u{1f1f5}");
         } else {
             eprintln!("no zsh on this system; skipping it");
         }
