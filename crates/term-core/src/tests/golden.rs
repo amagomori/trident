@@ -1840,3 +1840,20 @@ fn golden_progress_reports() {
         );
     }
 }
+
+#[test]
+fn csi_fast_path_matches_bytewise() {
+    let input: &[u8] = b"\x1b[2J\x1b[H\x1b[1;31mred\x1b[0m \x1b[38;5;208mo\x1b[38;2;1;2;3mx\x1b[m\
+        \x1b[5;10H\x1b[4:3mcurly\x1b[24m\x1b[?25l\x1b[3;8r\x1b[8;1H\n\n\x1b[r\x1b[2 q\
+        \x1b[1;\r2m\x1b[3\x1b[4mcut\x1b[65536;99999m\x1b[;;7m\x1b[K\x1b[2A\x1b[3C\x1b[@\x1b[?1049h\
+        \x1b[1;1Halt\x1b[?1049l\x1b[?25h";
+    let mut whole = Terminal::new(20, 8);
+    whole.advance(input);
+    for len in [1, 2, 3, 7] {
+        let mut split = Terminal::new(20, 8);
+        for chunk in input.chunks(len) {
+            split.advance(chunk);
+        }
+        assert_eq!(snapshot(&whole), snapshot(&split), "chunks of {len}");
+    }
+}
