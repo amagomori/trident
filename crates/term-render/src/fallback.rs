@@ -1,6 +1,7 @@
 //! System font discovery for characters the primary font lacks: fontconfig on Linux and
 //! other Unixes (loaded at runtime, so it is optional), Core Text on macOS. Nothing is
-//! queried until the first character that needs a fallback.
+//! queried until the first character that needs a fallback. Also finds the faces of a
+//! configured font family.
 
 use std::path::PathBuf;
 
@@ -8,9 +9,9 @@ use std::path::PathBuf;
 pub type FontFile = (PathBuf, u32);
 
 #[cfg(target_os = "macos")]
-pub use coretext::SystemFonts;
+pub use coretext::{SystemFonts, family_faces, named_face};
 #[cfg(not(target_os = "macos"))]
-pub use fontconfig::SystemFonts;
+pub use fontconfig::{SystemFonts, family_faces, named_face};
 
 /// The face in a font file or collection whose PostScript name is `postscript`, reading
 /// only each face's `name` table; 0 if none matches.
@@ -46,10 +47,12 @@ pub fn prefers_emoji(c: char, cells: usize) -> bool {
 #[cfg(not(target_os = "macos"))]
 mod fontconfig {
     use super::FontFile;
-    use fontconfig_sys::constants::{FC_CHARSET, FC_COLOR, FC_FILE, FC_INDEX};
+    use fontconfig_sys::constants::{
+        FC_CHARSET, FC_COLOR, FC_FAMILY, FC_FILE, FC_FULLNAME, FC_INDEX, FC_POSTSCRIPT_NAME,
+    };
     use fontconfig_sys::statics::{LIB, LIB_RESULT};
     use fontconfig_sys::*;
-    use std::ffi::{CStr, OsStr};
+    use std::ffi::{CStr, CString, OsStr};
     use std::os::unix::ffi::OsStrExt;
     use std::path::PathBuf;
     use std::ptr;
@@ -136,6 +139,78 @@ mod fontconfig {
         }
     }
 
+    /// The installed faces of family `name` (matched case-insensitively), sorted by file.
+    pub fn family_faces(name: &str) -> Vec<FontFile> {
+        list(FC_FAMILY, name)
+    }
+
+    /// The installed face whose full or PostScript name is `name`.
+    pub fn named_face(name: &str) -> Option<FontFile> {
+        list(FC_FULLNAME, name)
+            .into_iter()
+            .next()
+            .or_else(|| list(FC_POSTSCRIPT_NAME, name).into_iter().next())
+    }
+
+    fn list(object: &CStr, value: &str) -> Vec<FontFile> {
+        let Ok(value) = CString::new(value) else {
+            return Vec::new();
+        };
+        if LIB_RESULT.is_err() {
+            return Vec::new();
+        }
+        let mut files = Vec::new();
+        unsafe {
+            let config = (LIB.FcInitLoadConfigAndFonts)();
+            if config.is_null() {
+                return files;
+            }
+            let pattern = (LIB.FcPatternCreate)();
+            let objects = (LIB.FcObjectSetCreate)();
+            if !pattern.is_null() && !objects.is_null() {
+                (LIB.FcPatternAddString)(pattern, object.as_ptr(), value.as_ptr().cast());
+                (LIB.FcObjectSetAdd)(objects, FC_FILE.as_ptr());
+                (LIB.FcObjectSetAdd)(objects, FC_INDEX.as_ptr());
+                let set = (LIB.FcFontList)(config, pattern, objects);
+                if !set.is_null() {
+                    let fonts = &*set;
+                    let fonts = match fonts.nfont {
+                        n if n > 0 && !fonts.fonts.is_null() => {
+                            std::slice::from_raw_parts(fonts.fonts, n as usize)
+                        }
+                        _ => &[],
+                    };
+                    for &font in fonts {
+                        let mut file: *mut FcChar8 = ptr::null_mut();
+                        let mut index = 0;
+                        if (LIB.FcPatternGetString)(font, FC_FILE.as_ptr(), 0, &mut file)
+                            != FcResultMatch
+                        {
+                            continue;
+                        }
+                        (LIB.FcPatternGetInteger)(font, FC_INDEX.as_ptr(), 0, &mut index);
+                        let path = PathBuf::from(OsStr::from_bytes(
+                            CStr::from_ptr(file.cast()).to_bytes(),
+                        ));
+                        // The high bits number a variable font's named instances.
+                        files.push((path, (index.max(0) & 0xffff) as u32));
+                    }
+                    (LIB.FcFontSetDestroy)(set);
+                }
+            }
+            if !objects.is_null() {
+                (LIB.FcObjectSetDestroy)(objects);
+            }
+            if !pattern.is_null() {
+                (LIB.FcPatternDestroy)(pattern);
+            }
+            (LIB.FcConfigDestroy)(config);
+        }
+        files.sort();
+        files.dedup();
+        files
+    }
+
     unsafe fn sort(config: *mut FcConfig, name: &CStr) -> Option<*mut FcFontSet> {
         unsafe {
             let pattern = (LIB.FcNameParse)(name.as_ptr().cast());
@@ -185,7 +260,9 @@ mod fontconfig {
 mod coretext {
     use super::FontFile;
     use objc2_core_foundation::{CFArray, CFRange, CFRetained, CFString, CFType, CFURL};
-    use objc2_core_text::{CTFont, CTFontDescriptor, kCTFontNameAttribute, kCTFontURLAttribute};
+    use objc2_core_text::{
+        CTFont, CTFontCollection, CTFontDescriptor, kCTFontNameAttribute, kCTFontURLAttribute,
+    };
 
     /// Core Text's cascade list for Menlo, the system monospace font.
     #[derive(Default)]
@@ -233,6 +310,45 @@ mod coretext {
         }
     }
 
+    /// The installed faces of family `name`, sorted by file.
+    pub fn family_faces(name: &str) -> Vec<FontFile> {
+        let collection = unsafe { CTFontCollection::from_available_fonts(None) };
+        let Some(list) = (unsafe {
+            collection.matching_font_descriptors_for_family(&CFString::from_str(name), None)
+        }) else {
+            return Vec::new();
+        };
+        let list: &CFArray<CTFontDescriptor> = unsafe { &*(&*list as *const CFArray).cast() };
+        let mut files: Vec<FontFile> = list
+            .iter()
+            .filter_map(|descriptor| {
+                let url = unsafe { descriptor.attribute(kCTFontURLAttribute) };
+                let name = unsafe { descriptor.attribute(kCTFontNameAttribute) }
+                    .and_then(|n| n.downcast::<CFString>().ok())
+                    .map(|n| n.to_string());
+                file(url, name)
+            })
+            .collect();
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    /// The installed face whose full or PostScript name is `name`; Core Text substitutes
+    /// another font for unknown names, so the found font's names are checked.
+    pub fn named_face(name: &str) -> Option<FontFile> {
+        let font = unsafe { CTFont::with_name(&CFString::from_str(name), 12.0, std::ptr::null()) };
+        let postscript = unsafe { font.post_script_name() }.to_string();
+        let full = unsafe { font.full_name() }.to_string();
+        if !(postscript.eq_ignore_ascii_case(name) || full.eq_ignore_ascii_case(name)) {
+            return None;
+        }
+        file(
+            unsafe { font.attribute(kCTFontURLAttribute) },
+            Some(postscript),
+        )
+    }
+
     fn file(url: Option<CFRetained<CFType>>, postscript: Option<String>) -> Option<FontFile> {
         let path = url?.downcast::<CFURL>().ok()?.to_file_path()?;
         let index = match postscript {
@@ -244,12 +360,12 @@ mod coretext {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::face_index;
     use crate::font::{BOLD, REGULAR};
 
     /// A font collection holding `fonts` in order.
-    fn collection(fonts: &[&[u8]]) -> Vec<u8> {
+    pub(crate) fn collection(fonts: &[&[u8]]) -> Vec<u8> {
         let mut data = b"ttcf\x00\x01\x00\x00".to_vec();
         data.extend((fonts.len() as u32).to_be_bytes());
         let mut offset = data.len() + 4 * fonts.len();

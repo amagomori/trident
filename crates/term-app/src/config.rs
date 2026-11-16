@@ -7,7 +7,11 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    pub font: Option<PathBuf>,
+    /// A font file or family name, as are the style overrides below.
+    pub font: Option<String>,
+    pub font_bold: Option<String>,
+    pub font_italic: Option<String>,
+    pub font_bold_italic: Option<String>,
     pub font_size: f32,
     pub padding: f32,
     pub scrollback: usize,
@@ -43,6 +47,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             font: None,
+            font_bold: None,
+            font_italic: None,
+            font_bold_italic: None,
             font_size: 14.0,
             padding: term_render::PADDING,
             scrollback: 10_000,
@@ -78,7 +85,10 @@ impl Default for Config {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Raw {
-    font: Option<PathBuf>,
+    font: Option<String>,
+    font_bold: Option<String>,
+    font_italic: Option<String>,
+    font_bold_italic: Option<String>,
     font_size: Option<f32>,
     padding: Option<f32>,
     scrollback: Option<Scrollback>,
@@ -605,6 +615,9 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     };
     let mut config = Config {
         font: raw.font,
+        font_bold: raw.font_bold,
+        font_italic: raw.font_italic,
+        font_bold_italic: raw.font_bold_italic,
         drop_preview: raw.drop_preview.unwrap_or(true),
         paste_protection: raw.paste_protection.unwrap_or(true),
         clipboard_read: raw.clipboard_read.unwrap_or(false),
@@ -1358,6 +1371,8 @@ mod tests {
         let config = parse_text(
             r##"
 font = "/fonts/mono.ttf"
+font_italic = "Fira Code"
+font_bold_italic = "/fonts/mono-bi.ttf"
 font_size = 20.0
 padding = 12.0
 scrollback = 500
@@ -1389,6 +1404,9 @@ bright_white = "#fefdfc"
         )
         .unwrap();
         assert_eq!(config.font, Some("/fonts/mono.ttf".into()));
+        assert_eq!(config.font_bold, None);
+        assert_eq!(config.font_italic, Some("Fira Code".into()));
+        assert_eq!(config.font_bold_italic, Some("/fonts/mono-bi.ttf".into()));
         assert_eq!(config.font_size, 20.0);
         assert_eq!(config.padding, 12.0);
         assert_eq!(config.scrollback, 500);

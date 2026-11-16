@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 use term_core::{ClipboardRequest, MouseMode, Point, SelectionKind, Terminal};
 #[cfg(test)]
 use term_render::PADDING;
-use term_render::{Fonts, Renderer};
+use term_render::{FontFaces, FontSpec, Fonts, Renderer};
 mod links;
 #[cfg(target_os = "macos")]
 mod native_tabs;
@@ -164,7 +164,7 @@ struct Options {
     config_path: PathBuf,
     font_size_override: bool,
     scrollback: Option<usize>,
-    font: Option<PathBuf>,
+    font: Option<String>,
     font_size: f32,
     option_as_alt: bool,
     copy_on_select: bool,
@@ -179,8 +179,20 @@ impl Options {
         self.scrollback.unwrap_or(config.scrollback)
     }
 
-    fn font<'a>(&'a self, config: &'a config::Config) -> Option<&'a std::path::Path> {
-        self.font.as_deref().or(config.font.as_deref())
+    /// The config's fonts, or only `--font`'s when given.
+    fn font(&self, config: &config::Config) -> FontSpec {
+        match &self.font {
+            Some(font) => FontSpec {
+                regular: Some(font.clone()),
+                ..FontSpec::default()
+            },
+            None => FontSpec {
+                regular: config.font.clone(),
+                bold: config.font_bold.clone(),
+                italic: config.font_italic.clone(),
+                bold_italic: config.font_bold_italic.clone(),
+            },
+        }
     }
 
     fn size(&self, config: &config::Config) -> f32 {
@@ -207,7 +219,7 @@ fn usage() -> ! {
          {bin} show [--width N] [--height N] [--fit] FILE...\n\n\
          OPTIONS:\n  \
            --config <PATH>     Override the TOML config file location\n  \
-           --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)\n  \
+           --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)\n  \
            --font-size <SIZE>  Font size in points (default: {DEFAULT_FONT_SIZE})\n  \
            --option-as-alt     On macOS, make Option act as Alt/Meta\n  \
            --scrollback <LINES> History lines (default: 10000; 0 disables; max: 1000000)\n  \
@@ -253,7 +265,9 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
                         .ok_or("--scrollback needs an integer between 0 and 1000000")?,
                 );
             }
-            "--font" => options.font = Some(args.next().ok_or("--font needs a path")?.into()),
+            "--font" => {
+                options.font = Some(args.next().ok_or("--font needs a family name or path")?)
+            }
             "--font-size" => {
                 options.font_size_override = true;
                 options.font_size = args
@@ -1083,6 +1097,8 @@ struct App {
     /// The window's latest size in cells while neither maximized nor fullscreen; on macOS,
     /// each native tab's window keeps its own, swapped in with the tab.
     normal_cells: (usize, usize),
+    /// The faces `options.font(&config)` resolved to.
+    faces: FontFaces,
     icons: app_icon::Shown,
     /// Until the startup icons are set up: the latest time to do it.
     icons_latest: Option<Instant>,
@@ -1194,6 +1210,7 @@ impl App {
             config,
             config_error,
             normal_cells: window_state::DEFAULT_CELLS,
+            faces: FontFaces::bundled(),
             icons: app_icon::Shown::default(),
             icons_latest: None,
             output_at: Instant::now(),
@@ -1238,8 +1255,13 @@ impl App {
     }
 
     fn start(&mut self, event_loop: &ActiveEventLoop) -> Result<Session, String> {
-        let probe = match Fonts::new(self.options.font(&self.config), self.font_size) {
-            Ok(fonts) => fonts,
+        self.faces = match FontFaces::resolve(&self.options.font(&self.config)) {
+            Ok((faces, warnings)) => {
+                for warning in warnings {
+                    diag!("trident: font: {warning}");
+                }
+                faces
+            }
             Err(error) if self.options.font.is_none() => {
                 let error = format!(
                     "trident: {}:1:1: font: {error}",
@@ -1249,12 +1271,12 @@ impl App {
                 self.config_error = Some(error);
                 self.config = config::Config::default();
                 self.font_size = self.options.size(&self.config);
-                Fonts::new(None, self.font_size)?
+                FontFaces::bundled()
             }
             Err(error) => return Err(error),
         };
+        let probe = Fonts::new(&self.faces, self.font_size);
         self.watch_appearance();
-        let font = self.options.font(&self.config);
         let monitor = event_loop
             .primary_monitor()
             .or_else(|| event_loop.available_monitors().next());
@@ -1262,7 +1284,7 @@ impl App {
         let guessed_fonts = if guess == 1.0 {
             probe
         } else {
-            Fonts::new(font, self.font_size * guess as f32)?
+            Fonts::new(&self.faces, self.font_size * guess as f32)
         };
         let guessed_tab_bar = self.tab_bar_height(1, &guessed_fonts);
         let initial = window_state::initial(
@@ -1331,7 +1353,7 @@ impl App {
         let fonts = if scale == guess {
             guessed_fonts
         } else {
-            Fonts::new(font, self.font_size * scale as f32)?
+            Fonts::new(&self.faces, self.font_size * scale as f32)
         };
         let size = window.inner_size();
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
@@ -1615,10 +1637,7 @@ impl App {
         window.set_ime_allowed(true);
         native_tabs::add_tab(&s.window, &window);
         let size = window.inner_size();
-        let fonts = Fonts::new(
-            self.options.font(&self.config),
-            self.font_size * window.scale_factor() as f32,
-        )?;
+        let fonts = Fonts::new(&self.faces, self.font_size * window.scale_factor() as f32);
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
         Ok(TabWindow {
             window,
@@ -2778,7 +2797,8 @@ impl App {
 
     fn reload_config(&mut self) {
         let result = config::load(&self.options.config_path).and_then(|next| {
-            let font_changed = self.options.font.is_none() && next.font != self.config.font;
+            let spec = self.options.font(&next);
+            let font_changed = spec != self.options.font(&self.config);
             let size_changed =
                 !self.options.font_size_override && next.font_size != self.config.font_size;
             let size = if size_changed {
@@ -2786,19 +2806,17 @@ impl App {
             } else {
                 self.font_size
             };
-            let fonts = if font_changed {
-                let scale = self
-                    .session
-                    .as_ref()
-                    .map_or(1.0, |s| s.window.scale_factor());
-                Some(
-                    Fonts::new(next.font.as_deref(), size * scale as f32).map_err(|e| {
-                        format!(
-                            "trident: {}:1:1: font: {e}",
-                            self.options.config_path.display()
-                        )
-                    })?,
-                )
+            let faces = if font_changed {
+                let (faces, warnings) = FontFaces::resolve(&spec).map_err(|e| {
+                    format!(
+                        "trident: {}:1:1: font: {e}",
+                        self.options.config_path.display()
+                    )
+                })?;
+                for warning in warnings {
+                    diag!("trident: font: {warning}");
+                }
+                Some(faces)
             } else {
                 None
             };
@@ -2815,6 +2833,10 @@ impl App {
             self.config = next;
             if !self.config.hide_mouse_when_typing {
                 self.typing_pointer.show();
+            }
+            let font_changed = faces.is_some();
+            if let Some(faces) = faces {
+                self.faces = faces;
             }
             #[cfg(target_os = "macos")]
             close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
@@ -2851,20 +2873,15 @@ impl App {
                     warn_vsync_unsupported(&self.config, &s.renderer);
                 }
                 s.renderer.set_vsync(self.config.vsync);
-                if let Some(fonts) = fonts {
-                    s.fonts = fonts;
+                if font_changed {
+                    s.fonts = Fonts::new(&self.faces, size * s.window.scale_factor() as f32);
                     s.renderer.clear_glyph_cache();
                     #[cfg(target_os = "macos")]
                     for pane in self.tabs.iter_mut().flatten() {
                         let tab = &mut pane.window;
                         let px = size * tab.window.scale_factor() as f32;
-                        match Fonts::new(self.config.font.as_deref(), px) {
-                            Ok(fonts) => {
-                                tab.fonts = fonts;
-                                tab.renderer.clear_glyph_cache();
-                            }
-                            Err(error) => diag!("trident: font: {error}"),
-                        }
+                        tab.fonts = Fonts::new(&self.faces, px);
+                        tab.renderer.clear_glyph_cache();
                     }
                 }
                 #[cfg(target_os = "macos")]
@@ -4740,7 +4757,7 @@ mod tests {
     fn cli_overrides_config() {
         let config = super::config::parse(
             std::path::Path::new("test.toml"),
-            "font = '/config.ttf'\nfont_size = 22\nscrollback = 42\nshell = ['zsh', '-l']",
+            "font = '/config.ttf'\nfont_bold = 'Fira Code'\nfont_size = 22\nscrollback = 42\nshell = ['zsh', '-l']",
         )
         .unwrap();
         let mut options = super::Options {
@@ -4757,7 +4774,11 @@ mod tests {
         };
         assert_eq!(
             options.font(&config),
-            Some(std::path::Path::new("/config.ttf"))
+            FontSpec {
+                regular: Some("/config.ttf".into()),
+                bold: Some("Fira Code".into()),
+                ..FontSpec::default()
+            }
         );
         assert_eq!(options.size(&config), 22.0);
         assert_eq!(options.scrollback(&config), 42);
@@ -4769,7 +4790,10 @@ mod tests {
         options.command = vec!["bash".into()];
         assert_eq!(
             options.font(&config),
-            Some(std::path::Path::new("/cli.ttf"))
+            FontSpec {
+                regular: Some("/cli.ttf".into()),
+                ..FontSpec::default()
+            }
         );
         assert_eq!(options.size(&config), 18.0);
         assert_eq!(options.scrollback(&config), 90);
@@ -5884,13 +5908,13 @@ mod tests {
 
     #[test]
     fn guessed_grid_uses_physical_size_and_scaled_padding() {
-        let probe = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let probe = Fonts::bundled(DEFAULT_FONT_SIZE);
         let logical = LogicalSize::new(
             100.0 * probe.metrics.width + 2.0 * PADDING,
             30.0 * probe.metrics.height + 2.0 * PADDING,
         );
         for (scale, expected) in [(1.0, (100, 30)), (2.0, (94, 30))] {
-            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            let fonts = Fonts::bundled(DEFAULT_FONT_SIZE * scale as f32);
             assert_eq!(
                 grid_size_for(logical.to_physical(scale), scale, &fonts, PADDING),
                 expected
@@ -5904,7 +5928,7 @@ mod tests {
     #[test]
     fn window_size_round_trips_to_its_cells() {
         for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
-            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            let fonts = Fonts::bundled(DEFAULT_FONT_SIZE * scale as f32);
             for padding in [0.0, PADDING, 6.3] {
                 for tab_bar in [0, 37] {
                     for cells in [(20, 5), (80, 24), (100, 30), (317, 91)] {
@@ -5918,7 +5942,7 @@ mod tests {
                 }
             }
         }
-        let fonts = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let fonts = Fonts::bundled(DEFAULT_FONT_SIZE);
         let screen = PhysicalSize::new(1920, 1080);
         let max = grid_size_for(screen, 1.0, &fonts, PADDING);
         let size = window_size_for(

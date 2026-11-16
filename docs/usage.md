@@ -10,7 +10,7 @@ tabs, search, selection, pasting and the built-in file viewer. For settings, see
 trident [OPTIONS] [-e COMMAND [ARGS...]]
 
   --config <PATH>     Override the TOML config file location
-  --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)
+  --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)
   --font-size <SIZE>  Font size in points (default: 14)
   --scrollback <LINES> History lines (default: 10000; 0 disables; maximum: 1000000)
   --option-as-alt     On macOS, make Option act as Alt/Meta

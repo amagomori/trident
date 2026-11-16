@@ -19,7 +19,10 @@ This example shows every setting with its default or an example value:
 
 ```toml
 # All entries are optional; omitted colors use Tokyo Night.
-# font = "/path/to/mono.ttf" # default: bundled JetBrains Mono
+# font = "Fira Code"       # family name or font file; default: bundled JetBrains Mono
+# font_bold = "/path/to/mono-bold.ttf" # optional per-style faces: family names or files
+# font_italic = "Fira Code"
+# font_bold_italic = "Fira Code"
 font_size = 14.0            # 4..=200 points
 padding = 6.0               # 0..=1000 logical pixels
 # window_columns = 100      # first window's width in cells; default: last closed window's, or 100
@@ -90,6 +93,24 @@ opened with Ctrl+Shift+N (Cmd+N on macOS) take the size of the window they were 
 `vsync = false` shows frames without waiting for the display refresh. This can lower latency but
 can cause tearing. Where the graphics driver can't turn vsync off, such as OpenGL on Linux, vsync
 stays on and Trident logs a note.
+
+## Fonts
+
+`font` takes a family name, such as `"Fira Code"` or `"Menlo"`, or the path to a
+TrueType/OpenType file or `.ttc` collection. A value that contains a `/` or ends in `.ttf`,
+`.otf`, `.ttc` or `.otc` is a path; anything else is a family name, looked up with fontconfig on
+Linux and Core Text on macOS (a full face name such as `"Fira Code Retina"` works too).
+
+- Bold, italic and bold-italic text use the family's own faces, picked by weight and slant
+  (the faces in a collection file count as one family).
+- A style the font has no face for is synthesized: bold is drawn heavier and italic is slanted,
+  rather than drawn as regular text.
+- `font_bold`, `font_italic` and `font_bold_italic` choose a style's face from another family or
+  file. They are ignored when `--font` is given.
+- A family that is not installed is a warning naming it, and Trident uses the bundled
+  JetBrains Mono; a missing style override falls back to the style from `font`. A font file that
+  cannot be read is a [config error](#config-errors).
+- Font changes apply on [live reload](#live-reload), at the current font size.
 
 ## Key bindings
 
