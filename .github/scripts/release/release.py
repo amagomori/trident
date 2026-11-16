@@ -185,7 +185,7 @@ def deb(binary, version, arch, out):
             f"Section: x11\nPriority: optional\nHomepage: {HOMEPAGE}\n"
             f"Description: {SUMMARY}\n"
             f" {NAME} is a fast, GPU-rendered terminal emulator for Linux and macOS,\n"
-            f" written from scratch in Rust.\n")
+            f" written in Rust.\n")
         for path in root.rglob("*"):
             if path.is_dir():
                 path.chmod(0o755)

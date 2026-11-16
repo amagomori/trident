@@ -6,7 +6,7 @@
 
 ## Features
 
-A fast GPU-rendered terminal emulator written from scratch in Rust, for macOS and Linux.
+A fast, GPU-rendered terminal emulator for macOS and Linux, written in Rust.
 
 - **GPU rendering** with [wgpu](https://wgpu.rs): Metal on macOS, Vulkan or OpenGL on Linux.
   Every frame is one instanced draw call of cell backgrounds and glyphs from a texture atlas.
