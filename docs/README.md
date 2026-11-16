@@ -10,3 +10,4 @@ For what Trident is and how to install it, see the [README](../README.md).
 - [Development](development.md): crate layout, tests, releases, latency measurement and comparisons
   against other terminals.
 - [Conformance](conformance.md): vttest and esctest results.
+- [Benchmarks](benchmarks.md): Trident against Alacritty, kitty, WezTerm and Ghostty.
