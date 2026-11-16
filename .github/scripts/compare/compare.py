@@ -6,6 +6,8 @@
     python3 .github/scripts/compare/compare.py --terms terminal,alacritty
     python3 .github/scripts/compare/summarize.py
 
+or `.github/scripts/compare/run.sh`, which does all of that.
+
 Every test launches a fresh terminal running a probe shell script, so nothing in any
 terminal is instrumented. Tests:
   startup       launch -> shell exec, window mapped, first painted frame
@@ -500,18 +502,26 @@ def resolve_bins(names, overrides):
         if not sep or name not in TERMS:
             sys.exit(f"--bin wants NAME=PATH with NAME in {', '.join(TERMS)}: {item}")
         bins[name] = path
+    if names is None:
+        names = [n for n in TERMS if shutil.which(os.path.expanduser(bins[n]))]
+        skipped = [n for n in TERMS if n not in names]
+        if skipped:
+            print(f"not found, skipping: {', '.join(skipped)} (pass --bin NAME=PATH)", flush=True)
+        if "terminal" not in names:
+            sys.exit(f"terminal: {bins['terminal']} not found (cargo build --release)")
     for name in names:
         found = shutil.which(os.path.expanduser(bins[name]))
         if not found:
             sys.exit(f"{name}: {bins[name]} not found (pass --bin {name}=PATH)")
         bins[name] = os.path.abspath(found)
-    return bins
+    return names, bins
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--display", default=os.environ.get("DISPLAY", ":99"))
-    p.add_argument("--terms", default=",".join(TERMS))
+    p.add_argument("--terms", help=f"comma-separated subset of {','.join(TERMS)} "
+                   "(default: every one found)")
     p.add_argument("--tests", default="startup,memory,latency,cat,vtebench")
     p.add_argument("--bin", action="append", default=[], metavar="NAME=PATH",
                    help="binary for one terminal (repeatable)")
@@ -529,11 +539,11 @@ if __name__ == "__main__":
     p.add_argument("--idle-secs", type=float, default=5.0)
     p.add_argument("--vte-secs", type=int, default=10)
     ARGS = p.parse_args()
-    names, tests = ARGS.terms.split(","), ARGS.tests.split(",")
+    tests = ARGS.tests.split(",")
     for test in tests:
         if test not in TESTS:
             sys.exit(f"unknown test {test}; choose from {', '.join(TESTS)}")
-    ARGS.bins = resolve_bins(names, ARGS.bin)
+    names, ARGS.bins = resolve_bins(ARGS.terms and ARGS.terms.split(","), ARGS.bin)
     ARGS.work = ARGS.work.resolve()
     ARGS.work.mkdir(parents=True, exist_ok=True)
     if ARGS.cat_file is None:

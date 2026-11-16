@@ -124,18 +124,18 @@ No terminal is instrumented. Each one gets the matching config in `compare/cfg/`
 14, 100x30, 10,000 lines of scrollback).
 
 ```sh
-sudo apt install xvfb openbox xdotool python3-xlib fonts-jetbrains-mono
-Xvfb :99 -screen 0 1920x1080x24 & DISPLAY=:99 openbox &
-cargo build --release
-DISPLAY=:99 python3 .github/scripts/compare/compare.py --terms terminal,alacritty
-python3 .github/scripts/compare/summarize.py   # Markdown tables
+sudo apt install xvfb openbox python3-xlib fonts-jetbrains-mono
+.github/scripts/compare/run.sh           # one pass; tables in target/compare/results.md
+.github/scripts/compare/run.sh rounds    # two rounds with noise bounds, as in benchmarks.md
 ```
 
-- Terminals are found on `PATH`. To use another binary, such as an extracted kitty bundle or a
-  Ghostty AppImage, pass `--bin kitty=PATH` (repeatable).
-- vtebench needs its binary (`cargo install --git https://github.com/alacritty/vtebench`) and a
-  checkout (`--vtebench-dir`, default `~/vtebench`).
-- `--tests` and `--terms` pick a subset. Results merge into `target/compare/results.json`, so you
-  can split runs.
+`run.sh` builds the release binary, starts Xvfb and openbox if there is no display, installs
+vtebench under `target/compare` if needed, and runs every terminal found on `PATH`.
+
+- Extra arguments go to `compare.py`: `--bin kitty=PATH` (repeatable) for a binary not on `PATH`,
+  such as a Ghostty AppImage, and `--tests`/`--terms` for a subset. In `rounds` mode, pass them
+  in `BINS`.
+- Results merge into `target/compare/results.json`, so you can split runs.
 - On Xvfb with llvmpipe, the numbers compare terminals on one machine; they aren't real-display
-  latency. Ghostty ignores XTest keys there, so only its vtebench numbers are usable.
+  latency. Ghostty ignores XTest keys and spins its renderer there, so it gets no latency or `cat`
+  numbers.
