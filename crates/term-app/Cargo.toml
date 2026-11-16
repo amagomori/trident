@@ -1,6 +1,6 @@
 [package]
 name = "term-app"
-description = "A fast GPU-rendered terminal emulator written from scratch in Rust"
+description = "A fast, GPU-rendered terminal emulator for macOS and Linux, written in Rust"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

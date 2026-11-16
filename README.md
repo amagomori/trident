@@ -4,7 +4,7 @@
 
 <h1 align="center">Trident</h1>
 
-<p align="center">A fast, GPU-rendered terminal emulator for macOS and Linux, written from scratch in Rust.</p>
+<p align="center">A fast, GPU-rendered terminal emulator for macOS and Linux, written in Rust.</p>
 
 <p align="center">
   <img src="docs/images/screenshot.png" alt="Trident showing git log, an inline image, CJK, emoji, text styles and 256 colors" width="600">
