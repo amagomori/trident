@@ -929,8 +929,14 @@ fn open_window(
                         &mut child,
                         pager.as_ref().map(|pager| pager.file.as_path()),
                     );
-                    if let (Some(failure), Some(pager)) = (failure, &pager) {
-                        let _ = pager.failed.send_event(UserEvent::PagerFailed(failure));
+                    match (failure, &pager) {
+                        (Some(failure), Some(pager)) => {
+                            let _ = pager.failed.send_event(UserEvent::PagerFailed(failure));
+                        }
+                        (Some(failure), None) => {
+                            let _ = writeln!(std::io::stderr(), "trident: {failure}");
+                        }
+                        (None, _) => {}
                     }
                 }
                 Err(error) => {
@@ -964,17 +970,13 @@ fn wait_window(
         let _ = std::fs::remove_file(path);
     }
     match status {
-        Ok(status) if !status.success() => {
+        Ok(status) if status.success() => None,
+        Ok(status) if status.code().is_none() => {
             let _ = writeln!(std::io::stderr(), "trident: {label} exited with {status}");
-            status
-                .code()
-                .map(|_| format!("{label}: window exited with {status}"))
+            None
         }
-        Err(error) => {
-            let _ = writeln!(std::io::stderr(), "{label}: {error}");
-            Some(format!("{label}: {error}"))
-        }
-        Ok(_) => None,
+        Ok(status) => Some(format!("{label} exited with {status}")),
+        Err(error) => Some(format!("{label}: {error}")),
     }
 }
 
@@ -4460,15 +4462,38 @@ fn main() {
     };
     let mut app = App::new(options, event_loop.create_proxy());
     app.startup_stderr = startup_stderr;
-    if let Err(e) = event_loop.run_app(&mut app) {
+    let run = event_loop.run_app(&mut app);
+    let code = window_exit_code(&mut app);
+    let error = app.error.take();
+    // Dropping the app reaps every tab's command, killing one that ignores SIGHUP.
+    drop(app);
+    remove_on_exit();
+    if let Err(e) = run {
         diag!("trident: {e}");
-        exit(1);
+        std::process::exit(1);
     }
-    if let Some(e) = app.error {
+    if let Some(e) = error {
         diag!("trident: {e}");
-        exit(1);
+        std::process::exit(1);
     }
-    exit(0);
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+/// How long a pager window waits for its pager's exit status once its output has ended.
+const PAGER_STATUS_WAIT: Duration = Duration::from_millis(500);
+
+/// A pager window whose pager exited by itself exits with the pager's status, so the
+/// window that opened it can report a pager that failed. Other windows exit 0.
+fn window_exit_code(app: &mut App) -> i32 {
+    if REMOVE_ON_EXIT_PATH.get().is_none() || app.exit_deadline.is_none() {
+        return 0;
+    }
+    app.session
+        .as_mut()
+        .and_then(|s| s.pty.exit_code(PAGER_STATUS_WAIT))
+        .map_or(0, |code| i32::try_from(code).unwrap_or(1))
 }
 
 #[cfg(test)]
@@ -4853,6 +4878,7 @@ mod tests {
             ("kill -TERM $$", false),
             ("kill -KILL $$", false),
             ("exit 1", true),
+            ("exit 2", true),
         ] {
             let file = dir.join("output.txt");
             std::fs::write(&file, "out\n").unwrap();

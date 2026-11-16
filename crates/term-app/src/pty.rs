@@ -224,7 +224,7 @@ pub struct Pty {
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Input>,
     pause_boundary: Option<Arc<AtomicU64>>,
-    /// `None` only once `drop` has handed it to the reaper thread.
+    /// `None` once `drop` has handed it to the reaper thread or `exit_code` has reaped it.
     child: Option<Box<dyn Child + Send + Sync>>,
     output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
@@ -699,6 +699,24 @@ impl Pty {
         })
     }
 
+    /// The command's exit code, waiting up to `within` for it to exit after its output
+    /// ended. `None` while it still runs or when a signal ended it.
+    pub fn exit_code(&mut self, within: Duration) -> Option<u32> {
+        let deadline = Instant::now() + within;
+        let status = loop {
+            match self.child.as_mut()?.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        };
+        // Reaped, so `drop` must not signal its pid, which may be reused by now.
+        self.child = None;
+        status.signal().is_none().then(|| status.exit_code())
+    }
+
     pub fn set_command_notifications(&mut self, enabled: bool) -> Result<(), String> {
         #[cfg(unix)]
         {
@@ -1164,6 +1182,36 @@ mod tests {
             seen.extend_from_slice(&pty.take_output().bytes);
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_code_reports_how_the_command_exited() {
+        let spawn = |script: &str| {
+            Pty::spawn(
+                &["/bin/sh".into(), "-c".into(), script.into()],
+                &Default::default(),
+                None,
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap()
+        };
+        assert_eq!(spawn("exit 2").exit_code(Duration::from_secs(10)), Some(2));
+        assert_eq!(spawn("exit 0").exit_code(Duration::from_secs(10)), Some(0));
+        assert_eq!(
+            spawn("kill -TERM $$").exit_code(Duration::from_secs(10)),
+            None
+        );
+        let mut running = spawn("sleep 30");
+        assert_eq!(running.exit_code(Duration::from_millis(50)), None);
+        assert!(
+            running.child.is_some(),
+            "a running command stays for drop to reap"
+        );
     }
 
     #[cfg(unix)]
