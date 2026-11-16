@@ -17,6 +17,7 @@ pub struct Config {
     pub desktop_notifications: bool,
     pub drop_preview: bool,
     pub paste_protection: bool,
+    pub trim_paste: bool,
     pub clipboard_read: bool,
     pub compare_runs: bool,
     pub compare_ignore: term_core::Ignore,
@@ -53,6 +54,7 @@ impl Default for Config {
             desktop_notifications: true,
             drop_preview: true,
             paste_protection: true,
+            trim_paste: true,
             clipboard_read: false,
             compare_runs: true,
             compare_ignore: term_core::Ignore::default(),
@@ -88,6 +90,7 @@ struct Raw {
     desktop_notifications: Option<bool>,
     drop_preview: Option<bool>,
     paste_protection: Option<bool>,
+    trim_paste: Option<bool>,
     clipboard_read: Option<bool>,
     compare_runs: Option<CompareRunsEntry>,
     confirm_close: Option<bool>,
@@ -610,6 +613,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         font: raw.font,
         drop_preview: raw.drop_preview.unwrap_or(true),
         paste_protection: raw.paste_protection.unwrap_or(true),
+        trim_paste: raw.trim_paste.unwrap_or(true),
         clipboard_read: raw.clipboard_read.unwrap_or(false),
         confirm_close: raw.confirm_close.unwrap_or(true),
         visual_bell: raw.visual_bell.unwrap_or(false),
@@ -1345,6 +1349,8 @@ mod tests {
                 .unwrap()
                 .paste_protection
         );
+        assert!(parse_text("").unwrap().trim_paste);
+        assert!(!parse_text("trim_paste = false").unwrap().trim_paste);
         assert!(parse_text("").unwrap().confirm_close);
         assert!(!parse_text("confirm_close = false").unwrap().confirm_close);
         assert!(parse_text("confirm_close = 1").is_err());

@@ -104,6 +104,10 @@ once. So before Trident pastes text with a line break or another control charact
 it shows a banner: Enter pastes and Escape cancels. With bracketed paste on, text pastes directly
 with every ESC removed. To always paste immediately, set `paste_protection = false`.
 
+A single-line paste loses its trailing whitespace, so a copied command ending in a newline pastes
+without the banner and without running. Pastes of several lines keep every newline. To paste
+text exactly as copied, set `trim_paste = false`.
+
 ### Clipboard from programs
 
 Programs can copy to the clipboard with OSC 52, including through ssh and tmux
