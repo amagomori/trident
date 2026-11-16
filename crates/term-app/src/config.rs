@@ -26,6 +26,7 @@ pub struct Config {
     pub app_icon: AppIcon,
     pub menu_bar_icon: bool,
     pub auto_secure_input: bool,
+    pub hide_mouse_when_typing: bool,
     pub shell: Vec<String>,
     pub term: String,
     pub env: BTreeMap<String, String>,
@@ -57,6 +58,7 @@ impl Default for Config {
             app_icon: AppIcon::default(),
             menu_bar_icon: true,
             auto_secure_input: true,
+            hide_mouse_when_typing: true,
             shell: Vec::new(),
             term: crate::terminfo::FALLBACK.to_string(),
             env: BTreeMap::new(),
@@ -86,6 +88,7 @@ struct Raw {
     app_icon: Option<String>,
     menu_bar_icon: Option<bool>,
     auto_secure_input: Option<bool>,
+    hide_mouse_when_typing: Option<bool>,
     shell: Option<Shell>,
     term: Option<String>,
     env: BTreeMap<String, String>,
@@ -601,6 +604,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         vsync: raw.vsync.unwrap_or(true),
         menu_bar_icon: raw.menu_bar_icon.unwrap_or(true),
         auto_secure_input: raw.auto_secure_input.unwrap_or(true),
+        hide_mouse_when_typing: raw.hide_mouse_when_typing.unwrap_or(true),
         ..Config::default()
     };
     if let Some(name) = raw.tab_bar {
@@ -1121,6 +1125,17 @@ mod tests {
                 .auto_secure_input
         );
         assert!(parse_text("auto_secure_input = 1").is_err());
+    }
+
+    #[test]
+    fn hide_mouse_when_typing() {
+        assert!(parse_text("").unwrap().hide_mouse_when_typing);
+        assert!(
+            !parse_text("hide_mouse_when_typing = false")
+                .unwrap()
+                .hide_mouse_when_typing
+        );
+        assert!(parse_text("hide_mouse_when_typing = \"yes\"").is_err());
     }
 
     #[test]
