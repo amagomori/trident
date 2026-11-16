@@ -406,8 +406,10 @@ impl Terminal {
         // are not characters the line editor moves over.
         let skip = Flags::WIDE_SPACER.union(Flags::WIDE_WRAP);
         let mut text_end = 0;
-        // Where a trailing run of suggestion-styled text starts, and its style.
+        // Where a run of suggestion-styled text starts, and its style.
         let mut faint_run: Option<(usize, (Color, bool))> = None;
+        let mut faint_gap = false;
+        let mut suggestion_start = None;
         let mut count = 0;
         let mut click = None;
         let mut cursor = None;
@@ -424,12 +426,30 @@ impl Terminal {
                 }
                 let Some(cell) = cells.get(c) else { break };
                 if !cell.flags.intersects(skip) {
+                    let style = (cell.fg, cell.flags.contains(Flags::DIM));
+                    if cell.c == ' ' {
+                        if suggestion_style(cell) {
+                            if faint_run.is_none_or(|run| run.1 != style) {
+                                faint_run = Some((count, style));
+                            }
+                        } else if faint_run.is_some() {
+                            faint_gap = true;
+                        }
+                    }
                     if cell.c != ' ' {
-                        let style = (cell.fg, cell.flags.contains(Flags::DIM));
+                        // A separate right prompt must not replace a suggestion's
+                        // boundary with its own text end.
+                        if faint_gap
+                            && let Some((start, _)) = faint_run
+                            && cursor.is_some_and(|cursor| cursor <= start)
+                        {
+                            suggestion_start.get_or_insert(start);
+                        }
                         faint_run = match faint_run {
                             Some(run) if run.1 == style => Some(run),
                             _ => suggestion_style(cell).then_some((count, style)),
                         };
+                        faint_gap = false;
                         text_end = count + 1;
                     }
                     count += 1;
@@ -440,10 +460,10 @@ impl Terminal {
         // An autosuggestion (zsh-autosuggestions, fish) is drawn greyed past the end of
         // the real input, and Right at that end accepts it, so stop where it starts. The
         // cursor never sits inside a suggestion, so a run holding it is typed input.
-        let input_end = match faint_run {
+        let input_end = suggestion_start.unwrap_or(match faint_run {
             Some((start, _)) if cursor <= start => start,
             _ => text_end,
-        };
+        });
         let target = click?.min(input_end.max(cursor));
         Some(PromptClick::Move(target as isize - cursor as isize))
     }
