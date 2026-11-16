@@ -7,6 +7,18 @@ pub fn needs_confirmation(text: &str, bracketed: bool) -> bool {
     !bracketed && text.chars().any(|c| c.is_ascii_control() && c != '\t')
 }
 
+/// A single-line paste without its trailing whitespace, like Windows Terminal's trimPaste: a
+/// copied command's trailing newline neither asks for confirmation nor leaves an empty line.
+/// Text with a line break before its last non-blank character, or only whitespace, is unchanged.
+pub fn trim(text: &str) -> &str {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() || trimmed.contains(['\n', '\r']) {
+        text
+    } else {
+        trimmed
+    }
+}
+
 /// The confirmation prompt shown in the banner while a paste waits.
 pub fn prompt(text: &str) -> String {
     let lines = text
@@ -68,6 +80,34 @@ mod tests {
             assert!(needs_confirmation(text, false), "{text:?}");
             assert!(!needs_confirmation(text, true), "{text:?}");
         }
+    }
+
+    #[test]
+    fn single_line_pastes_lose_trailing_whitespace() {
+        for (text, want) in [
+            ("ls -la\n", "ls -la"),
+            ("ls -la\r\n", "ls -la"),
+            ("ls -la \t\n\n", "ls -la"),
+            ("git status  ", "git status"),
+            ("  cd ~\r", "  cd ~"),
+            ("ls -la", "ls -la"),
+        ] {
+            assert_eq!(trim(text), want, "{text:?}");
+            assert!(!needs_confirmation(trim(text), false), "{text:?}");
+        }
+        assert_eq!(encode(trim("ls -la\n"), true), b"\x1b[200~ls -la\x1b[201~");
+    }
+
+    #[test]
+    fn multi_line_and_blank_pastes_stay_as_is() {
+        for text in ["a\nb\n", "a\r\nb", "a\rb ", "\n", "  \r\n", ""] {
+            assert_eq!(trim(text), text, "{text:?}");
+        }
+        assert!(needs_confirmation(trim("make\nmake install\n"), false));
+        assert_eq!(
+            prompt(trim("make\nmake install\n")),
+            "Paste 2 lines? Enter pastes, Esc cancels"
+        );
     }
 
     #[test]

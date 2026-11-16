@@ -2625,14 +2625,19 @@ impl App {
             return;
         }
         let Some(s) = &self.session else { return };
+        let text = if self.config.trim_paste {
+            paste::trim(&text)
+        } else {
+            &text
+        };
         if self.config.paste_protection
-            && paste::needs_confirmation(&text, s.term.modes.bracketed_paste)
+            && paste::needs_confirmation(text, s.term.modes.bracketed_paste)
         {
-            self.pending_paste = Some(text);
+            self.pending_paste = Some(text.to_owned());
             s.window.request_redraw();
             return;
         }
-        self.send_paste(&text);
+        self.send_paste(text);
     }
 
     fn send_paste(&mut self, text: &str) {
