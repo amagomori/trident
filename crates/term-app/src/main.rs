@@ -1118,7 +1118,7 @@ struct App {
     notification_throttle: osc_notify::Throttle,
     mouse_pos: PhysicalPosition<f64>,
     typing_pointer: pointer::TypingPointer,
-    hover_preview: Option<hover_preview::HoverPreview>,
+    hover_preview: hover_preview::HoverPreview,
     left_down: bool,
     /// The left press landed on the pinned command header; swallow its release.
     ledger_click: bool,
@@ -1215,8 +1215,7 @@ impl App {
             notification_throttle: osc_notify::Throttle::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             typing_pointer: pointer::TypingPointer::default(),
-            hover_preview: hover_preview::enabled(std::env::var_os(hover_preview::ENV).as_deref())
-                .then(hover_preview::HoverPreview::new),
+            hover_preview: hover_preview::HoverPreview::new(),
             left_down: false,
             ledger_click: false,
             reported_button: None,
@@ -2186,15 +2185,10 @@ impl App {
         s.deferred = None;
         let was_synchronized = s.term.modes.synchronized_output;
         let mut advanced = None;
-        let hover_preview = &mut self.hover_preview;
         update_terminal(&mut s.term, &mut s.scroll, |term| {
             advanced = s.output.advance(term, s.pty.flow.paused, || {
                 s.pty.wake_pending.store(false, Ordering::Release);
-                let output = s.pty.take_output();
-                if let Some(preview) = hover_preview {
-                    preview.osc7.scan(&output.bytes);
-                }
-                output
+                s.pty.take_output()
             });
         });
         let Some((processed, from_leftover)) = advanced else {
@@ -2343,9 +2337,6 @@ impl App {
             if s.output.waiting_since.is_some() && !s.pty.flow.paused {
                 s.pty.wake_pending.store(false, Ordering::Release);
                 let queued = s.pty.take_output();
-                if let Some(preview) = &mut self.hover_preview {
-                    preview.osc7.scan(&queued.bytes);
-                }
                 if s.output.coalesce(queued) {
                     self.process_output();
                 }
@@ -2357,8 +2348,8 @@ impl App {
             search.refresh(&mut s.term, false);
         }
         self.update_ime_cursor_area();
-        let (preview_link, floating) = self.hover_preview_overlay();
-        let hover = self.hover_link().or(preview_link);
+        let floating = self.hover_preview_overlay();
+        let hover = self.hover_link();
         let Some(s) = &mut self.session else { return };
         s.renderer.set_floating(floating);
         if s.term.modes.synchronized_output {

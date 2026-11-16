@@ -60,6 +60,8 @@ pub struct FloatingImage {
     pub image: Arc<term_core::images::Image>,
     pub version: u64,
     pub pos: [f32; 2],
+    /// Underlined like a hovered link while no link is hovered.
+    pub underline: Option<term_core::Link>,
 }
 
 pub struct Renderer {
@@ -491,6 +493,11 @@ impl Renderer {
         hover: Option<&term_core::Link>,
         pre_present: Option<&mut dyn FnMut()>,
     ) -> bool {
+        let underline = self
+            .floating_image
+            .as_ref()
+            .and_then(|f| f.underline.clone());
+        let hover = hover.or(underline.as_ref());
         for _ in 0..2 {
             if self.build(
                 term,

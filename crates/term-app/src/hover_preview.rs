@@ -1,14 +1,14 @@
 //! Cmd-hover (Ctrl on Linux and elsewhere) previews of file paths printed in the output: a
 //! small card with an image thumbnail, a PDF's first page, the first lines of a text file or
-//! a directory listing. Opt-in with `TERMINAL_HOVER_PREVIEW=1`.
+//! a directory listing. Opt-in with `hover_preview = true` in the config.
 //!
 //! Relative paths resolve against the directory the shell last reported with OSC 7, else
-//! the shell process's own working directory; a shell reporting another host turns previews
-//! off. The UI thread only gathers the hovered row's text; a worker thread reads the file
+//! the working directory of the foreground program or the shell; a shell reporting another
+//! host turns previews off. The UI thread only gathers the hovered row's text; a worker thread reads the file
 //! and draws the card.
 
 use crate::{App, UserEvent, links};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
@@ -21,8 +21,6 @@ use term_core::images::Image;
 use term_core::{Flags, Link, Point, Row};
 use term_render::FloatingImage;
 
-pub const ENV: &str = "TERMINAL_HOVER_PREVIEW";
-
 /// Paths longer than this are not looked for.
 const MAX_PATH: usize = 4096;
 /// Files up to this size are read whole, so images can be decoded.
@@ -33,15 +31,6 @@ const MAX_LINES: usize = 14;
 const THUMBNAILER_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(not(target_os = "macos"))]
 static NEXT_PAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub fn enabled(value: Option<&OsStr>) -> bool {
-    value.and_then(OsStr::to_str).is_some_and(|v| {
-        matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
 
 /// A stretch of a row that may name a file: `text`, drawn in cells `start..end`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -226,79 +215,6 @@ pub enum Reported {
     Local(PathBuf),
     /// On another machine, as over ssh: its paths don't name files here.
     Remote,
-}
-
-const OSC7: &[u8] = b"\x1b]7;";
-
-/// Follows OSC 7 reports in the shell's output, across reads that split them.
-#[derive(Debug, Default)]
-pub struct Osc7 {
-    partial: Vec<u8>,
-    hostname: Vec<u8>,
-    pub reported: Option<Reported>,
-}
-
-impl Osc7 {
-    pub fn new() -> Osc7 {
-        Osc7 {
-            hostname: hostname(),
-            ..Osc7::default()
-        }
-    }
-
-    pub fn scan(&mut self, bytes: &[u8]) {
-        if self.partial.is_empty()
-            && memchr::memchr(0x1b, bytes)
-                .is_none_or(|_| memchr::memmem::find(bytes, OSC7).is_none())
-            && !ends_with_start(bytes)
-        {
-            return;
-        }
-        let joined;
-        let data = if self.partial.is_empty() {
-            bytes
-        } else {
-            self.partial.extend_from_slice(bytes);
-            joined = std::mem::take(&mut self.partial);
-            &joined[..]
-        };
-        let mut rest = data;
-        while let Some(at) = memchr::memmem::find(rest, OSC7) {
-            let body = &rest[at + OSC7.len()..];
-            let Some((len, terminator)) = terminator(body) else {
-                if body.len() <= MAX_PATH * 3 {
-                    self.partial = rest[at..].to_vec();
-                }
-                return;
-            };
-            if let Some(reported) = parse_uri(&body[..len], &self.hostname) {
-                self.reported = Some(reported);
-            }
-            rest = &body[len + terminator..];
-        }
-        if ends_with_start(rest) {
-            let keep = (1..OSC7.len()).rev().find(|&k| rest.ends_with(&OSC7[..k]));
-            self.partial = keep.map_or_else(Vec::new, |k| OSC7[..k].to_vec());
-        }
-    }
-}
-
-/// Whether `bytes` ends partway into an OSC 7 introducer.
-fn ends_with_start(bytes: &[u8]) -> bool {
-    (1..OSC7.len()).any(|k| bytes.ends_with(&OSC7[..k]))
-}
-
-/// The length of an OSC's text and of its BEL or ST terminator.
-fn terminator(body: &[u8]) -> Option<(usize, usize)> {
-    let at = memchr::memchr2(0x07, 0x1b, body)?;
-    if body[at] == 0x07 {
-        return Some((at, 1));
-    }
-    match body.get(at + 1) {
-        None => None,
-        Some(b'\\') => Some((at, 2)),
-        Some(_) => Some((at, 1)),
-    }
 }
 
 /// A `file://host/path` (or kitty's `kitty-shell-cwd://`) URI as a place on this machine.
@@ -807,15 +723,20 @@ pub fn place(x: f32, top: f32, bottom: f32, size: (f32, f32), window: (f32, f32)
 
 struct Job {
     generation: u64,
+    pane: u64,
     line: u64,
     candidates: Vec<Candidate>,
     cwd: Option<PathBuf>,
-    shell: Option<u32>,
+    /// Whose working directory relative paths start at without OSC 7.
+    process: Option<u32>,
     style: Style,
 }
 
 fn build(job: &Job, latest: &AtomicU64) -> Option<(Candidate, Image)> {
-    let cwd = job.cwd.clone().or_else(|| job.shell.and_then(process_cwd));
+    let cwd = job
+        .cwd
+        .clone()
+        .or_else(|| job.process.and_then(process_cwd));
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let (candidate, path) = resolve_first(&job.candidates, cwd.as_deref(), home.as_deref())?;
     if latest.load(Ordering::Relaxed) != job.generation {
@@ -828,6 +749,7 @@ fn build(job: &Job, latest: &AtomicU64) -> Option<(Candidate, Image)> {
 /// A card the worker finished, for the UI thread.
 pub struct Ready {
     generation: u64,
+    pane: u64,
     line: u64,
     card: Option<(Candidate, Image)>,
 }
@@ -844,12 +766,14 @@ impl std::fmt::Debug for Ready {
 
 #[derive(Debug, PartialEq)]
 struct Key {
+    pane: u64,
     line: u64,
     candidates: Vec<Candidate>,
     cwd: Option<PathBuf>,
 }
 
 struct Shown {
+    pane: u64,
     line: u64,
     candidate: Candidate,
     image: Arc<Image>,
@@ -857,7 +781,7 @@ struct Shown {
 }
 
 pub struct HoverPreview {
-    pub osc7: Osc7,
+    hostname: Vec<u8>,
     latest: Arc<AtomicU64>,
     pending: Option<Key>,
     shown: Option<Shown>,
@@ -866,7 +790,7 @@ pub struct HoverPreview {
 impl HoverPreview {
     pub fn new() -> HoverPreview {
         HoverPreview {
-            osc7: Osc7::new(),
+            hostname: hostname(),
             latest: Arc::new(AtomicU64::new(0)),
             pending: None,
             shown: None,
@@ -877,35 +801,34 @@ impl HoverPreview {
 impl App {
     /// What the pointer is over, if a preview should be looked for.
     fn hover_preview_target(&self) -> Option<Job> {
-        let preview = self.hover_preview.as_ref()?;
-        if !self.focused || !links::command_modifier(self.modifiers) {
+        if !self.config.hover_preview || !self.focused || !links::command_modifier(self.modifiers) {
             return None;
         }
-        let cwd = match &preview.osc7.reported {
-            Some(Reported::Remote) => return None,
-            Some(Reported::Local(dir)) => Some(dir.clone()),
+        let s = self.session.as_ref()?;
+        let cwd = match s.term.working_directory() {
+            Some(reported) => Some(crate::local_working_directory(Some(reported))?),
             None => None,
         };
-        let s = self.session.as_ref()?;
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
-        if crate::pointer_in_search_bar(
-            self.search.is_some(),
-            self.mouse_pos,
-            s.window.inner_size(),
-            cell,
-        ) || !crate::pointer_in_grid(
-            self.mouse_pos,
-            self.config.padding as f64 * s.window.scale_factor(),
-            (s.term.cols(), s.term.rows()),
-            cell,
-        ) {
+        let pad = self.config.padding * s.window.scale_factor() as f32;
+        if crate::pointer_in_search_bar(self.search.is_some(), self.mouse_pos, s.grid_px(), cell)
+            || term_render::ledger_bar(&s.term, pad, s.scroll.offset as f32, cell.1)
+                .is_some_and(|bar| bar.contains(self.mouse_pos.y as f32))
+            || !crate::pointer_in_grid(
+                self.mouse_pos,
+                pad as f64,
+                (s.term.cols(), s.term.rows()),
+                cell,
+            )
+        {
             return None;
         }
         let (row, col) = self.cell_at(self.mouse_pos)?;
-        let line = s.term.viewport_to_point_signed(row, col).line;
-        let candidates = match self.hover_link() {
+        let point = s.term.viewport_to_point_signed(row, col);
+        let candidates = match s.term.link_at(point) {
             Some(link) => {
-                let Reported::Local(path) = parse_uri(link.uri.as_bytes(), &preview.osc7.hostname)?
+                let Reported::Local(path) =
+                    parse_uri(link.uri.as_bytes(), &self.hover_preview.hostname)?
                 else {
                     return None;
                 };
@@ -923,10 +846,11 @@ impl App {
         }
         Some(Job {
             generation: 0,
-            line,
+            pane: s.pane,
+            line: point.line,
             candidates,
             cwd,
-            shell: s.pty.shell_pid(),
+            process: None,
             style: Style {
                 fg: s.term.palette.foreground,
                 bg: s.term.palette.background,
@@ -937,15 +861,11 @@ impl App {
 
     /// Starts looking for a preview of what the pointer is over, or hides the one shown.
     pub(crate) fn refresh_hover_preview(&mut self) {
-        if self.hover_preview.is_none() {
-            return;
-        }
         let job = self.hover_preview_target();
         let proxy = self.proxy.clone();
-        let Some(preview) = &mut self.hover_preview else {
-            return;
-        };
+        let preview = &mut self.hover_preview;
         let key = job.as_ref().map(|job| Key {
+            pane: job.pane,
             line: job.line,
             candidates: job.candidates.clone(),
             cwd: job.cwd.clone(),
@@ -958,6 +878,12 @@ impl App {
         let hid = preview.shown.take().is_some();
         if let Some(mut job) = job {
             job.generation = generation;
+            job.process = self.session.as_ref().and_then(|s| {
+                s.pty
+                    .running_program()
+                    .and_then(|group| u32::try_from(group).ok())
+                    .or_else(|| s.pty.shell_pid())
+            });
             let latest = preview.latest.clone();
             let _ = std::thread::Builder::new()
                 .name("hover preview".into())
@@ -965,6 +891,7 @@ impl App {
                     let card = build(&job, &latest);
                     let ready = Ready {
                         generation,
+                        pane: job.pane,
                         line: job.line,
                         card,
                     };
@@ -977,13 +904,12 @@ impl App {
     }
 
     pub(crate) fn hover_preview_ready(&mut self, ready: Ready) {
-        let Some(preview) = &mut self.hover_preview else {
-            return;
-        };
+        let preview = &mut self.hover_preview;
         if ready.generation != preview.latest.load(Ordering::Relaxed) {
             return;
         }
         preview.shown = ready.card.map(|(candidate, image)| Shown {
+            pane: ready.pane,
             line: ready.line,
             candidate,
             image: Arc::new(image),
@@ -994,24 +920,17 @@ impl App {
         }
     }
 
-    /// The underline under the previewed path and the card, for this frame.
-    pub(crate) fn hover_preview_overlay(&self) -> (Option<Link>, Option<FloatingImage>) {
-        let Some(shown) = self.hover_preview.as_ref().and_then(|p| p.shown.as_ref()) else {
-            return (None, None);
-        };
-        let Some(s) = &self.session else {
-            return (None, None);
-        };
+    /// The card and the underline under the previewed path, for this frame.
+    pub(crate) fn hover_preview_overlay(&self) -> Option<FloatingImage> {
+        let shown = self.hover_preview.shown.as_ref()?;
+        let s = self.session.as_ref().filter(|s| s.pane == shown.pane)?;
         let top = s.term.viewport_to_point(0, 0).line;
-        let Some(row) = shown
+        let row = shown
             .line
             .checked_sub(top)
-            .filter(|&r| r < s.term.rows() as u64)
-        else {
-            return (None, None);
-        };
+            .filter(|&r| r < s.term.rows() as u64)?;
         let c = &shown.candidate;
-        let link = (c.end > c.start).then(|| Link {
+        let underline = (c.end > c.start).then(|| Link {
             uri: String::new(),
             start: Point {
                 line: shown.line,
@@ -1026,7 +945,7 @@ impl App {
         let (cw, ch) = (s.fonts.metrics.width, s.fonts.metrics.height);
         let pad = self.config.padding * s.window.scale_factor() as f32;
         let row_top = pad + row as f32 * ch + s.scroll.offset as f32;
-        let size = s.window.inner_size();
+        let size = s.grid_px();
         let pos = place(
             pad + c.start as f32 * cw,
             row_top,
@@ -1038,8 +957,9 @@ impl App {
             image: shown.image.clone(),
             version: shown.version,
             pos,
+            underline,
         };
-        (link, Some(floating))
+        Some(floating)
     }
 }
 
@@ -1060,16 +980,6 @@ mod tests {
 
     fn at(line: &str, word: &str) -> usize {
         line.find(word).unwrap() + 1
-    }
-
-    #[test]
-    fn opt_in_values() {
-        assert!(enabled(Some(OsStr::new("1"))));
-        assert!(enabled(Some(OsStr::new("true"))));
-        assert!(enabled(Some(OsStr::new(" On "))));
-        assert!(!enabled(Some(OsStr::new("0"))));
-        assert!(!enabled(Some(OsStr::new(""))));
-        assert!(!enabled(None));
     }
 
     #[test]
@@ -1251,47 +1161,6 @@ mod tests {
             parse_uri(b"file:///caf%C3%A9", host),
             Some(Reported::Local("/café".into()))
         );
-    }
-
-    #[test]
-    fn osc7_follows_the_latest_report() {
-        let mut osc7 = Osc7::default();
-        osc7.scan(b"plain output");
-        assert_eq!(osc7.reported, None);
-        osc7.scan(b"\x1b]7;file:///one\x07prompt$ \x1b]7;file:///two\x1b\\");
-        assert_eq!(osc7.reported, Some(Reported::Local("/two".into())));
-        osc7.scan(b"\x1b]7;file://elsewhere/x\x07");
-        assert_eq!(osc7.reported, Some(Reported::Remote));
-    }
-
-    #[test]
-    fn osc7_split_across_reads() {
-        let report = b"ls\r\n\x1b]7;file:///srv/my%20app\x1b\\$ ";
-        for split in 0..report.len() {
-            let mut osc7 = Osc7::default();
-            osc7.scan(&report[..split]);
-            osc7.scan(&report[split..]);
-            assert_eq!(
-                osc7.reported,
-                Some(Reported::Local("/srv/my app".into())),
-                "split at {split}"
-            );
-        }
-        let mut osc7 = Osc7::default();
-        for byte in report {
-            osc7.scan(std::slice::from_ref(byte));
-        }
-        assert_eq!(osc7.reported, Some(Reported::Local("/srv/my app".into())));
-    }
-
-    #[test]
-    fn osc7_gives_up_on_unterminated_reports() {
-        let mut osc7 = Osc7::default();
-        osc7.scan(b"\x1b]7;file:///");
-        osc7.scan(&vec![b'a'; MAX_PATH * 4]);
-        assert!(osc7.partial.is_empty());
-        osc7.scan(b"\x1b]7;file:///ok\x07");
-        assert_eq!(osc7.reported, Some(Reported::Local("/ok".into())));
     }
 
     #[test]

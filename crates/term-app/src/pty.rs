@@ -731,7 +731,7 @@ impl Pty {
 
     /// The shell's process id.
     pub fn shell_pid(&self) -> Option<u32> {
-        self.child.process_id()
+        self.child.as_ref()?.process_id()
     }
 
     /// The process group of a program running in the foreground instead of the shell.
