@@ -2063,6 +2063,7 @@ impl App {
         if let Some(pos) = pos
             && pos != self.tab_pointer
         {
+            self.typing_pointer.show();
             self.pointer_moved(pos);
         }
     }
