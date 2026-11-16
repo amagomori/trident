@@ -165,6 +165,9 @@ enum UserEvent {
     /// The pointer moved with Cmd held; its position is read back from AppKit.
     #[cfg(target_os = "macos")]
     PointerMoved,
+    /// A window left native fullscreen, and AppKit has set its frame.
+    #[cfg(target_os = "macos")]
+    ExitedFullScreen,
 }
 
 struct Options {
@@ -855,6 +858,41 @@ fn new_tab_frame(fullscreen: bool, current: Option<Frame>, normal: Option<Frame>
     }
 }
 
+/// Puts the window back at its pre-fullscreen frame once AppKit has left fullscreen: with a
+/// tab opened while fullscreen active, AppKit restores the tab group screen-sized.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct FullscreenExit {
+    was_fullscreen: bool,
+    restore: Option<Frame>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl FullscreenExit {
+    /// Called on each frame change with the frame from before fullscreen; whether the
+    /// current frame is a normal one to remember, not fullscreen or on the way out of it.
+    fn observe(&mut self, fullscreen: bool, normal: Option<Frame>) -> bool {
+        if fullscreen {
+            self.was_fullscreen = true;
+            self.restore = None;
+            return false;
+        }
+        if std::mem::take(&mut self.was_fullscreen) {
+            self.restore = normal;
+        }
+        self.restore.is_none()
+    }
+
+    /// Once AppKit has left fullscreen: the frame to move the window from `current` to.
+    fn finish(&mut self, current: Option<Frame>, normal: Option<Frame>) -> Option<Frame> {
+        let was_fullscreen = std::mem::take(&mut self.was_fullscreen);
+        self.restore
+            .take()
+            .or(if was_fullscreen { normal } else { None })
+            .filter(|&frame| Some(frame) != current)
+    }
+}
+
 /// The fullscreen state `toggle_fullscreen` asks for: borderless on the current monitor,
 /// or windowed again.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -1228,6 +1266,8 @@ struct App {
     /// The window's frame while not fullscreen, swapped in with the tab like `normal_cells`.
     #[cfg(target_os = "macos")]
     normal_frame: Option<Frame>,
+    #[cfg(target_os = "macos")]
+    fullscreen_exit: FullscreenExit,
     icons: app_icon::Shown,
     /// Until the startup icons are set up: the latest time to do it.
     icons_latest: Option<Instant>,
@@ -1343,6 +1383,8 @@ impl App {
             normal_cells: window_state::DEFAULT_CELLS,
             #[cfg(target_os = "macos")]
             normal_frame: None,
+            #[cfg(target_os = "macos")]
+            fullscreen_exit: FullscreenExit::default(),
             icons: app_icon::Shown::default(),
             icons_latest: None,
             output_at: Instant::now(),
@@ -1652,11 +1694,30 @@ impl App {
     #[cfg(target_os = "macos")]
     fn note_normal_frame(&mut self) {
         let Some(s) = &self.session else { return };
-        if is_fullscreen(&s.window) {
+        if !self
+            .fullscreen_exit
+            .observe(is_fullscreen(&s.window), self.normal_frame)
+        {
             return;
         }
         if let Ok(position) = s.window.outer_position() {
             self.normal_frame = Some((position, s.size));
+        }
+    }
+
+    /// Moves the active window back to the frame it had before fullscreen, if AppKit left
+    /// fullscreen at another one.
+    #[cfg(target_os = "macos")]
+    fn restore_normal_frame(&mut self) {
+        let Some(s) = &self.session else { return };
+        let current = s
+            .window
+            .outer_position()
+            .ok()
+            .map(|position| (position, s.window.inner_size()));
+        if let Some((position, size)) = self.fullscreen_exit.finish(current, self.normal_frame) {
+            let _ = s.window.request_inner_size(size);
+            s.window.set_outer_position(position);
         }
     }
 
@@ -3914,6 +3975,8 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(target_os = "macos")]
                 native_tabs::watch_command_moves();
                 #[cfg(target_os = "macos")]
+                native_tabs::observe_fullscreen_exit();
+                #[cfg(target_os = "macos")]
                 native_tabs::install_window_menu();
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
@@ -3951,6 +4014,8 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::NewTab => self.new_tab(event_loop),
             #[cfg(target_os = "macos")]
             UserEvent::PointerMoved => self.sync_pointer(),
+            #[cfg(target_os = "macos")]
+            UserEvent::ExitedFullScreen => self.restore_normal_frame(),
             #[cfg(target_os = "linux")]
             UserEvent::Appearance(generation, theme) => {
                 if self.appearance_watch.is_some() && generation == self.appearance_generation {
@@ -4828,6 +4893,31 @@ mod tests {
         assert_eq!(new_tab_frame(true, Some(full), None), Some(full));
         assert_eq!(new_tab_frame(false, Some(normal), Some(full)), Some(normal));
         assert_eq!(new_tab_frame(false, None, Some(normal)), None);
+    }
+
+    #[test]
+    fn leaving_fullscreen_restores_the_frame_from_before_it() {
+        let normal = (PhysicalPosition::new(394, 149), PhysicalSize::new(812, 614));
+        let zoomed = (PhysicalPosition::new(0, 30), PhysicalSize::new(1600, 1088));
+        let mut exit = FullscreenExit::default();
+        assert!(exit.observe(false, Some(normal)));
+        assert_eq!(exit.finish(Some(normal), Some(normal)), None);
+        assert!(!exit.observe(true, Some(normal)));
+        assert!(!exit.observe(true, Some(normal)));
+        // AppKit's frames on the way out are not remembered, and the window goes back.
+        assert!(!exit.observe(false, Some(normal)));
+        assert!(!exit.observe(false, Some(zoomed)));
+        assert_eq!(exit.finish(Some(zoomed), Some(normal)), Some(normal));
+        assert!(exit.observe(false, Some(zoomed)));
+        assert_eq!(exit.finish(Some(normal), Some(zoomed)), None);
+        // Also when no frame change came before the exit finished.
+        assert!(!exit.observe(true, Some(normal)));
+        assert_eq!(exit.finish(Some(zoomed), Some(normal)), Some(normal));
+        // A window AppKit already put back is left alone.
+        assert!(!exit.observe(true, Some(normal)));
+        assert!(!exit.observe(false, Some(normal)));
+        assert_eq!(exit.finish(Some(normal), Some(normal)), None);
+        assert!(exit.observe(false, Some(normal)));
     }
 
     #[test]

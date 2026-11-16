@@ -8,10 +8,10 @@ use std::ptr::NonNull;
 use block2::RcBlock;
 use objc2::rc::Allocated;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-use objc2::{class, msg_send, sel};
+use objc2::runtime::{AnyClass, AnyObject, Imp, NSObject, Sel};
+use objc2::{MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel};
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{NSArray, NSObjectProtocol, NSString};
 use winit::dpi::PhysicalPosition;
 use winit::event_loop::EventLoopProxy;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -24,6 +24,16 @@ pub const TABBING_IDENTIFIER: &str = "trident";
 
 thread_local! {
     static PROXY: RefCell<Option<EventLoopProxy<UserEvent>>> = const { RefCell::new(None) };
+    static FULLSCREEN_EXIT: RefCell<Option<Retained<FullscreenExitObserver>>> =
+        const { RefCell::new(None) };
+}
+
+fn send(event: UserEvent) {
+    PROXY.with(|slot| {
+        if let Some(proxy) = &*slot.borrow() {
+            let _ = proxy.send_event(event);
+        }
+    });
 }
 
 fn ns_window(window: &Window) -> Option<Retained<AnyObject>> {
@@ -119,10 +129,57 @@ pub fn handle_new_tab_button(window: &Window, proxy: EventLoopProxy<UserEvent>) 
 }
 
 unsafe extern "C-unwind" fn new_window_for_tab(_: *mut AnyObject, _: Sel, _: *mut AnyObject) {
-    PROXY.with(|slot| {
-        if let Some(proxy) = &*slot.borrow() {
-            let _ = proxy.send_event(UserEvent::NewTab);
+    send(UserEvent::NewTab);
+}
+
+define_class!(
+    /// Hears every window leave native fullscreen.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TridentFullscreenExitObserver"]
+    struct FullscreenExitObserver;
+
+    unsafe impl NSObjectProtocol for FullscreenExitObserver {}
+
+    impl FullscreenExitObserver {
+        #[unsafe(method(windowDidExitFullScreen:))]
+        fn did_exit(&self, _notification: Option<&AnyObject>) {
+            send(UserEvent::ExitedFullScreen);
         }
+    }
+);
+
+/// Sends `UserEvent::ExitedFullScreen` whenever a window has left native fullscreen. The
+/// event arrives after AppKit and winit have finished setting the window's frame. Needs
+/// `handle_new_tab_button` first, which hands over the event loop proxy.
+pub fn observe_fullscreen_exit() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    FULLSCREEN_EXIT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return;
+        }
+        // SAFETY: NSObject's `init` on a fresh allocation.
+        let observer: Retained<FullscreenExitObserver> =
+            unsafe { msg_send![FullscreenExitObserver::alloc(mtm), init] };
+        let name = NSString::from_str("NSWindowDidExitFullScreenNotification");
+        // SAFETY: on the main thread; the observer answers the selector, which takes the
+        // notification, and stays alive in `slot`, since the center does not retain it. A nil
+        // object observes every window.
+        unsafe {
+            let center: Retained<AnyObject> =
+                msg_send![class!(NSNotificationCenter), defaultCenter];
+            let _: () = msg_send![
+                &*center,
+                addObserver: &*observer,
+                selector: sel!(windowDidExitFullScreen:),
+                name: &*name,
+                object: std::ptr::null::<AnyObject>()
+            ];
+        }
+        *slot = Some(observer);
     });
 }
 
