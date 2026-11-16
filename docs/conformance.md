@@ -1,11 +1,11 @@
 # Conformance: vttest and esctest
 
-Trident's terminal core (`term-core`) is checked against
-[vttest](https://invisible-island.net/vttest/) and
-[esctest2](https://github.com/ThomasDickey/esctest2) with the `vtrun` example, which runs a
-program on a pseudo-terminal with `term-core` as the terminal and sends its replies back.
+This page is for contributors. It shows how to run [vttest](https://invisible-island.net/vttest/)
+and [esctest2](https://github.com/ThomasDickey/esctest2) against Trident's terminal core
+(`term-core`), and which tests fail and why. The `vtrun` example runs a program on a
+pseudo-terminal with `term-core` as the terminal and sends its replies back.
 
-## Running
+## Run the suites
 
 ```sh
 cargo build --release -p term-core --example vtrun
@@ -19,9 +19,10 @@ $VTRUN --idle 5000 -- python3 esctest.py --expected-terminal=xterm --max-vt-leve
 $VTRUN --idle 400 --key '1\r' --key '\r' --key '\r' --key '0\r' -- vttest
 ```
 
-`vtrun` turns on DECRQCRA checksums (`Terminal::set_checksum_reports`), which esctest uses to
-read the screen. The app leaves them off: they let any program writing to the terminal read
-the screen back. Keys typed by `vtrun` are raw bytes, not the app's key encoder.
+- `vtrun` turns on DECRQCRA checksums (`Terminal::set_checksum_reports`), which esctest uses to
+  read the screen. The app leaves them off, because they let any program that writes to the
+  terminal read the screen back.
+- Keys that `vtrun` types are raw bytes. They don't go through the app's key encoder.
 
 ## esctest results
 
@@ -37,11 +38,6 @@ xterm expectations, VT level 4: **294 passed**, 43 xterm known bugs skipped, 230
 | 34 | XTWINOPS window ops, title stack, DECSLPP, DECCOLM 132 columns | [KAN-139](https://jarettforzano.atlassian.net/browse/KAN-139) |
 | 26 | Reverse wraparound (45), more(1) fix (41), DECSCL, remaining DECRQM/DECRQSS settings | [KAN-140](https://jarettforzano.atlassian.net/browse/KAN-140) |
 | 4 | DA1/DA2: Trident reports a VT220 (`CSI ? 62 ; 22 c`, `CSI > 0 ; 10 ; 1 c`), not xterm's VT420 | intentional |
-
-Added with KAN-19: DECRQCRA, DEC private DSRs (DECXCPR, printer, UDK, keyboard, locator,
-DECMSR, DECCKSR, data integrity, sessions), DECID, ANSI DECRQM, DECRQSS (SGR, DECSTBM,
-DECSCUSR), XTSAVE/XTRESTORE, DECALN homing the cursor and clearing margins, and DECSTR
-resetting the saved cursor, keypad mode and character sets.
 
 ## vttest results (menus 1-6)
 
