@@ -22,6 +22,9 @@ This example shows every setting with its default or an example value:
 # font = "/path/to/mono.ttf" # default: bundled JetBrains Mono
 font_size = 14.0            # 4..=200 points
 padding = 6.0               # 0..=1000 logical pixels
+# window_columns = 100      # first window's width in cells; default: last closed window's, or 100
+# window_rows = 30          # first window's height in cells; default: last closed window's, or 30
+remember_window_size = true # false: always open at window_columns x window_rows
 scrollback = 10000          # retained lines; 0 disables history (or use the [scrollback] table below)
 drop_preview = true         # false: file drops insert only the shell-quoted path
 paste_protection = true     # false: never confirm multi-line or control-character pastes
@@ -75,6 +78,14 @@ the shell or the running program, including committed IME text and `{ send = "..
 Moving the mouse, clicking, scrolling or switching focus shows it again. Modifier keys and
 shortcuts such as copy, tab switching and font size don't hide it, and mouse reporting to programs
 works as before.
+
+`window_columns` and `window_rows` set the first window's size in cells (1..=10000, then kept to
+at least 20 by 5 and to what fits on the screen). Setting either one opens at that size every time,
+with 100 or 30 for the other. Otherwise, with `remember_window_size = true`, the size in cells and
+the maximized state of the last window to close are saved to `$XDG_STATE_HOME/trident/window.toml`
+(`~/.local/state/trident/window.toml` when unset; `~/Library/Application Support/Trident/window.toml`
+on macOS) and reused at the next launch. A missing or unreadable file means 100 by 30. Windows
+opened with Ctrl+Shift+N (Cmd+N on macOS) take the size of the window they were opened from.
 
 `vsync = false` shows frames without waiting for the display refresh. This can lower latency but
 can cause tearing. Where the graphics driver can't turn vsync off, such as OpenGL on Linux, vsync
