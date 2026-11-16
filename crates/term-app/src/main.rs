@@ -40,6 +40,7 @@ use config::Action;
 use input::MouseButton as ReportButton;
 use pty::Pty;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::{File, FileType};
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
@@ -191,13 +192,35 @@ impl Options {
         }
     }
 
-    fn command<'a>(&'a self, config: &'a config::Config) -> &'a [String] {
-        if self.command.is_empty() {
+    /// What the window's first tab runs: `-e`'s command, else the shell. New tabs
+    /// always run the shell.
+    fn command<'a>(&'a self, config: &'a config::Config, first_tab: bool) -> &'a [String] {
+        if self.command.is_empty() || !first_tab {
             &config.shell
         } else {
             &self.command
         }
     }
+}
+
+/// The arguments a new window is started with: this launch's, without `-e` and its
+/// command, so the new window opens the shell.
+fn new_window_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut kept = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "-e" || arg == "--command" {
+            break;
+        }
+        let takes_value = ["--config", "--scrollback", "--font", "--font-size"]
+            .iter()
+            .any(|option| arg == *option);
+        kept.push(arg);
+        if takes_value && let Some(value) = args.next() {
+            kept.push(value);
+        }
+    }
+    kept
 }
 
 fn usage() -> ! {
@@ -1303,6 +1326,7 @@ impl App {
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let pty = self.spawn_pty(
             0,
+            self.options.command(&self.config, true),
             self.options.working_directory.as_deref(),
             spawn_cols,
             spawn_rows,
@@ -1453,6 +1477,7 @@ impl App {
     fn spawn_pty(
         &self,
         id: u64,
+        command: &[String],
         cwd: Option<&std::path::Path>,
         cols: usize,
         rows: usize,
@@ -1466,7 +1491,7 @@ impl App {
             env.insert("TERM".into(), term.into());
         }
         let mut pty = Pty::spawn(
-            self.options.command(&self.config),
+            command,
             &env,
             cwd,
             cols,
@@ -1560,7 +1585,14 @@ impl App {
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         self.next_pane += 1;
         let id = self.next_pane;
-        let pty = match self.spawn_pty(id, cwd.as_deref(), cols, rows, cell) {
+        let pty = match self.spawn_pty(
+            id,
+            self.options.command(&self.config, false),
+            cwd.as_deref(),
+            cols,
+            rows,
+            cell,
+        ) {
             Ok(pty) => pty,
             Err(error) => {
                 diag!("trident: new tab: {error}");
@@ -2964,7 +2996,7 @@ impl App {
                                 let (stderr, startup_stderr) = new_window_stderr();
                                 let mut command = std::process::Command::new(exe);
                                 command
-                                    .args(std::env::args_os().skip(1))
+                                    .args(new_window_args(std::env::args_os().skip(1)))
                                     .stdin(Stdio::null())
                                     .stdout(Stdio::null())
                                     .stderr(stderr);
@@ -4761,7 +4793,8 @@ mod tests {
         );
         assert_eq!(options.size(&config), 22.0);
         assert_eq!(options.scrollback(&config), 42);
-        assert_eq!(options.command(&config), ["zsh", "-l"]);
+        assert_eq!(options.command(&config, true), ["zsh", "-l"]);
+        assert_eq!(options.command(&config, false), ["zsh", "-l"]);
         options.font = Some("/cli.ttf".into());
         options.font_size_override = true;
         options.font_size = 18.0;
@@ -4776,7 +4809,8 @@ mod tests {
         let mut reloaded = config.clone();
         reloaded.scrollback = 123;
         assert_eq!(options.scrollback(&reloaded), 90);
-        assert_eq!(options.command(&config), ["bash"]);
+        assert_eq!(options.command(&config, true), ["bash"]);
+        assert_eq!(options.command(&config, false), ["zsh", "-l"]);
     }
 
     fn batch(bytes: &[u8]) -> pty::Output {
@@ -5524,6 +5558,56 @@ mod tests {
         assert_eq!(term.selection_text().as_deref(), Some("hello"));
         select_at(&mut term, point, ModifiersState::SHIFT, 3);
         assert_eq!(term.selection_text().as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn new_windows_drop_the_command_and_keep_other_options() {
+        let args = |list: &[&str]| -> Vec<OsString> { list.iter().map(OsString::from).collect() };
+        assert_eq!(
+            new_window_args(args(&[
+                "--font-size",
+                "14",
+                "-e",
+                "sh",
+                "-c",
+                "echo ran; exec zsh",
+            ])),
+            args(&["--font-size", "14"])
+        );
+        assert_eq!(
+            new_window_args(args(&[
+                "--copy-on-select",
+                "--command",
+                "vim",
+                "--config",
+                "x"
+            ])),
+            args(&["--copy-on-select"])
+        );
+        assert_eq!(
+            new_window_args(args(&[
+                "--config",
+                "-e",
+                "--font",
+                "--command",
+                "-e",
+                "top"
+            ])),
+            args(&["--config", "-e", "--font", "--command"])
+        );
+        assert_eq!(
+            new_window_args(args(&["--option-as-alt", "--scrollback", "5"])),
+            args(&["--option-as-alt", "--scrollback", "5"])
+        );
+        assert!(new_window_args(args(&["-e", "top"])).is_empty());
+        let options = parse_args_from(
+            new_window_args(args(&["--font-size", "14", "-e", "top"]))
+                .into_iter()
+                .map(|arg| arg.into_string().unwrap()),
+        )
+        .unwrap();
+        assert!(options.command.is_empty());
+        assert_eq!(options.font_size, 14.0);
     }
 
     #[test]
