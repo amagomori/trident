@@ -122,7 +122,8 @@ could then read what you copied.
 Closing a window at an idle shell prompt closes it at once. If a program such as vim, ssh or a
 build is running, a banner names it and asks first: Enter or a second close closes the window,
 and Escape keeps it. A command started with `-e` counts as a running program, unless it's a shell
-at its prompt. On macOS, Close Window and quitting the app ask the same way. To always close
+at its prompt. On macOS, Close Window and quitting the app ask the same way, and quitting closes
+every window opened with New Window, each asking for its own running program. To always close
 immediately, set `confirm_close = false`.
 
 ## Secure Keyboard Entry
