@@ -21,7 +21,7 @@ or `cat` numbers. These numbers compare terminals on one machine; they aren't re
 ## Run it
 
 ```sh
-sudo apt install xvfb openbox python3-xlib fonts-jetbrains-mono
+sudo apt install xvfb openbox python3-xlib xdotool fonts-jetbrains-mono
 .github/scripts/compare/run.sh rounds   # about 50 minutes; prints every metric with noise bounds
 ```
 

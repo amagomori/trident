@@ -124,7 +124,7 @@ No terminal is instrumented. Each one gets the matching config in `compare/cfg/`
 14, 100x30, 10,000 lines of scrollback).
 
 ```sh
-sudo apt install xvfb openbox python3-xlib fonts-jetbrains-mono
+sudo apt install xvfb openbox python3-xlib xdotool fonts-jetbrains-mono
 .github/scripts/compare/run.sh           # one pass; tables in target/compare/results.md
 .github/scripts/compare/run.sh rounds    # two rounds with noise bounds, as in benchmarks.md
 ```
