@@ -37,7 +37,6 @@ impl Terminal {
                 self.lines_mut()[row].set_wrapped(true);
                 self.cursor.col = 0;
                 self.linefeed();
-                self.reset_input_cursor();
             }
             let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
             let count = bytes.len().min(cols - col);
@@ -51,6 +50,9 @@ impl Terminal {
                 cell.c = b as char;
             }
             let end = col + count;
+            if self.shell.track_input {
+                self.record_printed(row, col..end);
+            }
             self.cursor.pending_wrap = end == cols;
             self.cursor.col = end.min(cols - 1);
             bytes = &bytes[count..];

@@ -47,7 +47,7 @@ struct ShellState {
     output_ends: Vec<OutputEnd>,
     prompt_line: Option<u64>,
     input_start: Option<(u64, usize)>,
-    input_cursor: Option<(u64, usize)>,
+    track_input: bool,
     input_writes: Vec<(u64, std::ops::Range<usize>)>,
     /// The prompt asked for clicks as SGR mouse reports (`OSC 133 ; A ; click_events=1`).
     click_events: bool,
@@ -940,7 +940,7 @@ impl Terminal {
                 output_ends: Vec::new(),
                 prompt_line: None,
                 input_start: None,
-                input_cursor: None,
+                track_input: false,
                 input_writes: Vec::new(),
                 click_events: false,
                 commands: VecDeque::new(),
@@ -1008,7 +1008,6 @@ impl Terminal {
         let pending_wrap = self.cursor.pending_wrap;
         self.advance(bytes);
         self.cursor.pending_wrap = pending_wrap;
-        self.reset_input_cursor();
     }
 
     /// Feed bytes from the shell.
@@ -1413,7 +1412,6 @@ impl Terminal {
             *point = tracked;
         }
         self.prompt_redraw = !self.alt_active && (editing || self.shell.zone == Zone::Input);
-        self.reset_input_cursor();
     }
 
     // ---- Selection ----
@@ -1771,23 +1769,14 @@ impl Terminal {
         let end = self.cursor.col + usize::from(self.cursor.pending_wrap);
         let row = self.cursor.row;
         self.lines_mut()[row].touch(end);
-        if let Some((line, start)) = self.shell.input_cursor
-            && !self.alt_active
-        {
-            let current = self.history + row as u64;
-            if line == current && start < end {
-                self.record_input_write(line, start..end);
-            }
-            self.shell.input_cursor = Some((current, end));
-        }
     }
 
-    fn reset_input_cursor(&mut self) {
-        if self.shell.input_cursor.is_some() {
-            self.shell.input_cursor = Some((
-                self.history + self.cursor.row as u64,
-                self.cursor.col + usize::from(self.cursor.pending_wrap),
-            ));
+    /// Notes printed prompt input, so padding a right prompt skips over is not mistaken
+    /// for typed spaces.
+    #[cold]
+    fn record_printed(&mut self, row: usize, cols: std::ops::Range<usize>) {
+        if !self.alt_active {
+            self.record_input_write(self.history + row as u64, cols);
         }
     }
 
@@ -1871,6 +1860,20 @@ impl Terminal {
     }
 
     fn put_char(&mut self, c: char) {
+        if self.shell.track_input {
+            return self.put_tracked_char(c);
+        }
+        self.put_char_cells(c, false)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn put_tracked_char(&mut self, c: char) {
+        self.put_char_cells(c, true)
+    }
+
+    #[inline(always)]
+    fn put_char_cells(&mut self, c: char, track: bool) {
         let c = match self.charsets[self.active_charset] {
             Charset::DecSpecial => dec_special(c),
             Charset::Uk if c == '#' => '\u{a3}',
@@ -1890,7 +1893,6 @@ impl Terminal {
             self.lines_mut()[row].set_wrapped(true);
             self.cursor.col = 0;
             self.linefeed();
-            self.reset_input_cursor();
         }
         if width == 2 && self.cursor.col == self.cols - 1 {
             if self.modes.autowrap {
@@ -1905,7 +1907,6 @@ impl Terminal {
                 line.set_wrapped(true);
                 self.cursor.col = 0;
                 self.linefeed();
-                self.reset_input_cursor();
             } else {
                 self.print_state.disarm_clear();
                 return;
@@ -1915,7 +1916,7 @@ impl Terminal {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
         let template = self.cursor.template;
         let insert = self.modes.insert;
-        if insert && self.shell.input_cursor.is_some() {
+        if insert && track {
             self.shift_input_writes(row, col, 0, width);
         }
         let line = &mut self.lines_mut()[row];
@@ -1941,6 +1942,9 @@ impl Terminal {
         line.cells[col] = cell;
 
         self.print_state = PrintState(c as u32);
+        if track {
+            self.record_printed(row, col..col + width);
+        }
         if col + width >= cols {
             self.cursor.col = cols - 1;
             self.cursor.pending_wrap = true;
@@ -2150,7 +2154,7 @@ impl Terminal {
 
     fn insert_blank(&mut self, n: usize) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
-        if self.shell.input_cursor.is_some() {
+        if self.shell.track_input {
             self.shift_input_writes(row, col, 0, n.min(cols - col));
         }
         if !self.screen().placements.is_empty() {
@@ -2176,7 +2180,7 @@ impl Terminal {
 
     fn delete_chars(&mut self, n: usize) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
-        if self.shell.input_cursor.is_some() {
+        if self.shell.track_input {
             self.shift_input_writes(row, col, n.min(cols - col), 0);
         }
         if !self.screen().placements.is_empty() {
