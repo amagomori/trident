@@ -1,7 +1,7 @@
 //! App icons: the bundled set from `assets/icons/` (built by `assets/generate_icons.py`),
-//! picked with `app_icon` in the config. macOS shows the pick in the Dock (an .icns holding
-//! every size from 16 to 1024 px) and, with `menu_bar_icon`, as a menu bar item (18 pt at 1x
-//! and 2x); X11 gets it as the window icon.
+//! picked with `app_icon` in the config. macOS shows the pick in the Dock (from an .icns
+//! holding every size from 16 to 1024 px, cut to the sizes the Dock draws) and, with
+//! `menu_bar_icon`, as a menu bar item (18 pt at 1x and 2x); X11 gets it as the window icon.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AppIcon {
@@ -89,23 +89,69 @@ impl AppIcon {
     }
 }
 
-/// The PNG stored under chunk type `kind` (e.g. `ic07`, 128 px) of an .icns file.
-#[cfg(any(target_os = "linux", test))]
-fn icns_png<'a>(icns: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+/// ICNS chunk type -> pixel size, as iconutil writes them.
+#[cfg(any(target_os = "macos", test))]
+const ICNS_TYPES: [(&[u8; 4], u32); 10] = [
+    (b"icp4", 16),
+    (b"ic11", 32),
+    (b"icp5", 32),
+    (b"ic12", 64),
+    (b"ic07", 128),
+    (b"ic13", 256),
+    (b"ic08", 256),
+    (b"ic14", 512),
+    (b"ic09", 512),
+    (b"ic10", 1024),
+];
+
+/// Largest Dock icon rep in pixels: the Dock size and magnification both top out at 128 pt,
+/// which is 256 px at 2x. AppKit keeps the larger reps' decoded pixels around (~3 MiB of
+/// open RSS for the 512 and 1024 px ones) though the Dock never draws them.
+#[cfg(any(target_os = "macos", test))]
+const DOCK_MAX_PX: u32 = 256;
+
+/// The (type, data) chunks of an .icns file.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn icns_chunks(icns: &[u8]) -> Option<Vec<(&[u8], &[u8])>> {
     let len = |bytes: &[u8]| Some(u32::from_be_bytes(bytes.get(4..8)?.try_into().ok()?) as usize);
     if icns.get(..4)? != b"icns" || len(icns)? != icns.len() {
         return None;
     }
+    let mut chunks = Vec::new();
     let mut rest = &icns[8..];
     while rest.len() >= 8 {
         let size = len(rest)?;
-        let chunk = rest.get(8..size)?;
-        if &rest[..4] == kind {
-            return Some(chunk);
-        }
+        chunks.push((&rest[..4], rest.get(8..size)?));
         rest = &rest[size..];
     }
-    None
+    Some(chunks)
+}
+
+/// The PNG stored under chunk type `kind` (e.g. `ic07`, 128 px) of an .icns file.
+#[cfg(any(target_os = "linux", test))]
+fn icns_png<'a>(icns: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+    icns_chunks(icns)?
+        .into_iter()
+        .find(|(ty, _)| ty == kind)
+        .map(|(_, png)| png)
+}
+
+/// An .icns holding only the reps of `icns` the Dock can draw (up to [`DOCK_MAX_PX`]);
+/// other chunks (a table of contents, unknown types) are dropped.
+#[cfg(any(target_os = "macos", test))]
+fn dock_icns(icns: &[u8]) -> Option<Vec<u8>> {
+    let mut out = b"icns\0\0\0\0".to_vec();
+    for (ty, data) in icns_chunks(icns)? {
+        let px = ICNS_TYPES.iter().find(|(kind, _)| &kind[..] == ty);
+        if px.is_some_and(|&(_, px)| px <= DOCK_MAX_PX) {
+            out.extend_from_slice(ty);
+            out.extend_from_slice(&(data.len() as u32 + 8).to_be_bytes());
+            out.extend_from_slice(data);
+        }
+    }
+    let len = out.len() as u32;
+    out[4..8].copy_from_slice(&len.to_be_bytes());
+    Some(out)
 }
 
 #[cfg(target_os = "linux")]
@@ -169,7 +215,10 @@ mod macos {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let data = NSData::with_bytes(icon.assets().icns);
+        let Some(icns) = super::dock_icns(icon.assets().icns) else {
+            return;
+        };
+        let data = NSData::with_bytes(&icns);
         let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
             return;
         };
@@ -293,19 +342,6 @@ mod macos {
 mod tests {
     use super::*;
 
-    const ICNS_TYPES: [(&[u8; 4], u32); 10] = [
-        (b"icp4", 16),
-        (b"ic11", 32),
-        (b"icp5", 32),
-        (b"ic12", 64),
-        (b"ic07", 128),
-        (b"ic13", 256),
-        (b"ic08", 256),
-        (b"ic14", 512),
-        (b"ic09", 512),
-        (b"ic10", 1024),
-    ];
-
     fn decode(png: &[u8]) -> image::RgbaImage {
         image::load_from_memory_with_format(png, image::ImageFormat::Png)
             .unwrap()
@@ -374,6 +410,39 @@ mod tests {
                 assert!(right - left >= 15 * scale, "{} @{scale}x", icon.name());
             }
         }
+    }
+
+    #[test]
+    fn dock_icns_keeps_only_the_reps_the_dock_draws() {
+        for icon in AppIcon::ALL {
+            let icns = icon.assets().icns;
+            let dock = dock_icns(icns).unwrap();
+            assert_eq!(icns_chunks(&dock).unwrap().len(), 7, "{}", icon.name());
+            for (kind, px) in ICNS_TYPES {
+                let kept = icns_png(&dock, kind);
+                if px <= DOCK_MAX_PX {
+                    assert_eq!(kept, icns_png(icns, kind), "{} {px}", icon.name());
+                } else {
+                    assert_eq!(kept, None, "{} {px}", icon.name());
+                }
+            }
+            assert!(
+                dock.len() < icns.len() / 3,
+                "{}: {}",
+                icon.name(),
+                dock.len()
+            );
+        }
+        assert_eq!(
+            dock_icns(b"icns\0\0\0\x08"),
+            Some(b"icns\0\0\0\x08".to_vec())
+        );
+        assert_eq!(dock_icns(b"icns\0\0\0\x10ic07\0\0\0\x20"), None);
+        assert_eq!(dock_icns(b"icns\0\0\0\x09"), None);
+        assert_eq!(
+            dock_icns(b"icns\0\0\0\x19TOC \0\0\0\x08icp4\0\0\0\x09z"),
+            Some(b"icns\0\0\0\x11icp4\0\0\0\x09z".to_vec())
+        );
     }
 
     #[test]
