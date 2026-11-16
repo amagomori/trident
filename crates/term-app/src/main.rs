@@ -889,6 +889,7 @@ fn open_window(
     label: &'static str,
     args: Vec<std::ffi::OsString>,
     working_directory: Option<PathBuf>,
+    cells: Option<String>,
     pager: Option<PagerWindow>,
 ) {
     let cleanup = pager.as_ref().map(|pager| pager.file.clone());
@@ -908,6 +909,9 @@ fn open_window(
                 }
                 if let Some(dir) = working_directory {
                     command.env(WORKING_DIRECTORY, dir);
+                }
+                if let Some(cells) = cells {
+                    command.env(WINDOW_CELLS, cells);
                 }
                 if let Some(pager) = &pager {
                     command.env(REMOVE_ON_EXIT, &pager.file);
@@ -3232,10 +3236,15 @@ impl App {
                     .session
                     .as_ref()
                     .and_then(|s| local_working_directory(s.term.working_directory()));
+                let cells = self
+                    .session
+                    .as_ref()
+                    .map(|s| window_state::format_cells((s.term.cols(), s.term.rows())));
                 open_window(
                     "new window",
                     new_window_args(std::env::args_os().skip(1)),
                     working_directory,
+                    cells,
                     None,
                 );
             }
@@ -3272,7 +3281,7 @@ impl App {
                             locale: pager_locale(var),
                             failed: self.proxy.clone(),
                         };
-                        open_window("pager", args, None, Some(pager));
+                        open_window("pager", args, None, None, Some(pager));
                     }
                     Err(error) => self.show_pager_error(error),
                 }
