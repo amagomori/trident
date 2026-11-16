@@ -186,11 +186,13 @@ impl Ghost<'_> {
         self.cluster.start(c, width == 2, at);
     }
 
-    fn at(&self) -> (usize, bool) {
-        (self.term.cursor.col, self.term.cursor.pending_wrap)
+    fn at(&self) -> usize {
+        GhostCluster::spot(self.term.cursor.col, self.term.cursor.pending_wrap)
     }
 
     /// `join_sequence`'s cursor movement: a sequence joining a narrow cell widens it.
+    #[cold]
+    #[inline(never)]
     fn join_sequence(&mut self, c: char) -> bool {
         if self.term.per_codepoint_widths() {
             return false;
@@ -223,15 +225,12 @@ impl Ghost<'_> {
 impl Perform for Ghost<'_> {
     /// `put_char` with autowrap on, insert off and the ASCII charset, minus the cell writes.
     fn print(&mut self, c: char) {
+        // vte prints only graphic ASCII, which is all one column wide.
         if c as u32 >= 0x80 {
             self.print_unicode(c);
             return;
         }
-        let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if width == 0 {
-            return;
-        }
-        self.place(c, width);
+        self.place(c, 1);
     }
 
     fn execute(&mut self, byte: u8) {

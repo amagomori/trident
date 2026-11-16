@@ -163,40 +163,59 @@ fn continues(first: char, last: char, single: bool, c: char) -> bool {
 
 /// The cluster the ghost parser (see `ghost.rs`) last printed, so skipped output moves the
 /// cursor over emoji sequences as `join_sequence` does.
-#[derive(Default)]
 pub(crate) struct GhostCluster {
     first: char,
     last: char,
     len: usize,
     wide: bool,
-    /// The cursor (column, pending wrap) right after it; anything else moved past it.
-    end: Option<(usize, bool)>,
+    /// The cursor right after it (`GhostCluster::spot`); anything else moved past it.
+    end: usize,
+}
+
+impl Default for GhostCluster {
+    fn default() -> Self {
+        GhostCluster {
+            first: '\0',
+            last: '\0',
+            len: 0,
+            wide: false,
+            end: Self::NOWHERE,
+        }
+    }
 }
 
 impl GhostCluster {
-    pub(crate) fn start(&mut self, c: char, wide: bool, end: (usize, bool)) {
+    const NOWHERE: usize = usize::MAX;
+
+    /// A cursor position, column and pending wrap, as one number.
+    #[inline(always)]
+    pub(crate) fn spot(col: usize, pending_wrap: bool) -> usize {
+        col << 1 | pending_wrap as usize
+    }
+
+    pub(crate) fn start(&mut self, c: char, wide: bool, end: usize) {
         self.first = c;
         self.last = c;
         self.len = 1;
         self.wide = wide;
-        self.end = Some(end);
+        self.end = end;
     }
 
-    pub(crate) fn push_zero_width(&mut self, c: char, at: (usize, bool)) {
-        if self.end == Some(at) && self.len < MAX_CHARS {
+    pub(crate) fn push_zero_width(&mut self, c: char, at: usize) {
+        if self.end == at && self.len < MAX_CHARS {
             self.last = c;
             self.len += 1;
         }
     }
 
     pub(crate) fn forget(&mut self) {
-        self.end = None;
+        self.end = Self::NOWHERE;
     }
 
     /// Whether `c`, printed with the cursor at `at`, joins the cluster; it then needs
     /// widening when this returns `Some(true)`.
-    pub(crate) fn join(&mut self, c: char, at: (usize, bool)) -> Option<bool> {
-        if self.end != Some(at)
+    pub(crate) fn join(&mut self, c: char, at: usize) -> Option<bool> {
+        if self.end != at
             || !(pictographic(c) || regional(c))
             || self.len >= MAX_CHARS
             || !continues(self.first, self.last, self.len == 1, c)
@@ -208,8 +227,8 @@ impl GhostCluster {
         Some(!std::mem::replace(&mut self.wide, true))
     }
 
-    pub(crate) fn moved_to(&mut self, end: (usize, bool)) {
-        self.end = Some(end);
+    pub(crate) fn moved_to(&mut self, end: usize) {
+        self.end = end;
     }
 }
 
@@ -387,7 +406,7 @@ impl Terminal {
             last: chars.next_back().unwrap_or(first),
             len: text.chars().count(),
             wide: cell.flags.contains(Flags::WIDE),
-            end: Some((self.cursor.col, self.cursor.pending_wrap)),
+            end: GhostCluster::spot(self.cursor.col, self.cursor.pending_wrap),
         }
     }
 
