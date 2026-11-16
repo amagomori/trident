@@ -158,6 +158,9 @@ enum UserEvent {
     /// The native tab bar's + button was clicked.
     #[cfg(target_os = "macos")]
     NewTab,
+    /// The pointer moved with Cmd held; its position is read back from AppKit.
+    #[cfg(target_os = "macos")]
+    PointerMoved,
 }
 
 struct Options {
@@ -2050,6 +2053,20 @@ impl App {
         }
     }
 
+    /// Catches up with a pointer move winit did not report.
+    #[cfg(target_os = "macos")]
+    fn sync_pointer(&mut self) {
+        let pos = self
+            .session
+            .as_ref()
+            .and_then(|s| native_tabs::pointer_position(&s.window));
+        if let Some(pos) = pos
+            && pos != self.tab_pointer
+        {
+            self.pointer_moved(pos);
+        }
+    }
+
     fn resize_grid(&mut self) {
         let tab_bar_shown = tab_bar_drawn(self.config.tab_bar.shown(self.tabs.len()));
         let Some(s) = &mut self.session else { return };
@@ -3565,6 +3582,8 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(target_os = "macos")]
                 native_tabs::handle_new_tab_button(&session.window, self.proxy.clone());
                 #[cfg(target_os = "macos")]
+                native_tabs::watch_command_moves();
+                #[cfg(target_os = "macos")]
                 native_tabs::install_window_menu();
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
@@ -3592,6 +3611,8 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             #[cfg(target_os = "macos")]
             UserEvent::NewTab => self.new_tab(event_loop),
+            #[cfg(target_os = "macos")]
+            UserEvent::PointerMoved => self.sync_pointer(),
             #[cfg(target_os = "linux")]
             UserEvent::Appearance(generation, theme) => {
                 if self.appearance_watch.is_some() && generation == self.appearance_generation {
@@ -3930,6 +3951,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
+                #[cfg(target_os = "macos")]
+                if links::command_modifier(self.modifiers) {
+                    self.sync_pointer();
+                }
                 self.refresh_link();
             }
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
