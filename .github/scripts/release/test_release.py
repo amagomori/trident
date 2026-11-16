@@ -41,6 +41,13 @@ class Version(Base):
         self.assertEqual(release.version_from_tag(f"v{version}"), version)
         self.assertEqual(release.version_from_tag(f"v{version}-rc.1"), f"{version}-rc.1")
 
+    def test_workspace_lockfile_matches_release_version(self):
+        locked = dict(re.findall(r'^name = "(term-app|term-core|term-render)"\n'
+                                 r'version = "([^"]+)"$',
+                                 (release.ROOT / "Cargo.lock").read_text(), re.M))
+        self.assertEqual(locked, {name: release.cargo_version()
+                                  for name in ("term-app", "term-core", "term-render")})
+
     def test_rejects_mismatch_and_bad_tags(self):
         for tag in ("v99.0.0", release.cargo_version(), "v1.2", "latest"):
             with self.assertRaises(release.ReleaseError, msg=tag):

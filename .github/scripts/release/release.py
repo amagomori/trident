@@ -4,7 +4,7 @@
 Builds are unsigned: the macOS app is only ad-hoc signed (`codesign -s -`), which Apple
 Silicon needs to run it at all; there is no Developer ID signature or notarization.
 
-  release.py version --tag v0.1.0                   check the tag against Cargo.toml
+  release.py version --tag v1.0.0                   check the tag against Cargo.toml
   release.py linux --binary B --version V --out D    tarball, .deb and (with --appimagetool
                     [--appimagetool T --runtime R]   and --runtime) an AppImage
   release.py macos --binary B --version V --out D    Trident.app and, where hdiutil exists, a .dmg

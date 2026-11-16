@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "term-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -2636,7 +2636,7 @@ dependencies = [
 
 [[package]]
 name = "term-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -2650,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "term-render"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ab_glyph",
  "ab_glyph_rasterizer",

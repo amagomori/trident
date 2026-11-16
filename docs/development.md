@@ -25,8 +25,8 @@ CI runs the same checks on Linux and macOS for every pull request.
 
 ## Release
 
-Pushing a `v*` tag that matches the workspace version in `Cargo.toml` (for example `v0.1.0`, or
-`v0.1.0-rc.1` for a prerelease) runs `.github/workflows/release.yml`, the only workflow that runs
+Pushing a `v*` tag that matches the workspace version in `Cargo.toml` (for example `v1.0.0`, or
+`v1.0.0-rc.1` for a prerelease) runs `.github/workflows/release.yml`, the only workflow that runs
 on tags. It builds a universal macOS binary into `Trident.app` inside
 `Trident-<version>-macos-universal.dmg`, and a Linux x86_64 `Trident-<version>-linux-x86_64.tar.gz`,
 `Trident-<version>-linux-amd64.deb` and `Trident-<version>-x86_64.AppImage`, then publishes them
@@ -34,28 +34,56 @@ with `SHA256SUMS` and release notes that list the PRs merged since the previous 
 signed or notarized. The app is ad-hoc signed so that it runs on Apple silicon.
 
 The packaging lives in `.github/scripts/release/release.py`, so you can build and check the
-artifacts locally before you tag:
+artifacts locally before you tag. Updating the workspace version, building artifacts and
+previewing notes do not publish anything. Do not create or push a tag, publish a release,
+update the tap/AUR, or change repository visibility until the release owner authorizes the
+publication window.
+
+Start both native builds from the same frozen commit, with a clean `dist` directory on each
+machine. Validate the intended tag without creating it:
+
+```sh
+tag=v1.0.0
+version=$(python3 .github/scripts/release/release.py version --tag "$tag")
+export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+python3 -m unittest discover -s .github/scripts/release
+```
+
+Build Linux on Ubuntu 22.04 (glibc 2.35), as the workflow does. Download appimagetool and its
+runtime using the URLs and SHA-256 pins in `release.yml`, verify both checksums, and make
+`appimagetool` executable before running:
 
 ```sh
 # Linux
-cargo build --release -p term-app
-python3 .github/scripts/release/release.py linux --binary target/release/trident --version 0.1.0 \
-  --out dist [--appimagetool appimagetool-x86_64.AppImage --runtime runtime-x86_64]
+cargo build --release --locked -p term-app
+python3 .github/scripts/release/release.py linux --binary target/release/trident --version "$version" \
+  --out dist --appimagetool ./appimagetool --runtime ./appimage-runtime
+./dist/*.AppImage --appimage-extract-and-run --version
+```
 
+```sh
 # macOS: a universal binary, as release.yml builds it
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 export MACOSX_DEPLOYMENT_TARGET=11.0
-cargo build --release -p term-app --target aarch64-apple-darwin
-cargo build --release -p term-app --target x86_64-apple-darwin
+cargo build --release --locked -p term-app --target aarch64-apple-darwin
+cargo build --release --locked -p term-app --target x86_64-apple-darwin
 lipo -create -output trident-universal \
   target/aarch64-apple-darwin/release/trident target/x86_64-apple-darwin/release/trident
-python3 .github/scripts/release/release.py macos --binary trident-universal --version 0.1.0 --out dist
+lipo trident-universal -verify_arch arm64 x86_64
+python3 .github/scripts/release/release.py macos --binary trident-universal --version "$version" --out dist
+hdiutil verify "dist/Trident-$version-macos-universal.dmg"
+```
 
+Combine only the four distributable files from those builds in a clean `dist` directory:
+the .dmg, .tar.gz, .deb and .AppImage. Keep `Trident.app`, tools, test outputs and preview notes
+outside that directory. On Linux, prepare the final checksums, notes and package definitions:
+
+```sh
 python3 .github/scripts/release/release.py checksums dist
-python3 .github/scripts/release/release.py changelog --tag v0.1.0
-python3 .github/scripts/release/release.py packages --version 0.1.0 --sums dist/SHA256SUMS \
-  --out packages [--base-url file://$PWD/dist]
-python3 -m unittest discover -s .github/scripts/release
+(cd dist && sha256sum -c SHA256SUMS)
+python3 .github/scripts/release/release.py changelog --tag "$tag" > notes.md
+python3 .github/scripts/release/release.py packages --version "$version" --sums dist/SHA256SUMS \
+  --out packages
 ```
 
 - If the tag doesn't exist, `changelog` writes the notes for `HEAD` as if it were tagged.
@@ -63,6 +91,27 @@ python3 -m unittest discover -s .github/scripts/release
 - `packages` writes the cask when `SHA256SUMS` lists the .dmg, and the AUR files when it lists the
   tarball, so a `dist` from either platform works.
 - `release.yml` pins appimagetool and its runtime by SHA-256.
+
+### When hosted Actions is unavailable
+
+The native steps above also prepare a release without GitHub-hosted runners. Keep the frozen
+commit ID with the artifacts and record native macOS/Linux install and upgrade results. A
+local cask or PKGBUILD can use `--base-url "file://$PWD/dist"`; regenerate `packages` without
+that override before publication so no local download URL reaches the tap or AUR. Do not
+substitute a Linux binary for the Mac build or label a single-architecture Mac build universal.
+
+At the authorized publication window, the release owner can tag the verified commit and
+upload the four artifacts plus `SHA256SUMS` with `gh release create --verify-tag`, using
+`notes.md`. This is a publishing action, not part of preparation. Do not also run the automatic
+publisher for the same tag. Updating the tap and AUR afterward is a separate publishing step:
+use the generated package files, the existing `push_package.sh` and the same stable/newest
+release checks as the workflow, with the already provisioned credentials. Never create new
+credentials just to rehearse a release. If credentials are unavailable locally, retain the
+prepared files for the authorized release owner rather than exporting Actions secrets.
+
+Before calling the release complete, check anonymous download access and perform real
+Homebrew/AUR installs and upgrades against the published URLs. A private source repository,
+an unpublished tag, or missing package credentials cannot be validated by offline tests.
 
 ### Homebrew and the AUR
 
