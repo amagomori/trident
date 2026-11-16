@@ -1,7 +1,7 @@
 """Black-box vtebench / 100 MiB cat / RSS+idle CPU on macOS for Trident (+ an A/A arm: the same
 binary again) vs other terminals. Driven by run.sh; nothing in any terminal is instrumented.
 usage: compare_mac.py <vtebench|cat|memory> <rounds> <out.json> [arms,...]. Never redirect vtebench stdout."""
-import json, os, signal, subprocess, sys, time, statistics as st
+import json, os, shutil, signal, subprocess, sys, time, statistics as st
 from pathlib import Path
 HERE = Path(__file__).resolve().parent; REPO = HERE.parents[3]; C = HERE.parent / "cfg"
 OUT = Path(os.environ.get("COMPARE_OUT", REPO / "target/compare-macos")); W = OUT / "work"; W.mkdir(parents=True, exist_ok=True)
@@ -36,8 +36,8 @@ def tree(root):
     return out, rows
 def usage(root):
     pids, rows = tree(root); return sum(rows[p][1] for p in pids), sum(rows[p][2] for p in pids)
-def launch(arm, sh):
-    return subprocess.Popen(ARMS[arm](["/bin/sh", "-c", sh]), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+def launch(arm, sh, *args):
+    return subprocess.Popen(ARMS[arm](["/bin/sh", "-c", sh, "compare_mac", *args]), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 def close(p):
     for f in (lambda: os.killpg(p.pid, signal.SIGKILL), lambda: p.kill()):
         try: f()
@@ -61,10 +61,35 @@ def idle(p, secs=5.0):
 def parse(path):
     lines = [l.split() for l in Path(path).read_text().splitlines() if l.strip()]
     return {b: st.median(v) for i, b in enumerate(lines[0]) if (v := [float(r[i]) for r in lines[1:] if i < len(r) and r[i].replace(".", "", 1).isdigit()])}
+# Upstream benchmarks can't find the terminal size on macOS; run vtebench_tty.py's copies and check
+# inside each terminal that setups and benchmarks emit what they should at 30 x 100 before vtebench.
+VSCRIPT = r'''vb=$1; dat=$2; chk=$3; secs=$4; done=$5; shift 5; sleep 2; stty size > "$chk/size"
+for d do n=${d##*/}
+  for s in setup benchmark; do [ -f "$d/$s" ] || continue; "$d/$s" < /dev/null > "$chk/$n.$s.out" 2> "$chk/$n.$s.err"; echo $? > "$chk/$n.$s.rc"; done
+  shift; set -- "$@" -b "$d"; done
+"$vb" -s --max-secs "$secs" --dat "$dat" "$@" 2> "$chk/vlog"; touch "$done"; exec sleep 600'''
+def vtebench_dirs():
+    sys.path.insert(0, str(HERE.parent.parent / "scroll-region-qa")); import vtebench_tty
+    b = V / "benchmarks"; names = sorted(n for n in os.listdir(b) if (b / n / "benchmark").is_file())
+    shutil.rmtree(W / "benchmarks", ignore_errors=True); return vtebench_tty, names, vtebench_tty.patch(str(b), names, str(W / "benchmarks"))
 def vtebench(arm, r):
-    d = W / f"{arm}-{r}.dat"; done = W / "done"; done.unlink(missing_ok=True); d.unlink(missing_ok=True)
-    p = launch(arm, f'sleep 2; cd "{V}" && "{VB}" -s --max-secs {os.environ.get("VSECS", "6")} --dat "{d}" 2> "{W}/vlog"; touch "{done}"; exec sleep 600')
-    ok = wait(done, 1800); close(p); return parse(d) if ok and d.exists() else {"error": "no result"}
+    vt, names, dirs = VTB
+    d = W / f"{arm}-{r}.dat"; done = W / "done"; chk = W / "check"; done.unlink(missing_ok=True); d.unlink(missing_ok=True)
+    shutil.rmtree(chk, ignore_errors=True); chk.mkdir()
+    p = launch(arm, VSCRIPT, VB, str(d), str(chk), os.environ.get("VSECS", "6"), str(done), *dirs)
+    ok = wait(done, 1800); close(p)
+    size = (chk / "size").read_text().split() if (chk / "size").exists() else ["none"]
+    bad = [] if size == ["30", "100"] else [f"started at {'x'.join(size)}, not 30x100"]
+    for n in names:
+        for s in ("setup", "benchmark"):
+            f = chk / f"{n}.{s}"
+            if not (V / "benchmarks" / n / s).is_file(): continue
+            if not Path(f"{f}.rc").exists(): bad.append(f"{n}/{s} did not run"); continue
+            rc, out, err = int(Path(f"{f}.rc").read_text() or -1), Path(f"{f}.out").read_bytes(), Path(f"{f}.err").read_bytes()
+            why = vt.check_setup(n, rc, out, err, 30) if s == "setup" else vt.check_benchmark(n, rc, out, err, 30, 100)
+            if why: bad.append(why)
+    if bad: return {"error": "workload check failed: " + "; ".join(bad)}
+    return parse(d) if ok and d.exists() else {"error": "no result"}
 def cat(arm, r):
     f = W / "t"; f.unlink(missing_ok=True)
     p = launch(arm, f'sleep 2; s=$(python3 -c "import time;print(time.time())"); cat "{DATA}"; e=$(python3 -c "import time;print(time.time())"); echo $s $e > "{f}.tmp"; mv "{f}.tmp" "{f}"; exec sleep 600')
@@ -87,6 +112,7 @@ test, R, out = sys.argv[1], int(sys.argv[2]), Path(sys.argv[3])
 arms = sys.argv[4].split(",") if len(sys.argv) > 4 else list(ARMS)
 res = json.loads(out.read_text()) if out.exists() else {}
 fn = {"vtebench": vtebench, "cat": cat, "memory": memory}[test]
+if test == "vtebench": VTB = vtebench_dirs()
 for r in range(R):
     for a in (arms if r % 2 == 0 else arms[::-1]):
         v = fn(a, r); res.setdefault(a, []).append(v); print(test, a, r, json.dumps(v)[:300], flush=True)
