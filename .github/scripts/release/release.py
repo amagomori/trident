@@ -506,9 +506,15 @@ def changelog(tag, since=None, cwd=ROOT, repo=REPO):
         lines += [f"- {title} ([#{n}](https://github.com/{repo}/pull/{n}))" for n, title in prs]
     else:
         lines.append("No pull requests merged since the last release.")
-    lines += ["", f"Builds are unsigned, so before opening {NAME} the first time, run "
-              f"`xattr -dr com.apple.quarantine /Applications/{NAME}.app` (the Homebrew cask "
-              "does this for you). Verify downloads with `sha256sum -c SHA256SUMS`."]
+    image = f'"$HOME/Downloads/{dmg_name(tag.removeprefix("v"))}"'
+    lines += ["", "Builds are unsigned and not notarized. For a browser-downloaded DMG in "
+              f"`~/Downloads`, compare `shasum -a 256 {image}` with the DMG's entry in the "
+              "release's `SHA256SUMS`. Only if they match, run "
+              f"`xattr -d com.apple.quarantine {image}` **before opening the DMG**. "
+              f"Then open the DMG and drag {NAME} to Applications. Before opening {NAME} "
+              f"the first time, run `xattr -dr com.apple.quarantine /Applications/{NAME}.app`. "
+              "These steps apply only to this download and app; the Homebrew cask handles "
+              "quarantine for you. Verify Linux downloads with `sha256sum -c SHA256SUMS`."]
     if since:
         lines += ["", f"**Full changelog**: https://github.com/{repo}/compare/{since}...{tag}"]
     return "\n".join(lines) + "\n"

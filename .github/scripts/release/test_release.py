@@ -355,7 +355,21 @@ class Changelog(unittest.TestCase):
         notes = release.changelog("v0.1.0", cwd=self.repo, repo="o/r")
         self.assertEqual(re.findall(r"^- .*$", notes, re.M),
                          ["- KAN-1: First feature ([#1](https://github.com/o/r/pull/1))"])
-        self.assertNotIn("compare", notes)
+        self.assertNotIn("/compare/", notes)
+
+    def test_browser_dmg_install_instructions(self):
+        notes = release.changelog("v1.0.0-rc.1", cwd=self.repo, repo="o/r")
+        image = '"$HOME/Downloads/Trident-1.0.0-rc.1-macos-universal.dmg"'
+        checksum = f"shasum -a 256 {image}"
+        container = f"xattr -d com.apple.quarantine {image}"
+        mount = "Then open the DMG"
+        app = "xattr -dr com.apple.quarantine /Applications/Trident.app"
+        self.assertIn("SHA256SUMS", notes)
+        self.assertIn("Only if they match", notes)
+        self.assertIn("**before opening the DMG**", notes)
+        self.assertLess(notes.index(checksum), notes.index(container))
+        self.assertLess(notes.index(container), notes.index(mount))
+        self.assertLess(notes.index(mount), notes.index(app))
 
     def test_untagged_release_previews_head(self):
         self.commit("KAN-4: Unreleased feature (#4)")
