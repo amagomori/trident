@@ -10,7 +10,9 @@ let mode = argv[1], runs = Int(argv[2])!, probes = Int(argv[3])!, outPath = argv
 let cmd = Array(argv[(argv.firstIndex(of: "--")! + 1)...])
 
 let trace = ProcessInfo.processInfo.environment["MLAT_TRACE"] != nil
-struct Frame { var pts: Double; var arrival: Double; var red: Int; var sum: UInt64 }
+// tiles: red pixels per T x T tile of the capture rect's frame, so red can be counted inside a window found later.
+let T = 32
+struct Frame { var pts: Double; var arrival: Double; var red: Int; var sum: UInt64; var tiles: [Int32]; var tw: Int }
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
   let lock = NSLock()
   var frames: [Frame] = []
@@ -28,19 +30,20 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     let bpr = CVPixelBufferGetBytesPerRow(pb), w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
     let x0 = max(0, Int(r.minX)), x1 = min(w, Int(r.maxX)), y0 = max(0, Int(r.minY)), y1 = min(h, Int(r.maxY))
     var red = 0; var sum: UInt64 = 1469598103934665603
+    let tw = (w + T - 1) / T; var tiles = [Int32](repeating: 0, count: tw * ((h + T - 1) / T))
     if x1 > x0 && y1 > y0 {
       for y in y0..<y1 {
         let row = base + y * bpr
         for x in x0..<x1 {
           let p = row + x * 4 // BGRA
           let b = p[0], g = p[1], rr = p[2]
-          if rr > 170 && g < 80 && b < 80 { red += 1 }
+          if rr > 170 && g < 80 && b < 80 { red += 1; tiles[(y / T) * tw + x / T] += 1 }
           sum = (sum ^ UInt64(b) ^ (UInt64(g) << 8) ^ (UInt64(rr) << 16)) &* 1099511628211
         }
       }
     }
     CVPixelBufferUnlockBaseAddress(pb, .readOnly)
-    lock.lock(); frames.append(Frame(pts: pts, arrival: arrival, red: red, sum: sum)); lock.unlock()
+    lock.lock(); frames.append(Frame(pts: pts, arrival: arrival, red: red, sum: sum, tiles: tiles, tw: tw)); lock.unlock()
   }
   func setRect(_ r: CGRect) { lock.lock(); rect = r; lock.unlock() }
   func snapshot() -> [Frame] { lock.lock(); defer { lock.unlock() }; return frames }
@@ -94,11 +97,22 @@ func killApp(_ p: Process) {
   sleepMs(1000)
 }
 var lastRedPts = 0.0
-func waitRed(after t0: Double, timeout: Double = 15) -> Double? {
-  let end = now() + timeout
+// Red pixels in the tiles wholly inside r (all of them for nil): wallpaper or other windows can be red too.
+func red(_ f: Frame, in r: CGRect?) -> Int {
+  guard let r = r else { return f.red }
+  let th = f.tiles.count / max(f.tw, 1)
+  let tx0 = max(0, Int(r.minX.rounded(.up)) + T - 1) / T, tx1 = min(f.tw, max(0, Int(r.maxX)) / T)
+  let ty0 = max(0, Int(r.minY.rounded(.up)) + T - 1) / T, ty1 = min(th, max(0, Int(r.maxY)) / T)
+  var n = 0
+  if tx1 > tx0 && ty1 > ty0 { for ty in ty0..<ty1 { for tx in tx0..<tx1 { n += Int(f.tiles[ty * f.tw + tx]) } } }
+  return n
+}
+func waitRed(after t0: Double, in r: CGRect? = nil, timeout: Double = 15) -> Double? {
+  let end = now() + timeout; var seen = 0
   while now() < end {
-    if let f = cap.snapshot().first(where: { $0.arrival > t0 && $0.red > 150 }) { lastRedPts = f.pts; return f.arrival }
-    sleepMs(2)
+    let snap = cap.snapshot()
+    if let f = snap[min(seen, snap.count)...].first(where: { $0.arrival > t0 && red($0, in: r) > 150 }) { lastRedPts = f.pts; return f.arrival }
+    seen = snap.count; sleepMs(2)
   }
   return nil
 }
@@ -115,7 +129,8 @@ for run in 1...runs {
   var mapped: Double? = nil; var win: [String: Any]? = nil
   let end = now() + 15
   while now() < end && win == nil { if let w = appWindow(excluding: before) { win = w; mapped = (now() - t0) * 1000 } else { sleepMs(1) } }
-  let red = waitRed(after: t0)
+  let wr = (win?[kCGWindowBounds as String] as? [String: Double]).map { b in CGRect(x: b["X"]!, y: b["Y"]!, width: b["Width"]!, height: b["Height"]!) }
+  let red = wr.flatMap { waitRed(after: t0, in: $0) }
   var row: [String: Any] = ["run": run, "mapped_ms": mapped as Any, "painted_ms": red.map { ($0 - t0) * 1000 } as Any, "painted_pts_ms": (lastRedPts - t0) * 1000]
   if mode == "latency", red != nil {
     sleepMs(1500)
