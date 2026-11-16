@@ -366,6 +366,7 @@ struct TabWindow {
     redraw_pending: bool,
     drawable_wait: Option<Instant>,
     occluded: bool,
+    normal_cells: (usize, usize),
 }
 
 impl Pane {
@@ -1079,7 +1080,8 @@ struct App {
     appearance_generation: u64,
     config: config::Config,
     config_error: Option<String>,
-    /// The window's latest size in cells while neither maximized nor fullscreen.
+    /// The window's latest size in cells while neither maximized nor fullscreen; on macOS,
+    /// each native tab's window keeps its own, swapped in with the tab.
     normal_cells: (usize, usize),
     icons: app_icon::Shown,
     /// Until the startup icons are set up: the latest time to do it.
@@ -1632,6 +1634,7 @@ impl App {
             redraw_pending: false,
             drawable_wait: None,
             occluded: false,
+            normal_cells: self.normal_cells,
         })
     }
 
@@ -1683,6 +1686,7 @@ impl App {
         };
         s.swap_pane(&mut pane);
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+        std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         let latency = s.latency.take();
         let search = self.search.take();
         let focused = std::mem::replace(&mut self.focused, false);
@@ -1696,6 +1700,7 @@ impl App {
         self.focused = focused;
         self.search = search;
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+        std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         if let Some(s) = &mut self.session {
             s.latency = latency;
             s.swap_pane(&mut pane);
@@ -1780,6 +1785,7 @@ impl App {
         #[cfg(target_os = "macos")]
         {
             std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+            std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
             native_tabs::show(&s.window);
         }
         self.tabs[self.active_tab] = Some(pane);
