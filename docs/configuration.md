@@ -34,6 +34,7 @@ vsync = true                # false: present without waiting for vblank (lower l
 app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset (see App icons in usage.md)
 menu_bar_icon = true        # macOS: false hides the menu bar item
 auto_secure_input = true    # macOS: false never turns on Secure Keyboard Entry at password prompts
+hide_mouse_when_typing = true # false: keep the mouse pointer shown while you type
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 term = "xterm-256color"     # "xterm-trident" once installed (falls back if not found)
 
@@ -68,6 +69,12 @@ bright_white = "#c0caf5"
 "ctrl+shift+t" = { send = "\u001b[1;5T" }
 "ctrl+shift+v" = "none"     # remove a default shortcut; pass key to the shell
 ```
+
+`hide_mouse_when_typing` hides the mouse pointer over the window when a key press sends input to
+the shell or the running program, including committed IME text and `{ send = "..." }` bindings.
+Moving the mouse, clicking, scrolling or switching focus shows it again. Modifier keys and
+shortcuts such as copy, tab switching and font size don't hide it, and mouse reporting to programs
+works as before.
 
 `vsync = false` shows frames without waiting for the display refresh. This can lower latency but
 can cause tearing. Where the graphics driver can't turn vsync off, such as OpenGL on Linux, vsync

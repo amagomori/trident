@@ -21,6 +21,7 @@ mod input;
 mod latency;
 mod osc_notify;
 mod paste;
+mod pointer;
 #[cfg(target_os = "macos")]
 mod present_macos;
 #[cfg(target_os = "linux")]
@@ -1104,6 +1105,7 @@ struct App {
     occluded: bool,
     notification_throttle: osc_notify::Throttle,
     mouse_pos: PhysicalPosition<f64>,
+    typing_pointer: pointer::TypingPointer,
     left_down: bool,
     /// The left press landed on the pinned command header; swallow its release.
     ledger_click: bool,
@@ -1199,6 +1201,7 @@ impl App {
             occluded: false,
             notification_throttle: osc_notify::Throttle::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
+            typing_pointer: pointer::TypingPointer::default(),
             left_down: false,
             ledger_click: false,
             reported_button: None,
@@ -2451,6 +2454,13 @@ impl App {
         }
     }
 
+    fn hide_pointer_for_typing(&mut self) {
+        if let Some(s) = &self.session {
+            self.typing_pointer
+                .typed(self.config.hide_mouse_when_typing, &s.window);
+        }
+    }
+
     fn write_input(&mut self, bytes: &[u8]) {
         let Some(s) = &mut self.session else { return };
         if let Some(log) = &mut s.latency {
@@ -2725,6 +2735,9 @@ impl App {
                 diag!("{warning}");
             }
             self.config = next;
+            if !self.config.hide_mouse_when_typing {
+                self.typing_pointer.show();
+            }
             #[cfg(target_os = "macos")]
             close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
             #[cfg(target_os = "macos")]
@@ -2926,6 +2939,7 @@ impl App {
             Action::Send(text) => {
                 if self.search.is_none() {
                     self.write_input(text.as_bytes());
+                    self.hide_pointer_for_typing();
                 }
             }
             Action::JumpToPromptUp | Action::JumpToPromptDown | Action::SelectCommandOutput => {
@@ -3861,6 +3875,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
+                self.typing_pointer.show();
                 let changed = std::mem::replace(&mut self.focused, focused) != focused;
                 if let Some(s) = &mut self.session {
                     s.blink_since = Instant::now();
@@ -3936,6 +3951,7 @@ impl ApplicationHandler<UserEvent> for App {
                 );
                 if let Some(bytes) = bytes {
                     self.write_input(&bytes);
+                    self.hide_pointer_for_typing();
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
@@ -3980,16 +3996,24 @@ impl ApplicationHandler<UserEvent> for App {
                     && self.pending_close.is_none()
                 {
                     self.write_input(text.as_bytes());
+                    self.hide_pointer_for_typing();
                 }
                 self.refresh_link();
                 self.update_ime_cursor_area();
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                self.typing_pointer.show();
                 if !self.tab_mouse_input(state, button, event_loop) {
                     self.mouse_input(state, button);
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => self.pointer_moved(position),
+            WindowEvent::CursorMoved { position, .. } => {
+                // Hiding the pointer can report a motion event at the same position.
+                if position != self.tab_pointer {
+                    self.typing_pointer.show();
+                }
+                self.pointer_moved(position)
+            }
             WindowEvent::CursorLeft { .. } => {
                 if self.tab_hover.take().is_some()
                     && let Some(s) = &self.session
@@ -3997,7 +4021,10 @@ impl ApplicationHandler<UserEvent> for App {
                     s.window.request_redraw();
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.typing_pointer.show();
+                self.mouse_wheel(delta)
+            }
             WindowEvent::RedrawRequested => {
                 self.present_frame();
             }
