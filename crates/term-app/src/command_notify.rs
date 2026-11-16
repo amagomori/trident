@@ -1250,7 +1250,7 @@ mod tests {
             0
         );
         let event = receiver
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(5))
             .expect("finished sleep notification");
         shell.group = None;
         assert!(event.name.is_some_and(|name| name.starts_with("sleep")));
