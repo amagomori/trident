@@ -199,7 +199,7 @@ class Packages(Base):
         text = release.cask("1.2.3", "aa" * 32)
         self.assertTrue(text.startswith('cask "trident" do\n  version "1.2.3"\n'))
         self.assertIn(f'  sha256 "{"aa" * 32}"\n', text)
-        self.assertIn('  url "https://github.com/amagomori/terminal/releases/download/'
+        self.assertIn('  url "https://github.com/amagomori/trident/releases/download/'
                       'v#{version}/Trident-#{version}-macos-universal.dmg"\n', text)
         self.assertIn('  app "Trident.app"\n', text)
         self.assertIn('  binary "#{appdir}/Trident.app/Contents/MacOS/trident"\n', text)
@@ -217,7 +217,7 @@ class Packages(Base):
                      "arch=('x86_64')", "provides=('trident')", "conflicts=('trident')",
                      f"sha256sums=('{'bb' * 32}')",
                      'source=("Trident-${_tag}-linux-x86_64.tar.gz::https://github.com/amagomori/'
-                     'terminal/releases/download/v${_tag}/Trident-${_tag}-linux-x86_64.tar.gz")'):
+                     'trident/releases/download/v${_tag}/Trident-${_tag}-linux-x86_64.tar.gz")'):
             self.assertIn(line, lines)
         self.assertIn('  install -Dm755 bin/trident "$pkgdir/usr/bin/trident"', lines)
         if shutil.which("bash"):
@@ -229,7 +229,7 @@ class Packages(Base):
         self.assertEqual(lines[0], "pkgbase = trident-bin")
         self.assertEqual(lines[-1], "pkgname = trident-bin")
         self.assertIn("\tsource = Trident-1.2.3-linux-x86_64.tar.gz::https://github.com/amagomori/"
-                      "terminal/releases/download/v1.2.3/Trident-1.2.3-linux-x86_64.tar.gz", lines)
+                      "trident/releases/download/v1.2.3/Trident-1.2.3-linux-x86_64.tar.gz", lines)
         self.assertIn(f"\tsha256sums = {'bb' * 32}", lines)
         self.assertIn("\tpkgver = 1.2.3", lines)
         if shutil.which("makepkg"):
@@ -342,7 +342,7 @@ class Changelog(unittest.TestCase):
                                  "- KAN-2: Second feature ([#2](https://github.com/o/r/pull/2))"])
         self.assertIn("https://github.com/o/r/compare/v0.1.0...v0.2.0", notes)
         self.assertIn("unsigned", notes)
-        self.assertIn("xattr -d com.apple.quarantine Trident-0.2.0-macos-universal.dmg", notes)
+        self.assertIn("xattr -dr com.apple.quarantine /Applications/Trident.app", notes)
 
     def test_first_release_lists_everything(self):
         notes = release.changelog("v0.1.0", cwd=self.repo, repo="o/r")

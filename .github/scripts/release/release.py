@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[3]
 NAME = "Trident"
 PACKAGE = "trident"
 BUNDLE_ID = "com.amagomori.trident"
-REPO = "amagomori/terminal"
+REPO = "amagomori/trident"
 HOMEPAGE = f"https://github.com/{REPO}"
 SUMMARY = "Fast, GPU-rendered terminal emulator"
 MACOS_MINIMUM = "11.0"
@@ -506,9 +506,9 @@ def changelog(tag, since=None, cwd=ROOT, repo=REPO):
         lines += [f"- {title} ([#{n}](https://github.com/{repo}/pull/{n}))" for n, title in prs]
     else:
         lines.append("No pull requests merged since the last release.")
-    lines += ["", "Builds are unsigned, so macOS reports a downloaded .dmg as damaged: run "
-              f"`xattr -d com.apple.quarantine {NAME}-{tag.removeprefix('v')}-macos-universal.dmg` "
-              "before opening it. Verify downloads with `sha256sum -c SHA256SUMS`."]
+    lines += ["", f"Builds are unsigned, so before opening {NAME} the first time, run "
+              f"`xattr -dr com.apple.quarantine /Applications/{NAME}.app` (the Homebrew cask "
+              "does this for you). Verify downloads with `sha256sum -c SHA256SUMS`."]
     if since:
         lines += ["", f"**Full changelog**: https://github.com/{repo}/compare/{since}...{tag}"]
     return "\n".join(lines) + "\n"

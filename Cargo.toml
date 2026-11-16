@@ -8,7 +8,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
-repository = "https://github.com/amagomori/terminal"
+repository = "https://github.com/amagomori/trident"
 
 [workspace.dependencies]
 regex = "1"
