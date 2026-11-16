@@ -165,9 +165,10 @@ enum UserEvent {
     /// The pointer moved with Cmd held; its position is read back from AppKit.
     #[cfg(target_os = "macos")]
     PointerMoved,
-    /// A window left native fullscreen, and AppKit has set its frame.
+    /// The window with this `native_tabs::key` left native fullscreen, and AppKit has set
+    /// its frame.
     #[cfg(target_os = "macos")]
-    ExitedFullScreen,
+    ExitedFullScreen(usize),
 }
 
 struct Options {
@@ -405,6 +406,7 @@ struct TabWindow {
     occluded: bool,
     normal_cells: (usize, usize),
     normal_frame: Option<Frame>,
+    fullscreen_exit: FullscreenExit,
 }
 
 impl Pane {
@@ -869,6 +871,14 @@ struct FullscreenExit {
 
 #[cfg(any(target_os = "macos", test))]
 impl FullscreenExit {
+    /// The state of a window opened `fullscreen` or not.
+    fn entered(fullscreen: bool) -> Self {
+        FullscreenExit {
+            was_fullscreen: fullscreen,
+            restore: None,
+        }
+    }
+
     /// Called on each frame change with the frame from before fullscreen; whether the
     /// current frame is a normal one to remember, not fullscreen or on the way out of it.
     fn observe(&mut self, fullscreen: bool, normal: Option<Frame>) -> bool {
@@ -1705,6 +1715,24 @@ impl App {
         }
     }
 
+    /// Restores the frame of the window, the active one or a background tab's, that left
+    /// fullscreen.
+    #[cfg(target_os = "macos")]
+    fn exited_fullscreen(&mut self, key: usize) {
+        let Some(s) = &self.session else { return };
+        if native_tabs::key(&s.window) == Some(key) {
+            self.restore_normal_frame();
+            return;
+        }
+        let index = self.tabs.iter().position(|pane| {
+            pane.as_ref()
+                .is_some_and(|pane| native_tabs::key(&pane.window.window) == Some(key))
+        });
+        if let Some(index) = index {
+            self.with_tab_shown(index, App::restore_normal_frame);
+        }
+    }
+
     /// Moves the active window back to the frame it had before fullscreen, if AppKit left
     /// fullscreen at another one.
     #[cfg(target_os = "macos")]
@@ -1888,6 +1916,7 @@ impl App {
             occluded: false,
             normal_cells: self.normal_cells,
             normal_frame: self.normal_frame,
+            fullscreen_exit: FullscreenExit::entered(is_fullscreen(&s.window)),
         })
     }
 
@@ -1941,6 +1970,7 @@ impl App {
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
         std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
+        std::mem::swap(&mut self.fullscreen_exit, &mut pane.window.fullscreen_exit);
         let latency = s.latency.take();
         let search = self.search.take();
         let focused = std::mem::replace(&mut self.focused, false);
@@ -1958,6 +1988,7 @@ impl App {
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
         std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
+        std::mem::swap(&mut self.fullscreen_exit, &mut pane.window.fullscreen_exit);
         if let Some(s) = &mut self.session {
             s.latency = latency;
             s.swap_pane(&mut pane);
@@ -2047,6 +2078,7 @@ impl App {
             std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
             std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
             std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
+            std::mem::swap(&mut self.fullscreen_exit, &mut pane.window.fullscreen_exit);
             native_tabs::show(&s.window);
         }
         self.tabs[self.active_tab] = Some(pane);
@@ -4015,7 +4047,7 @@ impl ApplicationHandler<UserEvent> for App {
             #[cfg(target_os = "macos")]
             UserEvent::PointerMoved => self.sync_pointer(),
             #[cfg(target_os = "macos")]
-            UserEvent::ExitedFullScreen => self.restore_normal_frame(),
+            UserEvent::ExitedFullScreen(key) => self.exited_fullscreen(key),
             #[cfg(target_os = "linux")]
             UserEvent::Appearance(generation, theme) => {
                 if self.appearance_watch.is_some() && generation == self.appearance_generation {
@@ -4918,6 +4950,26 @@ mod tests {
         assert!(!exit.observe(false, Some(normal)));
         assert_eq!(exit.finish(Some(normal), Some(normal)), None);
         assert!(exit.observe(false, Some(normal)));
+    }
+
+    #[test]
+    fn each_window_restores_its_own_frame_after_fullscreen() {
+        let a = (PhysicalPosition::new(394, 149), PhysicalSize::new(812, 614));
+        let b = (PhysicalPosition::new(900, 100), PhysicalSize::new(600, 400));
+        let zoomed = (PhysicalPosition::new(0, 30), PhysicalSize::new(1600, 1088));
+        let mut exit_a = FullscreenExit::default();
+        let mut exit_b = FullscreenExit::default();
+        assert!(!exit_a.observe(true, Some(a)));
+        assert!(exit_b.observe(false, Some(b)));
+        assert_eq!(exit_b.finish(Some(b), Some(b)), None);
+        assert_eq!(exit_a.finish(Some(zoomed), Some(a)), Some(a));
+        // A tab opened into a fullscreen group restores even if it saw no fullscreen frame.
+        let mut tab = FullscreenExit::entered(true);
+        assert_eq!(tab.finish(Some(zoomed), Some(a)), Some(a));
+        assert_eq!(
+            FullscreenExit::entered(false).finish(Some(zoomed), Some(a)),
+            None
+        );
     }
 
     #[test]

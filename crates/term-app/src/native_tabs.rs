@@ -143,13 +143,20 @@ define_class!(
 
     impl FullscreenExitObserver {
         #[unsafe(method(windowDidExitFullScreen:))]
-        fn did_exit(&self, _notification: Option<&AnyObject>) {
-            send(UserEvent::ExitedFullScreen);
+        fn did_exit(&self, notification: Option<&AnyObject>) {
+            let Some(notification) = notification else {
+                return;
+            };
+            // SAFETY: an NSNotification, whose object is the NSWindow that left fullscreen.
+            let window: Option<Retained<AnyObject>> = unsafe { msg_send![notification, object] };
+            if let Some(window) = window {
+                send(UserEvent::ExitedFullScreen(key_of(&window)));
+            }
         }
     }
 );
 
-/// Sends `UserEvent::ExitedFullScreen` whenever a window has left native fullscreen. The
+/// Sends `UserEvent::ExitedFullScreen` with the window's `key` whenever a window has left native fullscreen. The
 /// event arrives after AppKit and winit have finished setting the window's frame. Needs
 /// `handle_new_tab_button` first, which hands over the event loop proxy.
 pub fn observe_fullscreen_exit() {
