@@ -18,14 +18,11 @@ Trident runs on macOS 11 or later, on Apple silicon and Intel.
 
 - With [Homebrew](https://brew.sh): `brew install --cask amagomori/tap/trident`. To update, run
   `brew upgrade`.
-- From [Releases](https://github.com/amagomori/trident/releases):
-  1. Download `Trident-<version>-macos-universal.dmg`.
-  2. Builds are unsigned, so macOS reports the download as damaged. Clear the quarantine flag:
-     `xattr -d com.apple.quarantine ~/Downloads/Trident-<version>-macos-universal.dmg`.
-  3. Open the image and drag Trident to Applications.
+- From [Releases](https://github.com/amagomori/trident/releases): download
+  `Trident-<version>-macos-universal.dmg`, open it and drag Trident to Applications.
 
-  If you already copied the app from a quarantined image, run
-  `xattr -dr com.apple.quarantine /Applications/Trident.app`.
+Builds are unsigned: before opening Trident the first time, run
+`xattr -dr com.apple.quarantine /Applications/Trident.app` (the Homebrew cask does this for you).
 
 ### Linux
 
