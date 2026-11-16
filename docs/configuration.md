@@ -27,6 +27,7 @@ padding = 6.0               # 0..=1000 logical pixels
 remember_window_size = true # false: always open at window_columns x window_rows
 scrollback = 10000          # retained lines; 0 disables history (or use the [scrollback] table below)
 drop_preview = true         # false: file drops insert only the shell-quoted path
+hover_preview = false       # true: hold Ctrl (Cmd on macOS) over a file path to preview it
 paste_protection = true     # false: never confirm multi-line or control-character pastes
 trim_paste = true           # false: keep trailing whitespace and newlines on single-line pastes
 clipboard_read = false      # true: let programs read the clipboard with OSC 52

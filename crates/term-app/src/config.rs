@@ -16,6 +16,7 @@ pub struct Config {
     pub notify_long_commands_after: u64,
     pub desktop_notifications: bool,
     pub drop_preview: bool,
+    pub hover_preview: bool,
     pub paste_protection: bool,
     pub trim_paste: bool,
     pub clipboard_read: bool,
@@ -55,6 +56,7 @@ impl Default for Config {
             notify_long_commands_after: 10,
             desktop_notifications: true,
             drop_preview: true,
+            hover_preview: false,
             paste_protection: true,
             trim_paste: true,
             clipboard_read: false,
@@ -92,6 +94,7 @@ struct Raw {
     notify_long_commands_after: Option<u64>,
     desktop_notifications: Option<bool>,
     drop_preview: Option<bool>,
+    hover_preview: Option<bool>,
     paste_protection: Option<bool>,
     trim_paste: Option<bool>,
     clipboard_read: Option<bool>,
@@ -616,6 +619,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     let mut config = Config {
         font: raw.font,
         drop_preview: raw.drop_preview.unwrap_or(true),
+        hover_preview: raw.hover_preview.unwrap_or(false),
         paste_protection: raw.paste_protection.unwrap_or(true),
         trim_paste: raw.trim_paste.unwrap_or(true),
         clipboard_read: raw.clipboard_read.unwrap_or(false),
@@ -1334,6 +1338,8 @@ mod tests {
     fn defaults_and_full_config() {
         assert!(parse_text("").unwrap().drop_preview);
         assert!(!parse_text("drop_preview = false").unwrap().drop_preview);
+        assert!(!parse_text("").unwrap().hover_preview);
+        assert!(parse_text("hover_preview = true").unwrap().hover_preview);
         assert!(parse_text("").unwrap().paste_protection);
         assert!(!parse_text("").unwrap().clipboard_read);
         assert!(parse_text("clipboard_read = true").unwrap().clipboard_read);

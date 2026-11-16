@@ -17,6 +17,7 @@ mod drop_files;
 mod flow_control;
 #[cfg(any(target_os = "linux", test))]
 mod frame_clock;
+mod hover_preview;
 mod ime;
 mod input;
 mod latency;
@@ -151,6 +152,7 @@ enum UserEvent {
     /// A long command finished in the tab with this pane id.
     CommandFinished(u64, command_notify::Finished),
     ConfigChanged,
+    HoverPreview(hover_preview::Ready),
     /// The PTY of the tab with this pane id has output.
     Output(u64),
     /// The PTY of the tab with this pane id exited.
@@ -160,6 +162,9 @@ enum UserEvent {
     /// The native tab bar's + button was clicked.
     #[cfg(target_os = "macos")]
     NewTab,
+    /// The pointer moved with Cmd held; its position is read back from AppKit.
+    #[cfg(target_os = "macos")]
+    PointerMoved,
 }
 
 struct Options {
@@ -1237,6 +1242,7 @@ struct App {
     flash: bell::Flash,
     mouse_pos: PhysicalPosition<f64>,
     typing_pointer: pointer::TypingPointer,
+    hover_preview: hover_preview::HoverPreview,
     left_down: bool,
     /// The left press landed on the pinned command header; swallow its release.
     ledger_click: bool,
@@ -1335,6 +1341,7 @@ impl App {
             flash: bell::Flash::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             typing_pointer: pointer::TypingPointer::default(),
+            hover_preview: hover_preview::HoverPreview::new(),
             left_down: false,
             ledger_click: false,
             reported_button: None,
@@ -2240,6 +2247,21 @@ impl App {
         }
     }
 
+    /// Catches up with a pointer move winit did not report.
+    #[cfg(target_os = "macos")]
+    fn sync_pointer(&mut self) {
+        let pos = self
+            .session
+            .as_ref()
+            .and_then(|s| native_tabs::pointer_position(&s.window));
+        if let Some(pos) = pos
+            && pos != self.tab_pointer
+        {
+            self.typing_pointer.show();
+            self.pointer_moved(pos);
+        }
+    }
+
     fn resize_grid(&mut self) {
         let tab_bar_shown = tab_bar_drawn(self.config.tab_bar.shown(self.tabs.len()));
         let Some(s) = &mut self.session else { return };
@@ -2546,8 +2568,10 @@ impl App {
             search.refresh(&mut s.term, false);
         }
         self.update_ime_cursor_area();
+        let floating = self.hover_preview_overlay();
         let hover = self.hover_link();
         let Some(s) = &mut self.session else { return };
+        s.renderer.set_floating(floating);
         if s.term.modes.synchronized_output {
             s.redraw_pending = true;
             return;
@@ -3436,6 +3460,7 @@ impl App {
             s.hover = link;
             s.request_frame();
         }
+        self.refresh_hover_preview();
     }
 
     fn report_mouse(&mut self, button: ReportButton, pressed: bool, motion: bool) {
@@ -3820,6 +3845,8 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(target_os = "macos")]
                 native_tabs::handle_new_tab_button(&session.window, self.proxy.clone());
                 #[cfg(target_os = "macos")]
+                native_tabs::watch_command_moves();
+                #[cfg(target_os = "macos")]
                 native_tabs::install_window_menu();
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
@@ -3855,6 +3882,8 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             #[cfg(target_os = "macos")]
             UserEvent::NewTab => self.new_tab(event_loop),
+            #[cfg(target_os = "macos")]
+            UserEvent::PointerMoved => self.sync_pointer(),
             #[cfg(target_os = "linux")]
             UserEvent::Appearance(generation, theme) => {
                 if self.appearance_watch.is_some() && generation == self.appearance_generation {
@@ -3872,6 +3901,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ConfigChanged => self.reload_config(),
+            UserEvent::HoverPreview(ready) => self.hover_preview_ready(ready),
             UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
                 self.output_ready()
             }
@@ -4199,6 +4229,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
+                #[cfg(target_os = "macos")]
+                if links::command_modifier(self.modifiers) {
+                    self.sync_pointer();
+                }
                 self.refresh_link();
             }
             WindowEvent::DroppedFile(path) => self.dropped_file(path),

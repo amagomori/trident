@@ -202,6 +202,21 @@ doesn't run.
 On Linux, drops work from X11 apps. On a Wayland desktop, run `env -u WAYLAND_DISPLAY trident` to
 accept drops from X11 apps; drops from native Wayland apps aren't supported.
 
+## Hover previews
+
+With `hover_preview = true` in the config, hold Ctrl (Cmd on macOS) with the pointer over a file
+path in the output to see a small card next to it:
+
+- Images get a thumbnail and PDFs their first page.
+- Text files show their first lines, or the lines around `path:line` when a line is given.
+- Directories list their entries.
+
+Paths are found in `ls` columns, `git status` and `git diff` output, compiler and traceback
+locations, and quoted names. Ctrl-click or Cmd-click still opens links. Relative paths start at the
+directory the shell last reported with OSC 7, else the working directory of the foreground program
+or the shell. While the shell reports a directory on another host (as over ssh), nothing is
+previewed. PDF pages come from `pdftoppm` (poppler-utils) on Linux and Quick Look on macOS.
+
 ## View files
 
 ```text
