@@ -4,9 +4,9 @@
 # for the shell running it (mlat captures the display and injects keys), JetBrains Mono, the terminals in
 # /Applications or ~/.cargo/bin, vtebench (cargo install vtebench) and a ~/vtebench checkout.
 # kitty is optional (ARMS="... kitty"); it needs OpenGL 3.3, which macOS VMs lack. WezTerm uses macos/wezterm.lua (WebGpu).
-set -e
+set -eo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../../../.." && pwd)
-OUT=${COMPARE_OUT:-$REPO/target/compare-macos}; export COMPARE_OUT=$OUT; mkdir -p "$OUT/res"
+OUT=${COMPARE_OUT:-$REPO/target/compare-macos}; export COMPARE_OUT=$OUT; rm -rf "$OUT/res"; mkdir -p "$OUT/res"
 C=$HERE/../cfg; M=$HERE/marker.sh; R=$OUT/res
 TRIDENT=${TRIDENT:-${CARGO_TARGET_DIR:-$REPO/target}/release/trident}; ALACRITTY=${ALACRITTY:-$HOME/.cargo/bin/alacritty}
 ARMS=${ARMS:-"trident trident-aa alacritty ghostty wezterm"}
