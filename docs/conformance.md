@@ -1,8 +1,8 @@
-# Conformance: vttest and esctest
+# Terminal conformance
 
-This page is for contributors. It shows how to run [vttest](https://invisible-island.net/vttest/)
-and [esctest2](https://github.com/ThomasDickey/esctest2) against Trident's terminal core
-(`term-core`), and which tests fail and why. The `vtrun` example runs a program on a
+Run [vttest](https://invisible-island.net/vttest/) and
+[esctest2](https://github.com/ThomasDickey/esctest2) against Trident's `term-core` crate and
+review the failures below. The `vtrun` example runs a program on a
 pseudo-terminal with `term-core` as the terminal and sends its replies back.
 
 ## Run the suites
@@ -26,8 +26,9 @@ $VTRUN --idle 400 --key '1\r' --key '\r' --key '\r' --key '0\r' -- vttest
 
 ## esctest results
 
-xterm expectations, VT level 4: **294 passed**, 43 xterm known bugs skipped, 230 failed.
-[esctest-pass.txt](conformance/esctest-pass.txt) is the pass list;
+With xterm expectations at VT level 4, 294 tests pass and 230 fail. The suite skips 43 tests for
+known xterm bugs.
+[esctest-pass.txt](conformance/esctest-pass.txt) lists passing tests, and
 [esctest-fail.txt](conformance/esctest-fail.txt) lists every failure under its ticket.
 
 | Failures | Cause | Ticket |
@@ -45,7 +46,7 @@ xterm expectations, VT level 4: **294 passed**, 43 xterm known bugs skipped, 230
 | --- | --- |
 | 1 Cursor movements | Pass except the 132-column screen (DECCOLM, KAN-139) |
 | 2 Screen features | Pass except 132-column screens (DECCOLM, KAN-139) |
-| 3 Character sets | VT100 sets (US, UK, DEC Special Graphics) pass; NRCS and VT220 sets (G2/G3, SS2/SS3) are not supported (KAN-140) |
-| 4 Double-sized characters | DECDHL/DECDWL are not supported; lines render single size (not planned) |
-| 5 Keyboard | Covered by term-app key encoding tests (KAN-14); `vtrun` cannot exercise the app's encoder |
-| 6 Terminal reports | Pass (DA, DSR 5/6, LNM); answerback is empty |
+| 3 Character sets | VT100 sets (US, UK, DEC Special Graphics) pass. NRCS and VT220 sets (G2/G3, SS2/SS3) are not supported (KAN-140). |
+| 4 Double-sized characters | DECDHL/DECDWL are not supported or planned. Lines render at single size. |
+| 5 Keyboard | The term-app key encoding tests cover keyboard behavior (KAN-14). The `vtrun` example cannot exercise the app's encoder. |
+| 6 Terminal reports | DA, DSR 5/6 and LNM pass. Answerback is empty. |

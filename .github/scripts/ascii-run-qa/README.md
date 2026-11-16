@@ -1,8 +1,7 @@
 # ASCII-run QA scripts
 
-These scripts time a release binary against a baseline on large `cat` workloads. They are for QA
-runners checking a PR that changes how PTY output is parsed or written to the grid. They need
-Python 3 (stdlib only) on Linux or macOS.
+Compare a release binary with a baseline on large `cat` workloads when changing PTY parsing or
+grid writes. The scripts need Python 3 with only the standard library on Linux or macOS.
 
 | Script | Does |
 | --- | --- |
