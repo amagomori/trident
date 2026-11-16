@@ -1344,6 +1344,8 @@ struct App {
     normal_cells: (usize, usize),
     /// Why the last pager window could not open, shown until the next input.
     pager_error: Option<String>,
+    /// Captured before the app quit hook reaps the PTYs, for the source window's banner.
+    pager_exit_code: i32,
     icons: app_icon::Shown,
     /// Until the startup icons are set up: the latest time to do it.
     icons_latest: Option<Instant>,
@@ -1457,6 +1459,7 @@ impl App {
             config_error,
             normal_cells: window_state::DEFAULT_CELLS,
             pager_error: None,
+            pager_exit_code: 0,
             icons: app_icon::Shown::default(),
             icons_latest: None,
             output_at: Instant::now(),
@@ -3983,6 +3986,9 @@ impl ApplicationHandler<UserEvent> for App {
             s.latency.take();
         }
         self.save_window_state();
+        // AppKit may never return from this callback; collect the pager status before
+        // hang_up_all takes its child, but keep the normal exit code to report on Linux.
+        self.pager_exit_code = window_exit_code(self);
         pty::hang_up_all(
             self.session
                 .iter_mut()
@@ -4528,7 +4534,7 @@ fn main() {
     let mut app = App::new(options, event_loop.create_proxy());
     app.startup_stderr = startup_stderr;
     let run = event_loop.run_app(&mut app);
-    let code = window_exit_code(&mut app);
+    let code = app.pager_exit_code;
     let error = app.error.take();
     // Dropping the app reaps every tab's command, killing one that ignores SIGHUP.
     drop(app);
