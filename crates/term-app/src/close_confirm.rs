@@ -149,6 +149,25 @@ thread_local! {
     static QUIT_HOOK: std::cell::RefCell<Option<QuitHook>> = const { std::cell::RefCell::new(None) };
     /// AppKit waits for `answer_quit` on a quit that `should_terminate` deferred.
     static QUIT_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The window close `should_terminate` or Close Window sent closes more than its tab.
+    static WIDE_CLOSE: std::cell::Cell<Option<WideClose>> = const { std::cell::Cell::new(None) };
+}
+
+/// What a window's `CloseRequested` closes beyond that one tab.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WideClose {
+    /// Every tab, for a quit (see `should_terminate`).
+    Quit,
+    /// Every tab of the key window's tab group, for Close Window (see `close_window`).
+    Window,
+}
+
+/// What a window's `CloseRequested` closes beyond that one tab, if it came from a quit or
+/// Close Window; clears it.
+#[cfg(target_os = "macos")]
+pub fn take_wide_close() -> Option<WideClose> {
+    WIDE_CLOSE.take()
 }
 
 #[cfg(target_os = "macos")]
@@ -177,9 +196,16 @@ unsafe extern "C-unwind" fn should_terminate(
             // SAFETY: on the main thread.
             let session_ends = unsafe { quit_ends_session() };
             QUIT_DEFERRED.set(session_ends);
-            // SAFETY: window is a live NSWindow and this runs on the main thread.
+            WIDE_CLOSE.set(Some(WideClose::Quit));
+            // SAFETY: on the main thread; mainWindow is nil or a live NSWindow, and so is
+            // hook.window, which stands in when the app has no main window.
             let _: () = unsafe {
-                objc2::msg_send![&*hook.window, performClose: std::ptr::null::<objc2::runtime::AnyObject>()]
+                let app: objc2::rc::Retained<objc2::runtime::AnyObject> =
+                    objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+                let main: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+                    objc2::msg_send![&*app, mainWindow];
+                let window = main.as_deref().unwrap_or(&hook.window);
+                objc2::msg_send![window, performClose: std::ptr::null::<objc2::runtime::AnyObject>()]
             };
             if session_ends {
                 NS_TERMINATE_LATER
@@ -189,6 +215,35 @@ unsafe extern "C-unwind" fn should_terminate(
         }
         _ => NS_TERMINATE_NOW,
     })
+}
+
+/// `terminalCloseWindow:`, the app menu's Close Window: each native tab is its own NSWindow,
+/// so a plain `performClose:` would close only the key one; this marks the close as one of
+/// every tab in the key window's group first.
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn close_window(
+    _this: *mut objc2::runtime::AnyObject,
+    _cmd: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
+    WIDE_CLOSE.set(Some(WideClose::Window));
+    // SAFETY: on the main thread, where AppKit sends menu actions; keyWindow is nil or a
+    // live NSWindow.
+    unsafe {
+        let app: objc2::rc::Retained<objc2::runtime::AnyObject> =
+            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        let key: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+            objc2::msg_send![&*app, keyWindow];
+        match key {
+            Some(key) => {
+                let _: () = objc2::msg_send![
+                    &*key,
+                    performClose: std::ptr::null::<objc2::runtime::AnyObject>()
+                ];
+            }
+            None => WIDE_CLOSE.set(None),
+        }
+    }
 }
 
 /// Whether the quit being handled is a logout, restart or shutdown: an Apple Event quit with a
@@ -304,8 +359,8 @@ pub fn route_app_quit_through_close(
     };
     // SAFETY: called on the main thread once the event loop runs; every message matches the
     // AppKit signature of NSApplication, NSMenu, NSMenuItem and NSView; ns_view is the live
-    // view of `window`, and should_terminate and reply_to_quit have the `Q@:@` and `v@:@`
-    // signatures they are added with.
+    // view of `window`, and should_terminate, reply_to_quit and close_window have the `Q@:@`,
+    // `v@:@` and `v@:@` signatures they are added with.
     unsafe {
         let view: &AnyObject = handle.ns_view.cast().as_ref();
         let ns_window: Option<Retained<AnyObject>> = msg_send![view, window];
@@ -335,6 +390,15 @@ pub fn route_app_quit_through_close(
             reply,
             c"v@:@".as_ptr(),
         );
+        let close_window: Imp = std::mem::transmute(
+            close_window as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        objc2::ffi::class_addMethod(
+            delegate as *const AnyClass as *mut AnyClass,
+            sel!(terminalCloseWindow:),
+            close_window,
+            c"v@:@".as_ptr(),
+        );
         QUIT_HOOK.set(Some(QuitHook {
             window: ns_window,
             running: Box::new(running),
@@ -360,9 +424,11 @@ pub fn route_app_quit_through_close(
                 let close: Retained<AnyObject> = msg_send![
                     close,
                     initWithTitle: &*title,
-                    action: sel!(performClose:),
+                    action: sel!(terminalCloseWindow:),
                     keyEquivalent: &*key
                 ];
+                let target: Option<Retained<AnyObject>> = msg_send![&*app, delegate];
+                let _: () = msg_send![&*close, setTarget: target.as_deref()];
                 const COMMAND: usize = 1 << 20;
                 const SHIFT: usize = 1 << 17;
                 let _: () = msg_send![&*close, setKeyEquivalentModifierMask: COMMAND | SHIFT];

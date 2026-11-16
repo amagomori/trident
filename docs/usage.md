@@ -62,6 +62,13 @@ the shell reports it with OSC 7, the same way a new window does. Closing a tab t
 running a program asks first (see `confirm_close`); closing the last tab closes the window.
 Set `tab_bar = "auto"` to show the bar only while a window has two or more tabs.
 
+On macOS tabs are native AppKit window tabs, like Terminal.app's: the system draws the tab
+bar (shown once a window has two tabs), and its + button,
+the close buttons, dragging tabs to reorder them or out into their own window, and the
+tab shortcuts all work as above, following the order the tab bar shows. The Window menu
+has Show Tab Bar, Show All Tabs, Show Next/Previous Tab, Move Tab to New Window and Merge
+All Windows. `tab_bar` only applies on Linux.
+
 Search updates as you type across scrollback and the active screen, joining soft wraps.
 It ignores case unless the query contains an uppercase character. Enter or Up moves
 to the next older match; Shift+Enter or Down moves newer, wrapping at either end.
