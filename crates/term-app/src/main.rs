@@ -3403,7 +3403,7 @@ impl App {
                     .and_then(|s| local_working_directory(s.term.working_directory()))
                     .or_else(|| path.parent().map(std::path::Path::to_owned));
                 let cells = self.window_cells();
-                links::open_file(editor, |command| {
+                links::open_file(editor, &self.config.env, |command| {
                     spawn_window(
                         links::window_args(std::env::args_os().skip(1), command),
                         working_directory,
@@ -3419,6 +3419,9 @@ impl App {
         if let Some(s) = &mut self.session
             && s.hover != link
         {
+            if link.is_none() {
+                s.file_hover.take();
+            }
             s.window.set_cursor(if link.is_some() {
                 winit::window::CursorIcon::Pointer
             } else {
@@ -3478,6 +3481,10 @@ impl App {
             if !pressed && std::mem::take(&mut self.ledger_click) {
                 return;
             }
+        }
+        if pressed && let Some(s) = &self.session {
+            // Resolve the reference again: the directory or the file may have changed.
+            s.file_hover.take();
         }
         match links::mouse_action(
             button,

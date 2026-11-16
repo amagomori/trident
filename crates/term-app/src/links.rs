@@ -140,7 +140,7 @@ pub fn editor(
         name.is_some_and(|name| TERMINAL_EDITORS.contains(&name))
             || argv[1..]
                 .iter()
-                .any(|arg| arg == "-nw" || arg == "--no-window-system")
+                .any(|arg| ["-nw", "--no-window-system", "-t", "--tty"].contains(&arg.as_str()))
     };
     if !configured.is_empty() {
         let file_text = file.to_string_lossy();
@@ -148,10 +148,31 @@ pub fn editor(
         let mut argv: Vec<OsString> = configured
             .iter()
             .map(|arg| {
-                arg.replace("{file}", &file_text)
-                    .replace("{line}", &line.to_string())
-                    .replace("{column}", &column.to_string())
-                    .into()
+                let mut filled = String::new();
+                let mut rest = arg.as_str();
+                while let Some(start) = rest.find('{') {
+                    filled.push_str(&rest[..start]);
+                    rest = &rest[start..];
+                    let value = [
+                        ("{file}", file_text.to_string()),
+                        ("{line}", line.to_string()),
+                        ("{column}", column.to_string()),
+                    ]
+                    .into_iter()
+                    .find(|(placeholder, _)| rest.starts_with(placeholder));
+                    match value {
+                        Some((placeholder, value)) => {
+                            filled.push_str(&value);
+                            rest = &rest[placeholder.len()..];
+                        }
+                        None => {
+                            filled.push('{');
+                            rest = &rest[1..];
+                        }
+                    }
+                }
+                filled.push_str(rest);
+                OsString::from(filled)
             })
             .collect();
         if !named {
@@ -243,7 +264,12 @@ pub fn window_args(
     kept
 }
 
-pub fn open_file(editor: Editor, new_window: impl FnOnce(Vec<OsString>)) {
+/// Run `editor`, with the config's `[env]` applied to programs started directly.
+pub fn open_file(
+    editor: Editor,
+    env: &std::collections::BTreeMap<String, String>,
+    new_window: impl FnOnce(Vec<OsString>),
+) {
     let argv = match editor {
         Editor::Terminal(argv) => return new_window(argv),
         Editor::Program(argv) => argv,
@@ -257,10 +283,12 @@ pub fn open_file(editor: Editor, new_window: impl FnOnce(Vec<OsString>)) {
             path.into(),
         ],
     };
+    let env = env.clone();
     std::thread::spawn(move || {
         let mut command = Command::new(&argv[0]);
         command
             .args(&argv[1..])
+            .envs(&env)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -422,6 +450,29 @@ mod tests {
             editor(&config(&["/opt/bin/subl"]), None, file, 1, None),
             Editor::Program(_)
         ));
+        assert!(matches!(
+            editor(
+                &config(&["emacsclient", "-t", "{file}"]),
+                None,
+                file,
+                1,
+                None
+            ),
+            Editor::Terminal(_)
+        ));
+        let Editor::Program(argv) = editor(
+            &config(&["myedit", "{file}", "{line}{column}", "{x}{"]),
+            None,
+            Path::new("/w/{line}/{column}.rs"),
+            7,
+            Some(3),
+        ) else {
+            panic!()
+        };
+        assert_eq!(
+            args(&argv),
+            ["myedit", "/w/{line}/{column}.rs", "73", "{x}{"]
+        );
     }
 
     #[test]
