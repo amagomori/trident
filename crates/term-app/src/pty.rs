@@ -10,6 +10,24 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// A window started from `/` (as from Finder) runs in the inherited home, not an
+/// `[env].HOME` override. Pager lookup and PTY spawning must use the same directory.
+pub fn default_working_directory() -> Option<std::path::PathBuf> {
+    inherited_working_directory(
+        std::env::current_dir().ok(),
+        std::env::var_os("HOME").map(Into::into),
+    )
+}
+
+fn inherited_working_directory(
+    current: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    current
+        .filter(|dir| dir != std::path::Path::new("/"))
+        .or(home)
+}
+
 /// Output the reader thread queues before it waits for the UI, once it also holds
 /// `MIN_LINES` lines. That many lines is well past a screen plus default scrollback, so a
 /// flood's batch is long enough to skip building the lines it evicts, even with long lines.
@@ -224,7 +242,7 @@ pub struct Pty {
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Input>,
     pause_boundary: Option<Arc<AtomicU64>>,
-    /// `None` only once `drop` has handed it to the reaper thread.
+    /// `None` once `drop` has handed it to the reaper thread or `exit_code` has reaped it.
     child: Option<Box<dyn Child + Send + Sync>>,
     output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
@@ -520,14 +538,11 @@ impl Pty {
         for (key, value) in env {
             cmd.env(key, value);
         }
-        if let Some(dir) = cwd {
-            cmd.cwd(dir);
-        } else if let Some(home) = std::env::var_os("HOME")
-            && std::env::current_dir()
-                .map(|d| d == std::path::Path::new("/"))
-                .unwrap_or(true)
+        if let Some(dir) = cwd
+            .map(std::path::PathBuf::from)
+            .or_else(default_working_directory)
         {
-            cmd.cwd(home);
+            cmd.cwd(dir);
         }
         // portable-pty starts the default shell as a login shell, with argv[0] `-<basename>`.
         let login = cmd.is_default_prog().then(|| {
@@ -697,6 +712,24 @@ impl Pty {
             watcher: None,
             finished: Arc::new(finished),
         })
+    }
+
+    /// The command's exit code, waiting up to `within` for it to exit after its output
+    /// ended. `None` while it still runs or when a signal ended it.
+    pub fn exit_code(&mut self, within: Duration) -> Option<u32> {
+        let deadline = Instant::now() + within;
+        let status = loop {
+            match self.child.as_mut()?.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        };
+        // Reaped, so `drop` must not signal its pid, which may be reused by now.
+        self.child = None;
+        status.signal().is_none().then(|| status.exit_code())
     }
 
     pub fn set_command_notifications(&mut self, enabled: bool) -> Result<(), String> {
@@ -971,6 +1004,23 @@ fn reap(mut child: Box<dyn Child + Send + Sync>) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_directory_uses_inherited_home_only_from_root_or_unknown_cwd() {
+        let home = std::path::PathBuf::from("/inherited-home");
+        let cwd = std::path::PathBuf::from("/project");
+        for current in [None, Some("/".into())] {
+            assert_eq!(
+                inherited_working_directory(current, Some(home.clone())),
+                Some(home.clone())
+            );
+        }
+        assert_eq!(
+            inherited_working_directory(Some(cwd.clone()), Some(home)),
+            Some(cwd)
+        );
+        assert_eq!(inherited_working_directory(Some("/".into()), None), None);
+    }
+
     #[cfg(unix)]
     fn nonblocking_pipe() -> (std::fs::File, std::fs::File) {
         use std::os::fd::FromRawFd;
@@ -1211,6 +1261,36 @@ mod tests {
             seen.extend_from_slice(&pty.take_output().bytes);
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_code_reports_how_the_command_exited() {
+        let spawn = |script: &str| {
+            Pty::spawn(
+                &["/bin/sh".into(), "-c".into(), script.into()],
+                &Default::default(),
+                None,
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap()
+        };
+        assert_eq!(spawn("exit 2").exit_code(Duration::from_secs(10)), Some(2));
+        assert_eq!(spawn("exit 0").exit_code(Duration::from_secs(10)), Some(0));
+        assert_eq!(
+            spawn("kill -TERM $$").exit_code(Duration::from_secs(10)),
+            None
+        );
+        let mut running = spawn("sleep 30");
+        assert_eq!(running.exit_code(Duration::from_millis(50)), None);
+        assert!(
+            running.child.is_some(),
+            "a running command stays for drop to reap"
+        );
     }
 
     #[cfg(unix)]

@@ -378,14 +378,35 @@ impl Terminal {
         if self.alt_active {
             return;
         }
+        let visible_end = self.history + self.rows as u64 - self.display_offset as u64;
+        self.selection = self
+            .command_output_before(visible_end)
+            .and_then(|(_, selection)| selection);
+    }
+
+    /// The most recent nonempty command output, wherever the viewport is, with its
+    /// colors and attributes as SGR sequences (for a pager such as `less -R`).
+    pub fn last_command_output(&self) -> Option<String> {
+        if self.alt_active {
+            return None;
+        }
+        let mut before = self.history + self.rows as u64;
+        loop {
+            let (start, selection) = self.command_output_before(before)?;
+            if let Some(selection) = selection {
+                return Some(self.styled_text(selection));
+            }
+            before = start;
+        }
+    }
+
+    /// The latest command output starting above line `before`: its first line and,
+    /// unless the output is empty, the selection covering it.
+    fn command_output_before(&self, before: u64) -> Option<(u64, Option<Selection>)> {
         let end = self.history + self.rows as u64;
-        let visible_end = end - self.display_offset as u64;
-        let Some(start) = (self.first_line()..visible_end)
+        let start = (self.first_line()..before)
             .rev()
-            .find(|&line| self.line(line).flags.contains(RowFlags::OUTPUT_START))
-        else {
-            return;
-        };
+            .find(|&line| self.line(line).flags.contains(RowFlags::OUTPUT_START))?;
         let start_col = self.line(start).output_col as usize;
         let start_col = if start_col <= self.cols || self.line(start).wrapped() {
             start_col.min(self.cols)
@@ -438,9 +459,9 @@ impl Terminal {
             line: partial.map_or_else(|| stop.saturating_sub(1), |(line, _)| line),
             col: partial.map_or(self.cols - 1, |(_, col)| col - 1),
         };
-        if (stop > start || partial.is_some()) && (head.line, head.col) >= (anchor.line, anchor.col)
-        {
-            self.selection = Some(Selection {
+        let selection = ((stop > start || partial.is_some())
+            && (head.line, head.col) >= (anchor.line, anchor.col))
+            .then_some(Selection {
                 anchor,
                 head,
                 kind: if partial.is_some() || start_col > 0 {
@@ -449,7 +470,7 @@ impl Terminal {
                     SelectionKind::Line
                 },
             });
-        }
+        Some((start, selection))
     }
 
     #[cold]
@@ -1277,7 +1298,10 @@ impl Terminal {
 
     /// The selected range, expanded for word/line selections, as inclusive points.
     pub fn selection_range(&self) -> Option<(Point, Point)> {
-        let sel = self.selection?;
+        self.range_of(self.selection?)
+    }
+
+    fn range_of(&self, sel: Selection) -> Option<(Point, Point)> {
         let (mut start, mut end) = if sel.anchor <= sel.head {
             (sel.anchor, sel.head)
         } else {
@@ -1321,11 +1345,20 @@ impl Terminal {
 
     /// Inclusive columns on one physical row, shared by highlighting and copying.
     /// Selecting either half of a wide glyph selects the whole glyph.
-    fn selection_columns(&self, (start, end): (Point, Point), line: u64) -> Option<(usize, usize)> {
+    fn selection_columns(&self, range: (Point, Point), line: u64) -> Option<(usize, usize)> {
+        self.columns_of(self.selection?.kind, range, line)
+    }
+
+    fn columns_of(
+        &self,
+        kind: SelectionKind,
+        (start, end): (Point, Point),
+        line: u64,
+    ) -> Option<(usize, usize)> {
         if !(start.line..=end.line).contains(&line) {
             return None;
         }
-        let block = self.selection?.kind == SelectionKind::Block;
+        let block = kind == SelectionKind::Block;
         let mut from = if block || line == start.line {
             start.col
         } else {
@@ -1338,7 +1371,7 @@ impl Terminal {
         };
         from = from.min(self.cols - 1);
         to = to.min(self.cols - 1);
-        let cells = self.selection_cells(line);
+        let cells = self.cells_of(kind, line);
         from = from.min(cells.len().saturating_sub(1));
         to = to.min(cells.len().saturating_sub(1));
         if from > 0 && cells[from].flags.contains(Flags::WIDE_SPACER) {
@@ -1407,7 +1440,11 @@ impl Terminal {
     }
 
     fn output_end(&self, line: u64) -> Option<&OutputEnd> {
-        if self.alt_active || self.selection?.kind != SelectionKind::CommandOutput {
+        self.output_end_of(self.selection?.kind, line)
+    }
+
+    fn output_end_of(&self, kind: SelectionKind, line: u64) -> Option<&OutputEnd> {
+        if self.alt_active || kind != SelectionKind::CommandOutput {
             return None;
         }
         self.command_output_end(line)
@@ -1426,6 +1463,63 @@ impl Terminal {
     fn selection_cells(&self, line: u64) -> &[Cell] {
         self.output_end(line)
             .map_or(&self.line(line).cells, |end| &end.cells)
+    }
+
+    fn cells_of(&self, kind: SelectionKind, line: u64) -> &[Cell] {
+        self.output_end_of(kind, line)
+            .map_or(&self.line(line).cells, |end| &end.cells)
+    }
+
+    /// A line or command-output selection's text with SGR sequences for its styles;
+    /// each hard line ends with its attributes reset.
+    fn styled_text(&self, sel: Selection) -> String {
+        let mut out = String::new();
+        let Some((start, end)) = self.range_of(sel) else {
+            return out;
+        };
+        let plain = Cell::default();
+        let mut style = &plain;
+        for line in start.line..=end.line {
+            let Some((from, to)) = self.columns_of(sel.kind, (start, end), line) else {
+                continue;
+            };
+            let cells = &self.cells_of(sel.kind, line)[from..=to];
+            let soft = line != end.line
+                && self
+                    .output_end_of(sel.kind, line)
+                    .map_or(self.line(line).wrapped(), |end| end.wrapped);
+            let len = if soft {
+                cells.len()
+            } else {
+                cells
+                    .iter()
+                    .rposition(|cell| cell.c != ' ')
+                    .map_or(0, |i| i + 1)
+            };
+            for cell in &cells[..len] {
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_SPACER.union(Flags::WIDE_WRAP))
+                {
+                    continue;
+                }
+                if !cell.same_sgr(style) {
+                    cell.push_sgr(&mut out);
+                    style = cell;
+                }
+                self.push_cell_text(cell, &mut out);
+            }
+            if !soft {
+                if !style.same_sgr(&plain) {
+                    out.push_str("\x1b[0m");
+                    style = &plain;
+                }
+                if line != end.line {
+                    out.push('\n');
+                }
+            }
+        }
+        out
     }
 
     #[cold]

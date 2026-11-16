@@ -34,6 +34,7 @@ pub struct Config {
     pub window_rows: Option<usize>,
     pub remember_window_size: bool,
     pub shell: Vec<String>,
+    pub pager: Vec<String>,
     /// The editor for `path:line` links; empty uses `$VISUAL`/`$EDITOR`.
     pub editor: Vec<String>,
     pub term: String,
@@ -74,6 +75,7 @@ impl Default for Config {
             window_rows: None,
             remember_window_size: true,
             shell: Vec::new(),
+            pager: ["less", "-R", "+G"].map(String::from).to_vec(),
             editor: Vec::new(),
             term: crate::terminfo::FALLBACK.to_string(),
             env: BTreeMap::new(),
@@ -111,6 +113,7 @@ struct Raw {
     window_rows: Option<u64>,
     remember_window_size: Option<bool>,
     shell: Option<Shell>,
+    pager: Option<Shell>,
     editor: Option<Shell>,
     term: Option<String>,
     env: BTreeMap<String, String>,
@@ -281,6 +284,7 @@ pub enum Action {
     JumpToPromptDown,
     SelectCommandOutput,
     ToggleFullscreen,
+    ShowLastCommandOutput,
     None,
     Send(String),
 }
@@ -313,6 +317,7 @@ impl Action {
                 "jump_to_prompt_down" => Self::JumpToPromptDown,
                 "select_command_output" => Self::SelectCommandOutput,
                 "toggle_fullscreen" => Self::ToggleFullscreen,
+                "show_last_command_output" => Self::ShowLastCommandOutput,
                 "none" => Self::None,
                 _ => match name
                     .strip_prefix("select_tab_")
@@ -441,6 +446,11 @@ fn shell_integration_bindings() {
                 "select_command_output",
                 Action::SelectCommandOutput,
             ),
+            (
+                if macos { "shift+g" } else { "g" },
+                "show_last_command_output",
+                Action::ShowLastCommandOutput,
+            ),
         ] {
             assert_eq!(
                 defaults[&Chord::parse(&format!("{prefix}+{key}")).unwrap()],
@@ -510,6 +520,10 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
             Chord::parse("super+shift+a").unwrap(),
             Action::SelectCommandOutput,
         );
+        bindings.insert(
+            Chord::parse("super+shift+g").unwrap(),
+            Action::ShowLastCommandOutput,
+        );
         bindings.insert(Chord::parse("super+k").unwrap(), Action::Clear);
         for (key, action) in [
             ("=", Action::Increase),
@@ -526,6 +540,10 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
         bindings.insert(
             Chord::parse("ctrl+shift+a").unwrap(),
             Action::SelectCommandOutput,
+        );
+        bindings.insert(
+            Chord::parse("ctrl+shift+g").unwrap(),
+            Action::ShowLastCommandOutput,
         );
     }
     let fullscreen = if macos { "ctrl+super+f" } else { "f11" };
@@ -726,6 +744,14 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     };
     if config.shell.first().is_some_and(|s| s.is_empty()) {
         return Err(error("shell", "expected a nonempty program"));
+    }
+    match raw.pager {
+        Some(Shell::Program(program)) => config.pager = vec![program],
+        Some(Shell::Command(command)) => config.pager = command,
+        None => {}
+    }
+    if config.pager.first().is_none_or(|s| s.is_empty()) {
+        return Err(error("pager", "expected a nonempty program"));
     }
     config.editor = match raw.editor {
         Some(Shell::Program(command)) => command.split_whitespace().map(str::to_owned).collect(),
@@ -1479,6 +1505,21 @@ bright_white = "#fefdfc"
         assert!(parse_text("").unwrap().editor.is_empty());
         assert!(parse_text("editor = ''").unwrap().editor.is_empty());
         assert!(parse_text("editor = ['']").unwrap_err().contains("editor"));
+    }
+
+    #[test]
+    fn pager_defaults_to_less_and_accepts_a_program_or_command() {
+        assert_eq!(parse_text("").unwrap().pager, ["less", "-R", "+G"]);
+        assert_eq!(parse_text("pager = 'most'").unwrap().pager, ["most"]);
+        assert_eq!(
+            parse_text("pager = ['bat', '--paging=always']")
+                .unwrap()
+                .pager,
+            ["bat", "--paging=always"]
+        );
+        for text in ["pager = ''", "pager = []", "pager = ['']"] {
+            assert!(parse_text(text).unwrap_err().contains("pager"), "{text}");
+        }
     }
 
     #[test]
