@@ -124,6 +124,11 @@ pub(crate) fn skin_tone(c: char) -> bool {
     matches!(c as u32, 0x1F3FB..=0x1F3FF)
 }
 
+/// The tag characters of an emoji tag sequence (a subdivision flag such as Scotland's).
+pub fn tag(c: char) -> bool {
+    matches!(c as u32, 0xE0020..=0xE007F)
+}
+
 /// Emoji and the symbols emoji sequences are built from (an approximation of
 /// `Extended_Pictographic`).
 fn pictographic(c: char) -> bool {
@@ -157,7 +162,7 @@ pub fn is_emoji_sequence(cluster: &str) -> bool {
         Some(p) if pictographic(p) => {
             let mut joiner = false;
             chars.any(|c| {
-                let joined = skin_tone(c) || (joiner && c != '\u{200D}');
+                let joined = skin_tone(c) || tag(c) || (joiner && c != '\u{200D}');
                 joiner = c == '\u{200D}';
                 joined
             })
@@ -460,6 +465,22 @@ mod tests {
         assert!(is_emoji_sequence(thumb) && is_emoji_sequence(coder));
         assert!(!is_emoji_sequence("e\u{301}") && !is_emoji_sequence("\u{1f468}\u{fe0f}"));
         assert!(!is_emoji_sequence("\u{1f468}\u{200d}"));
+    }
+
+    #[test]
+    fn subdivision_flags_are_one_sequence() {
+        let mut t = Terminal::new(20, 2);
+        let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+        let wales = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0077}\u{e006c}\u{e0073}\u{e007f}";
+        t.advance(format!("{scotland}|{wales}|").as_bytes());
+        let row = t.viewport_row(0);
+        assert_eq!(t.grapheme(&row.cells[0]), Some(scotland));
+        assert!(row.cells[0].flags.contains(Flags::WIDE));
+        assert_eq!(t.base_char(&row.cells[2]), '|');
+        assert_eq!(t.grapheme(&row.cells[3]), Some(wales));
+        assert_eq!(t.cursor_position(), Some((0, 6)));
+        assert!(is_emoji_sequence(scotland) && is_emoji_sequence(wales));
+        assert!(!is_emoji_sequence("\u{1f3f4}"));
     }
 
     #[test]

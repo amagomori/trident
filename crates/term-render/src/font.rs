@@ -9,6 +9,7 @@ use ab_glyph::{Font, FontArc, FontRef, GlyphId, PxScale, ScaleFont, point};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use term_core::grapheme;
 
 /// The bundled regular face, also used by `terminal show` for SVG text.
 pub static REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
@@ -273,7 +274,7 @@ impl Fonts {
         let mut tried = Vec::new();
         for c in text
             .chars()
-            .filter(|&c| c as u32 >= 0x80 && c != '\u{200D}')
+            .filter(|&c| c as u32 >= 0x80 && c != '\u{200D}' && !grapheme::tag(c))
         {
             let Some(fallback) = self.fallback_for(c, true, false) else {
                 continue;
@@ -435,6 +436,7 @@ mod tests {
             "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
             "\u{1f1ef}\u{1f1f5}",
             "\u{1f44d}\u{1f3fd}",
+            "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
         ] {
             let glyph = fonts.rasterize_sequence(text, 2).expect(text);
             assert!(glyph.color, "{text}");
@@ -447,6 +449,10 @@ mod tests {
         let family = fonts.rasterize_sequence(family, 2).unwrap();
         let man = fonts.rasterize('\u{1f468}', Style::Regular, 2).unwrap();
         assert_ne!(family.coverage, man.coverage);
+        let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+        let scotland = fonts.rasterize_sequence(scotland, 2).unwrap();
+        let black_flag = fonts.rasterize('\u{1f3f4}', Style::Regular, 2).unwrap();
+        assert_ne!(scotland.coverage, black_flag.coverage);
         // Two unrelated emoji are not one glyph.
         assert!(fonts.rasterize_sequence("\u{1f468}\u{1f600}", 2).is_none());
     }

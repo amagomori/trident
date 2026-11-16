@@ -42,6 +42,9 @@ struct Queue {
     pending: Mutex<Pending>,
     room: Condvar,
     probe: Probe,
+    /// The user typed since the last line they sent: only then can a read be the line
+    /// editor's echo. A command's output, and the next prompt, follow a sent line.
+    typing: AtomicBool,
 }
 
 /// Asks whether the shell itself is the PTY's foreground process group.
@@ -689,7 +692,8 @@ impl Pty {
                             // finds the editor's modes just set is the end of a command's
                             // output and the prompt, not the editor's own redraw.
                             let modes = queue.probe.editor_modes();
-                            let editing = modes && was_editing;
+                            let editing =
+                                modes && was_editing && queue.typing.load(Ordering::SeqCst);
                             was_editing = modes;
                             let sequence = queue.read_sequence.fetch_add(1, Ordering::SeqCst) + 1;
                             let read_bytes =
@@ -822,7 +826,12 @@ impl Pty {
         if bytes.is_empty() {
             return;
         }
-        self.line_sent |= memchr::memchr2(b'\r', b'\n', bytes).is_some();
+        let line_end = memchr::memrchr2(b'\r', b'\n', bytes);
+        self.line_sent |= line_end.is_some();
+        self.output.typing.store(
+            line_end.is_none_or(|end| end + 1 < bytes.len()),
+            Ordering::SeqCst,
+        );
         let settings = self.flow_flags().unwrap_or_default();
         self.flow_redraw |= self.flow.input(
             bytes,
@@ -1467,6 +1476,43 @@ mod tests {
         let row = term.viewport_row(1);
         assert_eq!(term.grapheme(&row.cells[0]), Some(sequence), "{args:?}");
         assert_eq!(term.base_char(&row.cells[2]), '|');
+    }
+
+    /// A command that leaves the PTY in a line editor's modes while it prints (or a shell
+    /// already back at its prompt when its output is read) is not echoing the user.
+    #[cfg(unix)]
+    #[test]
+    fn output_after_a_sent_line_is_never_editor_echo() {
+        let script = "read line; stty -icanon -echo -icrnl; printf 'x\\n'; sleep 0.3; \
+                      printf 'A\\360\\237\\221\\215\\360\\237\\217\\275B\\n'; sleep 0.3; \
+                      printf 'done\\n'; sleep 5";
+        let args = ["sh".into(), "-c".into(), script.into()];
+        let env = [("LC_ALL".to_owned(), "C.UTF-8".to_owned())]
+            .into_iter()
+            .collect();
+        let mut pty = Pty::spawn(&args, &env, None, 40, 10, (8.0, 16.0), |_| {}, |_| {}).unwrap();
+        let mut term = term_core::Terminal::new(40, 10);
+        pty.write(b"go\r");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let row = loop {
+            let output = pty.take_output();
+            term.set_line_editing(output.line_editing);
+            if output.line_sent {
+                term.line_sent();
+            }
+            term.advance(&output.bytes);
+            if let Some(row) =
+                (0..4).find(|&r| term.base_char(&term.viewport_row(r).cells[0]) == 'd')
+            {
+                break row - 1;
+            }
+            assert!(Instant::now() < deadline, "the script never finished");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let cells = &term.viewport_row(row).cells;
+        assert_eq!(term.base_char(&cells[0]), 'A');
+        assert_eq!(term.grapheme(&cells[1]), Some("\u{1f44d}\u{1f3fd}"));
+        assert_eq!(term.base_char(&cells[3]), 'B');
     }
 
     #[cfg(unix)]
