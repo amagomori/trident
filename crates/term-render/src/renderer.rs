@@ -57,6 +57,17 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 
+/// An image drawn over the whole window at `pos` (physical pixels, top-left), outside the
+/// terminal's own image placements. Bump `version` when `image` changes.
+#[derive(Clone, Debug)]
+pub struct FloatingImage {
+    pub image: Arc<term_core::images::Image>,
+    pub version: u64,
+    pub pos: [f32; 2],
+    /// Underlined like a hovered link while no link is hovered.
+    pub underline: Option<term_core::Link>,
+}
+
 pub struct Renderer {
     /// The blink phase of a focused cursor; false hides it until the next frame.
     pub cursor_visible: bool,
@@ -75,6 +86,9 @@ pub struct Renderer {
     instance_capacity: usize,
     atlas: Atlas,
     images: ImagePipeline,
+    /// A transient card drawn over everything, such as a file preview.
+    floating: ImagePipeline,
+    floating_image: Option<FloatingImage>,
     /// Instances in each region this frame.
     lens: [u32; 4],
     /// The grid area images are clipped to: x, y, width, height in physical pixels.
@@ -300,6 +314,7 @@ impl Renderer {
         let instance_capacity = 1024;
         let instances = create_instance_buffer(&device, 4 * instance_capacity);
         let images = ImagePipeline::new(&device, format);
+        let floating = ImagePipeline::new(&device, format);
 
         Ok(Renderer {
             surface,
@@ -315,6 +330,8 @@ impl Renderer {
             instance_capacity,
             atlas,
             images,
+            floating,
+            floating_image: None,
             lens: [0; 4],
             image_clip: [0; 4],
             srgb: format.is_srgb(),
@@ -339,6 +356,11 @@ impl Renderer {
             #[cfg(target_os = "linux")]
             shm,
         })
+    }
+
+    /// Sets or clears the floating image drawn from the next frame on.
+    pub fn set_floating(&mut self, floating: Option<FloatingImage>) {
+        self.floating_image = floating;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -479,6 +501,11 @@ impl Renderer {
         hover: Option<&term_core::Link>,
         pre_present: Option<&mut dyn FnMut()>,
     ) -> bool {
+        let underline = self
+            .floating_image
+            .as_ref()
+            .and_then(|f| f.underline.clone());
+        let hover = hover.or(underline.as_ref());
         for _ in 0..2 {
             if self.build(
                 term,
@@ -510,6 +537,14 @@ impl Renderer {
         if !quads.is_empty() || !self.images.is_empty() {
             self.images
                 .prepare(&self.device, &self.queue, &self.uniforms, term, quads);
+        }
+        if self.floating_image.is_some() || !self.floating.is_empty() {
+            let image = self
+                .floating_image
+                .as_ref()
+                .map(|f| (&*f.image, f.version, f.pos));
+            self.floating
+                .prepare_single(&self.device, &self.queue, &self.uniforms, image);
         }
         self.draw(term.palette.background, pre_present)
     }
@@ -1299,6 +1334,11 @@ impl Renderer {
                     &mut pass,
                     overlays + self.bar_start..overlays + self.lens[3],
                 );
+            }
+            if !self.floating.is_empty() {
+                pass.set_viewport(0.0, inset as f32, width as f32, area as f32, 0.0, 1.0);
+                self.floating
+                    .draw(&mut pass, Layer::AboveText, [0, inset, width, area]);
             }
         }
         self.queue.submit([encoder.finish()]);
