@@ -34,6 +34,7 @@ mod secure_input;
 mod show;
 mod terminfo;
 mod theme;
+mod window_state;
 
 use config::Action;
 use input::MouseButton as ReportButton;
@@ -66,6 +67,7 @@ use winit::window::{Fullscreen, Theme, Window, WindowId};
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
 const WORKING_DIRECTORY: &str = "TERMINAL_WORKING_DIRECTORY";
+const WINDOW_CELLS: &str = "TERMINAL_WINDOW_CELLS";
 /// Bounds how long startup waits for the portal's color scheme before the
 /// first PTY output is parsed; the read overlaps window and GPU setup.
 #[cfg(target_os = "linux")]
@@ -168,6 +170,8 @@ struct Options {
     copy_on_select: bool,
     command: Vec<String>,
     working_directory: Option<PathBuf>,
+    /// The size of the window that opened this one, in cells.
+    window_cells: Option<(usize, usize)>,
 }
 
 impl Options {
@@ -235,6 +239,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
         copy_on_select: false,
         command: Vec::new(),
         working_directory: None,
+        window_cells: None,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -361,6 +366,7 @@ struct TabWindow {
     redraw_pending: bool,
     drawable_wait: Option<Instant>,
     occluded: bool,
+    normal_cells: (usize, usize),
 }
 
 impl Pane {
@@ -1074,6 +1080,9 @@ struct App {
     appearance_generation: u64,
     config: config::Config,
     config_error: Option<String>,
+    /// The window's latest size in cells while neither maximized nor fullscreen; on macOS,
+    /// each native tab's window keeps its own, swapped in with the tab.
+    normal_cells: (usize, usize),
     icons: app_icon::Shown,
     /// Until the startup icons are set up: the latest time to do it.
     icons_latest: Option<Instant>,
@@ -1184,6 +1193,7 @@ impl App {
             font_size: options.size(&config),
             config,
             config_error,
+            normal_cells: window_state::DEFAULT_CELLS,
             icons: app_icon::Shown::default(),
             icons_latest: None,
             output_at: Instant::now(),
@@ -1245,28 +1255,51 @@ impl App {
         };
         self.watch_appearance();
         let font = self.options.font(&self.config);
-        let m = probe.metrics;
-        let logical_size = LogicalSize::new(
-            100.0 * m.width + 2.0 * self.config.padding,
-            30.0 * m.height + 2.0 * self.config.padding + self.tab_bar_height(1, &probe) as f32,
-        );
-        let guess = event_loop
+        let monitor = event_loop
             .primary_monitor()
-            .map_or(1.0, |m| m.scale_factor());
+            .or_else(|| event_loop.available_monitors().next());
+        let guess = monitor.as_ref().map_or(1.0, |m| m.scale_factor());
         let guessed_fonts = if guess == 1.0 {
             probe
         } else {
             Fonts::new(font, self.font_size * guess as f32)?
         };
+        let guessed_tab_bar = self.tab_bar_height(1, &guessed_fonts);
+        let initial = window_state::initial(
+            self.options.window_cells,
+            (self.config.window_columns, self.config.window_rows),
+            self.config.remember_window_size,
+            || window_state::load(&window_state::path()?),
+        );
+        let cells = window_state::clamp(
+            initial.cells,
+            monitor.map(|m| {
+                grid_size_for(
+                    below_tab_bar(m.size(), guessed_tab_bar),
+                    guess,
+                    &guessed_fonts,
+                    self.config.padding,
+                )
+            }),
+        );
+        let physical_size = window_size_for(
+            cells,
+            guess,
+            &guessed_fonts,
+            self.config.padding,
+            guessed_tab_bar,
+        );
+        let logical_size = LogicalSize::new(
+            f64::from(physical_size.width) / guess,
+            f64::from(physical_size.height) / guess,
+        );
         let (spawn_cols, spawn_rows) = grid_size_for(
-            below_tab_bar(
-                logical_size.to_physical(guess),
-                self.tab_bar_height(1, &guessed_fonts),
-            ),
+            below_tab_bar(physical_size, guessed_tab_bar),
             guess,
             &guessed_fonts,
             self.config.padding,
         );
+        self.normal_cells = (spawn_cols, spawn_rows);
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let pty = self.spawn_pty(
             0,
@@ -1277,7 +1310,8 @@ impl App {
         )?;
         let attrs = Window::default_attributes()
             .with_title("Trident")
-            .with_inner_size(logical_size);
+            .with_inner_size(logical_size)
+            .with_maximized(initial.maximized);
         #[cfg(target_os = "linux")]
         let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
             attrs, "trident", "trident",
@@ -1454,6 +1488,33 @@ impl App {
     }
 
     /// The tab bar's height with `tabs` tabs open, 0 when it is hidden.
+    fn save_window_state(&self) {
+        let Some(s) = self
+            .session
+            .as_ref()
+            .filter(|_| self.config.remember_window_size)
+        else {
+            return;
+        };
+        let maximized = s.window.is_maximized();
+        let cells = if maximized || s.window.fullscreen().is_some() {
+            self.normal_cells
+        } else {
+            (s.term.cols(), s.term.rows())
+        };
+        let Some(path) = window_state::path() else {
+            return;
+        };
+        if let Err(error) =
+            window_state::save(&path, window_state::WindowState { cells, maximized })
+        {
+            diag!(
+                "trident: cannot save window size to {}: {error}",
+                path.display()
+            );
+        }
+    }
+
     fn tab_bar_height(&self, tabs: usize, fonts: &Fonts) -> u32 {
         if tab_bar_drawn(self.config.tab_bar.shown(tabs)) {
             term_render::tab_bar_height(fonts.metrics.height)
@@ -1573,6 +1634,7 @@ impl App {
             redraw_pending: false,
             drawable_wait: None,
             occluded: false,
+            normal_cells: self.normal_cells,
         })
     }
 
@@ -1624,6 +1686,7 @@ impl App {
         };
         s.swap_pane(&mut pane);
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+        std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         let latency = s.latency.take();
         let search = self.search.take();
         let focused = std::mem::replace(&mut self.focused, false);
@@ -1637,6 +1700,7 @@ impl App {
         self.focused = focused;
         self.search = search;
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+        std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         if let Some(s) = &mut self.session {
             s.latency = latency;
             s.swap_pane(&mut pane);
@@ -1721,6 +1785,7 @@ impl App {
         #[cfg(target_os = "macos")]
         {
             std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+            std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
             native_tabs::show(&s.window);
         }
         self.tabs[self.active_tab] = Some(pane);
@@ -2075,6 +2140,9 @@ impl App {
             }
         }
         let grid_changed = (cols, rows) != (s.term.cols(), s.term.rows());
+        if grid_changed && !s.window.is_maximized() && s.window.fullscreen().is_none() {
+            self.normal_cells = (cols, rows);
+        }
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         let covered = find_bar_rows(
@@ -2884,6 +2952,10 @@ impl App {
                     .session
                     .as_ref()
                     .and_then(|s| local_working_directory(s.term.working_directory()));
+                let cells = self
+                    .session
+                    .as_ref()
+                    .map(|s| window_state::format_cells((s.term.cols(), s.term.rows())));
                 if let Err(error) =
                     std::thread::Builder::new()
                         .name("new-window".into())
@@ -2901,6 +2973,9 @@ impl App {
                                 }
                                 if let Some(dir) = working_directory {
                                     command.env(WORKING_DIRECTORY, dir);
+                                }
+                                if let Some(cells) = cells {
+                                    command.env(WINDOW_CELLS, cells);
                                 }
                                 command.spawn()
                             });
@@ -3516,6 +3591,22 @@ fn grid_size(window: &Window, fonts: &Fonts, padding: f32, tab_bar: u32) -> (usi
     )
 }
 
+/// The inner size `grid_size_for` turns back into `cells`.
+fn window_size_for(
+    (cols, rows): (usize, usize),
+    scale: f64,
+    fonts: &Fonts,
+    padding: f32,
+    tab_bar: u32,
+) -> PhysicalSize<u32> {
+    let pad = (2.0 * padding * scale as f32).ceil();
+    let side = |cells: usize, cell: f32| (cells as f32 * cell + pad).ceil() as u32;
+    PhysicalSize::new(
+        side(cols, fonts.metrics.width),
+        side(rows, fonts.metrics.height) + tab_bar,
+    )
+}
+
 fn grid_size_for(
     size: PhysicalSize<u32>,
     scale: f64,
@@ -3578,6 +3669,7 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(s) = &mut self.session {
             s.latency.take();
         }
+        self.save_window_state();
     }
 
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
@@ -4063,8 +4155,12 @@ fn main() {
     // SAFETY: main has not started any threads or spawned the PTY yet.
     unsafe { std::env::remove_var(STARTUP_STDERR) };
     let working_directory = std::env::var_os(WORKING_DIRECTORY).map(PathBuf::from);
+    let window_cells = std::env::var(WINDOW_CELLS).ok();
     // SAFETY: as above.
-    unsafe { std::env::remove_var(WORKING_DIRECTORY) };
+    unsafe {
+        std::env::remove_var(WORKING_DIRECTORY);
+        std::env::remove_var(WINDOW_CELLS);
+    }
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
@@ -4074,6 +4170,7 @@ fn main() {
     let options = match parse_args() {
         Ok(o) => Options {
             working_directory: working_directory.filter(|dir| dir.is_dir()),
+            window_cells: window_cells.as_deref().and_then(window_state::parse_cells),
             ..o
         },
         Err(e) => {
@@ -4654,6 +4751,7 @@ mod tests {
             font_size: super::DEFAULT_FONT_SIZE,
             command: Vec::new(),
             working_directory: None,
+            window_cells: None,
             option_as_alt: true,
             copy_on_select: false,
         };
@@ -5803,6 +5901,39 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn window_size_round_trips_to_its_cells() {
+        for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            for padding in [0.0, PADDING, 6.3] {
+                for tab_bar in [0, 37] {
+                    for cells in [(20, 5), (80, 24), (100, 30), (317, 91)] {
+                        let size = window_size_for(cells, scale, &fonts, padding, tab_bar);
+                        assert_eq!(
+                            grid_size_for(below_tab_bar(size, tab_bar), scale, &fonts, padding),
+                            cells,
+                            "{scale} {padding} {tab_bar} {cells:?}"
+                        );
+                    }
+                }
+            }
+        }
+        let fonts = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let screen = PhysicalSize::new(1920, 1080);
+        let max = grid_size_for(screen, 1.0, &fonts, PADDING);
+        let size = window_size_for(
+            window_state::clamp((1000, 1000), Some(max)),
+            1.0,
+            &fonts,
+            PADDING,
+            0,
+        );
+        assert!(
+            size.width <= screen.width && size.height <= screen.height,
+            "{size:?}"
+        );
+    }
+
     #[test]
     fn icons_wait_for_the_first_frame_and_quiet_output() {
         let now = Instant::now();

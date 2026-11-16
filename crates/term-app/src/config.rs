@@ -27,6 +27,9 @@ pub struct Config {
     pub menu_bar_icon: bool,
     pub auto_secure_input: bool,
     pub hide_mouse_when_typing: bool,
+    pub window_columns: Option<usize>,
+    pub window_rows: Option<usize>,
+    pub remember_window_size: bool,
     pub shell: Vec<String>,
     pub term: String,
     pub env: BTreeMap<String, String>,
@@ -59,6 +62,9 @@ impl Default for Config {
             menu_bar_icon: true,
             auto_secure_input: true,
             hide_mouse_when_typing: true,
+            window_columns: None,
+            window_rows: None,
+            remember_window_size: true,
             shell: Vec::new(),
             term: crate::terminfo::FALLBACK.to_string(),
             env: BTreeMap::new(),
@@ -89,6 +95,9 @@ struct Raw {
     menu_bar_icon: Option<bool>,
     auto_secure_input: Option<bool>,
     hide_mouse_when_typing: Option<bool>,
+    window_columns: Option<u64>,
+    window_rows: Option<u64>,
+    remember_window_size: Option<bool>,
     shell: Option<Shell>,
     term: Option<String>,
     env: BTreeMap<String, String>,
@@ -605,6 +614,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         menu_bar_icon: raw.menu_bar_icon.unwrap_or(true),
         auto_secure_input: raw.auto_secure_input.unwrap_or(true),
         hide_mouse_when_typing: raw.hide_mouse_when_typing.unwrap_or(true),
+        remember_window_size: raw.remember_window_size.unwrap_or(true),
         ..Config::default()
     };
     if let Some(name) = raw.tab_bar {
@@ -639,6 +649,23 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
             return Err(error("font_size", "expected a number between 4 and 200"));
         }
         config.font_size = size;
+    }
+    for (key, value, field) in [
+        (
+            "window_columns",
+            raw.window_columns,
+            &mut config.window_columns,
+        ),
+        ("window_rows", raw.window_rows, &mut config.window_rows),
+    ] {
+        if let Some(value) = value {
+            *field = Some(
+                usize::try_from(value)
+                    .ok()
+                    .filter(|n| (1..=crate::window_state::MAX_CELLS).contains(n))
+                    .ok_or_else(|| error(key, "expected a whole number between 1 and 10000"))?,
+            );
+        }
     }
     if let Some(padding) = raw.padding {
         if !padding.is_finite() || !(0.0..=1000.0).contains(&padding) {
@@ -1087,6 +1114,35 @@ mod tests {
 
     fn parse_text(text: &str) -> Result<Config, String> {
         parse(Path::new("/config/terminal/config.toml"), text)
+    }
+
+    #[test]
+    fn window_size() {
+        let config = parse_text("").unwrap();
+        assert_eq!((config.window_columns, config.window_rows), (None, None));
+        assert!(config.remember_window_size);
+        let config =
+            parse_text("window_columns = 120\nwindow_rows = 40\nremember_window_size = false")
+                .unwrap();
+        assert_eq!(
+            (config.window_columns, config.window_rows),
+            (Some(120), Some(40))
+        );
+        assert!(!config.remember_window_size);
+        assert!(config.warnings.is_empty());
+        assert_eq!(parse_text("window_rows = 3").unwrap().window_rows, Some(3));
+        for text in [
+            "window_columns = 0",
+            "window_rows = -1",
+            "window_columns = 10001",
+            "window_columns = 80.5",
+            "window_rows = \"24\"",
+            "remember_window_size = 1",
+        ] {
+            assert!(parse_text(text).is_err(), "{text}");
+        }
+        let error = parse_text("window_columns = 0").unwrap_err();
+        assert!(error.contains("window_columns"), "{error}");
     }
 
     #[test]
