@@ -437,13 +437,13 @@ impl Terminal {
                         }
                     }
                     if cell.c != ' ' {
-                        // Right prompts sit at the row's edge after padding, not a
-                        // word separator within syntax-coloured editable text.
+                        // Separate right prompts have more padding before them than
+                        // after them, including themes with a right-hand inset.
                         if faint_gap > 1
                             && cells[c..]
                                 .iter()
                                 .rposition(|cell| cell.c != ' ')
-                                .is_some_and(|last| c + last + 2 >= cells.len())
+                                .is_some_and(|last| faint_gap > cells.len() - c - last - 1)
                             && let Some((start, _)) = faint_run
                             && cursor.is_some_and(|cursor| cursor <= start)
                         {

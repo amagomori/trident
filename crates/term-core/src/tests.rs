@@ -2837,7 +2837,14 @@ fn prompt_click_stops_before_a_greyed_autosuggestion() {
 fn prompt_click_excludes_suggestion_spaces_and_separate_right_prompts() {
     for grey in ["90", "38;5;240", "38;2;85;85;85", "2"] {
         for (typed, suggestion) in [("echo", " hello world"), ("echo hel", "lo world")] {
-            for right_prompt in ["", "\x1b[1;50H\x1b[33mRIGHT-CLOCK\x1b[m"] {
+            for right_prompt in [
+                "",
+                "\x1b[1;50H\x1b[33mRIGHT-CLOCK\x1b[m",
+                "\x1b[1;49H\x1b[33mRIGHT-CLOCK\x1b[m",
+                "\x1b[1;48H\x1b[33mRIGHT-CLOCK\x1b[m",
+                "\x1b[1;46H\x1b[33mRIGHT-CLOCK\x1b[m",
+                "\x1b[1;40H\x1b[33mRIGHT-CLOCK\x1b[m",
+            ] {
                 let t = term(
                     60,
                     4,
