@@ -1054,9 +1054,23 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn wait_until(description: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
     fn assert_idle(activity: &Activity) {
         use std::sync::atomic::Ordering;
-        std::thread::sleep(Duration::from_millis(1500));
+        wait_until("watcher to become idle", || {
+            activity.idle.load(Ordering::SeqCst)
+        });
         let samples = activity.samples.load(Ordering::Relaxed);
         assert!(samples > 0);
         std::thread::sleep(Duration::from_secs(1));
@@ -1066,27 +1080,25 @@ mod tests {
     #[cfg(unix)]
     fn assert_sampling(activity: &Activity) {
         use std::sync::atomic::Ordering;
-        std::thread::sleep(Duration::from_millis(1500));
+        // Progress during the kick's one-second grace period alone is not enough:
+        // canonical prompts and silent builtins must keep sampling after it expires.
+        std::thread::sleep(Duration::from_millis(1100));
         let samples = activity.samples.load(Ordering::Relaxed);
-        std::thread::sleep(Duration::from_secs(1));
-        assert!(activity.samples.load(Ordering::Relaxed) > samples);
+        wait_until("three watcher samples", || {
+            activity.samples.load(Ordering::Relaxed) >= samples + 3
+        });
     }
 
     #[cfg(unix)]
     #[test]
     fn idle_watcher_kick_tracks_real_foreground_command() {
-        shell_command_finishes("bash", &["--noprofile", "--norc", "-i"], b"sleep 1\n", true);
+        shell_command_finishes(&["--noprofile", "--norc", "-i"], true, false);
     }
 
     #[cfg(unix)]
     #[test]
     fn silent_builtin_then_command_finishes() {
-        shell_command_finishes(
-            "bash",
-            &["--noprofile", "--norc", "-i"],
-            b"read -t 2 x; sleep 2\n",
-            true,
-        );
+        shell_command_finishes(&["--noprofile", "--norc", "-i"], true, true);
     }
 
     #[cfg(unix)]
@@ -1094,34 +1106,97 @@ mod tests {
     fn canonical_shell_prompt_keeps_sampling() {
         // macOS /bin/sh is bash with readline, so turn line editing off to keep the prompt canonical.
         shell_command_finishes(
-            "bash",
             &["--noediting", "--noprofile", "--norc", "-i"],
-            b"sleep 1\n",
+            false,
             false,
         );
     }
 
     #[cfg(unix)]
-    fn shell_command_finishes(shell: &str, args: &[&str], input: &[u8], idle: bool) {
+    fn shell_command_finishes(args: &[&str], idle: bool, builtin: bool) {
         use portable_pty::{CommandBuilder, PtySize, native_pty_system};
         use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+
+        // Failed assertions must not leave a shell, command or PTY reader behind.
+        struct Shell {
+            child: Box<dyn portable_pty::Child + Send + Sync>,
+            group: Option<i32>,
+            reader: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for Shell {
+            fn drop(&mut self) {
+                if let Some(group) = self.group {
+                    // SAFETY: this is the foreground job in our isolated PTY session.
+                    unsafe { libc::kill(-group, libc::SIGKILL) };
+                }
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                if let Some(reader) = self.reader.take() {
+                    let _ = reader.join();
+                }
+            }
+        }
 
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-        let mut command = CommandBuilder::new(shell);
+        let mut command = CommandBuilder::new("bash");
         command.args(args);
-        let mut child = pair.slave.spawn_command(command).unwrap();
+        command.env("PS1", "notify-ready> ");
+        command.env("PROMPT_COMMAND", "");
+        command.env("INPUTRC", "/dev/null");
+        let child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
         // Drain the master like the app's reader, or the shell blocks on a full PTY (macOS).
         let mut output = pair.master.try_clone_reader().unwrap();
-        std::thread::spawn(move || while matches!(output.read(&mut [0; 4096]), Ok(n) if n > 0) {});
+        let (output_sender, output_receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            loop {
+                match output.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = output_sender.send(buffer[..n].to_vec());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+        let mut shell = Shell {
+            child,
+            group: None,
+            reader: Some(reader),
+        };
+        let shell_pid = shell.child.process_id().unwrap();
         let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
             .try_clone_to_owned()
             .unwrap();
+
+        // spawn/exec does not mean bash has reached its prompt or enabled readline yet.
+        let mut seen = Vec::new();
+        wait_until("bash prompt", || {
+            seen.extend(output_receiver.try_iter().flatten());
+            assert!(
+                shell.child.try_wait().unwrap().is_none(),
+                "bash exited: {seen:?}"
+            );
+            seen.windows(b"notify-ready> ".len())
+                .any(|w| w == b"notify-ready> ")
+        });
+        let canonical = || {
+            let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: fd is live and termios is read only after successful initialization.
+            unsafe {
+                assert_eq!(libc::tcgetattr(fd.as_raw_fd(), termios.as_mut_ptr()), 0);
+                termios.assume_init().c_lflag & libc::ICANON != 0
+            }
+        };
+        wait_until("prompt terminal mode", || canonical() != idle);
         let activity = std::sync::Arc::new(Activity::default());
         let (sender, receiver) = std::sync::mpsc::channel();
         let watcher = watch(
-            fd,
-            child.process_id().unwrap(),
+            fd.try_clone().unwrap(),
+            shell_pid,
             Default::default(),
             activity.clone(),
             move |event| {
@@ -1137,14 +1212,50 @@ mod tests {
         // Kick before the shell forks, as happens on an Enter write.
         activity.kick();
         let mut writer = pair.master.take_writer().unwrap();
-        writer.write_all(input).unwrap();
+        if builtin {
+            // Hold the silent builtin past the kick's one-second grace period. Only the
+            // terminal's canonical mode keeps sampling alive; no second kick is sent.
+            writer.write_all(b"read x; sleep 60\n").unwrap();
+            writer.flush().unwrap();
+            wait_until("canonical read builtin", canonical);
+            assert_sampling(&activity);
+            writer.write_all(b"\n").unwrap();
+        } else {
+            writer.write_all(b"sleep 60\n").unwrap();
+        }
         writer.flush().unwrap();
-        let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        wait_until("foreground sleep after exec", || {
+            // SAFETY: fd owns a live PTY descriptor.
+            let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+            if group > 0 && group as u32 != shell_pid {
+                shell.group = Some(group);
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if !command_name(group).is_some_and(|name| name.starts_with("sleep")) {
+                    return false;
+                }
+                return true;
+            }
+            false
+        });
+        // Keep the real command alive until the watcher has had a chance to observe it,
+        // even if it was descheduled for longer than the old `sleep 1` fixture lasted.
+        assert_sampling(&activity);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        // SAFETY: this is the foreground job observed above, not the shell or test process.
+        assert_eq!(
+            unsafe { libc::kill(-shell.group.unwrap(), libc::SIGTERM) },
+            0
+        );
+        let event = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("finished sleep notification");
+        shell.group = None;
         assert!(event.name.is_some_and(|name| name.starts_with("sleep")));
         assert!(event.duration >= Duration::from_millis(400));
         drop(watcher);
-        child.kill().unwrap();
-        child.wait().unwrap();
     }
 
     #[cfg(unix)]
