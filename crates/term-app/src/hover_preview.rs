@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use term_core::colors::Rgb;
 use term_core::images::Image;
-use term_core::{Flags, Link, Point, Row};
+use term_core::{Flags, Link, Point, Row, Terminal};
 use term_render::FloatingImage;
 
 /// Paths longer than this are not looked for.
@@ -29,7 +29,6 @@ const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_LINES: usize = 14;
 const THUMBNAILER_TIMEOUT: Duration = Duration::from_secs(3);
-#[cfg(not(target_os = "macos"))]
 static NEXT_PAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A stretch of a row that may name a file: `text`, drawn in cells `start..end`.
@@ -43,10 +42,10 @@ pub struct Candidate {
 }
 
 /// The row's characters, each with the column it starts at and its width in cells.
-pub fn row_text(row: &Row) -> Vec<(char, usize, usize)> {
-    let mut chars = Vec::with_capacity(row.cells.len());
+/// Appends `row`'s characters with their cells, columns counted from `offset`.
+pub fn row_text(term: &Terminal, row: &Row, offset: usize, out: &mut Vec<(char, usize, usize)>) {
     for (col, cell) in row.cells.iter().enumerate() {
-        if cell.flags.contains(Flags::WIDE_SPACER) {
+        if cell.flags.intersects(Flags::WIDE_SPACER) || cell.flags.intersects(Flags::WIDE_WRAP) {
             continue;
         }
         let width = if cell.flags.contains(Flags::WIDE) {
@@ -54,10 +53,42 @@ pub fn row_text(row: &Row) -> Vec<(char, usize, usize)> {
         } else {
             1
         };
-        let c = if cell.c == '\0' { ' ' } else { cell.c };
-        chars.push((c, col, width));
+        let col = offset + col;
+        match term.grapheme(cell) {
+            Some(cluster) => out.extend(cluster.chars().map(|c| (c, col, width))),
+            None => out.push((if cell.c == '\0' { ' ' } else { cell.c }, col, width)),
+        }
     }
-    chars
+}
+
+/// How many rows a path may soft-wrap across on either side of the hovered one.
+const MAX_WRAPPED: isize = 8;
+
+/// The logical line through viewport `row`, its rows joined across soft wraps: the first
+/// row and the characters, columns counting on from one row to the next.
+pub fn line_text(term: &Terminal, row: isize) -> (isize, Vec<(char, usize, usize)>) {
+    let (lowest, last) = (row.min(0), term.rows() as isize - 1);
+    let mut first = row;
+    while first > lowest
+        && first > row - MAX_WRAPPED
+        && term.viewport_row_signed(first - 1).wrapped()
+    {
+        first -= 1;
+    }
+    let mut end = row;
+    while end < last && end < row + MAX_WRAPPED && term.viewport_row_signed(end).wrapped() {
+        end += 1;
+    }
+    let mut chars = Vec::new();
+    for (i, r) in (first..=end).enumerate() {
+        row_text(
+            term,
+            term.viewport_row_signed(r),
+            i * term.cols(),
+            &mut chars,
+        );
+    }
+    (first, chars)
 }
 
 fn breaks(c: char) -> bool {
@@ -416,7 +447,10 @@ fn content(path: &Path, line: Option<usize>, max: (u32, u32)) -> Option<Content>
         });
     }
     if !complete && let Some(end) = memchr::memrchr(b'\n', &bytes) {
-        bytes.truncate(end + 1);
+        // UTF-16LE spells a newline `0A 00`: keep the whole code unit.
+        let utf16le = bytes.starts_with(&[0xFF, 0xFE]);
+        let keep = end + 1 + usize::from(utf16le && end % 2 == 0);
+        bytes.truncate(keep);
     }
     let (detail, body) = match crate::show::preview(&bytes, complete, path, max) {
         crate::show::Preview::Image(w, h, pixels, name) => {
@@ -463,13 +497,25 @@ fn text_lines(text: &str, line: Option<usize>) -> Body {
     }
 }
 
+/// A fresh directory only we can write to, so nobody can plant a symlink where a
+/// thumbnailer writes its output.
+fn private_dir() -> Option<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = std::env::temp_dir().join(format!(
+        "trident-hover-{}-{}",
+        std::process::id(),
+        NEXT_PAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).ok()?;
+    Some(dir)
+}
+
 /// The first page of the PDF at `path`, rendered by the system's tools to fit `max`.
 fn pdf_page(path: &Path, max: (u32, u32)) -> Option<(u32, u32, Vec<u8>)> {
     let side = max.0.max(max.1).to_string();
     #[cfg(target_os = "macos")]
     let png = {
-        let dir = std::env::temp_dir().join(format!("terminal-hover-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok()?;
+        let dir = private_dir()?;
         let mut command = Command::new("qlmanage");
         command
             .arg("-t")
@@ -477,22 +523,19 @@ fn pdf_page(path: &Path, max: (u32, u32)) -> Option<(u32, u32, Vec<u8>)> {
             .arg("-o")
             .arg(&dir)
             .arg(path);
-        run(&mut command, THUMBNAILER_TIMEOUT)?;
-        let mut name = path.file_name()?.to_os_string();
+        let ran = run(&mut command, THUMBNAILER_TIMEOUT);
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".png");
-        let out = dir.join(name);
-        let png = std::fs::read(&out).ok();
-        let _ = std::fs::remove_file(&out);
+        let png = std::fs::read(dir.join(name)).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        ran?;
         png?
     };
     #[cfg(not(target_os = "macos"))]
     let png = {
         // pdftoppm 22 writes `-singlefile` output to `<root>.png` even for root `-`.
-        let root = std::env::temp_dir().join(format!(
-            "terminal-hover-{}-{}",
-            std::process::id(),
-            NEXT_PAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let dir = private_dir()?;
+        let root = dir.join("page");
         let mut command = Command::new("pdftoppm");
         command
             .args([
@@ -510,7 +553,7 @@ fn pdf_page(path: &Path, max: (u32, u32)) -> Option<(u32, u32, Vec<u8>)> {
         let out = root.with_extension("png");
         let ran = run(&mut command, THUMBNAILER_TIMEOUT);
         let png = std::fs::read(&out).ok();
-        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_dir_all(&dir);
         ran?;
         png?
     };
@@ -665,11 +708,19 @@ fn draw(content: &Content, style: Style) -> Option<Image> {
     }
     svg += "</svg>";
 
-    let mut options = usvg::Options::default();
-    options
-        .fontdb_mut()
-        .load_font_data(term_render::BUNDLED_FONT.to_vec());
-    options.fontdb_mut().set_monospace_family(family);
+    // The bundled font first, then the system's for scripts it lacks (CJK and the like).
+    static FONTS: std::sync::OnceLock<Arc<usvg::fontdb::Database>> = std::sync::OnceLock::new();
+    let fontdb = FONTS.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_font_data(term_render::BUNDLED_FONT.to_vec());
+        db.load_system_fonts();
+        db.set_monospace_family(family);
+        Arc::new(db)
+    });
+    let options = usvg::Options {
+        fontdb: fontdb.clone(),
+        ..Default::default()
+    };
     let tree = usvg::Tree::from_str(&svg, &options).ok()?;
     let (pw, ph) = (w as u32, h as u32);
     let mut pixmap = tiny_skia::Pixmap::new(pw, ph)?;
@@ -724,8 +775,12 @@ pub fn place(x: f32, top: f32, bottom: f32, size: (f32, f32), window: (f32, f32)
 struct Job {
     generation: u64,
     pane: u64,
+    /// The first row of the hovered line; candidate columns count on across its rows.
     line: u64,
+    cols: usize,
     candidates: Vec<Candidate>,
+    /// The file a hovered OSC 8 link names, byte for byte.
+    link: Option<PathBuf>,
     cwd: Option<PathBuf>,
     /// Whose working directory relative paths start at without OSC 7.
     process: Option<u32>,
@@ -738,7 +793,10 @@ fn build(job: &Job, latest: &AtomicU64) -> Option<(Candidate, Image)> {
         .clone()
         .or_else(|| job.process.and_then(process_cwd));
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let (candidate, path) = resolve_first(&job.candidates, cwd.as_deref(), home.as_deref())?;
+    let (candidate, path) = match &job.link {
+        Some(path) => (job.candidates.first()?, path.clone()),
+        None => resolve_first(&job.candidates, cwd.as_deref(), home.as_deref())?,
+    };
     if latest.load(Ordering::Relaxed) != job.generation {
         return None;
     }
@@ -751,6 +809,7 @@ pub struct Ready {
     generation: u64,
     pane: u64,
     line: u64,
+    cols: usize,
     card: Option<(Candidate, Image)>,
 }
 
@@ -769,12 +828,14 @@ struct Key {
     pane: u64,
     line: u64,
     candidates: Vec<Candidate>,
+    link: Option<PathBuf>,
     cwd: Option<PathBuf>,
 }
 
 struct Shown {
     pane: u64,
     line: u64,
+    cols: usize,
     candidate: Candidate,
     image: Arc<Image>,
     version: u64,
@@ -825,6 +886,8 @@ impl App {
         }
         let (row, col) = self.cell_at(self.mouse_pos)?;
         let point = s.term.viewport_to_point_signed(row, col);
+        let mut line = point.line;
+        let mut link_path = None;
         let candidates = match s.term.link_at(point) {
             Some(link) => {
                 let Reported::Local(path) =
@@ -832,14 +895,20 @@ impl App {
                 else {
                     return None;
                 };
+                let text = path.to_string_lossy().into_owned();
+                link_path = Some(path);
                 vec![Candidate {
-                    text: path.to_string_lossy().into_owned(),
+                    text,
                     start: col,
                     end: col,
                     line: None,
                 }]
             }
-            None => candidates_at(&row_text(s.term.viewport_row_signed(row)), col),
+            None => {
+                let (first, chars) = line_text(&s.term, row);
+                line = s.term.viewport_to_point_signed(first, 0).line;
+                candidates_at(&chars, (row - first) as usize * s.term.cols() + col)
+            }
         };
         if candidates.is_empty() {
             return None;
@@ -847,8 +916,10 @@ impl App {
         Some(Job {
             generation: 0,
             pane: s.pane,
-            line: point.line,
+            line,
+            cols: s.term.cols(),
             candidates,
+            link: link_path,
             cwd,
             process: None,
             style: Style {
@@ -868,6 +939,7 @@ impl App {
             pane: job.pane,
             line: job.line,
             candidates: job.candidates.clone(),
+            link: job.link.clone(),
             cwd: job.cwd.clone(),
         });
         if preview.pending == key {
@@ -893,6 +965,7 @@ impl App {
                         generation,
                         pane: job.pane,
                         line: job.line,
+                        cols: job.cols,
                         card,
                     };
                     let _ = proxy.send_event(UserEvent::HoverPreview(ready));
@@ -911,6 +984,7 @@ impl App {
         preview.shown = ready.card.map(|(candidate, image)| Shown {
             pane: ready.pane,
             line: ready.line,
+            cols: ready.cols,
             candidate,
             image: Arc::new(image),
             version: ready.generation,
@@ -924,22 +998,22 @@ impl App {
     pub(crate) fn hover_preview_overlay(&self) -> Option<FloatingImage> {
         let shown = self.hover_preview.shown.as_ref()?;
         let s = self.session.as_ref().filter(|s| s.pane == shown.pane)?;
+        let c = &shown.candidate;
+        let cols = shown.cols.max(1);
+        let at = |v: usize| Point {
+            line: shown.line + (v / cols) as u64,
+            col: v % cols,
+        };
+        let start = at(c.start);
         let top = s.term.viewport_to_point(0, 0).line;
-        let row = shown
+        let row = start
             .line
             .checked_sub(top)
             .filter(|&r| r < s.term.rows() as u64)?;
-        let c = &shown.candidate;
         let underline = (c.end > c.start).then(|| Link {
             uri: String::new(),
-            start: Point {
-                line: shown.line,
-                col: c.start,
-            },
-            end: Point {
-                line: shown.line,
-                col: c.end - 1,
-            },
+            start,
+            end: at(c.end - 1),
             pieces: Vec::new(),
         });
         let (cw, ch) = (s.fonts.metrics.width, s.fonts.metrics.height);
@@ -947,7 +1021,7 @@ impl App {
         let row_top = pad + row as f32 * ch + s.scroll.offset as f32;
         let size = s.grid_px();
         let pos = place(
-            pad + c.start as f32 * cw,
+            pad + start.col as f32 * cw,
             row_top,
             row_top + ch,
             (shown.image.width as f32, shown.image.height as f32),
@@ -1079,9 +1153,32 @@ mod tests {
     fn row_text_skips_spacers() {
         let mut term = term_core::Terminal::new(10, 2);
         term.advance("日a".as_bytes());
-        let text = row_text(term.viewport_row(0));
+        let mut text = Vec::new();
+        row_text(&term, term.viewport_row(0), 0, &mut text);
         assert_eq!(text[0], ('日', 0, 2));
         assert_eq!(text[1], ('a', 2, 1));
+    }
+
+    #[test]
+    fn line_text_joins_soft_wraps() {
+        let mut term = term_core::Terminal::new(10, 3);
+        term.advance(b"ab src/main.rs:3\r\n$ ");
+        let (first, chars) = line_text(&term, 1);
+        assert_eq!(first, 0);
+        let texts: Vec<_> = candidates_at(&chars, 11)
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert!(texts.contains(&"src/main.rs".to_string()), "{texts:?}");
+        assert_eq!(line_text(&term, 2).0, 2);
+    }
+
+    #[test]
+    fn line_text_spells_out_graphemes() {
+        let mut term = term_core::Terminal::new(20, 2);
+        term.advance("cafe\u{301}.txt".as_bytes());
+        let text: String = line_text(&term, 0).1.iter().map(|c| c.0).collect();
+        assert!(text.starts_with("cafe\u{301}.txt"), "{text:?}");
     }
 
     fn scratch() -> PathBuf {
