@@ -978,36 +978,30 @@ fn wait_window(
     }
 }
 
-/// Checks that a window can start `program`, looking it up on `path` as the PTY does:
-/// relative paths and `PATH` entries resolve against `home`, the new window's directory.
+/// Finds the file a window would start for `program`, looking it up on `path` as the PTY
+/// does: relative paths and `PATH` entries resolve against `home`, the new window's
+/// directory. The window is given the result, since the PTY does not resolve a relative
+/// path such as `bin/pager` against its directory.
 fn find_program(
     program: &str,
     path: Option<&std::ffi::OsStr>,
     home: &std::path::Path,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     use std::os::unix::fs::PermissionsExt;
     let runnable = |candidate: &std::path::Path| {
-        std::fs::metadata(home.join(candidate))
+        let candidate = home.join(candidate);
+        std::fs::metadata(&candidate)
             .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .then_some(candidate)
     };
     if program.contains('/') {
-        return if runnable(std::path::Path::new(program)) {
-            Ok(())
-        } else {
-            Err(format!("pager: cannot run {program}"))
-        };
+        return runnable(std::path::Path::new(program))
+            .ok_or_else(|| format!("pager: cannot run {program}"));
     }
-    if path
-        .into_iter()
+    path.into_iter()
         .flat_map(std::env::split_paths)
-        .any(|dir| runnable(&dir.join(program)))
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "pager: {program} is not on PATH; set pager to its full path"
-        ))
-    }
+        .find_map(|dir| runnable(&dir.join(program)))
+        .ok_or_else(|| format!("pager: {program} is not on PATH; set pager to its full path"))
 }
 
 /// A UTF-8 character type for a pager window whose environment names no locale, as an
@@ -3259,14 +3253,17 @@ impl App {
                 };
                 let home = var("HOME").map(PathBuf::from).unwrap_or_default();
                 let opened = find_program(&self.config.pager[0], var("PATH").as_deref(), &home)
-                    .and_then(|()| {
-                        write_pager_file(&output).map_err(|error| format!("pager: {error}"))
+                    .and_then(|program| {
+                        write_pager_file(&output)
+                            .map(|file| (program, file))
+                            .map_err(|error| format!("pager: {error}"))
                     });
                 match opened {
-                    Ok(file) => {
+                    Ok((program, file)) => {
                         let mut args = new_window_args(std::env::args_os().skip(1));
                         args.push("-e".into());
-                        args.extend(self.config.pager.iter().map(Into::into));
+                        args.push(program.into());
+                        args.extend(self.config.pager[1..].iter().map(Into::into));
                         args.push(file.clone().into());
                         let pager = PagerWindow {
                             file,
@@ -4928,13 +4925,25 @@ mod tests {
         std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
         let path = std::env::join_paths(["/nonexistent".as_ref(), dir.as_path()]).unwrap();
         let root = std::path::Path::new("/");
-        assert_eq!(find_program("pager", Some(&path), root), Ok(()));
-        assert_eq!(find_program(runnable.to_str().unwrap(), None, root), Ok(()));
+        assert_eq!(
+            find_program("pager", Some(&path), root),
+            Ok(runnable.clone())
+        );
+        assert_eq!(
+            find_program(runnable.to_str().unwrap(), None, root),
+            Ok(runnable.clone())
+        );
         let parent = dir.parent().unwrap();
         let name = dir.file_name().unwrap().to_str().unwrap();
-        assert_eq!(find_program(&format!("{name}/pager"), None, parent), Ok(()));
+        assert_eq!(
+            find_program(&format!("{name}/pager"), None, parent),
+            Ok(runnable.clone())
+        );
         let relative = std::ffi::OsString::from(name);
-        assert_eq!(find_program("pager", Some(&relative), parent), Ok(()));
+        assert_eq!(
+            find_program("pager", Some(&relative), parent),
+            Ok(runnable.clone())
+        );
         for (program, path) in [
             ("pager", None),
             ("notes", Some(path.as_os_str())),
