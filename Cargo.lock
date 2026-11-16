@@ -2656,6 +2656,7 @@ dependencies = [
  "ab_glyph_rasterizer",
  "bytemuck",
  "glow",
+ "harfrust",
  "libc",
  "memmap2",
  "objc2-core-foundation",

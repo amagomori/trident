@@ -1,7 +1,7 @@
 //! Glyph atlases packed in shelves (rows of glyphs of similar height): a single-channel
 //! page for text and an RGBA page for color glyphs, created when the first one is drawn.
 
-use crate::font::{Fonts, Style};
+use crate::font::{Fonts, RasterizedGlyph, Style};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -266,7 +266,15 @@ pub struct Atlas {
     /// Bumped by `clear`, which invalidates every glyph handed out before.
     pub generation: u64,
     glyphs: HashMap<GlyphKey, Option<AtlasGlyph>>,
+    /// Emoji sequences shaped to one glyph, by text, then style and cells.
+    sequences: HashMap<Box<str>, Vec<SequenceGlyph>>,
 }
+
+/// Cached sequences past which the ones no font draws are dropped.
+const MAX_SEQUENCES: usize = 4096;
+
+/// An emoji sequence's style, cells and glyph.
+type SequenceGlyph = (Style, u8, Option<AtlasGlyph>);
 
 /// The atlas ran out of space at its largest; it has been cleared and the frame must be rebuilt.
 pub struct AtlasFull;
@@ -280,12 +288,14 @@ impl Atlas {
             srgb,
             generation: 0,
             glyphs: HashMap::new(),
+            sequences: HashMap::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.generation += 1;
         self.glyphs.clear();
+        self.sequences.clear();
         self.mono.clear();
         if let Some(page) = &mut self.color {
             page.clear();
@@ -310,8 +320,51 @@ impl Atlas {
         if let Some(glyph) = self.glyphs.get(&key) {
             return Ok(*glyph);
         }
-        let Some(raster) = fonts.rasterize(key.c, key.style, key.cells as usize) else {
-            self.glyphs.insert(key, None);
+        let raster = fonts.rasterize(key.c, key.style, key.cells as usize);
+        let glyph = self.place(raster, device, queue)?;
+        self.glyphs.insert(key, glyph);
+        Ok(glyph)
+    }
+
+    /// The glyph an emoji sequence (see `grapheme::is_emoji_sequence`) shapes to, or `None`
+    /// when no font draws it as one glyph.
+    pub fn get_sequence(
+        &mut self,
+        text: &str,
+        style: Style,
+        cells: u8,
+        fonts: &mut Fonts,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Option<AtlasGlyph>, AtlasFull> {
+        if let Some(&(.., glyph)) = self
+            .sequences
+            .get(text)
+            .and_then(|v| v.iter().find(|&&(s, c, _)| s == style && c == cells))
+        {
+            return Ok(glyph);
+        }
+        let raster = fonts.rasterize_sequence(text, cells as usize);
+        let glyph = self.place(raster, device, queue)?;
+        // Sequences no font draws take no atlas space, so `clear` would never drop them.
+        if glyph.is_none() && self.sequences.len() >= MAX_SEQUENCES {
+            self.sequences
+                .retain(|_, glyphs| glyphs.iter().any(|&(.., g)| g.is_some()));
+        }
+        self.sequences
+            .entry(text.into())
+            .or_default()
+            .push((style, cells, glyph));
+        Ok(glyph)
+    }
+
+    fn place(
+        &mut self,
+        raster: Option<RasterizedGlyph>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Option<AtlasGlyph>, AtlasFull> {
+        let Some(raster) = raster else {
             return Ok(None);
         };
         let page = if raster.color {
@@ -330,7 +383,6 @@ impl Atlas {
         };
         let (w, h) = (raster.width as u32, raster.height as u32);
         if w + 1 > page.size || h + 1 > page.size {
-            self.glyphs.insert(key, None);
             return Ok(None);
         }
         let mut at = page.place(w, h);
@@ -354,7 +406,6 @@ impl Atlas {
             top: raster.top,
             color: raster.color,
         };
-        self.glyphs.insert(key, Some(glyph));
         Ok(Some(glyph))
     }
 }

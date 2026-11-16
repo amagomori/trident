@@ -685,8 +685,33 @@ impl Renderer {
                         cell.flags.contains(Flags::BOLD),
                         cell.flags.contains(Flags::ITALIC),
                     );
-                    let cluster = term.grapheme(cell);
-                    let base = term.base_char(cell);
+                    let mut cluster = term.grapheme(cell);
+                    let mut base = term.base_char(cell);
+                    let mut shaped = None;
+                    if let Some(text) = cluster {
+                        if let Some(syllable) = grapheme::compose_hangul(text) {
+                            (base, cluster) = (syllable, None);
+                        } else if grapheme::is_emoji_sequence(text) {
+                            match self.atlas.get_sequence(
+                                text,
+                                style,
+                                cells as u8,
+                                fonts,
+                                &self.device,
+                                &self.queue,
+                            ) {
+                                Ok(glyph) => shaped = glyph,
+                                Err(_) => {
+                                    self.damage.invalidate();
+                                    ok = false;
+                                    break 'rows;
+                                }
+                            }
+                            if shaped.is_some() {
+                                cluster = None;
+                            }
+                        }
+                    }
                     let marks = cluster.into_iter().flat_map(grapheme::overlay_marks);
                     for (index, c) in std::iter::once(base).chain(marks).enumerate() {
                         if index == 0 && c == ' ' {
@@ -697,7 +722,11 @@ impl Renderer {
                             style,
                             cells: if index == 0 { cells as u8 } else { 0 },
                         };
-                        match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                        let glyph = match shaped {
+                            Some(g) if index == 0 => Ok(Some(g)),
+                            _ => self.atlas.get(key, fonts, &self.device, &self.queue),
+                        };
+                        match glyph {
                             Ok(Some(g)) => {
                                 // Center marks over a wide base. Fonts often draw a
                                 // combining mark left of its origin, over the glyph before

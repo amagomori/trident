@@ -513,6 +513,10 @@ fn shortcut_tab(index: usize, count: usize) -> usize {
 /// Runs every byte of `batch` through `term`, applying shell-return resets; the bytes
 /// processed.
 fn advance_all(term: &mut Terminal, batch: pty::Output) -> usize {
+    term.set_line_editing(batch.line_editing);
+    if batch.line_sent {
+        term.line_sent();
+    }
     let mut start = 0;
     for offset in batch.shell_returns {
         while start < offset {
@@ -533,6 +537,8 @@ type QuitChecks = std::rc::Rc<std::cell::RefCell<Vec<(u64, Box<dyn Fn() -> bool>
 struct PendingOutput {
     bytes: Vec<u8>,
     shell_returns: Vec<usize>,
+    line_editing: Option<usize>,
+    line_sent: bool,
     waiting_since: Option<Instant>,
 }
 
@@ -541,6 +547,8 @@ impl PendingOutput {
         let leftover = pty::Output {
             bytes: std::mem::take(&mut self.bytes),
             shell_returns: std::mem::take(&mut self.shell_returns),
+            line_editing: self.line_editing,
+            line_sent: std::mem::take(&mut self.line_sent),
         };
         let mut processed = 0;
         for batch in [leftover, queued] {
@@ -570,6 +578,10 @@ impl PendingOutput {
         }
         let from_leftover = !self.is_empty();
         let mut batch = self.next_batch(take_pty);
+        term.set_line_editing(batch.line_editing);
+        if batch.line_sent {
+            term.line_sent();
+        }
         let processed = advance_output(term, &mut batch);
         self.retain(
             batch,
@@ -586,17 +598,22 @@ impl PendingOutput {
 
     fn next_batch(&mut self, take_pty: impl FnOnce() -> pty::Output) -> pty::Output {
         if self.is_empty() {
-            take_pty()
+            let mut output = take_pty();
+            output.line_sent |= std::mem::take(&mut self.line_sent);
+            output
         } else {
             pty::Output {
                 bytes: std::mem::take(&mut self.bytes),
                 shell_returns: std::mem::take(&mut self.shell_returns),
+                line_editing: self.line_editing,
+                line_sent: std::mem::take(&mut self.line_sent),
             }
         }
     }
 
     fn retain(&mut self, mut batch: pty::Output, consumed: usize, frame_ended: bool, now: Instant) {
         self.bytes = batch.bytes.split_off(consumed);
+        self.line_editing = batch.line_editing.map(|at| at.saturating_sub(consumed));
         self.shell_returns = batch
             .shell_returns
             .into_iter()
@@ -607,6 +624,11 @@ impl PendingOutput {
 
     fn coalesce(&mut self, queued: pty::Output) -> bool {
         let offset = self.bytes.len();
+        self.line_sent |= queued.line_sent;
+        self.line_editing = match queued.line_editing {
+            Some(0) if offset > 0 => self.line_editing.or(Some(offset)),
+            at => at.map(|at| offset + at),
+        };
         self.bytes.extend(queued.bytes);
         self.shell_returns
             .extend(queued.shell_returns.into_iter().map(|at| offset + at));
@@ -2292,6 +2314,8 @@ impl App {
         let queued = pty::Output {
             bytes: std::mem::take(&mut pane.output.bytes),
             shell_returns: std::mem::take(&mut pane.output.shell_returns),
+            line_editing: pane.output.line_editing,
+            line_sent: std::mem::take(&mut pane.output.line_sent),
         };
         pane.output.waiting_since = None;
         let batch = pane.pty.take_output();
@@ -5487,6 +5511,7 @@ mod tests {
         pty::Output {
             bytes: bytes.to_vec(),
             shell_returns: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -5525,6 +5550,7 @@ mod tests {
             pty::Output {
                 bytes,
                 shell_returns,
+                ..Default::default()
             },
         )
     }
@@ -5580,6 +5606,7 @@ mod tests {
             pty::Output {
                 bytes: b"\x1b[?2026l\x1b[?2026hthird".to_vec(),
                 shell_returns: vec![8],
+                ..Default::default()
             },
         );
         let text: String = term
@@ -5755,6 +5782,28 @@ mod tests {
     }
 
     #[test]
+    fn coalesced_output_keeps_where_line_editing_starts() {
+        let family = "\u{1f468}\u{200d}\u{1f469}";
+        let mut output = PendingOutput {
+            bytes: b"\x1b[?2026h".to_vec(),
+            ..Default::default()
+        };
+        let queued = |bytes: String, line_editing| pty::Output {
+            bytes: bytes.into_bytes(),
+            line_editing,
+            ..Default::default()
+        };
+        output.coalesce(queued(format!("{family}|\r\n"), None));
+        output.coalesce(queued(family.to_string(), Some(0)));
+        assert!(output.coalesce(queued("\x1b[?2026l".into(), Some(0))));
+        assert_eq!(output.line_editing, Some(8 + family.len() + 3));
+        let mut term = Terminal::new(10, 2);
+        output.advance(&mut term, false, || panic!("coalesced output first"));
+        assert_eq!(term.grapheme(&term.viewport_row(0).cells[0]), Some(family));
+        assert_eq!(term.viewport_row(1).cells[2].c, '\u{1f469}');
+    }
+
+    #[test]
     fn queued_completed_frames_replace_an_unsubmitted_frame() {
         let mut term = Terminal::new(10, 2);
         let mut output = PendingOutput::default();
@@ -5807,6 +5856,7 @@ mod tests {
         assert!(!output.coalesce(pty::Output {
             bytes: Vec::new(),
             shell_returns: vec![0],
+            ..Default::default()
         }));
         assert_eq!(output.shell_returns, [output.bytes.len()]);
         assert!(output.coalesce(batch(b"\x1b[?2026l")));
@@ -6368,6 +6418,7 @@ mod tests {
                 ]
                 .concat(),
                 shell_returns: vec![setup.len(), setup.len() * 2 + prompt.len()],
+                ..Default::default()
             },
         );
         assert_eq!(term.modes.mouse, MouseMode::Off);
@@ -6378,6 +6429,7 @@ mod tests {
             &mut pty::Output {
                 bytes: Vec::new(),
                 shell_returns: Vec::new(),
+                ..Default::default()
             },
         );
         assert!(term.modes.bracketed_paste);
@@ -6399,6 +6451,7 @@ mod tests {
         let mut queued = Some(pty::Output {
             bytes: b"\r099\x1b[?2026l".to_vec(),
             shell_returns: vec![0],
+            ..Default::default()
         });
         assert!(!wake_pending.swap(true, Ordering::AcqRel));
         output.presented();
@@ -6591,6 +6644,7 @@ mod tests {
         let mut output = pty::Output {
             bytes: [first.as_slice(), second.as_slice(), prompt.as_slice()].concat(),
             shell_returns: vec![first.len(), first.len() + second.len()],
+            ..Default::default()
         };
         let consumed = advance_output(&mut term, &mut output);
         assert_eq!(consumed, first.len() + second.len());
@@ -6620,6 +6674,7 @@ mod tests {
             pty::Output {
                 bytes: Vec::new(),
                 shell_returns: vec![0],
+                ..Default::default()
             },
             0,
             false,
