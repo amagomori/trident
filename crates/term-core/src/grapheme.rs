@@ -142,22 +142,32 @@ fn pictographic(c: char) -> bool {
 /// zero width joiner, a skin tone after a pictograph, or a flag's second regional indicator.
 fn continues_sequence(cluster: &str, c: char) -> bool {
     let mut chars = cluster.chars();
-    let first = chars.next();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let single = chars.as_str().is_empty();
+    let last = chars.next_back().unwrap_or(first);
+    continues(first, last, single, c)
+}
+
+/// `continues_sequence` for a cluster that starts with `first` and ends with `last`.
+fn continues(first: char, last: char, single: bool, c: char) -> bool {
     if regional(c) {
-        return first.is_some_and(regional) && chars.next().is_none();
+        return regional(first) && single;
     }
-    let last = chars.next_back().or(first);
     if skin_tone(c) {
-        return last.is_some_and(pictographic);
+        return pictographic(last);
     }
-    last == Some('\u{200D}') && first.is_some_and(pictographic)
+    last == '\u{200D}' && pictographic(first)
 }
 
 /// The cluster the ghost parser (see `ghost.rs`) last printed, so skipped output moves the
 /// cursor over emoji sequences as `join_sequence` does.
 #[derive(Default)]
 pub(crate) struct GhostCluster {
-    text: String,
+    first: char,
+    last: char,
+    len: usize,
     wide: bool,
     /// The cursor (column, pending wrap) right after it; anything else moved past it.
     end: Option<(usize, bool)>,
@@ -165,19 +175,17 @@ pub(crate) struct GhostCluster {
 
 impl GhostCluster {
     pub(crate) fn start(&mut self, c: char, wide: bool, end: (usize, bool)) {
-        if !(pictographic(c) || regional(c)) {
-            self.end = None;
-            return;
-        }
-        self.text.clear();
-        self.text.push(c);
+        self.first = c;
+        self.last = c;
+        self.len = 1;
         self.wide = wide;
         self.end = Some(end);
     }
 
     pub(crate) fn push_zero_width(&mut self, c: char, at: (usize, bool)) {
-        if self.end == Some(at) && self.text.chars().count() < MAX_CHARS {
-            self.text.push(c);
+        if self.end == Some(at) && self.len < MAX_CHARS {
+            self.last = c;
+            self.len += 1;
         }
     }
 
@@ -190,12 +198,13 @@ impl GhostCluster {
     pub(crate) fn join(&mut self, c: char, at: (usize, bool)) -> Option<bool> {
         if self.end != Some(at)
             || !(pictographic(c) || regional(c))
-            || self.text.chars().count() >= MAX_CHARS
-            || !continues_sequence(&self.text, c)
+            || self.len >= MAX_CHARS
+            || !continues(self.first, self.last, self.len == 1, c)
         {
             return None;
         }
-        self.text.push(c);
+        self.last = c;
+        self.len += 1;
         Some(!std::mem::replace(&mut self.wide, true))
     }
 
@@ -369,8 +378,14 @@ impl Terminal {
         let cell = self.screen().lines[row].cells[col];
         let mut text = String::new();
         self.push_cell_text(&cell, &mut text);
+        let mut chars = text.chars();
+        let Some(first) = chars.next() else {
+            return GhostCluster::default();
+        };
         GhostCluster {
-            text,
+            first,
+            last: chars.next_back().unwrap_or(first),
+            len: text.chars().count(),
             wide: cell.flags.contains(Flags::WIDE),
             end: Some((self.cursor.col, self.cursor.pending_wrap)),
         }
