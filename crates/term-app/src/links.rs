@@ -106,7 +106,7 @@ pub fn resolve(path: &str, bases: &[PathBuf], home: Option<&Path>) -> Option<Pat
 /// Editors that run inside a terminal, so they get a new Trident window.
 const TERMINAL_EDITORS: &[&str] = &[
     "vi", "vim", "nvim", "nano", "pico", "micro", "kak", "hx", "helix", "joe", "ne", "mcedit",
-    "ed", "mg", "kilo",
+    "ed", "red", "mg", "kilo",
 ];
 
 /// How to open a file at a line.
@@ -114,8 +114,9 @@ const TERMINAL_EDITORS: &[&str] = &[
 pub enum Editor {
     /// Run this program directly (a GUI editor).
     Program(Vec<OsString>),
-    /// Run this command in a new terminal window (vim, nano, ...).
-    Terminal(Vec<OsString>),
+    /// Run this command in a new terminal window (vim, nano, ...), in the given directory
+    /// when the editor needs one (`red` only edits files in its working directory).
+    Terminal(Vec<OsString>, Option<PathBuf>),
     /// No editor is set: hand the file to `open`/`xdg-open`, which can't take a line.
     System(PathBuf),
 }
@@ -179,7 +180,7 @@ pub fn editor(
             argv.push(file.into());
         }
         return if terminal(configured) {
-            Editor::Terminal(argv)
+            Editor::Terminal(argv, None)
         } else {
             Editor::Program(argv)
         };
@@ -226,7 +227,14 @@ pub fn editor(
             argv.push(format!("+{line}:{column}").into());
             argv.push(file.into());
         }
-        "ed" | "red" => argv.push(file.into()),
+        "ed" => argv.push(file.into()),
+        "red" => {
+            if let (Some(name), Some(dir)) = (file.file_name(), file.parent()) {
+                argv.push(name.into());
+                return Editor::Terminal(argv, Some(dir.to_owned()));
+            }
+            argv.push(file.into());
+        }
         _ => {
             argv.push(format!("+{line}").into());
             argv.push(file.into());
@@ -252,7 +260,7 @@ pub fn editor(
     if gui {
         Editor::Program(argv)
     } else {
-        Editor::Terminal(argv)
+        Editor::Terminal(argv, None)
     }
 }
 
@@ -271,10 +279,10 @@ pub fn window_args(
 pub fn open_file(
     editor: Editor,
     env: &std::collections::BTreeMap<String, String>,
-    new_window: impl FnOnce(Vec<OsString>),
+    new_window: impl FnOnce(Vec<OsString>, Option<PathBuf>),
 ) {
     let argv = match editor {
-        Editor::Terminal(argv) => return new_window(argv),
+        Editor::Terminal(argv, dir) => return new_window(argv, dir),
         Editor::Program(argv) => argv,
         Editor::System(path) => vec![
             if cfg!(target_os = "macos") {
@@ -440,14 +448,15 @@ mod tests {
             panic!()
         };
         assert_eq!(args(&argv), ["code", "--goto", "/w/a b.rs:7:3"]);
-        let Editor::Terminal(argv) = editor(&config(&["nvim", "+{line}"]), None, file, 7, None)
+        let Editor::Terminal(argv, None) =
+            editor(&config(&["nvim", "+{line}"]), None, file, 7, None)
         else {
             panic!()
         };
         assert_eq!(args(&argv), ["nvim", "+7", "/w/a b.rs"]);
         assert!(matches!(
             editor(&config(&["emacs", "-nw", "+{line}"]), None, file, 1, None),
-            Editor::Terminal(_)
+            Editor::Terminal(..)
         ));
         assert!(matches!(
             editor(&config(&["/opt/bin/subl"]), None, file, 1, None),
@@ -461,7 +470,7 @@ mod tests {
                 1,
                 None
             ),
-            Editor::Terminal(_)
+            Editor::Terminal(..)
         ));
         let Editor::Program(argv) = editor(
             &config(&["myedit", "{file}", "{line}{column}", "{x}{"]),
@@ -483,8 +492,8 @@ mod tests {
         let file = Path::new("/w/x.rs");
         let open = |env: &str| match editor(&[], Some(env), file, 12, Some(4)) {
             Editor::Program(argv) => (false, args(&argv).join(" ")),
-            Editor::Terminal(argv) => (true, args(&argv).join(" ")),
-            Editor::System(_) => panic!("{env}"),
+            Editor::Terminal(argv, None) => (true, args(&argv).join(" ")),
+            other => panic!("{env}: {other:?}"),
         };
         assert_eq!(
             open("vim"),
@@ -506,6 +515,13 @@ mod tests {
         assert_eq!(open("zed"), (false, "zed /w/x.rs:12:4".into()));
         assert_eq!(open("mate"), (false, "mate -l 12:4 /w/x.rs".into()));
         assert_eq!(open("ed"), (true, "ed /w/x.rs".into()));
+        assert_eq!(
+            editor(&[], Some("red"), file, 12, Some(4)),
+            Editor::Terminal(
+                ["red", "x.rs"].map(OsString::from).to_vec(),
+                Some(PathBuf::from("/w"))
+            )
+        );
         assert_eq!(open("joe"), (true, "joe +12 /w/x.rs".into()));
         assert_eq!(
             open(r#"open -a "Visual Studio Code" --args"#),
@@ -518,7 +534,7 @@ mod tests {
             12,
             Some(4),
         ) {
-            Editor::Terminal(argv) => argv,
+            Editor::Terminal(argv, None) => argv,
             other => panic!("{other:?}"),
         };
         assert_eq!(

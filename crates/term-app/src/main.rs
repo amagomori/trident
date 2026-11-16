@@ -3404,10 +3404,10 @@ impl App {
                     .and_then(|s| local_working_directory(s.term.working_directory()))
                     .or_else(|| path.parent().map(std::path::Path::to_owned));
                 let cells = self.window_cells();
-                links::open_file(editor, &self.config.env, |command| {
+                links::open_file(editor, &self.config.env, |command, dir| {
                     spawn_window(
                         links::window_args(std::env::args_os().skip(1), command),
-                        working_directory,
+                        dir.or(working_directory),
                         cells,
                     );
                 });

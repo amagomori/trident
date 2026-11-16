@@ -92,7 +92,8 @@ compilers, linters, test runners and grep, such as `src/main.rs:10:5`, `--> src/
   `{file}`, `{line}` and `{column}` arguments. If no argument names the file, it's appended.
 - Without `editor`, Trident uses `$VISUAL` or `$EDITOR` (from `[env]` first) with that editor's
   own line syntax. It knows vim and nvim, nano, emacs, helix, micro, kakoune, VS Code, Cursor,
-  Sublime Text, Zed and TextMate, and opens `ed` at the top of the file; any other editor gets
+  Sublime Text, Zed and TextMate, and opens `ed` at the top of the file (`red`, which only edits
+  files in its working directory, starts in the file's directory); any other editor gets
   `+line file`. Quoted words in the variable, such as an editor path with spaces, stay one argument.
 - Terminal editors such as vim, nano and `emacs -nw` open in a new Trident window. GUI editors run
   directly.
