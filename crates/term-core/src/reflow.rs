@@ -355,6 +355,13 @@ impl Terminal {
                 map.line(command.input_line, command.input_col, false);
             command.next_prompt = command.next_prompt.map(|l| map.line(l, 0, false).0);
         }
+        let writes = std::mem::take(&mut shell.input_writes);
+        for (line, cols) in writes {
+            for col in cols {
+                let (line, col) = map.line(line, col, false);
+                self.record_input_write(line, col..col + 1);
+            }
+        }
         self.remap_budget_lines(|l| map.line(l, 0, false).0);
         if !self.primary.placements.is_empty() {
             for p in &mut self.primary.placements {

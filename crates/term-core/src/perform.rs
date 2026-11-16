@@ -39,6 +39,7 @@ impl Perform for Terminal {
             0x0f => self.active_charset = 0,
             _ => {}
         }
+        self.reset_input_cursor();
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
@@ -174,6 +175,7 @@ impl Perform for Terminal {
             }
             _ => {}
         }
+        self.reset_input_cursor();
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
@@ -224,6 +226,7 @@ impl Perform for Terminal {
             (_, [b')']) => self.charsets[1] = Charset::Ascii,
             _ => {}
         }
+        self.reset_input_cursor();
     }
 
     #[cold]
@@ -311,6 +314,12 @@ impl Perform for Terminal {
             }
             _ => {}
         }
+        self.shell.input_cursor = (!self.alt_active
+            && matches!(self.shell.zone, super::Zone::Prompt | super::Zone::Input))
+        .then_some((
+            self.history + self.cursor.row as u64,
+            self.cursor.col + usize::from(self.cursor.pending_wrap),
+        ));
     }
 }
 

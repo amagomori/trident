@@ -47,6 +47,8 @@ struct ShellState {
     output_ends: Vec<OutputEnd>,
     prompt_line: Option<u64>,
     input_start: Option<(u64, usize)>,
+    input_cursor: Option<(u64, usize)>,
+    input_writes: Vec<(u64, std::ops::Range<usize>)>,
     /// The prompt asked for clicks as SGR mouse reports (`OSC 133 ; A ; click_events=1`).
     click_events: bool,
     commands: VecDeque<Command>,
@@ -408,7 +410,7 @@ impl Terminal {
         let mut text_end = 0;
         // Where a run of suggestion-styled text starts, and its style.
         let mut faint_run: Option<(usize, (Color, bool))> = None;
-        let mut faint_gap = 0;
+        let mut faint_gap = false;
         let mut suggestion_start = None;
         let mut count = 0;
         let mut click = None;
@@ -433,17 +435,17 @@ impl Terminal {
                                 faint_run = Some((count, style));
                             }
                         } else if faint_run.is_some() {
-                            faint_gap += 1;
+                            faint_gap |= !self
+                                .shell
+                                .input_writes
+                                .iter()
+                                .any(|(row, cols)| *row == line && cols.contains(&c));
                         }
                     }
                     if cell.c != ' ' {
-                        // Separate right prompts have more padding before them than
-                        // after them, including themes with a right-hand inset.
-                        if faint_gap > 1
-                            && cells[c..]
-                                .iter()
-                                .rposition(|cell| cell.c != ' ')
-                                .is_some_and(|last| faint_gap > cells.len() - c - last - 1)
+                        // Cursor-addressed right prompts leave unwritten padding;
+                        // spaces printed by the line editor remain editable input.
+                        if faint_gap
                             && let Some((start, _)) = faint_run
                             && cursor.is_some_and(|cursor| cursor <= start)
                         {
@@ -453,7 +455,7 @@ impl Terminal {
                             Some(run) if run.1 == style => Some(run),
                             _ => suggestion_style(cell).then_some((count, style)),
                         };
-                        faint_gap = 0;
+                        faint_gap = false;
                         text_end = count + 1;
                     }
                     count += 1;
@@ -601,6 +603,7 @@ impl Terminal {
         }
         match mark {
             b"A" => {
+                self.shell.input_writes.clear();
                 self.drop_overwritten_commands(line);
                 if let Some(last) = self.shell.commands.back_mut()
                     && last.next_prompt.is_none()
@@ -727,6 +730,14 @@ impl Terminal {
             .shell
             .input_start
             .and_then(|(line, col)| Some((shift(line)?, col)));
+        self.shell.input_writes.retain_mut(|(line, _)| {
+            if let Some(moved) = shift(*line) {
+                *line = moved;
+                true
+            } else {
+                false
+            }
+        });
         let commands = &mut self.shell.commands;
         let mut i = commands.partition_point(|c| c.next_prompt.is_some_and(|next| next < top));
         while i < commands.len() {
@@ -837,6 +848,7 @@ impl Terminal {
                 Some(RowFlags::PROMPT)
             }
             b"C" => {
+                self.shell.input_writes.clear();
                 let current = self.history + self.cursor.row as u64;
                 self.shell.output_ends.retain(|end| end.line != current);
                 self.shell.zone = Zone::Output;
@@ -928,6 +940,8 @@ impl Terminal {
                 output_ends: Vec::new(),
                 prompt_line: None,
                 input_start: None,
+                input_cursor: None,
+                input_writes: Vec::new(),
                 click_events: false,
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
@@ -994,6 +1008,7 @@ impl Terminal {
         let pending_wrap = self.cursor.pending_wrap;
         self.advance(bytes);
         self.cursor.pending_wrap = pending_wrap;
+        self.reset_input_cursor();
     }
 
     /// Feed bytes from the shell.
@@ -1398,6 +1413,7 @@ impl Terminal {
             *point = tracked;
         }
         self.prompt_redraw = !self.alt_active && (editing || self.shell.zone == Zone::Input);
+        self.reset_input_cursor();
     }
 
     // ---- Selection ----
@@ -1660,6 +1676,14 @@ impl Terminal {
         let shell = &mut self.shell;
         shell.prompt_line = shell.prompt_line.and_then(shift);
         shell.input_start = shell.input_start.and_then(|(l, c)| Some((shift(l)?, c)));
+        shell.input_writes.retain_mut(|(line, _)| {
+            if let Some(moved) = shift(*line) {
+                *line = moved;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// Returns the row evicted from the far end of scrollback, if any, for reuse.
@@ -1712,6 +1736,12 @@ impl Terminal {
     }
 
     fn reset_rows(&mut self, rows: std::ops::Range<usize>) {
+        if !self.alt_active {
+            let lines = self.history + rows.start as u64..self.history + rows.end as u64;
+            self.shell
+                .input_writes
+                .retain(|(line, _)| !lines.contains(line));
+        }
         let (cols, template) = (self.cols, self.cursor.template);
         let mut freed = self.recycled_memory_freed;
         for row in &mut self.lines_mut()[rows] {
@@ -1727,6 +1757,7 @@ impl Terminal {
         } else if self.cursor.row < self.rows - 1 {
             self.cursor.row += 1;
         }
+        self.reset_input_cursor();
     }
 
     fn reverse_index(&mut self) {
@@ -1744,6 +1775,88 @@ impl Terminal {
         let end = self.cursor.col + usize::from(self.cursor.pending_wrap);
         let row = self.cursor.row;
         self.lines_mut()[row].touch(end);
+        if let Some((line, start)) = self.shell.input_cursor {
+            let current = self.history + row as u64;
+            if line == current && start < end {
+                self.record_input_write(line, start..end);
+            }
+            self.shell.input_cursor = Some((current, end));
+        }
+    }
+
+    fn reset_input_cursor(&mut self) {
+        if self.shell.input_cursor.is_some() {
+            self.shell.input_cursor = Some((
+                self.history + self.cursor.row as u64,
+                self.cursor.col + usize::from(self.cursor.pending_wrap),
+            ));
+        }
+    }
+
+    #[cold]
+    fn record_input_write(&mut self, line: u64, mut cols: std::ops::Range<usize>) {
+        self.shell.input_writes.retain(|(row, existing)| {
+            if *row == line && existing.start <= cols.end && cols.start <= existing.end {
+                cols.start = cols.start.min(existing.start);
+                cols.end = cols.end.max(existing.end);
+                false
+            } else {
+                true
+            }
+        });
+        self.shell.input_writes.push((line, cols));
+    }
+
+    #[cold]
+    fn erase_input_writes(&mut self, row: usize, from: usize, to: usize) {
+        if self.alt_active {
+            return;
+        }
+        let line = self.history + row as u64;
+        let mut tail = None;
+        self.shell.input_writes.retain_mut(|(old_line, cols)| {
+            if *old_line != line || cols.end <= from || cols.start >= to {
+                return true;
+            }
+            if cols.start < from {
+                if cols.end > to {
+                    tail = Some((line, to..cols.end));
+                }
+                cols.end = from;
+                true
+            } else if cols.end > to {
+                cols.start = to;
+                true
+            } else {
+                false
+            }
+        });
+        if let Some(tail) = tail {
+            self.shell.input_writes.push(tail);
+        }
+    }
+
+    #[cold]
+    fn shift_input_writes(&mut self, row: usize, col: usize, removed: usize, inserted: usize) {
+        let line = self.history + row as u64;
+        let cols = self.cols;
+        let shift = |c: usize| {
+            if c < col {
+                c
+            } else {
+                (col + c.saturating_sub(col + removed) + inserted).min(cols)
+            }
+        };
+        self.shell.input_writes.retain_mut(|(old_line, range)| {
+            if *old_line == line {
+                range.start = shift(range.start);
+                range.end = shift(range.end);
+            }
+            range.start < range.end
+        });
+        if inserted > 0 {
+            self.record_input_write(line, col..(col + inserted).min(cols));
+        }
     }
 
     fn put_char(&mut self, c: char) {
@@ -1769,6 +1882,7 @@ impl Terminal {
         }
         if width == 2 && self.cursor.col == self.cols - 1 {
             if self.modes.autowrap {
+                self.sync_cursor_row();
                 let (row, col) = (self.cursor.row, self.cursor.col);
                 let mut blank = Cell::blank(&self.cursor.template);
                 blank.flags.insert(Flags::WIDE_WRAP);
@@ -1788,6 +1902,9 @@ impl Terminal {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
         let template = self.cursor.template;
         let insert = self.modes.insert;
+        if insert && self.shell.input_cursor.is_some() {
+            self.shift_input_writes(row, col, 0, width);
+        }
         let line = &mut self.lines_mut()[row];
         if insert {
             insert_printed_cells(line, col, cols, width, &template);
@@ -1888,9 +2005,15 @@ impl Terminal {
         } else if !tail_kept {
             line.set_blank_from(from);
         }
+        if !self.shell.input_writes.is_empty() {
+            self.erase_input_writes(row, from, to);
+        }
     }
 
     fn erase_row(&mut self, row: usize) {
+        if !self.shell.input_writes.is_empty() {
+            self.erase_input_writes(row, 0, usize::MAX);
+        }
         if !self.screen().placements.is_empty() {
             self.erase_placements(row, row, 0, usize::MAX);
         }
@@ -1999,6 +2122,9 @@ impl Terminal {
             }
             1 => self.erase_cells(row, 0, col + 1),
             2 => {
+                if !self.shell.input_writes.is_empty() {
+                    self.erase_input_writes(row, 0, usize::MAX);
+                }
                 if !self.screen().placements.is_empty() {
                     self.erase_placements(row, row, 0, usize::MAX);
                 }
@@ -2011,6 +2137,9 @@ impl Terminal {
 
     fn insert_blank(&mut self, n: usize) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        if self.shell.input_cursor.is_some() {
+            self.shift_input_writes(row, col, 0, n.min(cols - col));
+        }
         if !self.screen().placements.is_empty() {
             self.erase_placements(row, row, col, usize::MAX);
         }
@@ -2034,6 +2163,9 @@ impl Terminal {
 
     fn delete_chars(&mut self, n: usize) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        if self.shell.input_cursor.is_some() {
+            self.shift_input_writes(row, col, n.min(cols - col), 0);
+        }
         if !self.screen().placements.is_empty() {
             self.erase_placements(row, row, col, usize::MAX);
         }

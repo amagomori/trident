@@ -2839,6 +2839,7 @@ fn prompt_click_excludes_suggestion_spaces_and_separate_right_prompts() {
         for (typed, suggestion) in [("echo", " hello world"), ("echo hel", "lo world")] {
             for right_prompt in [
                 "",
+                "\x1b[1;20H\x1b[33mRIGHT-CLOCK\x1b[m",
                 "\x1b[1;50H\x1b[33mRIGHT-CLOCK\x1b[m",
                 "\x1b[1;49H\x1b[33mRIGHT-CLOCK\x1b[m",
                 "\x1b[1;48H\x1b[33mRIGHT-CLOCK\x1b[m",
@@ -2878,19 +2879,51 @@ fn prompt_click_excludes_suggestion_spaces_and_separate_right_prompts() {
 
 #[test]
 fn prompt_click_keeps_syntax_coloured_input_suffixes_reachable() {
-    for spaces in [" ", "  ", "     "] {
-        let t = term(
-            40,
-            4,
-            &format!(
+    for spaces in [
+        " ",
+        "  ",
+        "     ",
+        "                    ",
+        "                            ",
+    ] {
+        for cols in [20, 40, 80] {
+            if 11 + spaces.len() >= cols {
+                continue;
+            }
+            let output = format!(
                 "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[90mecho\x1b[m{spaces}\x1b[33mhello\x1b[m\x1b[1;3H"
-            ),
-        );
-        assert_eq!(
-            click(&t, 0, 39),
-            Some(PromptClick::Move((9 + spaces.len()) as isize))
-        );
+            );
+            for chunk in [1, output.len()] {
+                let mut t = Terminal::new(cols, 4);
+                for bytes in output.as_bytes().chunks(chunk) {
+                    t.advance(bytes);
+                }
+                assert_eq!(
+                    click(&t, 0, cols - 1),
+                    Some(PromptClick::Move((9 + spaces.len()) as isize)),
+                    "{cols} {spaces:?} {chunk}"
+                );
+                t.advance(b"\x1b[4C\x1b[4D");
+                assert_eq!(
+                    click(&t, 0, cols - 1),
+                    Some(PromptClick::Move((9 + spaces.len()) as isize))
+                );
+            }
+        }
     }
+}
+
+#[test]
+fn prompt_click_forgets_erased_input_padding_before_a_right_prompt() {
+    let mut t = term(
+        60,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[90mecho\x1b[m                            \x1b[33mhello\x1b[m\x1b[1;3H",
+    );
+    t.advance(b"echo hel\x1b[90mlo world\x1b[m\x1b[K\x1b[1;40H\x1b[33mRIGHT-CLOCK\x1b[m\x1b[1;11H");
+    assert_eq!(click(&t, 0, 59), Some(PromptClick::Move(0)));
+    t.resize(80, 4);
+    assert_eq!(click(&t, 0, 79), Some(PromptClick::Move(0)));
 }
 
 #[test]
