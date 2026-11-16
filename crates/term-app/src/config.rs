@@ -34,6 +34,8 @@ pub struct Config {
     pub remember_window_size: bool,
     pub shell: Vec<String>,
     pub pager: Vec<String>,
+    /// The editor for `path:line` links; empty uses `$VISUAL`/`$EDITOR`.
+    pub editor: Vec<String>,
     pub term: String,
     pub env: BTreeMap<String, String>,
     pub themes: theme::Themes,
@@ -72,6 +74,7 @@ impl Default for Config {
             remember_window_size: true,
             shell: Vec::new(),
             pager: ["less", "-R", "+G"].map(String::from).to_vec(),
+            editor: Vec::new(),
             term: crate::terminfo::FALLBACK.to_string(),
             env: BTreeMap::new(),
             themes: theme::Themes::default(),
@@ -108,6 +111,7 @@ struct Raw {
     remember_window_size: Option<bool>,
     shell: Option<Shell>,
     pager: Option<Shell>,
+    editor: Option<Shell>,
     term: Option<String>,
     env: BTreeMap<String, String>,
     colors: BTreeMap<String, String>,
@@ -744,6 +748,14 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     }
     if config.pager.first().is_none_or(|s| s.is_empty()) {
         return Err(error("pager", "expected a nonempty program"));
+    }
+    config.editor = match raw.editor {
+        Some(Shell::Program(command)) => command.split_whitespace().map(str::to_owned).collect(),
+        Some(Shell::Command(command)) => command,
+        None => Vec::new(),
+    };
+    if config.editor.first().is_some_and(|s| s.is_empty()) {
+        return Err(error("editor", "expected a nonempty program"));
     }
     if let Some(term) = raw.term {
         if term.is_empty() || term.contains(['/', ' ']) {
@@ -1472,6 +1484,21 @@ bright_white = "#fefdfc"
             parse_text("shell = '/bin/zsh'").unwrap().shell,
             ["/bin/zsh"]
         );
+        assert_eq!(
+            parse_text("editor = 'code --goto {file}:{line}'")
+                .unwrap()
+                .editor,
+            ["code", "--goto", "{file}:{line}"]
+        );
+        assert_eq!(
+            parse_text("editor = ['/Applications/My Editor', '{file}']")
+                .unwrap()
+                .editor,
+            ["/Applications/My Editor", "{file}"]
+        );
+        assert!(parse_text("").unwrap().editor.is_empty());
+        assert!(parse_text("editor = ''").unwrap().editor.is_empty());
+        assert!(parse_text("editor = ['']").unwrap_err().contains("editor"));
     }
 
     #[test]

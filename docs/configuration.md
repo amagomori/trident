@@ -43,6 +43,7 @@ hide_mouse_when_typing = true # false: keep the mouse pointer shown while you ty
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 pager = ["less", "-R", "+G"] # opens the last command's output (file path appended); also accepts a string
 term = "xterm-256color"     # "xterm-trident" once installed (falls back if not found)
+editor = ["code", "--goto", "{file}:{line}:{column}"] # path:line links; default: $VISUAL/$EDITOR (see usage.md)
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
 EDITOR = "vim"
