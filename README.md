@@ -88,7 +88,7 @@ entry is optional. For all settings, see [Configuration](docs/configuration.md).
 - [Configuration](docs/configuration.md): settings, key bindings, shell integration, themes
 - [Development](docs/development.md): crate layout, tests, releases, latency and comparison harnesses
 - [Conformance](docs/conformance.md): vttest and esctest results
-- [Benchmarks](docs/benchmarks.md): Trident against Alacritty, kitty, WezTerm and Ghostty
+- [Benchmarks](docs/benchmarks.md): Trident against Alacritty, kitty, WezTerm and Ghostty on macOS and Linux
 
 ## License
 

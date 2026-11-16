@@ -139,3 +139,7 @@ vtebench under `target/compare` if needed, and runs every terminal found on `PAT
 - On Xvfb with llvmpipe, the numbers compare terminals on one machine; they aren't real-display
   latency. Ghostty ignores XTest keys and spins its renderer there, so it gets no latency or `cat`
   numbers.
+
+On macOS, `.github/scripts/compare/macos/run.sh` runs the same tests against Alacritty, Ghostty and
+WezTerm (add kitty with `ARMS="... kitty"`), with Trident run twice for noise bounds. See
+[benchmarks.md](benchmarks.md#run-it) for setup.
