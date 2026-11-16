@@ -60,7 +60,7 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::window::{Theme, Window, WindowId};
+use winit::window::{Fullscreen, Theme, Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
@@ -782,8 +782,18 @@ fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) 
     (repeat || held_at_focus)
         && matches!(
             action,
-            Action::NewWindow | Action::NewTab | Action::CloseTab
+            Action::NewWindow | Action::NewTab | Action::CloseTab | Action::ToggleFullscreen
         )
+}
+
+/// The fullscreen state `toggle_fullscreen` asks for: borderless on the current monitor,
+/// or windowed again.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn toggled_fullscreen(current: Option<Fullscreen>) -> Option<Fullscreen> {
+    match current {
+        Some(_) => None,
+        None => Some(Fullscreen::Borderless(None)),
+    }
 }
 
 /// The directory a new window should start in: the shell's OSC 7 directory when it is
@@ -2912,6 +2922,16 @@ impl App {
                     let _ = writeln!(std::io::stderr(), "new window: {error}");
                 }
             }
+            Action::ToggleFullscreen => {
+                // The window's `Resized` events then resize the grid through `s.resize`.
+                if let Some(s) = &self.session {
+                    #[cfg(target_os = "macos")]
+                    native_tabs::toggle_fullscreen(&s.window);
+                    #[cfg(not(target_os = "macos"))]
+                    s.window
+                        .set_fullscreen(toggled_fullscreen(s.window.fullscreen()));
+                }
+            }
             Action::None => return false,
             Action::Copy => self.copy(false),
             Action::Paste => self.paste(false),
@@ -4361,6 +4381,7 @@ mod tests {
             Action::Increase,
             Action::Decrease,
             Action::Copy,
+            Action::ToggleFullscreen,
             Action::None,
         ] {
             assert!(!suppress_shortcut_repeat(&action, false, false));
@@ -4369,11 +4390,23 @@ mod tests {
                     suppress_shortcut_repeat(&action, repeat, synthetic),
                     matches!(
                         action,
-                        Action::NewWindow | Action::NewTab | Action::CloseTab
+                        Action::NewWindow
+                            | Action::NewTab
+                            | Action::CloseTab
+                            | Action::ToggleFullscreen
                     )
                 );
             }
         }
+    }
+
+    #[test]
+    fn toggle_fullscreen_goes_borderless_and_back() {
+        assert!(matches!(
+            toggled_fullscreen(None),
+            Some(Fullscreen::Borderless(None))
+        ));
+        assert!(toggled_fullscreen(Some(Fullscreen::Borderless(None))).is_none());
     }
 
     #[test]

@@ -59,6 +59,7 @@ For the full capability list, see
 | Bigger / smaller / reset font | Cmd+= / Cmd+- / Cmd+0 | Ctrl+Shift+= / Ctrl+Shift+- / Ctrl+Shift+0 |
 | Scroll back | Shift+PageUp/PageDown, Shift+Home/End, mouse wheel | same |
 | Clear scrollback | Cmd+K | — |
+| Toggle fullscreen | Ctrl+Cmd+F (native fullscreen, also Window > Enter Full Screen) | F11 (borderless) |
 
 ## Tabs
 

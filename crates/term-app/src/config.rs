@@ -255,6 +255,7 @@ pub enum Action {
     JumpToPromptUp,
     JumpToPromptDown,
     SelectCommandOutput,
+    ToggleFullscreen,
     None,
     Send(String),
 }
@@ -286,6 +287,7 @@ impl Action {
                 "jump_to_prompt_up" => Self::JumpToPromptUp,
                 "jump_to_prompt_down" => Self::JumpToPromptDown,
                 "select_command_output" => Self::SelectCommandOutput,
+                "toggle_fullscreen" => Self::ToggleFullscreen,
                 "none" => Self::None,
                 _ => match name
                     .strip_prefix("select_tab_")
@@ -373,6 +375,32 @@ impl Chord {
 
 pub fn default_bindings() -> BTreeMap<Chord, Action> {
     default_bindings_for(cfg!(target_os = "macos"))
+}
+
+#[test]
+fn toggle_fullscreen_defaults_to_ctrl_cmd_f_on_macos_and_f11_on_linux() {
+    assert_eq!(
+        Action::parse(Binding::Name("toggle_fullscreen".into())).unwrap(),
+        Action::ToggleFullscreen
+    );
+    for (macos, chord, unbound) in [
+        (true, "ctrl+super+f", "f11"),
+        (false, "f11", "ctrl+super+f"),
+    ] {
+        let defaults = default_bindings_for(macos);
+        assert_eq!(
+            defaults[&Chord::parse(chord).unwrap()],
+            Action::ToggleFullscreen
+        );
+        assert_eq!(defaults.get(&Chord::parse(unbound).unwrap()), None);
+        assert_eq!(
+            defaults
+                .values()
+                .filter(|action| **action == Action::ToggleFullscreen)
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -475,6 +503,8 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
             Action::SelectCommandOutput,
         );
     }
+    let fullscreen = if macos { "ctrl+super+f" } else { "f11" };
+    bindings.insert(Chord::parse(fullscreen).unwrap(), Action::ToggleFullscreen);
     for (key, action) in [
         ("pageup", Action::PageUp),
         ("pagedown", Action::PageDown),
