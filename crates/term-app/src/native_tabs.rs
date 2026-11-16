@@ -122,13 +122,27 @@ unsafe extern "C-unwind" fn new_window_for_tab(_: *mut AnyObject, _: Sel, _: *mu
     });
 }
 
+/// Enters or leaves native (Spaces) fullscreen, as the green button does: AppKit takes the
+/// whole tab group along, so the tabs stay attached.
+pub fn toggle_fullscreen(window: &Window) {
+    let Some(window) = ns_window(window) else {
+        return;
+    };
+    // SAFETY: a live NSWindow on the main thread; toggleFullScreen: takes an ignored sender.
+    unsafe {
+        let _: () = msg_send![&*window, toggleFullScreen: std::ptr::null::<AnyObject>()];
+    }
+}
+
 /// The Window menu's items as (title, action), `None` for a separator. None has a key
 /// equivalent, so every chord stays with `config.bindings`. The tab items are the
 /// standard NSWindow tab actions, so AppKit validates them, retitles Show/Hide Tab Bar
 /// and sends them to the key window; it only adds the window list to the menu itself.
-const WINDOW_MENU: [Option<(&str, &std::ffi::CStr)>; 12] = [
+/// AppKit also retitles Enter/Exit Full Screen and adds no second full screen item.
+const WINDOW_MENU: [Option<(&str, &std::ffi::CStr)>; 13] = [
     Some(("Minimize", c"performMiniaturize:")),
     Some(("Zoom", c"performZoom:")),
+    Some(("Enter Full Screen", c"toggleFullScreen:")),
     None,
     Some(("Show Tab Bar", c"toggleTabBar:")),
     Some(("Show All Tabs", c"toggleTabOverview:")),
@@ -216,6 +230,7 @@ mod tests {
             "moveTabToNewWindow:",
             "mergeAllWindows:",
             "performMiniaturize:",
+            "toggleFullScreen:",
         ] {
             assert!(actions.contains(&action), "Window menu lacks {action}");
         }
