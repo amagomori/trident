@@ -845,7 +845,10 @@ fn synchronized_advance_preserves_plain_flood_batching() {
 #[test]
 fn skipped_output_moves_the_cursor_over_emoji_sequences_like_built_output() {
     // Line feeds without carriage returns carry the column into the rows that are built.
-    let line = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{1f1ef}\u{1f1f5}\u{1f44d}\u{1f3fd}x\n";
+    let line = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{1f1ef}\u{1f1f5}\u{1f44d}\u{1f3fd}x"
+        .to_owned()
+        + &"\u{1f468}\u{200d}".repeat(crate::grapheme::MAX_CHARS / 2)
+        + "\u{1f469}\n";
     let batch = line.repeat(DEFAULT_SCROLLBACK + 100) + "|";
     let mut ghosted = term(80, 4, "");
     assert!(ghosted.ghost_split(batch.as_bytes()).is_some());

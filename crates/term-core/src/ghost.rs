@@ -147,6 +147,45 @@ impl Ghost<'_> {
         }
     }
 
+    #[inline(always)]
+    fn place(&mut self, c: char, width: usize) {
+        if self.term.cursor.pending_wrap {
+            self.term.cursor.col = 0;
+            self.linefeed();
+        }
+        let cols = self.term.cols;
+        if width == 2 && self.term.cursor.col == cols - 1 {
+            self.term.cursor.col = 0;
+            self.linefeed();
+        }
+        let t = &mut *self.term;
+        t.print_state = super::PrintState(c as u32);
+        if t.cursor.col + width >= cols {
+            t.cursor.col = cols - 1;
+            t.cursor.pending_wrap = true;
+        } else {
+            t.cursor.col += width;
+        }
+    }
+
+    #[inline(never)]
+    fn print_unicode(&mut self, c: char) {
+        let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if width == 0 {
+            self.term.print_state.joined(c);
+            let at = self.at();
+            self.cluster.push_zero_width(c, at);
+            return;
+        }
+        if self.term.print_state.may_join(c) && self.join_sequence(c) {
+            self.term.print_state = super::PrintState(c as u32);
+            return;
+        }
+        self.place(c, width);
+        let at = self.at();
+        self.cluster.start(c, width == 2, at);
+    }
+
     fn at(&self) -> (usize, bool) {
         (self.term.cursor.col, self.term.cursor.pending_wrap)
     }
@@ -184,38 +223,15 @@ impl Ghost<'_> {
 impl Perform for Ghost<'_> {
     /// `put_char` with autowrap on, insert off and the ASCII charset, minus the cell writes.
     fn print(&mut self, c: char) {
+        if c as u32 >= 0x80 {
+            self.print_unicode(c);
+            return;
+        }
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
-            self.term.print_state.joined(c);
-            let at = self.at();
-            self.cluster.push_zero_width(c, at);
             return;
         }
-        if c as u32 >= 0x80 && self.term.print_state.may_join(c) && self.join_sequence(c) {
-            self.term.print_state = super::PrintState(c as u32);
-            return;
-        }
-        if self.term.cursor.pending_wrap {
-            self.term.cursor.col = 0;
-            self.linefeed();
-        }
-        let cols = self.term.cols;
-        if width == 2 && self.term.cursor.col == cols - 1 {
-            self.term.cursor.col = 0;
-            self.linefeed();
-        }
-        let t = &mut *self.term;
-        t.print_state = super::PrintState(c as u32);
-        if t.cursor.col + width >= cols {
-            t.cursor.col = cols - 1;
-            t.cursor.pending_wrap = true;
-        } else {
-            t.cursor.col += width;
-        }
-        if c as u32 >= 0x80 {
-            let at = self.at();
-            self.cluster.start(c, width == 2, at);
-        }
+        self.place(c, width);
     }
 
     fn execute(&mut self, byte: u8) {

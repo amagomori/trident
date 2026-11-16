@@ -172,7 +172,7 @@ impl GhostCluster {
     }
 
     pub(crate) fn push_zero_width(&mut self, c: char, at: (usize, bool)) {
-        if self.end == Some(at) {
+        if self.end == Some(at) && self.text.chars().count() < MAX_CHARS {
             self.text.push(c);
         }
     }
@@ -186,6 +186,7 @@ impl GhostCluster {
     pub(crate) fn join(&mut self, c: char, at: (usize, bool)) -> Option<bool> {
         if self.end != Some(at)
             || !(pictographic(c) || regional(c))
+            || self.text.chars().count() >= MAX_CHARS
             || !continues_sequence(&self.text, c)
         {
             return None;
