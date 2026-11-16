@@ -165,6 +165,10 @@ pub(crate) struct GhostCluster {
 
 impl GhostCluster {
     pub(crate) fn start(&mut self, c: char, wide: bool, end: (usize, bool)) {
+        if !(pictographic(c) || regional(c)) {
+            self.end = None;
+            return;
+        }
         self.text.clear();
         self.text.push(c);
         self.wide = wide;
