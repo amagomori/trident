@@ -2619,6 +2619,7 @@ dependencies = [
  "portable-pty",
  "resvg",
  "serde",
+ "shlex",
  "smithay-clipboard",
  "term-core",
  "term-render",

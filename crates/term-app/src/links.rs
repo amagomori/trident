@@ -185,7 +185,9 @@ pub fn editor(
         };
     }
     let Some(words) = environment
-        .map(|e| e.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+        .map(|e| {
+            shlex::split(e).unwrap_or_else(|| e.split_whitespace().map(str::to_owned).collect())
+        })
         .filter(|words| !words.is_empty())
     else {
         return Editor::System(file.to_owned());
@@ -224,6 +226,7 @@ pub fn editor(
             argv.push(format!("+{line}:{column}").into());
             argv.push(file.into());
         }
+        "ed" | "red" => argv.push(file.into()),
         _ => {
             argv.push(format!("+{line}").into());
             argv.push(file.into());
@@ -502,7 +505,32 @@ mod tests {
         assert_eq!(open("subl"), (false, "subl /w/x.rs:12:4".into()));
         assert_eq!(open("zed"), (false, "zed /w/x.rs:12:4".into()));
         assert_eq!(open("mate"), (false, "mate -l 12:4 /w/x.rs".into()));
-        assert_eq!(open("ed"), (true, "ed +12 /w/x.rs".into()));
+        assert_eq!(open("ed"), (true, "ed /w/x.rs".into()));
+        assert_eq!(open("joe"), (true, "joe +12 /w/x.rs".into()));
+        assert_eq!(
+            open(r#"open -a "Visual Studio Code" --args"#),
+            (true, "open -a Visual Studio Code --args +12 /w/x.rs".into())
+        );
+        let quoted = match editor(
+            &[],
+            Some(r#"'/Applications/My Editor/bin/vim' -n"#),
+            file,
+            12,
+            Some(4),
+        ) {
+            Editor::Terminal(argv) => argv,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            quoted,
+            [
+                "/Applications/My Editor/bin/vim",
+                "-n",
+                "+call cursor(12, 4)",
+                "/w/x.rs"
+            ]
+            .map(OsString::from)
+        );
         assert_eq!(
             editor(&[], None, file, 1, None),
             Editor::System(file.to_owned())
