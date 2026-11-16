@@ -10,6 +10,24 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// A window started from `/` (as from Finder) runs in the inherited home, not an
+/// `[env].HOME` override. Pager lookup and PTY spawning must use the same directory.
+pub fn default_working_directory() -> Option<std::path::PathBuf> {
+    inherited_working_directory(
+        std::env::current_dir().ok(),
+        std::env::var_os("HOME").map(Into::into),
+    )
+}
+
+fn inherited_working_directory(
+    current: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    current
+        .filter(|dir| dir != std::path::Path::new("/"))
+        .or(home)
+}
+
 /// Output the reader thread queues before it waits for the UI, once it also holds
 /// `MIN_LINES` lines. That many lines is well past a screen plus default scrollback, so a
 /// flood's batch is long enough to skip building the lines it evicts, even with long lines.
@@ -520,14 +538,11 @@ impl Pty {
         for (key, value) in env {
             cmd.env(key, value);
         }
-        if let Some(dir) = cwd {
-            cmd.cwd(dir);
-        } else if let Some(home) = std::env::var_os("HOME")
-            && std::env::current_dir()
-                .map(|d| d == std::path::Path::new("/"))
-                .unwrap_or(true)
+        if let Some(dir) = cwd
+            .map(std::path::PathBuf::from)
+            .or_else(default_working_directory)
         {
-            cmd.cwd(home);
+            cmd.cwd(dir);
         }
         // portable-pty starts the default shell as a login shell, with argv[0] `-<basename>`.
         let login = cmd.is_default_prog().then(|| {
@@ -983,6 +998,23 @@ fn reap(mut child: Box<dyn Child + Send + Sync>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_directory_uses_inherited_home_only_from_root_or_unknown_cwd() {
+        let home = std::path::PathBuf::from("/inherited-home");
+        let cwd = std::path::PathBuf::from("/project");
+        for current in [None, Some("/".into())] {
+            assert_eq!(
+                inherited_working_directory(current, Some(home.clone())),
+                Some(home.clone())
+            );
+        }
+        assert_eq!(
+            inherited_working_directory(Some(cwd.clone()), Some(home)),
+            Some(cwd)
+        );
+        assert_eq!(inherited_working_directory(Some("/".into()), None), None);
+    }
 
     #[cfg(unix)]
     fn nonblocking_pipe() -> (std::fs::File, std::fs::File) {

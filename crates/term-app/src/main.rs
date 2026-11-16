@@ -1001,17 +1001,17 @@ fn wait_window(
 }
 
 /// Finds the file a window would start for `program`, looking it up on `path` as the PTY
-/// does: relative paths and `PATH` entries resolve against `home`, the new window's
+/// does: relative paths and `PATH` entries resolve against `directory`, the new window's
 /// directory. The window is given the result, since the PTY does not resolve a relative
 /// path such as `bin/pager` against its directory.
 fn find_program(
     program: &str,
     path: Option<&std::ffi::OsStr>,
-    home: &std::path::Path,
+    directory: &std::path::Path,
 ) -> Result<PathBuf, String> {
     use std::os::unix::fs::PermissionsExt;
     let runnable = |candidate: &std::path::Path| {
-        let candidate = home.join(candidate);
+        let candidate = directory.join(candidate);
         std::fs::metadata(&candidate)
             .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
             .then_some(candidate)
@@ -3327,13 +3327,19 @@ impl App {
                         .map(Into::into)
                         .or_else(|| std::env::var_os(name))
                 };
-                let home = var("HOME").map(PathBuf::from).unwrap_or_default();
-                let opened = find_program(&self.config.pager[0], var("PATH").as_deref(), &home)
-                    .and_then(|program| {
-                        write_pager_file(&output)
-                            .map(|file| (program, file))
-                            .map_err(|error| format!("pager: {error}"))
-                    });
+                let directory = self
+                    .options
+                    .working_directory
+                    .clone()
+                    .or_else(pty::default_working_directory)
+                    .unwrap_or_default();
+                let opened =
+                    find_program(&self.config.pager[0], var("PATH").as_deref(), &directory)
+                        .and_then(|program| {
+                            write_pager_file(&output)
+                                .map(|file| (program, file))
+                                .map_err(|error| format!("pager: {error}"))
+                        });
                 match opened {
                     Ok((program, file)) => {
                         let mut args = new_window_args(std::env::args_os().skip(1));
@@ -3346,7 +3352,7 @@ impl App {
                             locale: pager_locale(var),
                             failed: self.proxy.clone(),
                         };
-                        open_window("pager", args, None, None, Some(pager));
+                        open_window("pager", args, Some(directory), None, Some(pager));
                     }
                     Err(error) => self.show_pager_error(error),
                 }
