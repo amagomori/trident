@@ -1,14 +1,24 @@
-# KAN-95 process-group QA scripts
+# Process-group QA scripts
 
-Release-binary checks for PR #61 (sample the shell's foreground process group at most every
-5 ms while output is queued). Python 3 stdlib, Linux and macOS. Run from a desktop session
-for anything that counts as evidence; `--xvfb` is a smoke check only.
+These scripts check a PR that changes how Trident tracks the shell's foreground process group:
+CPU cost under output, terminal modes left on by a dead command, and notification and title
+latency. They are for QA runners. They need Python 3 (stdlib only) on Linux or macOS. Run them from
+a desktop session; `--xvfb` is a smoke check only.
 
-| script | measures |
+| Script | Measures |
 | --- | --- |
-| `cpu_ab.py` | Merge number: app CPU (all app threads, not the shell or `cat`) and wall time of `cat` 60 MiB up to a DA1 reply, head vs main plus a byte-identical main copy for A/A, shuffled per round. Median per-round % change with 95% bootstrap CI; exit 1 on a wall-time regression beyond A/A. The timed span starts when the driver wakes the shell, with no idle poll in it; a run aborts if `cat` fails inside the app. |
-| `modes.py` | Shell-return marks: whether mouse, focus and bracketed-paste reports a dead command left on still reach the next prompt, per scenario (idle, SIGKILL, during a 20 MiB flood, prompt re-enabling `?2004h`, plus the documented flood-tail case), main vs head. Needs `xdotool xclip xmessage` on Linux X11; Accessibility for the runner on macOS. |
-| `timing.py` | Long-command notification and OSC 2 title latency (idle and during floods), main vs head, shuffled. Exit 1 when a notification or any title is missing on head (a title run passes only if every title sent was seen; on Linux only `Notify` calls with app_name `terminal` count, so other apps' notifications are ignored), or head's median is above main's by more than max(20 ms, 10%), at least 200 ms for the notify cases (one watcher poll, since notify latency is bimodal by poll phase). Linux: `xdotool xprop xmessage dbus-monitor` and the desktop session bus; macOS: Accessibility for the runner. |
+| `cpu_ab.py` | App CPU (all app threads) and wall time of `cat` of 60 MiB up to a DA1 reply, head against main plus a byte-identical main copy as A/A, shuffled per round. Prints the median per-round % change with a 95% bootstrap CI and exits 1 on a wall-time regression beyond A/A. |
+| `modes.py` | Whether mouse, focus and bracketed-paste reporting left on by a dead command still reach the next prompt. Covers idle, SIGKILL, a 20 MiB flood and a prompt that re-enables `?2004h`, main against head. |
+| `timing.py` | Long-command notification and OSC 2 title latency, idle and during floods, main against head. Exits 1 when head misses a notification or title, or when head's median is slower than main's by more than max(20 ms, 10%), or 200 ms for notifications. |
+
+## Prerequisites
+
+- Linux: an X11 session with `xdotool`, `xprop`, `xmessage`, `xclip` and `dbus-monitor`, and the
+  desktop session bus.
+- macOS: **Accessibility** permission for the app that runs the scripts. The stock
+  `/usr/bin/python3` and `/bin/bash` are enough.
+
+## Run
 
 ```sh
 git worktree add ../t-main origin/main && git worktree add ../t-head <head-sha>
@@ -21,8 +31,6 @@ python3 .github/scripts/pgrp-qa/timing.py --main ../t-main/target/release/triden
     --head ../t-head/target/release/trident --runs 6 --out timing
 ```
 
-All three write `rows.json` (every run) into `--out`; `cpu_ab.py` also writes `summary.json`
-with binary hashes. On Linux, `cpu_ab.py --taskset 2` pins the app to one core, as in the
-PR's own A/B; run it pinned and unpinned.
-
-macOS: the stock `/usr/bin/python3` (3.9) and `/bin/bash` (3.2) are enough.
+All three write `rows.json` (every run) into `--out`, and `cpu_ab.py` also writes `summary.json`
+with binary hashes. On Linux, run `cpu_ab.py` both unpinned and with `--taskset 2`, which pins the
+app to one core.

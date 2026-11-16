@@ -1,21 +1,26 @@
-# KAN-108 merge queue
+# Merge queue
 
-`mq.py` merges ready amagomori/terminal PRs in order while rebasing each one once. A PR
-entering the queue is rebased onto the queue head (main plus every PR ahead of it) and its
-branch is pushed, so its head tree is what main will hold after its squash merge. QA passes are
-recorded against that tree. Merging the front PR leaves main with exactly the tree the next PR
-was rebased onto, so the next PR merges without another rebase and its QA carries over.
+`mq.py` merges ready Trident PRs in order and rebases each one only once. It is for the session
+that merges PRs. It needs Python 3.9 or later, git and an authenticated `gh`, run from a checkout
+of the repository. `--repo` defaults to `amagomori/terminal`, which GitHub redirects to
+`amagomori/trident`.
 
-A PR is rebased again only when its base really moves: main changed outside the queue, a PR
-ahead was dropped or rebased, or someone pushed to a queued branch. QA is needed again only if
-that changes the PR's tree. For a re-QA, `status` says whether the base change touched any file
-the PR touches or any build config (Cargo manifests and lockfile, `.cargo/`, toolchain,
-`build.rs`, workflows): "full" re-QA if so, otherwise "quick" (merged-tree release PTY A/B).
-A rebase conflict takes the PR out of the queue and leaves its branch as it was.
+## How it works
 
-The queue is stored on the remote as `refs/merge-queue/main` (`queue.json`); every save is a
-`--force-with-lease` push, so all sessions share one queue and can't overwrite each other.
-Needs Python 3.9+, git and an authenticated `gh`; run it from a checkout of the repo.
+- When a PR enters the queue, `mq.py` rebases it onto the queue head (main plus every PR ahead of
+  it) and pushes the branch. Its head tree is then what main holds after its squash merge.
+- QA passes are recorded against that tree. Merging the front PR leaves main at the tree the next PR
+  was rebased onto, so the next PR merges without another rebase and keeps its QA pass.
+- A PR is rebased again only when its base moves: main changed outside the queue, a PR ahead was
+  dropped or rebased, or someone pushed to a queued branch.
+- After such a rebase, `status` says which re-QA the PR needs. It's "full" if the base change
+  touched any file the PR touches or any build config (Cargo manifests and lockfile, `.cargo/`,
+  toolchain, `build.rs`, workflows). Otherwise it's "quick", a release PTY A/B of the merged tree.
+- A rebase conflict takes the PR out of the queue and leaves its branch unchanged.
+- The queue is stored on the remote as `refs/merge-queue/main` (`queue.json`). Every save is a
+  `--force-with-lease` push, so all sessions share one queue and can't overwrite each other.
+
+## Commands
 
 ```sh
 q=.github/scripts/merge-queue/mq.py
@@ -28,5 +33,10 @@ python3 $q merge --all [--force]  # squash-merge while the front is ready; --for
 python3 $q status [--json]
 ```
 
-Tests (local bare remote and a fake GitHub that squash-merges): `python3 -m unittest discover
--s .github/scripts/merge-queue`
+## Test
+
+The tests use a local bare remote and a fake GitHub that squash-merges:
+
+```sh
+python3 -m unittest discover -s .github/scripts/merge-queue
+```
