@@ -69,6 +69,49 @@ pub fn process_args(pid: i32) -> Option<Vec<String>> {
     args
 }
 
+/// The working directory of process `pid`, if it still exists and the platform reports it.
+#[cold]
+pub fn process_working_directory(pid: i32) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    let dir = std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+    #[cfg(target_os = "macos")]
+    let dir = {
+        let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        // SAFETY: the buffer is valid for `size` bytes; proc_pidinfo writes at most that.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        (written == size).then(|| {
+            // SAFETY: proc_pidinfo filled the whole struct.
+            let info = unsafe { info.assume_init() };
+            let bytes: Vec<u8> = info
+                .pvi_cdir
+                .vip_path
+                .iter()
+                .flatten()
+                .map(|&c| c as u8)
+                .take_while(|&b| b != 0)
+                .collect();
+            std::path::PathBuf::from(
+                <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(bytes),
+            )
+        })
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let dir: Option<std::path::PathBuf> = {
+        let _ = pid;
+        None
+    };
+    dir.filter(|dir| dir.is_absolute())
+}
+
 /// argv of `pid` from `KERN_PROCARGS2`: argc, the executable path and its NUL padding, then
 /// the arguments, each NUL-terminated.
 #[cfg(target_os = "macos")]
@@ -593,6 +636,16 @@ pub fn route_app_quit_through_close(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn working_directory_of_this_process() {
+        assert_eq!(
+            process_working_directory(std::process::id() as i32),
+            Some(std::env::current_dir().unwrap())
+        );
+        assert_eq!(process_working_directory(i32::MAX), None);
+    }
 
     #[test]
     fn close_window_menu_leaves_cmd_w_to_close_tab() {

@@ -308,7 +308,10 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
 struct Session {
     composition: ime::Composition,
     link_pressed: bool,
-    hover: Option<term_core::Link>,
+    hover: Option<links::Hover>,
+    /// The last `path:line` under the pointer and the file it names, so hovering the same
+    /// reference each frame doesn't touch the filesystem.
+    file_hover: std::cell::RefCell<Option<(term_core::FileLink, Option<PathBuf>)>>,
     ime_cursor_area: Option<[f32; 4]>,
     scroll: PixelScroll,
     pty_cell: (f32, f32),
@@ -839,6 +842,86 @@ fn local_working_directory(cwd: Option<&term_core::WorkingDirectory>) -> Option<
         || hostname().is_some_and(|name| same_host(&name, &cwd.host));
     let path = PathBuf::from(&cwd.path);
     (local && path.is_absolute() && path.is_dir()).then_some(path)
+}
+
+/// Start another Trident window with `args`, in `working_directory` and with `cells`
+/// columns and rows when given.
+fn spawn_window(
+    args: Vec<std::ffi::OsString>,
+    working_directory: Option<PathBuf>,
+    cells: Option<String>,
+) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("new-window".into())
+        .spawn(move || {
+            let result = std::env::current_exe().and_then(|exe| {
+                let (stderr, startup_stderr) = new_window_stderr();
+                let mut command = std::process::Command::new(exe);
+                command
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(stderr);
+                if startup_stderr {
+                    command.env(STARTUP_STDERR, "1");
+                }
+                if let Some(dir) = working_directory {
+                    command.env(WORKING_DIRECTORY, dir);
+                }
+                if let Some(cells) = cells {
+                    command.env(WINDOW_CELLS, cells);
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(group) = close_confirm::current_quit_group() {
+                    command.env(close_confirm::QUIT_GROUP, group);
+                }
+                command.spawn()
+            });
+            match result {
+                Ok(mut child) => {
+                    if let Some(stderr) = child.stderr.take()
+                        && let Err(error) = forward_new_window_stderr(stderr, std::io::stderr())
+                    {
+                        let _ = writeln!(std::io::stderr(), "new window: {error}");
+                    }
+                    match child.wait() {
+                        Ok(status) if !status.success() => {
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "trident: new window exited with {status}"
+                            );
+                        }
+                        Err(error) => {
+                            let _ = writeln!(std::io::stderr(), "new window: {error}");
+                        }
+                        Ok(_) => {}
+                    }
+                }
+                Err(error) => {
+                    let _ = writeln!(std::io::stderr(), "new window: {error}");
+                }
+            }
+        })
+    {
+        let _ = writeln!(std::io::stderr(), "new window: {error}");
+    }
+}
+
+/// Where a relative `path:line` may live: the shell's OSC 7 directory, then the
+/// foreground process's working directory (no OSC 7, or a build tool run elsewhere).
+fn file_link_bases(s: &Session) -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = local_working_directory(s.term.working_directory())
+        .into_iter()
+        .collect();
+    if let Some(dir) = s
+        .pty
+        .foreground_process()
+        .and_then(close_confirm::process_working_directory)
+        && !bases.contains(&dir)
+    {
+        bases.push(dir);
+    }
+    bases
 }
 
 fn same_host(a: &str, b: &str) -> bool {
@@ -1445,6 +1528,7 @@ impl App {
             composition: ime::Composition::default(),
             link_pressed: false,
             hover: None,
+            file_hover: Default::default(),
             ime_cursor_area: None,
             scroll: PixelScroll::default(),
             pty_cell: cell,
@@ -2560,7 +2644,7 @@ impl App {
             banner.as_deref(),
             search.as_ref(),
             s.composition.preedit().filter(|_| search.is_none()),
-            hover.as_ref(),
+            hover.as_ref().map(|hover| &hover.link),
             Some(&mut pre_present),
         );
         s.blink_at = s.renderer.blinking().then_some(blink_flip);
@@ -3007,69 +3091,11 @@ impl App {
                     .session
                     .as_ref()
                     .and_then(|s| local_working_directory(s.term.working_directory()));
-                let cells = self
-                    .session
-                    .as_ref()
-                    .map(|s| window_state::format_cells((s.term.cols(), s.term.rows())));
-                #[cfg(target_os = "macos")]
-                let quit_group = close_confirm::current_quit_group();
-                if let Err(error) =
-                    std::thread::Builder::new()
-                        .name("new-window".into())
-                        .spawn(move || {
-                            let result = std::env::current_exe().and_then(|exe| {
-                                let (stderr, startup_stderr) = new_window_stderr();
-                                let mut command = std::process::Command::new(exe);
-                                command
-                                    .args(new_window_args(std::env::args_os().skip(1)))
-                                    .stdin(Stdio::null())
-                                    .stdout(Stdio::null())
-                                    .stderr(stderr);
-                                if startup_stderr {
-                                    command.env(STARTUP_STDERR, "1");
-                                }
-                                if let Some(dir) = working_directory {
-                                    command.env(WORKING_DIRECTORY, dir);
-                                }
-                                if let Some(cells) = cells {
-                                    command.env(WINDOW_CELLS, cells);
-                                }
-                                #[cfg(target_os = "macos")]
-                                if let Some(group) = quit_group {
-                                    command.env(close_confirm::QUIT_GROUP, group);
-                                }
-                                command.spawn()
-                            });
-                            match result {
-                                Ok(mut child) => {
-                                    if let Some(stderr) = child.stderr.take()
-                                        && let Err(error) =
-                                            forward_new_window_stderr(stderr, std::io::stderr())
-                                    {
-                                        let _ = writeln!(std::io::stderr(), "new window: {error}");
-                                    }
-                                    match child.wait() {
-                                        Ok(status) if !status.success() => {
-                                            let _ = writeln!(
-                                                std::io::stderr(),
-                                                "trident: new window exited with {status}"
-                                            );
-                                        }
-                                        Err(error) => {
-                                            let _ =
-                                                writeln!(std::io::stderr(), "new window: {error}");
-                                        }
-                                        Ok(_) => {}
-                                    }
-                                }
-                                Err(error) => {
-                                    let _ = writeln!(std::io::stderr(), "new window: {error}");
-                                }
-                            }
-                        })
-                {
-                    let _ = writeln!(std::io::stderr(), "new window: {error}");
-                }
+                spawn_window(
+                    new_window_args(std::env::args_os().skip(1)),
+                    working_directory,
+                    self.window_cells(),
+                );
             }
             Action::ToggleFullscreen => {
                 // The window's `Resized` events then resize the grid through `s.resize`.
@@ -3275,7 +3301,14 @@ impl App {
             .is_some_and(|s| input::tracks_mouse(s.term.modes.mouse, self.modifiers))
     }
 
-    fn hover_link(&self) -> Option<term_core::Link> {
+    /// The current grid size, for a new window to open at.
+    fn window_cells(&self) -> Option<String> {
+        self.session
+            .as_ref()
+            .map(|s| window_state::format_cells((s.term.cols(), s.term.rows())))
+    }
+
+    fn hover_link(&self) -> Option<links::Hover> {
         if !self.focused || !links::command_modifier(self.modifiers) {
             return None;
         }
@@ -3314,7 +3347,71 @@ impl App {
         {
             return None;
         }
-        s.term.link_at(s.term.viewport_to_point_signed(row, col))
+        let point = s.term.viewport_to_point_signed(row, col);
+        if let Some(link) = s.term.link_at(point) {
+            return Some(links::Hover {
+                target: links::Target::Uri(link.uri.clone()),
+                link,
+            });
+        }
+        let file_link = s.term.file_link_at(point)?;
+        let mut cache = s.file_hover.borrow_mut();
+        let path = match &*cache {
+            Some((cached, path)) if *cached == file_link => path.clone(),
+            _ => {
+                let path = links::resolve(
+                    &file_link.path,
+                    &file_link_bases(s),
+                    std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+                );
+                *cache = Some((file_link.clone(), path.clone()));
+                path
+            }
+        };
+        Some(links::Hover {
+            link: file_link.link(),
+            target: links::Target::File {
+                path: path?,
+                line: file_link.line,
+                column: file_link.column,
+            },
+        })
+    }
+
+    fn open_link(&self, target: links::Target) {
+        match target {
+            links::Target::Uri(uri) => links::open(uri),
+            links::Target::File { path, line, column } => {
+                let environment = ["VISUAL", "EDITOR"].into_iter().find_map(|name| {
+                    self.config
+                        .env
+                        .get(name)
+                        .cloned()
+                        .or_else(|| std::env::var(name).ok())
+                        .filter(|v| !v.trim().is_empty())
+                });
+                let editor = links::editor(
+                    &self.config.editor,
+                    environment.as_deref(),
+                    &path,
+                    line,
+                    column,
+                );
+                let working_directory = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| local_working_directory(s.term.working_directory()))
+                    .or_else(|| path.parent().map(std::path::Path::to_owned));
+                let cells = self.window_cells();
+                links::open_file(editor, |command| {
+                    spawn_window(
+                        links::window_args(std::env::args_os().skip(1), command),
+                        working_directory,
+                        cells,
+                    );
+                });
+            }
+        }
     }
 
     fn refresh_link(&mut self) {
@@ -3392,9 +3489,9 @@ impl App {
                 self.session.as_mut().unwrap().link_pressed = false;
                 return;
             }
-            Some(links::MouseAction::Open(link)) => {
+            Some(links::MouseAction::Open(hover)) => {
                 self.session.as_mut().unwrap().link_pressed = true;
-                links::open(link.uri);
+                self.open_link(hover.target);
                 return;
             }
             None => {}

@@ -12,7 +12,7 @@ mod ghost;
 pub mod grapheme;
 mod kitty;
 mod links;
-pub use links::Link;
+pub use links::{FileLink, Link};
 mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
