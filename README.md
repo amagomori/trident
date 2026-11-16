@@ -12,46 +12,50 @@
 
 ## Install
 
-- **macOS** with [Homebrew](https://brew.sh): `brew install --cask amagomori/tap/trident`;
-  `brew upgrade` picks up new releases.
-- **Arch Linux**: install [`trident-bin`](https://aur.archlinux.org/packages/trident-bin) from the
-  AUR, e.g. `yay -S trident-bin`.
+### macOS
 
-Or download a build from [Releases](https://github.com/amagomori/terminal/releases):
+Trident runs on macOS 11 or later, on Apple silicon and Intel.
 
-- **macOS** (11 or newer, Apple silicon and Intel): `Trident-<version>-macos-universal.dmg`; drag
-  Trident to Applications. Builds are unsigned, so macOS reports a downloaded .dmg as "damaged";
-  run `xattr -d com.apple.quarantine ~/Downloads/Trident-<version>-macos-universal.dmg` before
-  opening it. An app already copied from a quarantined image needs
+- With [Homebrew](https://brew.sh): `brew install --cask amagomori/tap/trident`. To update, run
+  `brew upgrade`.
+- From [Releases](https://github.com/amagomori/trident/releases):
+  1. Download `Trident-<version>-macos-universal.dmg`.
+  2. Builds are unsigned, so macOS reports the download as damaged. Clear the quarantine flag:
+     `xattr -d com.apple.quarantine ~/Downloads/Trident-<version>-macos-universal.dmg`.
+  3. Open the image and drag Trident to Applications.
+
+  If you already copied the app from a quarantined image, run
   `xattr -dr com.apple.quarantine /Applications/Trident.app`.
-- **Debian/Ubuntu**: `sudo apt install ./Trident-<version>-linux-amd64.deb`; installing a newer
-  .deb the same way upgrades it.
-- **Any Linux** (glibc 2.35 or newer): `chmod +x Trident-<version>-x86_64.AppImage` and run it, or
-  unpack the tarball into `~/.local`:
+
+### Linux
+
+Download the package for your distribution from
+[Releases](https://github.com/amagomori/trident/releases):
+
+- **Arch Linux**: install [`trident-bin`](https://aur.archlinux.org/packages/trident-bin) from the
+  AUR, for example `yay -S trident-bin`.
+- **Debian and Ubuntu**: `sudo apt install ./Trident-<version>-linux-amd64.deb`. To upgrade,
+  install a newer .deb the same way.
+- **Other distributions** (glibc 2.35 or later): run `Trident-<version>-x86_64.AppImage` after
+  `chmod +x`, or unpack the tarball into `~/.local`:
   `tar xzf Trident-<version>-linux-x86_64.tar.gz -C ~/.local --strip-components=1`.
-  The app menu entry runs `trident` from your login `PATH`, so log out and back in if `~/.local/bin`
-  was not there before.
+  The app menu entry runs `trident` from your login `PATH`, so if `~/.local/bin` wasn't on it,
+  log out and back in.
 
-`SHA256SUMS` lists every file's checksum (`sha256sum -c SHA256SUMS`).
+To check a download, run `sha256sum -c SHA256SUMS` with the release's `SHA256SUMS` file.
 
-### From source
+### Build from source
 
-You need a [Rust toolchain](https://rustup.rs) (1.90 or newer).
+You need a [Rust toolchain](https://rustup.rs) 1.90 or later and a graphics driver. On Linux, you
+also need Mesa or a vendor Vulkan or GL driver, and an X11 or Wayland session.
 
 ```sh
-git clone https://github.com/amagomori/terminal
-cd terminal
+git clone https://github.com/amagomori/trident
+cd trident
 cargo run --release
 ```
 
-Or install the `trident` binary into `~/.cargo/bin`:
-
-```sh
-cargo install --path crates/term-app
-```
-
-No system libraries are needed beyond a graphics driver (on Linux: Mesa or a vendor Vulkan/GL
-driver, and an X11 or Wayland session).
+To install the `trident` binary into `~/.cargo/bin`, run `cargo install --path crates/term-app`.
 
 ## Quick start
 
@@ -64,24 +68,29 @@ trident --install-terminfo     # optional: install the xterm-trident terminfo en
 
 ## Features
 
-- **GPU rendering** with [wgpu](https://wgpu.rs) (Metal, Vulkan or OpenGL); idle, it uses no CPU or GPU.
-- **xterm-compatible**: truecolor, mouse reporting, alternate screen, wide characters; runs vim, tmux and htop.
-- **Scrollback search**, rectangular selection, and shell integration (OSC 133) with prompt jumps.
-- **Inline images** (kitty graphics protocol), desktop notifications, and file drops.
+- **GPU rendering** with [wgpu](https://wgpu.rs): Metal on macOS, Vulkan or OpenGL on Linux. It
+  prefers the integrated GPU and uses no CPU or GPU while idle.
+- **xterm-compatible**: truecolor, mouse reporting, alternate screen, bracketed paste and wide
+  characters. Runs vim, tmux, htop and less.
+- **Tabs, scrollback search and selection**, including rectangular selection and the Linux primary
+  selection.
+- **Shell integration** (OSC 133) with prompt jumps and marks on output that changed since the
+  last run.
+- **Inline images** (kitty graphics protocol), desktop notifications and file drops.
 - **Color emoji and font fallback**, with JetBrains Mono bundled.
 - **Live-reloaded config** with bundled themes that can follow the OS appearance.
 
 ## Configuration
 
-Settings live in `~/.config/trident/config.toml` (or `$XDG_CONFIG_HOME/trident/config.toml`),
-and every entry is optional. See [docs/configuration.md](docs/configuration.md).
+Trident reads `~/.config/trident/config.toml` (or `$XDG_CONFIG_HOME/trident/config.toml`). Every
+entry is optional. For all settings, see [Configuration](docs/configuration.md).
 
 ## Documentation
 
 - [Usage](docs/usage.md): command line, terminfo, shortcuts, search, selection, pasting, notifications
 - [Configuration](docs/configuration.md): settings, key bindings, shell integration, themes
-- [Development](docs/development.md): crate layout, tests, latency and comparison harnesses
-- [Full feature list](docs/README.md#features)
+- [Development](docs/development.md): crate layout, tests, releases, latency and comparison harnesses
+- [Conformance](docs/conformance.md): vttest and esctest results
 
 ## License
 
