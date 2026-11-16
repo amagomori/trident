@@ -1736,11 +1736,8 @@ impl Terminal {
     }
 
     fn reset_rows(&mut self, rows: std::ops::Range<usize>) {
-        if !self.alt_active {
-            let lines = self.history + rows.start as u64..self.history + rows.end as u64;
-            self.shell
-                .input_writes
-                .retain(|(line, _)| !lines.contains(line));
+        if !self.shell.input_writes.is_empty() {
+            self.erase_input_rows(rows.clone());
         }
         let (cols, template) = (self.cols, self.cursor.template);
         let mut freed = self.recycled_memory_freed;
@@ -1757,7 +1754,6 @@ impl Terminal {
         } else if self.cursor.row < self.rows - 1 {
             self.cursor.row += 1;
         }
-        self.reset_input_cursor();
     }
 
     fn reverse_index(&mut self) {
@@ -1775,8 +1771,8 @@ impl Terminal {
         let end = self.cursor.col + usize::from(self.cursor.pending_wrap);
         let row = self.cursor.row;
         self.lines_mut()[row].touch(end);
-        if !self.alt_active
-            && let Some((line, start)) = self.shell.input_cursor
+        if let Some((line, start)) = self.shell.input_cursor
+            && !self.alt_active
         {
             let current = self.history + row as u64;
             if line == current && start < end {
@@ -1792,6 +1788,16 @@ impl Terminal {
                 self.history + self.cursor.row as u64,
                 self.cursor.col + usize::from(self.cursor.pending_wrap),
             ));
+        }
+    }
+
+    #[cold]
+    fn erase_input_rows(&mut self, rows: std::ops::Range<usize>) {
+        if !self.alt_active {
+            let lines = self.history + rows.start as u64..self.history + rows.end as u64;
+            self.shell
+                .input_writes
+                .retain(|(line, _)| !lines.contains(line));
         }
     }
 
@@ -1884,6 +1890,7 @@ impl Terminal {
             self.lines_mut()[row].set_wrapped(true);
             self.cursor.col = 0;
             self.linefeed();
+            self.reset_input_cursor();
         }
         if width == 2 && self.cursor.col == self.cols - 1 {
             if self.modes.autowrap {
@@ -1898,6 +1905,7 @@ impl Terminal {
                 line.set_wrapped(true);
                 self.cursor.col = 0;
                 self.linefeed();
+                self.reset_input_cursor();
             } else {
                 self.print_state.disarm_clear();
                 return;

@@ -37,6 +37,7 @@ impl Terminal {
                 self.lines_mut()[row].set_wrapped(true);
                 self.cursor.col = 0;
                 self.linefeed();
+                self.reset_input_cursor();
             }
             let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
             let count = bytes.len().min(cols - col);
