@@ -2988,6 +2988,8 @@ impl App {
                     .session
                     .as_ref()
                     .map(|s| window_state::format_cells((s.term.cols(), s.term.rows())));
+                #[cfg(target_os = "macos")]
+                let quit_group = close_confirm::current_quit_group();
                 if let Err(error) =
                     std::thread::Builder::new()
                         .name("new-window".into())
@@ -3008,6 +3010,10 @@ impl App {
                                 }
                                 if let Some(cells) = cells {
                                     command.env(WINDOW_CELLS, cells);
+                                }
+                                #[cfg(target_os = "macos")]
+                                if let Some(group) = quit_group {
+                                    command.env(close_confirm::QUIT_GROUP, group);
                                 }
                                 command.spawn()
                             });
@@ -3696,12 +3702,19 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     /// A macOS app quit ends the process from AppKit without returning from the event loop,
-    /// so the latency log is written here instead of when the session drops.
+    /// so the latency log is written and every tab's shell hung up on here instead of when
+    /// the session drops.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(s) = &mut self.session {
             s.latency.take();
         }
         self.save_window_state();
+        pty::hang_up_all(
+            self.session
+                .iter_mut()
+                .map(|s| &mut s.pty)
+                .chain(self.tabs.iter_mut().flatten().map(|pane| &mut pane.pty)),
+        );
     }
 
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
@@ -4188,11 +4201,17 @@ fn main() {
     unsafe { std::env::remove_var(STARTUP_STDERR) };
     let working_directory = std::env::var_os(WORKING_DIRECTORY).map(PathBuf::from);
     let window_cells = std::env::var(WINDOW_CELLS).ok();
+    #[cfg(target_os = "macos")]
+    let quit_group = std::env::var(close_confirm::QUIT_GROUP).ok();
     // SAFETY: as above.
     unsafe {
         std::env::remove_var(WORKING_DIRECTORY);
         std::env::remove_var(WINDOW_CELLS);
+        #[cfg(target_os = "macos")]
+        std::env::remove_var(close_confirm::QUIT_GROUP);
     }
+    #[cfg(target_os = "macos")]
+    close_confirm::join_quit_group(quit_group);
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
