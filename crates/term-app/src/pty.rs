@@ -909,19 +909,27 @@ impl Drop for Pty {
 /// Hangs up on the shell of every one of `ptys` at once, killing one that lingers, and waits
 /// for them: an app quit on macOS ends the process from AppKit, which never drops the PTYs.
 pub fn hang_up_all<'a>(ptys: impl IntoIterator<Item = &'a mut Pty>) {
-    let hang_ups: Vec<_> = ptys
-        .into_iter()
-        .filter_map(|pty| pty.child.take())
-        .filter_map(|mut child| {
-            std::thread::Builder::new()
-                .name("pty-hang-up".into())
-                .spawn(move || match child.kill() {
-                    Ok(()) => drop(child.wait()),
-                    Err(_) => drop(child.try_wait()),
-                })
-                .ok()
-        })
-        .collect();
+    fn hang_up(mut child: Box<dyn Child + Send + Sync>) {
+        match child.kill() {
+            Ok(()) => drop(child.wait()),
+            Err(_) => drop(child.try_wait()),
+        }
+    }
+    let mut hang_ups = Vec::new();
+    for child in ptys.into_iter().filter_map(|pty| pty.child.take()) {
+        // The child is sent only once its thread exists, so a failed spawn still hangs up.
+        let (send, receive) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("pty-hang-up".into())
+            .spawn(move || receive.recv().map(hang_up))
+        {
+            Ok(thread) => {
+                let _ = send.send(child);
+                hang_ups.push(thread);
+            }
+            Err(_) => hang_up(child),
+        }
+    }
     for hang_up in hang_ups {
         let _ = hang_up.join();
     }
