@@ -29,6 +29,8 @@ const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_LINES: usize = 14;
 const THUMBNAILER_TIMEOUT: Duration = Duration::from_secs(3);
+/// Space between a card and the row it previews, in physical pixels.
+const PLACE_GAP: f32 = 4.0;
 static NEXT_PAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A stretch of a row that may name a file: `text`, drawn in cells `start..end`.
@@ -317,15 +319,31 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
     }
 }
 
+/// Why a helper program gave no output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunError {
+    Missing,
+    TimedOut,
+    Failed,
+}
+
 /// Runs `command` and returns what it printed, if it succeeds within `timeout`.
+#[cfg(not(target_os = "linux"))]
 fn run(command: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
+    try_run(command, timeout).ok()
+}
+
+fn try_run(command: &mut Command, timeout: Duration) -> Result<Vec<u8>, RunError> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => RunError::Missing,
+            _ => RunError::Failed,
+        })?;
+    let mut stdout = child.stdout.take().ok_or(RunError::Failed)?;
     let reader = std::thread::spawn(move || {
         let mut out = Vec::new();
         let _ = stdout.read_to_end(&mut out);
@@ -334,12 +352,21 @@ fn run(command: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success().then(|| reader.join().ok()).flatten(),
+            Ok(Some(status)) => {
+                return status
+                    .success()
+                    .then(|| reader.join().ok())
+                    .flatten()
+                    .ok_or(RunError::Failed);
+            }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
+            waited => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(match waited {
+                    Ok(None) => RunError::TimedOut,
+                    _ => RunError::Failed,
+                });
             }
         }
     }
@@ -375,7 +402,37 @@ fn body_room(scale: f32) -> (u32, u32) {
     ((420.0 * scale) as u32, (260.0 * scale) as u32)
 }
 
-fn content(path: &Path, line: Option<usize>, max: (u32, u32)) -> Option<Content> {
+/// The padding and line height of a card at `scale`, in physical pixels.
+fn card_metrics(scale: f32) -> (f32, f32) {
+    let pad = (8.0 * scale).round();
+    let line_h = ((12.0 * scale).round() * 1.4).round();
+    (pad, line_h)
+}
+
+/// Room for a card's body for a word whose row spans `top..bottom` in a `window`:
+/// the whole card fits on the roomier side of the row, or failing that in the window.
+fn fit_room(scale: f32, top: f32, bottom: f32, window: (f32, f32)) -> (u32, u32) {
+    let (pad, line_h) = card_metrics(scale);
+    let frame_h = line_h + 2.0 * pad;
+    let side = (top - PLACE_GAP).max(window.1 - bottom - PLACE_GAP);
+    let height = if side - frame_h >= 4.0 * line_h {
+        side
+    } else {
+        window.1
+    };
+    let max = body_room(scale);
+    let w = (window.0 - 2.0 * pad).max(0.0) as u32;
+    let h = (height - frame_h).max(line_h) as u32;
+    (max.0.min(w), max.1.min(h))
+}
+
+/// How many text lines fit in `height` physical pixels of body, at least one.
+fn lines_in(height: u32, scale: f32) -> usize {
+    let (_, line_h) = card_metrics(scale);
+    ((height as f32 / line_h) as usize).clamp(1, MAX_LINES)
+}
+
+fn content(path: &Path, line: Option<usize>, max: (u32, u32), rows: usize) -> Option<Content> {
     let title = path
         .file_name()
         .map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy())
@@ -398,8 +455,8 @@ fn content(path: &Path, line: Option<usize>, max: (u32, u32)) -> Option<Content>
             1 => "1 item".to_string(),
             n => format!("{n} items"),
         };
-        let more = names.len().saturating_sub(MAX_LINES);
-        names.truncate(MAX_LINES);
+        let more = names.len().saturating_sub(rows);
+        names.truncate(rows);
         if more > 0 {
             names.pop();
             names.push(format!("… {} more", more + 1));
@@ -430,15 +487,8 @@ fn content(path: &Path, line: Option<usize>, max: (u32, u32)) -> Option<Content>
     let complete = bytes.len() as u64 >= meta.len();
     if bytes.starts_with(b"%PDF-") {
         let (detail, body) = match pdf_page(path, max) {
-            Some((w, h, pixels)) => (format!("PDF · {size}"), Body::Image(w, h, pixels)),
-            None => (
-                size,
-                note(if cfg!(target_os = "macos") {
-                    "PDF document"
-                } else {
-                    "PDF document (install poppler-utils for a page preview)"
-                }),
-            ),
+            Ok((w, h, pixels)) => (format!("PDF · {size}"), Body::Image(w, h, pixels)),
+            Err(why) => (size, note(pdf_note(why))),
         };
         return Some(Content {
             title,
@@ -456,7 +506,7 @@ fn content(path: &Path, line: Option<usize>, max: (u32, u32)) -> Option<Content>
         crate::show::Preview::Image(w, h, pixels, name) => {
             (format!("{name} · {size}"), Body::Image(w, h, pixels))
         }
-        crate::show::Preview::Text(text) => (size, text_lines(&text, line)),
+        crate::show::Preview::Text(text) => (size, text_lines(&text, line, rows)),
         crate::show::Preview::Binary(kind) => (size, note(&kind)),
     };
     Some(Content {
@@ -474,15 +524,18 @@ fn note(text: &str) -> Body {
     }
 }
 
-/// Up to `MAX_LINES` lines of `text`, numbered and around `line` (from 1) when given.
-fn text_lines(text: &str, line: Option<usize>) -> Body {
+/// Up to `rows` lines of `text`, numbered and centred on `line` (from 1) when given.
+fn text_lines(text: &str, line: Option<usize>, rows: usize) -> Body {
     let total = text.lines().count();
     let target = line.filter(|&l| l >= 1 && l <= total).map(|l| l - 1);
-    let start = target.map_or(0, |t| t.saturating_sub(3));
+    let start = target.map_or(0, |t| {
+        t.saturating_sub((rows - 1) / 2)
+            .min(total.saturating_sub(rows))
+    });
     let lines = text
         .lines()
         .skip(start)
-        .take(MAX_LINES)
+        .take(rows)
         .map(|l| {
             l.replace('\t', "    ")
                 .chars()
@@ -510,12 +563,23 @@ fn private_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// What a PDF card says when there is no page to show.
+fn pdf_note(why: RunError) -> &'static str {
+    match why {
+        RunError::Missing if cfg!(not(target_os = "macos")) => {
+            "PDF document (install poppler-utils for a page preview)"
+        }
+        RunError::TimedOut => "PDF document (the page preview took too long)",
+        _ => "PDF document",
+    }
+}
+
 /// The first page of the PDF at `path`, rendered by the system's tools to fit `max`.
-fn pdf_page(path: &Path, max: (u32, u32)) -> Option<(u32, u32, Vec<u8>)> {
+fn pdf_page(path: &Path, max: (u32, u32)) -> Result<(u32, u32, Vec<u8>), RunError> {
     let side = max.0.max(max.1).to_string();
     #[cfg(target_os = "macos")]
     let png = {
-        let dir = private_dir()?;
+        let dir = private_dir().ok_or(RunError::Failed)?;
         let mut command = Command::new("qlmanage");
         command
             .arg("-t")
@@ -523,18 +587,18 @@ fn pdf_page(path: &Path, max: (u32, u32)) -> Option<(u32, u32, Vec<u8>)> {
             .arg("-o")
             .arg(&dir)
             .arg(path);
-        let ran = run(&mut command, THUMBNAILER_TIMEOUT);
+        let ran = try_run(&mut command, THUMBNAILER_TIMEOUT);
         let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".png");
         let png = std::fs::read(dir.join(name)).ok();
         let _ = std::fs::remove_dir_all(&dir);
         ran?;
-        png?
+        png.ok_or(RunError::Failed)?
     };
     #[cfg(not(target_os = "macos"))]
     let png = {
         // pdftoppm 22 writes `-singlefile` output to `<root>.png` even for root `-`.
-        let dir = private_dir()?;
+        let dir = private_dir().ok_or(RunError::Failed)?;
         let root = dir.join("page");
         let mut command = Command::new("pdftoppm");
         command
@@ -551,20 +615,20 @@ fn pdf_page(path: &Path, max: (u32, u32)) -> Option<(u32, u32, Vec<u8>)> {
             .arg(path)
             .arg(&root);
         let out = root.with_extension("png");
-        let ran = run(&mut command, THUMBNAILER_TIMEOUT);
+        let ran = try_run(&mut command, THUMBNAILER_TIMEOUT);
         let png = std::fs::read(&out).ok();
         let _ = std::fs::remove_dir_all(&dir);
         ran?;
-        png?
+        png.ok_or(RunError::Failed)?
     };
-    let page = image::load_from_memory(&png).ok()?;
+    let page = image::load_from_memory(&png).map_err(|_| RunError::Failed)?;
     let page = if page.width() > max.0 || page.height() > max.1 {
         page.thumbnail(max.0, max.1)
     } else {
         page
     };
     let page = page.into_rgba8();
-    Some((page.width(), page.height(), page.into_raw()))
+    Ok((page.width(), page.height(), page.into_raw()))
 }
 
 fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
@@ -601,15 +665,13 @@ fn clip(text: &str, max: usize) -> String {
 }
 
 /// Draws the card: a header with the name and what the file is, over the body.
-fn draw(content: &Content, style: Style) -> Option<Image> {
+fn draw(content: &Content, style: Style, room: (u32, u32)) -> Option<Image> {
     use resvg::{tiny_skia, usvg};
     let s = style.scale;
-    let pad = (8.0 * s).round();
+    let (pad, line_h) = card_metrics(s);
     let font = (12.0 * s).round();
     let char_w = font * 0.6;
-    let line_h = (font * 1.4).round();
     let header = line_h + pad;
-    let room = body_room(s);
     let max_chars = ((room.0 as f32) / char_w) as usize;
     let (gutter, body_w, body_h) = match &content.body {
         Body::Image(w, h, _) => (0.0, *w as f32, *h as f32),
@@ -634,7 +696,7 @@ fn draw(content: &Content, style: Style) -> Option<Image> {
     let title_chars = max_chars.saturating_sub(detail.chars().count() + 2);
     let title = clip(&content.title, title_chars);
     let header_w = (title.chars().count() + detail.chars().count() + 2) as f32 * char_w;
-    let w = (body_w.max(header_w).max(160.0 * s) + 2.0 * pad).ceil();
+    let w = (body_w.max(header_w).max((160.0 * s).min(room.0 as f32)) + 2.0 * pad).ceil();
     let h = (header + body_h + pad).ceil();
 
     let card = mix(style.bg, style.fg, 0.07);
@@ -759,7 +821,7 @@ fn draw(content: &Content, style: Style) -> Option<Image> {
 /// Where a `size` card goes for a word whose row spans `top..bottom` starting at `x`:
 /// below the row if it fits, else above, kept inside the `window`.
 pub fn place(x: f32, top: f32, bottom: f32, size: (f32, f32), window: (f32, f32)) -> [f32; 2] {
-    let gap = 4.0;
+    let gap = PLACE_GAP;
     let below = bottom + gap;
     let above = top - gap - size.1;
     let y = if below + size.1 <= window.1 || (above < 0.0 && window.1 - bottom >= top) {
@@ -785,6 +847,8 @@ struct Job {
     /// Whose working directory relative paths start at without OSC 7.
     process: Option<u32>,
     style: Style,
+    /// Room for the card's body, in physical pixels.
+    room: (u32, u32),
 }
 
 fn build(job: &Job, latest: &AtomicU64) -> Option<(Candidate, Image)> {
@@ -800,8 +864,13 @@ fn build(job: &Job, latest: &AtomicU64) -> Option<(Candidate, Image)> {
     if latest.load(Ordering::Relaxed) != job.generation {
         return None;
     }
-    let content = content(&path, candidate.line, body_room(job.style.scale))?;
-    Some((candidate.clone(), draw(&content, job.style)?))
+    let content = content(
+        &path,
+        candidate.line,
+        job.room,
+        lines_in(job.room.1, job.style.scale),
+    )?;
+    Some((candidate.clone(), draw(&content, job.style, job.room)?))
 }
 
 /// A card the worker finished, for the UI thread.
@@ -830,6 +899,7 @@ struct Key {
     candidates: Vec<Candidate>,
     link: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    room: (u32, u32),
 }
 
 struct Shown {
@@ -913,6 +983,15 @@ impl App {
         if candidates.is_empty() {
             return None;
         }
+        let scale = s.window.scale_factor() as f32;
+        let row_top = pad + row as f32 * cell.1 + s.scroll.offset as f32;
+        let grid = s.grid_px();
+        let room = fit_room(
+            scale,
+            row_top,
+            row_top + cell.1,
+            (grid.width as f32, grid.height as f32),
+        );
         Some(Job {
             generation: 0,
             pane: s.pane,
@@ -925,15 +1004,15 @@ impl App {
             style: Style {
                 fg: s.term.palette.foreground,
                 bg: s.term.palette.background,
-                scale: s.window.scale_factor() as f32,
+                scale,
             },
+            room,
         })
     }
 
     /// Starts looking for a preview of what the pointer is over, or hides the one shown.
     pub(crate) fn refresh_hover_preview(&mut self) {
         let job = self.hover_preview_target();
-        let proxy = self.proxy.clone();
         let preview = &mut self.hover_preview;
         let key = job.as_ref().map(|job| Key {
             pane: job.pane,
@@ -941,6 +1020,7 @@ impl App {
             candidates: job.candidates.clone(),
             link: job.link.clone(),
             cwd: job.cwd.clone(),
+            room: job.room,
         });
         if preview.pending == key {
             return;
@@ -949,6 +1029,8 @@ impl App {
         preview.pending = key;
         let hid = preview.shown.take().is_some();
         if let Some(mut job) = job {
+            // Cloning the proxy wakes the event loop on macOS, so only do it for a new job.
+            let proxy = self.proxy.clone();
             job.generation = generation;
             job.process = self.session.as_ref().and_then(|s| {
                 s.pty
@@ -1280,15 +1362,94 @@ mod tests {
     }
 
     #[test]
+    fn cards_fit_small_windows() {
+        let style = Style {
+            fg: (0xc0, 0xca, 0xf5),
+            bg: (0x1a, 0x1b, 0x26),
+            scale: 1.0,
+        };
+        let text: String = (1..=40)
+            .map(|i| format!("{}\n", "x".repeat(i * 3)))
+            .collect();
+        let image = Body::Image(500, 400, vec![255; 500 * 400 * 4]);
+        for window in [
+            (440.0, 302.0),
+            (435.0, 316.0),
+            (300.0, 200.0),
+            (800.0, 600.0),
+        ] {
+            for row in [0.0, window.1 / 2.0 - 10.0, window.1 - 20.0] {
+                let room = fit_room(1.0, row, row + 20.0, window);
+                let rows = lines_in(room.1, 1.0);
+                let lines = Content {
+                    title: "main.rs".into(),
+                    detail: "1.2 KB".into(),
+                    body: text_lines(&text, Some(20), rows),
+                };
+                let (w, h) = (room.0.min(500), room.1.min(400));
+                let picture = Content {
+                    title: "big.png".into(),
+                    detail: "PNG · 1 MB".into(),
+                    body: match &image {
+                        Body::Image(..) => Body::Image(w, h, vec![255; (w * h * 4) as usize]),
+                        _ => unreachable!(),
+                    },
+                };
+                for content in [lines, picture] {
+                    let card = draw(&content, style, room).unwrap();
+                    let size = (card.width as f32, card.height as f32);
+                    assert!(
+                        size.0 <= window.0 && size.1 <= window.1,
+                        "{size:?} in {window:?}"
+                    );
+                    let [x, y] = place(10.0, row, row + 20.0, size, window);
+                    assert!(x + size.0 <= window.0 && y + size.1 <= window.1);
+                }
+            }
+        }
+        assert_eq!(
+            fit_room(1.0, 300.0, 320.0, (1600.0, 1200.0)),
+            body_room(1.0),
+            "big windows keep the full size"
+        );
+    }
+
+    #[test]
+    fn pdf_notes_name_the_problem() {
+        assert_eq!(
+            pdf_note(RunError::TimedOut),
+            "PDF document (the page preview took too long)"
+        );
+        assert_eq!(pdf_note(RunError::Failed), "PDF document");
+        assert!(
+            !pdf_note(RunError::TimedOut).contains("install"),
+            "a slow pdftoppm is installed"
+        );
+    }
+
+    #[test]
     fn text_cards_show_the_reported_line() {
         let text: String = (1..=40).map(|i| format!("line {i}\n")).collect();
-        let Body::Lines { lines, first, mark } = text_lines(&text, Some(20)) else {
+        let Body::Lines { lines, first, mark } = text_lines(&text, Some(20), MAX_LINES) else {
             panic!("lines");
         };
-        assert_eq!(first, Some(17));
+        assert_eq!((first, mark), (Some(14), Some(6)), "line 20 in the middle");
         assert_eq!(lines[mark.unwrap()], "line 20");
         assert_eq!(lines.len(), MAX_LINES);
-        let Body::Lines { lines, first, mark } = text_lines("a\tb\n", Some(99)) else {
+        let Body::Lines { first, mark, .. } = text_lines(&text, Some(2), MAX_LINES) else {
+            panic!("lines");
+        };
+        assert_eq!((first, mark), (Some(1), Some(1)), "near the top");
+        let Body::Lines { lines, first, mark } = text_lines(&text, Some(39), MAX_LINES) else {
+            panic!("lines");
+        };
+        assert_eq!((first, mark), (Some(27), Some(12)), "near the end");
+        assert_eq!(lines.len(), MAX_LINES);
+        let Body::Lines { lines, first, mark } = text_lines(&text, Some(20), 5) else {
+            panic!("lines");
+        };
+        assert_eq!((lines.len(), first, mark), (5, Some(18), Some(2)));
+        let Body::Lines { lines, first, mark } = text_lines("a\tb\n", Some(99), MAX_LINES) else {
             panic!("lines");
         };
         assert_eq!(
@@ -1305,16 +1466,16 @@ mod tests {
             bg: (0x1a, 0x1b, 0x26),
             scale: 1.0,
         };
-        let text = content(&dir.join("src/main.rs"), None, body_room(1.0)).unwrap();
+        let text = content(&dir.join("src/main.rs"), None, body_room(1.0), MAX_LINES).unwrap();
         assert_eq!(text.title, "main.rs");
-        let card = draw(&text, style).unwrap();
+        let card = draw(&text, style, body_room(1.0)).unwrap();
         assert_eq!(card.pixels.len(), (card.width * card.height * 4) as usize);
 
         let png = dir.join("dot.png");
         image::RgbaImage::from_pixel(600, 300, image::Rgba([255, 0, 0, 255]))
             .save(&png)
             .unwrap();
-        let picture = content(&png, None, body_room(1.0)).unwrap();
+        let picture = content(&png, None, body_room(1.0), MAX_LINES).unwrap();
         assert!(
             picture.detail.starts_with("PNG 600×300"),
             "{}",
@@ -1324,11 +1485,11 @@ mod tests {
             panic!("image");
         };
         assert!(w <= 420 && h <= 260 && w == 2 * h, "{w}×{h}");
-        let card = draw(&picture, style).unwrap();
+        let card = draw(&picture, style, body_room(1.0)).unwrap();
         let centre = ((card.height / 2 * card.width + card.width / 2) * 4) as usize;
         assert_eq!(&card.pixels[centre..centre + 4], &[255, 0, 0, 255]);
 
-        let listing = content(&dir, None, body_room(1.0)).unwrap();
+        let listing = content(&dir, None, body_room(1.0), MAX_LINES).unwrap();
         assert_eq!(listing.detail, "2 items");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1372,7 +1533,7 @@ mod tests {
         let dir = scratch();
         let pdf = dir.join("page.pdf");
         std::fs::write(&pdf, tiny_pdf()).unwrap();
-        let page = content(&pdf, None, body_room(1.0)).unwrap();
+        let page = content(&pdf, None, body_room(1.0), MAX_LINES).unwrap();
         assert!(page.detail.starts_with("PDF · "), "{}", page.detail);
         let Body::Image(w, h, pixels) = page.body else {
             panic!("page");
