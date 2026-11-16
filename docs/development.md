@@ -1,5 +1,8 @@
 # Development
 
+This page is for contributors: how the code is laid out, how to test and release it, and how to
+measure latency and compare Trident with other terminals.
+
 ## Layout
 
 A Cargo workspace of three crates:
@@ -10,7 +13,7 @@ A Cargo workspace of three crates:
 | `crates/term-render` | wgpu renderer (`renderer.rs`, `shader.wgsl`) that draws a frame as one instanced pass, plus glyph rasterization ([`ab_glyph`](https://crates.io/crates/ab_glyph)), system font fallback (`fallback.rs`), color glyphs (`color.rs`) and the GPU glyph atlases. Takes any window with raw window and display handles |
 | `crates/term-app` | The `trident` binary: window and event loop ([`winit`](https://crates.io/crates/winit)), the shell on a pseudo-terminal ([`portable-pty`](https://crates.io/crates/portable-pty)), key and mouse encoding, and the clipboard |
 
-## Building and testing
+## Build and test
 
 ```sh
 cargo test --workspace
@@ -18,20 +21,20 @@ cargo clippy --workspace --all-targets
 cargo fmt
 ```
 
-CI runs these on Linux and macOS for every pull request.
+CI runs the same checks on Linux and macOS for every pull request.
 
-## Releasing
+## Release
 
 Pushing a `v*` tag that matches the workspace version in `Cargo.toml` (for example `v0.1.0`, or
 `v0.1.0-rc.1` for a prerelease) runs `.github/workflows/release.yml`, the only workflow that runs
 on tags. It builds a universal macOS binary into `Trident.app` inside
 `Trident-<version>-macos-universal.dmg`, and a Linux x86_64 `Trident-<version>-linux-x86_64.tar.gz`,
 `Trident-<version>-linux-amd64.deb` and `Trident-<version>-x86_64.AppImage`, then publishes them
-with `SHA256SUMS` and release notes listing the PRs merged since the previous tag. Builds are not
-signed or notarized; the app is only ad-hoc signed so it runs on Apple silicon.
+with `SHA256SUMS` and release notes that list the PRs merged since the previous tag. Builds aren't
+signed or notarized. The app is ad-hoc signed so that it runs on Apple silicon.
 
-The packaging lives in `.github/scripts/release/release.py`, so artifacts can be built and checked
-locally before tagging:
+The packaging lives in `.github/scripts/release/release.py`, so you can build and check the
+artifacts locally before you tag:
 
 ```sh
 # Linux
@@ -55,18 +58,17 @@ python3 .github/scripts/release/release.py packages --version 0.1.0 --sums dist/
 python3 -m unittest discover -s .github/scripts/release
 ```
 
-Until the tag exists, `changelog` writes the notes for `HEAD` as if it were tagged.
-
-The .deb needs `dpkg-deb` and `tic`; the .dmg needs macOS. `packages` writes the cask when
-`SHA256SUMS` lists the .dmg and the AUR files when it lists the tarball, so a dist from either
-platform works. `release.yml` pins appimagetool and its
-runtime by SHA-256.
+- If the tag doesn't exist, `changelog` writes the notes for `HEAD` as if it were tagged.
+- The .deb needs `dpkg-deb` and `tic`. The .dmg needs macOS.
+- `packages` writes the cask when `SHA256SUMS` lists the .dmg, and the AUR files when it lists the
+  tarball, so a `dist` from either platform works.
+- `release.yml` pins appimagetool and its runtime by SHA-256.
 
 ### Homebrew and the AUR
 
-After a stable (non-prerelease) tag is published, the `packages` job writes the Homebrew cask
+When a stable (non-prerelease) tag is published, the `packages` job writes the Homebrew cask
 (`trident.rb`) and the AUR `trident-bin` `PKGBUILD` and `.SRCINFO` from the release's
-`SHA256SUMS`, uploads them as the `packages` artifact, and pushes them:
+`SHA256SUMS`. It uploads them as the `packages` artifact and pushes them:
 
 - `Casks/trident.rb` to [amagomori/homebrew-tap](https://github.com/amagomori/homebrew-tap), when
   the `HOMEBREW_TAP_TOKEN` secret holds a token that can push there
@@ -74,74 +76,52 @@ After a stable (non-prerelease) tag is published, the `packages` job writes the 
 - `PKGBUILD` and `.SRCINFO` to `ssh://aur@aur.archlinux.org/trident-bin.git`, when the
   `AUR_SSH_KEY` secret holds the private key of the AUR account that maintains `trident-bin`.
 
-Each push is skipped until its secret is set, and re-running the job for a published release
-pushes nothing new. `--base-url` points the files at local artifacts, to try them before tagging
-(`makepkg` in the `aur` directory, or `brew install --cask` from a local tap on macOS).
+Each push is skipped while its secret is unset, and re-running the job for a published release
+pushes nothing new. To try the files before you tag, point them at local artifacts with
+`--base-url`, then run `makepkg` in the `aur` directory, or on macOS `brew install --cask` from a
+local tap.
 
-The Linux `.desktop` entry is `packaging/linux/trident.desktop`; the tarball, .deb and AppImage
-install it with the `hicolor` icons `assets/generate_icons.py` writes to `assets/icons/tide-*.png`.
+### Icons and images
 
-`assets/social-preview.png` (1280x640) is the repository's social preview image. GitHub shows a
-social preview only for public repositories, so upload it under Settings > General > Social preview
-once the repository is public.
+- `assets/generate_icons.py` (needs Pillow) writes every app icon variant from the source images
+  in `assets/`: `assets/icons/<name>.icns`, the macOS menu bar images
+  (`<name>-menubar.png`, `<name>-menubar@2x.png`) and the Linux `hicolor` icons
+  (`tide-*.png`). After you edit a source image, run `python3 assets/generate_icons.py`.
+- The tarball, .deb and AppImage install the icons with the `.desktop` entry,
+  `packaging/linux/trident.desktop`.
+- `assets/social-preview.png` (1280x640) is the repository's social preview image. GitHub shows it
+  only for public repositories, so upload it under **Settings** > **General** > **Social preview**
+  when the repository is public.
 
-## Measuring latency
+## Measure latency
 
-On Wayland with presentation feedback and a known refresh period, redraws and flood
-parsing latch just before the predicted vblank, allowing for measured frame cost and
-adaptive compositor slack. Other platforms and missing feedback keep immediate redraws
-and the fixed flood timeout. Idle windows do not schedule frame timers.
+`.github/scripts/latency.py` measures input-to-present latency and throughput of a real window.
+Run it from a Linux or macOS desktop session, not Xvfb:
 
-From a Linux or macOS desktop session, run `python3 .github/scripts/latency.py
---base ../baseline --head . --runs 5`, or use
-`--app target/release/trident`. It reports per-run p50/p99/mean input-to-present
-latency and their min–max spread, plus presented/wasted/late frames and bytes/s
-under sustained output. Load mode runs without probes for `--duration` seconds
-(default 10) and reports throughput only. Late intervals exceed 1.5 refresh periods
-and require both adjacent frames to have parsed new bytes; idle gaps do not count.
-`--json results.json` saves samples; `--xvfb` is for smoke
-tests only. See the script docstring for setup and comparison controls.
-An uninstrumented baseline is skipped with a diagnostic; the head must produce
-latency data. Meaningful comparisons require instrumentation in both checkouts.
+```sh
+python3 .github/scripts/latency.py --base ../baseline --head . --runs 5
+python3 .github/scripts/latency.py --app target/release/trident --runs 5
+```
 
-Probes enter through the app's normal PTY input path. Output is matched to the
-frame carrying parsed output. On X11, Present CompleteNotify supplies the
-presentation timestamp (`x11-present`). On Wayland, `wp_presentation` feedback
-(`wayland-presentation`) is requested before
-each surface commit and converted from the compositor's advertised clock; the mode
-records vsync/hardware-clock/hardware-completion/zero-copy flags. Skipped or missing
-completions count as wasted frames.
-Present-return latency is reported separately. Each run labels its timing source;
-without feedback it explicitly reports `present-return (no feedback)` instead.
-Wayland logs also include `clock_ns` with final frame cost, latch margin and refresh
-period in nanoseconds (the comparison table's refresh comes from the monitor API).
-On macOS, Metal drawable presented handlers use `presentedTime` (`metal-presented`).
-The opt-in harness hooks the concrete command-buffer `presentDrawable:` method;
-the direct drawable `present` path used with `presentsWithTransaction` is not
-hooked. The app does not enable that setting (CAMetalLayer defaults to false).
-Only Wayland presentation timing is verified, through headless Weston protocol
-testing. Metal and X11 timing are **unverified**, and the table and JSON label
-them accordingly. QA's paravirtual Metal run returned `presentedTime == 0` for all
-681 callbacks (skipped); real-Mac timing remains unverified. X11 completion
-matching is untested because no DRI3/GPU X server was available.
-These timestamps are not an optical
-measurement of pixel scanout; compositor/display processing may add delay.
-For a Wayland smoke test, start Weston headless and run with its `WAYLAND_DISPLAY`
-and `XDG_RUNTIME_DIR`, with `DISPLAY` unset. Headless feedback validates protocol
-matching, not physical-display latency.
-Likewise, llvmpipe on an X server can produce no Present completion events even
-when the Present extension is advertised; such runs explicitly use the labeled
-present-return fallback and cannot prove real-display scheduling gains.
+It reports p50, p99 and mean latency per run with their spread, plus presented, wasted and late
+frames and bytes per second under load. Each run names its timing source. Only Wayland
+presentation feedback is verified; X11 Present, macOS Metal and present-return timings are
+labeled unverified. None of them is an optical measurement of the display. For setup, flags and
+how frames are matched, see the script's docstring.
 
-## Comparing against other terminals
+## Compare with other terminals
 
-`.github/scripts/compare/compare.py` runs the same black-box tests in `terminal`,
-Alacritty, kitty, WezTerm and Ghostty on one Linux X display: startup (shell exec,
-window mapped, first paint), keypress-to-framebuffer latency through XTest, `cat` of a
-100 MiB file, the [vtebench](https://github.com/alacritty/vtebench) suite, and RSS/PSS
-plus idle CPU before and after a 50,000-line burst. Nothing in the terminals is
-instrumented, and each one gets the matching config in `compare/cfg/` (JetBrains Mono
-14, 100x30, 10k scrollback).
+`.github/scripts/compare/compare.py` runs the same black-box tests in Trident, Alacritty, kitty,
+WezTerm and Ghostty on one Linux X display. The script calls Trident `terminal`, in `--terms`
+and `--bin`. It measures:
+
+- Startup: shell exec, window mapped and first paint.
+- Keypress-to-framebuffer latency through XTest.
+- `cat` of a 100 MiB file and the [vtebench](https://github.com/alacritty/vtebench) suite.
+- RSS, PSS and idle CPU before and after a 50,000-line burst.
+
+No terminal is instrumented. Each one gets the matching config in `compare/cfg/` (JetBrains Mono
+14, 100x30, 10,000 lines of scrollback).
 
 ```sh
 sudo apt install xvfb openbox xdotool python3-xlib fonts-jetbrains-mono
@@ -151,11 +131,11 @@ DISPLAY=:99 python3 .github/scripts/compare/compare.py --terms terminal,alacritt
 python3 .github/scripts/compare/summarize.py   # Markdown tables
 ```
 
-Other terminals are looked up on `PATH`; pass `--bin kitty=PATH` (repeatable) for
-others, such as an extracted kitty bundle or a Ghostty AppImage. vtebench needs its
-binary (`cargo install --git https://github.com/alacritty/vtebench`) and a checkout
-(`--vtebench-dir`, default `~/vtebench`). `--tests` and `--terms` pick a subset;
-results merge into `target/compare/results.json`, so runs can be split. On Xvfb with
-llvmpipe the numbers are relative comparisons on one box, not real-display latency.
-Ghostty needs a Mesa GL version override there (set by the script), then spins its
-renderer and ignores XTest keys, so only its vtebench numbers are usable.
+- Terminals are found on `PATH`. To use another binary, such as an extracted kitty bundle or a
+  Ghostty AppImage, pass `--bin kitty=PATH` (repeatable).
+- vtebench needs its binary (`cargo install --git https://github.com/alacritty/vtebench`) and a
+  checkout (`--vtebench-dir`, default `~/vtebench`).
+- `--tests` and `--terms` pick a subset. Results merge into `target/compare/results.json`, so you
+  can split runs.
+- On Xvfb with llvmpipe, the numbers compare terminals on one machine; they aren't real-display
+  latency. Ghostty ignores XTest keys there, so only its vtebench numbers are usable.
