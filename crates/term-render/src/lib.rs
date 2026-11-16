@@ -15,11 +15,13 @@ mod preedit;
 #[cfg(target_os = "linux")]
 mod present_shm;
 mod renderer;
+mod tabs;
 
 pub use font::{CellMetrics, FAMILY as BUNDLED_FONT_FAMILY, Fonts, REGULAR as BUNDLED_FONT, Style};
 pub use ledger::{LedgerBar, ledger_bar};
 pub use preedit::{Preedit, PreeditLayout};
 pub use renderer::{PADDING, Renderer};
+pub use tabs::{TabBar, TabHit, TabLayout, TabRect, fit_title, tab_bar_height, tab_layout};
 
 pub struct SearchOverlay<'a> {
     pub matches: &'a [term_core::search::Match],

@@ -45,10 +45,22 @@ fail unless the entry is installed there too; copy it with
 | Extend the current selection | Shift-click or Shift-drag | same |
 | Paste | Cmd+V | Ctrl+Shift+V, Shift+Insert, middle click |
 | New window | Cmd+N | Ctrl+Shift+N |
+| New tab / close tab | Cmd+T / Cmd+W | Ctrl+Shift+T / Ctrl+Shift+W |
+| Close window (every tab in it) | Cmd+Shift+W | — |
+| Next / previous tab | Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+PageDown / Ctrl+PageUp, Ctrl+Tab / Ctrl+Shift+Tab |
+| Go to tab 1-8 / last tab | Cmd+1..8 / Cmd+9 | Alt+1..8 / Alt+9 |
 | Scroll one line up / down | Cmd+Option+Up/Down | Ctrl+Alt+Shift+Up/Down |
 | Bigger / smaller / reset font | Cmd+= / Cmd+- / Cmd+0 | Ctrl+Shift+= / Ctrl+Shift+- / Ctrl+Shift+0 |
 | Scroll back | Shift+PageUp/PageDown, Shift+Home/End, mouse wheel | same |
 | Clear scrollback | Cmd+K | — |
+
+Each window has a tab bar above the grid. Click a tab to show it, click its × (or
+middle-click the tab) to close it, and click + to open a new one. Every tab runs its own
+shell in its own PTY; tabs in the background keep running and update their titles, and
+closing one never stops the others. A new tab starts in the active tab's directory when
+the shell reports it with OSC 7, the same way a new window does. Closing a tab that is
+running a program asks first (see `confirm_close`); closing the last tab closes the window.
+Set `tab_bar = "auto"` to show the bar only while a window has two or more tabs.
 
 Search updates as you type across scrollback and the active screen, joining soft wraps.
 It ignores case unless the query contains an uppercase character. Enter or Up moves
@@ -87,9 +99,9 @@ Closing the window at an idle shell prompt quits at once. While another program 
 Trident's foreground (vim, ssh, a build), a banner names it and asks first: Enter (or a
 second close) closes the window, Escape keeps it, and other keys are ignored while it is
 shown. A command started with `-e` (`trident -e vim`, `trident -e sh -c make`) counts as a
-running program too, unless it is a shell at its prompt. On macOS, Cmd-W and every app quit
-(Cmd-Q, the Quit menu, Dock > Quit, logging out) ask the same way. Set `confirm_close = false`
-to always close immediately.
+running program too, unless it is a shell at its prompt. On macOS, Close Window
+(Cmd-Shift-W) and every app quit (Cmd-Q, the Quit menu, Dock > Quit, logging out) ask the
+same way. Set `confirm_close = false` to always close immediately.
 
 ## Secure Keyboard Entry
 

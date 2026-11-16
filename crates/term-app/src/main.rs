@@ -141,10 +141,13 @@ impl ResizeThrottle {
 enum UserEvent {
     #[cfg(target_os = "linux")]
     Appearance(u64, Option<Theme>),
-    CommandFinished(command_notify::Finished),
+    /// A long command finished in the tab with this pane id.
+    CommandFinished(u64, command_notify::Finished),
     ConfigChanged,
-    Output,
-    Exit,
+    /// The PTY of the tab with this pane id has output.
+    Output(u64),
+    /// The PTY of the tab with this pane id exited.
+    Exit(u64),
     #[cfg(target_os = "macos")]
     Presented,
 }
@@ -308,7 +311,98 @@ struct Session {
     /// The title set by OSC 0/2, shown after any OSC 9;4 progress.
     title: String,
     progress: Option<term_core::Progress>,
+    /// Which tab's pane the terminal fields belong to.
+    pane: u64,
+    /// The tab bar's height in physical pixels, 0 while it is hidden.
+    tab_bar: u32,
 }
+
+/// A tab in the background: the per-terminal state `Session::swap_pane` trades with the
+/// active tab's.
+struct Pane {
+    id: u64,
+    composition: ime::Composition,
+    link_pressed: bool,
+    hover: Option<term_core::Link>,
+    scroll: PixelScroll,
+    pty_cell: (f32, f32),
+    term: Terminal,
+    pty: Pty,
+    since_frame: usize,
+    deferred: Option<Instant>,
+    synchronized_since: Option<Instant>,
+    output: PendingOutput,
+    title: String,
+    progress: Option<term_core::Progress>,
+}
+
+impl Pane {
+    fn new(id: u64, term: Terminal, pty: Pty, pty_cell: (f32, f32)) -> Pane {
+        Pane {
+            id,
+            composition: ime::Composition::default(),
+            link_pressed: false,
+            hover: None,
+            scroll: PixelScroll::default(),
+            pty_cell,
+            term,
+            pty,
+            since_frame: 0,
+            deferred: None,
+            synchronized_since: None,
+            output: PendingOutput::default(),
+            title: String::new(),
+            progress: None,
+        }
+    }
+}
+
+/// The title shown on a tab: the terminal's title, or a placeholder until it sets one.
+fn tab_title(title: &str) -> String {
+    if title.trim().is_empty() {
+        "Terminal".into()
+    } else {
+        title.into()
+    }
+}
+
+/// The tab to show after closing tab `index` of `count`: the one to its right, else
+/// the one to its left.
+fn neighbor_tab(index: usize, count: usize) -> usize {
+    if index + 1 < count {
+        index + 1
+    } else {
+        index.saturating_sub(1)
+    }
+}
+
+/// The tab index a select-tab shortcut picks: the ninth always selects the last tab.
+fn shortcut_tab(index: usize, count: usize) -> usize {
+    if index == 8 {
+        count.saturating_sub(1)
+    } else {
+        index
+    }
+}
+
+/// Runs every byte of `batch` through `term`, applying shell-return resets; the bytes
+/// processed.
+fn advance_all(term: &mut Terminal, batch: pty::Output) -> usize {
+    let mut start = 0;
+    for offset in batch.shell_returns {
+        while start < offset {
+            start += term.advance_until_sync_end(&batch.bytes[start..offset]);
+        }
+        term.reset_input_modes();
+    }
+    while start < batch.bytes.len() {
+        start += term.advance_until_sync_end(&batch.bytes[start..]);
+    }
+    start
+}
+
+#[cfg(target_os = "macos")]
+type QuitChecks = std::rc::Rc<std::cell::RefCell<Vec<(u64, Box<dyn Fn() -> bool>)>>>;
 
 #[derive(Default)]
 struct PendingOutput {
@@ -325,17 +419,7 @@ impl PendingOutput {
         };
         let mut processed = 0;
         for batch in [leftover, queued] {
-            let mut start = 0;
-            for offset in batch.shell_returns {
-                while start < offset {
-                    start += term.advance_until_sync_end(&batch.bytes[start..offset]);
-                }
-                term.reset_input_modes();
-            }
-            while start < batch.bytes.len() {
-                start += term.advance_until_sync_end(&batch.bytes[start..]);
-            }
-            processed += start;
+            processed += advance_all(term, batch);
         }
         term.modes.synchronized_output = false;
         self.waiting_since = Some(Instant::now());
@@ -526,6 +610,30 @@ fn update_terminal(
 }
 
 impl Session {
+    /// Makes `pane` the active tab, leaving the previous active tab's state in `pane`.
+    fn swap_pane(&mut self, pane: &mut Pane) {
+        use std::mem::swap;
+        swap(&mut self.pane, &mut pane.id);
+        swap(&mut self.composition, &mut pane.composition);
+        swap(&mut self.link_pressed, &mut pane.link_pressed);
+        swap(&mut self.hover, &mut pane.hover);
+        swap(&mut self.scroll, &mut pane.scroll);
+        swap(&mut self.pty_cell, &mut pane.pty_cell);
+        swap(&mut self.term, &mut pane.term);
+        swap(&mut self.pty, &mut pane.pty);
+        swap(&mut self.since_frame, &mut pane.since_frame);
+        swap(&mut self.deferred, &mut pane.deferred);
+        swap(&mut self.synchronized_since, &mut pane.synchronized_since);
+        swap(&mut self.output, &mut pane.output);
+        swap(&mut self.title, &mut pane.title);
+        swap(&mut self.progress, &mut pane.progress);
+    }
+
+    /// The part of the window below the tab bar, where the grid goes.
+    fn grid_px(&self) -> PhysicalSize<u32> {
+        below_tab_bar(self.size, self.tab_bar)
+    }
+
     fn frame_deadline(&mut self) -> Option<(Instant, Instant)> {
         #[cfg(target_os = "linux")]
         if let Some(feedback) = &mut self.presentation {
@@ -616,7 +724,11 @@ impl HeldAtFocus {
 }
 
 fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) -> bool {
-    (repeat || held_at_focus) && matches!(action, Action::NewWindow)
+    (repeat || held_at_focus)
+        && matches!(
+            action,
+            Action::NewWindow | Action::NewTab | Action::CloseTab
+        )
 }
 
 /// The directory a new window should start in: the shell's OSC 7 directory when it is
@@ -907,6 +1019,22 @@ struct App {
     options: Options,
     proxy: EventLoopProxy<UserEvent>,
     session: Option<Session>,
+    /// One slot per tab, in tab bar order; the active tab's slot is empty because its
+    /// state lives in `session`.
+    tabs: Vec<Option<Pane>>,
+    active_tab: usize,
+    next_pane: u64,
+    tab_hover: Option<term_render::TabHit>,
+    /// The pointer in window coordinates; `mouse_pos` is relative to the grid area.
+    tab_pointer: PhysicalPosition<f64>,
+    /// A press landed on the tab bar, so its release is not the terminal's.
+    tab_click: bool,
+    /// The tab a close confirmation is for; none when it is for the window.
+    pending_close_tab: Option<u64>,
+    /// Per tab pane id, whether a program other than the shell runs there; asked before
+    /// the app quits.
+    #[cfg(target_os = "macos")]
+    quit_checks: QuitChecks,
     font_size: f32,
     modifiers: ModifiersState,
     held_at_focus: HeldAtFocus,
@@ -993,6 +1121,15 @@ impl App {
             options,
             proxy,
             session: None,
+            tabs: Vec::new(),
+            active_tab: 0,
+            next_pane: 0,
+            tab_hover: None,
+            tab_pointer: PhysicalPosition::default(),
+            tab_click: false,
+            pending_close_tab: None,
+            #[cfg(target_os = "macos")]
+            quit_checks: QuitChecks::default(),
             modifiers: ModifiersState::empty(),
             held_at_focus: HeldAtFocus::default(),
             focused: true,
@@ -1037,7 +1174,7 @@ impl App {
         let m = probe.metrics;
         let logical_size = LogicalSize::new(
             100.0 * m.width + 2.0 * self.config.padding,
-            30.0 * m.height + 2.0 * self.config.padding,
+            30.0 * m.height + 2.0 * self.config.padding + self.tab_bar_height(1, &probe) as f32,
         );
         let guess = event_loop
             .primary_monitor()
@@ -1048,38 +1185,22 @@ impl App {
             Fonts::new(font, self.font_size * guess as f32)?
         };
         let (spawn_cols, spawn_rows) = grid_size_for(
-            logical_size.to_physical(guess),
+            below_tab_bar(
+                logical_size.to_physical(guess),
+                self.tab_bar_height(1, &guessed_fonts),
+            ),
             guess,
             &guessed_fonts,
             self.config.padding,
         );
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
-        let proxy = self.proxy.clone();
-        let command_proxy = self.proxy.clone();
-        let mut env = self.config.env.clone();
-        if !env.contains_key("TERM") {
-            let term = terminfo::term(&self.config.term, &self.config.env);
-            env.insert("TERM".into(), term.into());
-        }
-        let mut pty = Pty::spawn(
-            self.options.command(&self.config),
-            &env,
+        let pty = self.spawn_pty(
+            0,
             self.options.working_directory.as_deref(),
             spawn_cols,
             spawn_rows,
             spawn_cell,
-            move |exited| {
-                let _ = proxy.send_event(if exited {
-                    UserEvent::Exit
-                } else {
-                    UserEvent::Output
-                });
-            },
-            move |finished| {
-                let _ = command_proxy.send_event(UserEvent::CommandFinished(finished));
-            },
         )?;
-        pty.set_command_notifications(self.config.notify_long_commands_after != 0)?;
         let attrs = Window::default_attributes()
             .with_title("Trident")
             .with_inner_size(logical_size);
@@ -1104,7 +1225,8 @@ impl App {
         diag!("trident: rendering with {}", renderer.adapter_info);
         warn_vsync_unsupported(&self.config, &renderer);
 
-        let (cols, rows) = grid_size(&window, &fonts, self.config.padding);
+        let tab_bar = self.tab_bar_height(1, &fonts);
+        let (cols, rows) = grid_size(&window, &fonts, self.config.padding, tab_bar);
         let mut term = Terminal::new(cols, rows);
         self.appearance = window.theme().or(self.appearance);
         #[cfg(target_os = "linux")]
@@ -1116,10 +1238,11 @@ impl App {
             self.appearance = theme;
         }
         term.set_palette(self.config.themes.palette(self.appearance).clone());
-        term.set_scrollback_limit(self.options.scrollback(&self.config));
-        term.set_command_budget(self.config.command_budget, self.config.command_share);
-        term.set_compare_runs(self.config.compare_runs);
-        term.set_compare_ignore(&self.config.compare_ignore);
+        configure_term(
+            &mut term,
+            &self.config,
+            self.options.scrollback(&self.config),
+        );
         term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
         let cell = (fonts.metrics.width, fonts.metrics.height);
         if (cols, rows, cell) != (spawn_cols, spawn_rows, spawn_cell) {
@@ -1208,20 +1331,362 @@ impl App {
             blink_at: None,
             title: String::new(),
             progress: None,
+            pane: 0,
+            tab_bar,
         })
     }
 
+    /// Starts the shell for the tab with pane id `id`, its events tagged with that id.
+    fn spawn_pty(
+        &self,
+        id: u64,
+        cwd: Option<&std::path::Path>,
+        cols: usize,
+        rows: usize,
+        cell: (f32, f32),
+    ) -> Result<Pty, String> {
+        let proxy = self.proxy.clone();
+        let command_proxy = self.proxy.clone();
+        let mut env = self.config.env.clone();
+        if !env.contains_key("TERM") {
+            let term = terminfo::term(&self.config.term, &self.config.env);
+            env.insert("TERM".into(), term.into());
+        }
+        let mut pty = Pty::spawn(
+            self.options.command(&self.config),
+            &env,
+            cwd,
+            cols,
+            rows,
+            cell,
+            move |exited| {
+                let _ = proxy.send_event(if exited {
+                    UserEvent::Exit(id)
+                } else {
+                    UserEvent::Output(id)
+                });
+            },
+            move |finished| {
+                let _ = command_proxy.send_event(UserEvent::CommandFinished(id, finished));
+            },
+        )?;
+        pty.set_command_notifications(self.config.notify_long_commands_after != 0)?;
+        Ok(pty)
+    }
+
+    /// The tab bar's height with `tabs` tabs open, 0 when it is hidden.
+    fn tab_bar_height(&self, tabs: usize, fonts: &Fonts) -> u32 {
+        if self.config.tab_bar.shown(tabs) {
+            term_render::tab_bar_height(fonts.metrics.height)
+        } else {
+            0
+        }
+    }
+
+    /// Where tab `index`'s PTY is, whether it is the active tab or in the background.
+    fn tab_pty(&self, index: usize) -> Option<&Pty> {
+        if index == self.active_tab {
+            self.session.as_ref().map(|s| &s.pty)
+        } else {
+            self.tabs.get(index)?.as_ref().map(|pane| &pane.pty)
+        }
+    }
+
+    fn tab_index(&self, id: u64) -> Option<usize> {
+        if self.session.as_ref().is_some_and(|s| s.pane == id) {
+            return Some(self.active_tab);
+        }
+        self.tabs
+            .iter()
+            .position(|pane| pane.as_ref().is_some_and(|pane| pane.id == id))
+    }
+
+    /// Opens a tab after the active one, in the active tab's OSC 7 directory, and shows it.
+    fn new_tab(&mut self) {
+        let Some(s) = &self.session else { return };
+        let cwd = local_working_directory(s.term.working_directory())
+            .or_else(|| self.options.working_directory.clone());
+        let (cols, rows) = (s.term.cols(), s.term.rows());
+        let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
+        self.next_pane += 1;
+        let id = self.next_pane;
+        let pty = match self.spawn_pty(id, cwd.as_deref(), cols, rows, cell) {
+            Ok(pty) => pty,
+            Err(error) => {
+                diag!("trident: new tab: {error}");
+                return;
+            }
+        };
+        let mut term = Terminal::new(cols, rows);
+        term.set_palette(self.config.themes.palette(self.appearance).clone());
+        configure_term(
+            &mut term,
+            &self.config,
+            self.options.scrollback(&self.config),
+        );
+        term.set_cell_pixel_size(cell.0, cell.1);
+        #[cfg(target_os = "macos")]
+        self.quit_checks
+            .borrow_mut()
+            .push((id, Box::new(pty.running_program_check())));
+        let index = (self.active_tab + 1).min(self.tabs.len());
+        self.tabs
+            .insert(index, Some(Pane::new(id, term, pty, cell)));
+        if index <= self.active_tab {
+            self.active_tab += 1;
+        }
+        self.select_tab(index);
+    }
+
+    /// Shows tab `index`; the tab it replaces keeps running in the background.
+    fn select_tab(&mut self, index: usize) {
+        if index == self.active_tab || index >= self.tabs.len() {
+            return;
+        }
+        let Some(s) = &mut self.session else { return };
+        let Some(mut pane) = self.tabs[index].take() else {
+            return;
+        };
+        if self.focused && s.term.modes.focus_events {
+            s.pty.write(b"\x1b[O");
+        }
+        s.swap_pane(&mut pane);
+        s.renderer.forget_frame();
+        self.tabs[self.active_tab] = Some(pane);
+        self.active_tab = index;
+        if self.focused && s.term.modes.focus_events {
+            s.pty.write(b"\x1b[I");
+        }
+        self.search = None;
+        self.left_down = false;
+        self.ledger_click = false;
+        self.last_click = None;
+        self.reported_button = None;
+        s.ime_cursor_area = None;
+        s.window
+            .set_title(&progress::window_title(&s.title, s.progress));
+        s.request_frame();
+        s.window.request_redraw();
+        self.resize_grid();
+        self.refresh_link();
+        self.process_output();
+    }
+
+    /// Closes tab `index`, asking first while a program other than the shell runs in it.
+    /// Closing the last tab closes the window.
+    fn close_tab(&mut self, index: usize, event_loop: &ActiveEventLoop) {
+        if self.tabs.len() <= 1 {
+            self.close_requested(event_loop);
+            return;
+        }
+        let running = self
+            .tab_pty(index)
+            .filter(|_| self.config.confirm_close && self.pending_close.is_none())
+            .and_then(Pty::running_program);
+        if let Some(pid) = running {
+            self.select_tab(index);
+            self.pending_close = Some(close_confirm::process_name(pid));
+            self.pending_close_tab = self.session.as_ref().map(|s| s.pane);
+            if let Some(s) = &self.session {
+                s.window.request_redraw();
+            }
+            return;
+        }
+        self.remove_tab(index);
+    }
+
+    /// Drops tab `index` and its PTY; the others keep running.
+    fn remove_tab(&mut self, index: usize) {
+        if self.tabs.len() <= 1 || index >= self.tabs.len() {
+            return;
+        }
+        if index == self.active_tab {
+            self.select_tab(neighbor_tab(index, self.tabs.len()));
+        }
+        let removed = self.tabs.remove(index);
+        if index < self.active_tab {
+            self.active_tab -= 1;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(pane) = &removed {
+            self.quit_checks
+                .borrow_mut()
+                .retain(|(id, _)| *id != pane.id);
+        }
+        drop(removed);
+        self.tab_hover = None;
+        self.resize_grid();
+    }
+
+    /// Tab output while the tab is in the background: parsed right away so its program
+    /// never blocks on a full PTY, and drawn once the tab is shown.
+    fn background_output(&mut self, id: u64) {
+        let Some(pane) = self.tabs.iter_mut().flatten().find(|pane| pane.id == id) else {
+            return;
+        };
+        pane.pty.refresh_flow();
+        if pane.pty.flow.paused {
+            return;
+        }
+        pane.pty.wake_pending.store(false, Ordering::Release);
+        // Bytes the tab had queued when it was switched away from come first.
+        let queued = pty::Output {
+            bytes: std::mem::take(&mut pane.output.bytes),
+            shell_returns: std::mem::take(&mut pane.output.shell_returns),
+        };
+        pane.output.waiting_since = None;
+        let batch = pane.pty.take_output();
+        update_terminal(&mut pane.term, &mut pane.scroll, |term| {
+            advance_all(term, queued);
+            advance_all(term, batch);
+        });
+        if pane.term.take_synchronized_output_started() {
+            pane.synchronized_since = Some(Instant::now());
+        }
+        if !pane.term.modes.synchronized_output {
+            pane.synchronized_since = None;
+        }
+        let responses = pane.term.take_responses();
+        pane.pty.write(&responses);
+        for request in pane.term.take_clipboard_requests() {
+            match request {
+                ClipboardRequest::Store { primary, text } => self.clipboard.set(text, primary),
+                ClipboardRequest::Load { primary, .. } if self.config.clipboard_read => {
+                    let text = self.clipboard.get(primary).unwrap_or_default();
+                    if let Some(reply) = request.reply(&text) {
+                        pane.pty.write(&reply);
+                    }
+                }
+                ClipboardRequest::Load { .. } => {}
+            }
+        }
+        let mut changed = false;
+        if let Some(title) = pane.term.take_title() {
+            changed |= pane.title != title;
+            pane.title = title;
+        }
+        if let Some(progress) = pane.term.take_progress() {
+            pane.progress = progress;
+        }
+        let bell = std::mem::take(&mut pane.term.bell);
+        for notification in pane.term.take_notifications() {
+            if self.config.desktop_notifications
+                && osc_notify::wanted(notification.occasion, self.focused, || Some(false))
+                && self.notification_throttle.allow(Instant::now())
+            {
+                osc_notify::show(notification);
+            }
+        }
+        let Some(s) = &self.session else { return };
+        if bell && !self.focused {
+            s.window
+                .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        }
+        if changed && s.tab_bar > 0 {
+            s.window.request_redraw();
+        }
+    }
+
+    /// Handles a click on the tab bar; false when the click is the terminal's.
+    fn tab_mouse_input(
+        &mut self,
+        state: ElementState,
+        button: MouseButton,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        use term_render::TabHit;
+        if state == ElementState::Released {
+            return std::mem::take(&mut self.tab_click);
+        }
+        let Some(s) = &self.session else { return false };
+        if self.left_down || self.tab_pointer.y >= s.tab_bar as f64 {
+            return false;
+        }
+        self.tab_click = true;
+        if self.pending_close.is_some() || self.pending_paste.is_some() {
+            return true;
+        }
+        let layout = term_render::tab_layout(
+            self.tabs.len(),
+            s.size.width as f32,
+            s.fonts.metrics.width,
+            s.fonts.metrics.height,
+        );
+        let hit = layout.hit(self.tab_pointer.x as f32, self.tab_pointer.y as f32);
+        match (button, hit) {
+            (MouseButton::Left, Some(TabHit::Tab(i))) => self.select_tab(i),
+            (MouseButton::Left, Some(TabHit::Close(i)))
+            | (MouseButton::Middle, Some(TabHit::Tab(i) | TabHit::Close(i))) => {
+                self.close_tab(i, event_loop)
+            }
+            (MouseButton::Left | MouseButton::Middle, Some(TabHit::New)) => self.new_tab(),
+            _ => {}
+        }
+        true
+    }
+
+    /// Tracks the pointer over the tab bar, and passes it on to the grid in grid
+    /// coordinates.
+    fn pointer_moved(&mut self, pos: PhysicalPosition<f64>) {
+        self.tab_pointer = pos;
+        let Some(s) = &self.session else { return };
+        let tab_bar = s.tab_bar as f64;
+        let over_bar = pos.y < tab_bar;
+        let hover = over_bar
+            .then(|| {
+                term_render::tab_layout(
+                    self.tabs.len(),
+                    s.size.width as f32,
+                    s.fonts.metrics.width,
+                    s.fonts.metrics.height,
+                )
+                .hit(pos.x as f32, pos.y as f32)
+            })
+            .flatten();
+        if hover != self.tab_hover {
+            self.tab_hover = hover;
+            s.window.request_redraw();
+        }
+        let grid_pos = PhysicalPosition::new(pos.x, pos.y - tab_bar);
+        if over_bar && !self.left_down {
+            self.mouse_pos = grid_pos;
+            self.refresh_link();
+        } else {
+            self.cursor_moved(grid_pos);
+        }
+    }
+
     fn resize_grid(&mut self) {
+        let tab_bar_shown = self.config.tab_bar.shown(self.tabs.len());
         let Some(s) = &mut self.session else { return };
         s.scroll.reset();
         s.resize.applied(Instant::now());
-        let (cols, rows) = grid_size(&s.window, &s.fonts, self.config.padding);
+        s.tab_bar = if tab_bar_shown {
+            term_render::tab_bar_height(s.fonts.metrics.height)
+        } else {
+            0
+        };
+        let (cols, rows) = grid_size(&s.window, &s.fonts, self.config.padding, s.tab_bar);
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
+        for pane in self.tabs.iter_mut().flatten() {
+            pane.term.set_cell_pixel_size(cell.0, cell.1);
+            if (cols, rows) != (pane.term.cols(), pane.term.rows()) {
+                let editing = pane.pty.line_editing();
+                search::Search::resize(None, &mut pane.term, cols, rows, editing);
+                release_freed_memory(&mut pane.term);
+                pane.scroll.reset();
+                pane.pty.resize(cols, rows, cell);
+                pane.pty_cell = cell;
+            } else if pty_resize_needed(false, pane.pty_cell, cell) {
+                pane.pty.resize(cols, rows, cell);
+                pane.pty_cell = cell;
+            }
+        }
         let grid_changed = (cols, rows) != (s.term.cols(), s.term.rows());
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         let covered = find_bar_rows(
-            s.window.inner_size().height as f32,
+            s.window.inner_size().height.saturating_sub(s.tab_bar) as f32,
             self.config.padding * s.window.scale_factor() as f32,
             s.fonts.metrics.height,
             rows,
@@ -1509,7 +1974,11 @@ impl App {
             None => banner,
         };
         let banner = match &self.pending_close {
-            Some(program) => Some(close_confirm::banner(program.as_deref(), banner)),
+            Some(program) => Some(close_confirm::banner(
+                program.as_deref(),
+                self.pending_close_tab.is_some(),
+                banner,
+            )),
             None => banner,
         };
         let started = Instant::now();
@@ -1543,6 +2012,16 @@ impl App {
             cursor_blink(blinking, s.blink_since, Instant::now());
         s.renderer.cursor_visible = cursor_visible;
         s.cursor_blink_at = cursor_blink_at;
+        let tab_bar = (s.tab_bar > 0).then(|| term_render::TabBar {
+            titles: self
+                .tabs
+                .iter()
+                .map(|pane| tab_title(pane.as_ref().map_or(&s.title, |pane| &pane.title)))
+                .collect(),
+            active: self.active_tab,
+            hover: self.tab_hover,
+        });
+        s.renderer.set_tab_bar(tab_bar, s.tab_bar);
         let rendered = s.renderer.render(
             &s.term,
             &mut s.fonts,
@@ -1653,10 +2132,22 @@ impl App {
         let running = self
             .session
             .as_ref()
-            .filter(|_| self.config.confirm_close && self.pending_close.is_none())
-            .and_then(|s| s.pty.running_program());
+            .filter(|_| {
+                self.config.confirm_close
+                    && (self.pending_close.is_none() || self.pending_close_tab.is_some())
+            })
+            .and_then(|s| {
+                s.pty.running_program().or_else(|| {
+                    self.tabs
+                        .iter()
+                        .flatten()
+                        .find_map(|pane| pane.pty.running_program())
+                })
+            });
         match (running, &self.session) {
             (Some(pid), Some(s)) => {
+                // A window close while a tab close is being asked about asks about the window.
+                self.pending_close_tab = None;
                 self.pending_close = Some(close_confirm::process_name(pid));
                 if s.window.is_minimized() == Some(true) {
                     s.window.set_minimized(false);
@@ -1677,13 +2168,23 @@ impl App {
         use winit::keyboard::NamedKey;
         match event.logical_key {
             Key::Named(NamedKey::Enter) => {
-                if !close_confirm::answer_quit(true) {
+                if let Some(id) = self.pending_close_tab.take() {
+                    self.pending_close = None;
+                    if let Some(index) = self.tab_index(id) {
+                        self.remove_tab(index);
+                    }
+                    if let Some(s) = &self.session {
+                        s.window.request_redraw();
+                    }
+                } else if !close_confirm::answer_quit(true) {
                     event_loop.exit();
                 }
             }
             Key::Named(NamedKey::Escape) => {
                 self.pending_close = None;
-                close_confirm::answer_quit(false);
+                if self.pending_close_tab.take().is_none() {
+                    close_confirm::answer_quit(false);
+                }
                 if let Some(s) = &self.session {
                     s.window.request_redraw();
                 }
@@ -1757,6 +2258,12 @@ impl App {
             let responses = s.term.take_responses();
             s.pty.write(&responses);
             s.window.request_redraw();
+            for pane in self.tabs.iter_mut().flatten() {
+                pane.term
+                    .set_palette(self.config.themes.palette(appearance).clone());
+                let responses = pane.term.take_responses();
+                pane.pty.write(&responses);
+            }
         }
     }
 
@@ -1812,16 +2319,22 @@ impl App {
                     .set_palette(self.config.themes.palette(self.appearance).clone());
                 let responses = s.term.take_responses();
                 s.pty.write(&responses);
-                s.term
-                    .set_scrollback_limit(self.options.scrollback(&self.config));
-                s.term
-                    .set_command_budget(self.config.command_budget, self.config.command_share);
-                s.term.set_compare_runs(self.config.compare_runs);
-                s.term.set_compare_ignore(&self.config.compare_ignore);
+                let scrollback = self.options.scrollback(&self.config);
+                configure_term(&mut s.term, &self.config, scrollback);
                 if let Some(search) = &mut self.search {
                     search.dirty = true;
                 }
                 release_freed_memory(&mut s.term);
+                for pane in self.tabs.iter_mut().flatten() {
+                    pane.pty
+                        .set_command_notifications(self.config.notify_long_commands_after != 0)?;
+                    pane.term
+                        .set_palette(self.config.themes.palette(self.appearance).clone());
+                    let responses = pane.term.take_responses();
+                    pane.pty.write(&responses);
+                    configure_term(&mut pane.term, &self.config, scrollback);
+                    release_freed_memory(&mut pane.term);
+                }
                 if next_vsync_off {
                     warn_vsync_unsupported(&self.config, &s.renderer);
                 }
@@ -1847,7 +2360,12 @@ impl App {
     }
 
     /// Handles terminal shortcuts; true if the key was consumed.
-    fn shortcut(&mut self, event: &KeyEvent, held_at_focus: bool) -> bool {
+    fn shortcut(
+        &mut self,
+        event: &KeyEvent,
+        held_at_focus: bool,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
         let mods = self.modifiers;
         let Some(chord) = shortcut_chord(event.key_without_modifiers(), mods) else {
             return false;
@@ -1863,7 +2381,7 @@ impl App {
                 let search = self.search.get_or_insert_with(search::Search::default);
                 if let Some(s) = &self.session {
                     search.covered_rows = find_bar_rows(
-                        s.window.inner_size().height as f32,
+                        s.window.inner_size().height.saturating_sub(s.tab_bar) as f32,
                         self.config.padding * s.window.scale_factor() as f32,
                         s.fonts.metrics.height,
                         s.term.rows(),
@@ -1880,6 +2398,13 @@ impl App {
                     s.window.request_redraw();
                 }
             }
+            Action::NewTab => self.new_tab(),
+            Action::CloseTab => self.close_tab(self.active_tab, event_loop),
+            Action::NextTab => self.select_tab((self.active_tab + 1) % self.tabs.len().max(1)),
+            Action::PreviousTab => self.select_tab(
+                (self.active_tab + self.tabs.len().max(1) - 1) % self.tabs.len().max(1),
+            ),
+            Action::SelectTab(index) => self.select_tab(shortcut_tab(index, self.tabs.len())),
             Action::NewWindow => {
                 let working_directory = self
                     .session
@@ -2067,8 +2592,8 @@ impl App {
     fn update_ime_cursor_area(&mut self) {
         let Some(s) = &mut self.session else { return };
         let m = s.fonts.metrics;
-        let size = s.size;
-        let area = if let Some(search) = &self.search {
+        let size = s.grid_px();
+        let mut area = if let Some(search) = &self.search {
             term_render::search_layout(
                 search.cursor_column(),
                 search.preedit_columns(),
@@ -2097,6 +2622,7 @@ impl App {
                 (m.width, m.height),
             )
         };
+        area[1] += s.tab_bar as f32;
         if s.ime_cursor_area == Some(area) {
             return;
         }
@@ -2136,7 +2662,7 @@ impl App {
         if pointer_in_search_bar(
             self.search.is_some(),
             self.mouse_pos,
-            s.size,
+            s.grid_px(),
             (s.fonts.metrics.width, s.fonts.metrics.height),
         ) {
             return None;
@@ -2392,6 +2918,14 @@ impl App {
 
 /// Hand memory from dropped rows or recycled buffers back to the OS: glibc keeps
 /// freed heap pages otherwise.
+/// Applies the config settings every tab's terminal shares, at startup, in new tabs and on reload.
+fn configure_term(term: &mut Terminal, config: &config::Config, scrollback: usize) {
+    term.set_scrollback_limit(scrollback);
+    term.set_command_budget(config.command_budget, config.command_share);
+    term.set_compare_runs(config.compare_runs);
+    term.set_compare_ignore(&config.compare_ignore);
+}
+
 fn release_freed_memory(term: &mut Terminal) -> bool {
     let shrunk = term.take_shrunk();
     let recycled = term.take_recycled_memory_freed();
@@ -2484,8 +3018,17 @@ fn cursor_area(
     ]
 }
 
-fn grid_size(window: &Window, fonts: &Fonts, padding: f32) -> (usize, usize) {
-    grid_size_for(window.inner_size(), window.scale_factor(), fonts, padding)
+fn below_tab_bar(size: PhysicalSize<u32>, tab_bar: u32) -> PhysicalSize<u32> {
+    PhysicalSize::new(size.width, size.height.saturating_sub(tab_bar))
+}
+
+fn grid_size(window: &Window, fonts: &Fonts, padding: f32, tab_bar: u32) -> (usize, usize) {
+    grid_size_for(
+        below_tab_bar(window.inner_size(), tab_bar),
+        window.scale_factor(),
+        fonts,
+        padding,
+    )
 }
 
 fn grid_size_for(
@@ -2515,16 +3058,22 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(target_os = "macos")]
                 close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
                 #[cfg(target_os = "macos")]
-                close_confirm::route_app_quit_through_close(
-                    &session.window,
-                    session.pty.running_program_check(),
-                );
+                close_confirm::route_app_quit_through_close(&session.window, {
+                    let checks = self.quit_checks.clone();
+                    move || checks.borrow().iter().any(|(_, running)| running())
+                });
+                #[cfg(target_os = "macos")]
+                self.quit_checks
+                    .borrow_mut()
+                    .push((session.pane, Box::new(session.pty.running_program_check())));
                 #[cfg(target_os = "macos")]
                 ime::set_command_chords(&self.config.bindings);
                 #[cfg(target_os = "macos")]
                 ime::forward_command_chords(&session.window);
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
+                self.tabs = vec![None];
+                self.active_tab = 0;
                 self.process_output();
             }
             Err(e) => {
@@ -2550,9 +3099,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.set_appearance(theme);
                 }
             }
-            UserEvent::CommandFinished(finished) => {
+            UserEvent::CommandFinished(id, finished) => {
+                let watched = self.session.as_ref().is_some_and(|s| s.pane == id);
                 if command_notify::should_notify(
-                    self.focused,
+                    self.focused && watched,
                     finished.duration,
                     self.config.notify_long_commands_after,
                 ) {
@@ -2560,7 +3110,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ConfigChanged => self.reload_config(),
-            UserEvent::Output => self.output_ready(),
+            UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
+                self.output_ready()
+            }
+            UserEvent::Output(id) => self.background_output(id),
             #[cfg(target_os = "macos")]
             UserEvent::Presented => {
                 if self.exit_deadline.is_none()
@@ -2569,7 +3122,17 @@ impl ApplicationHandler<UserEvent> for App {
                     s.window.request_redraw();
                 }
             }
-            UserEvent::Exit => {
+            UserEvent::Exit(id) if self.tabs.len() > 1 => {
+                if let Some(index) = self.tab_index(id) {
+                    if self.pending_close_tab == Some(id) {
+                        self.pending_close_tab = None;
+                        self.pending_close = None;
+                    }
+                    self.remove_tab(index);
+                }
+            }
+            UserEvent::Exit(id) if self.session.as_ref().is_some_and(|s| s.pane != id) => {}
+            UserEvent::Exit(_) => {
                 self.exit_deadline
                     .get_or_insert_with(|| Instant::now() + EXIT_TIMEOUT);
                 if let Some(s) = &mut self.session {
@@ -2874,7 +3437,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.confirm_paste_key(&event);
                     return;
                 }
-                if self.shortcut(&event, held_at_focus) {
+                if self.shortcut(&event, held_at_focus, event_loop) {
                     return;
                 }
                 let find_preedit = self.search.as_ref().map(|f| f.preedit.as_str());
@@ -2949,8 +3512,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.refresh_link();
                 self.update_ime_cursor_area();
             }
-            WindowEvent::MouseInput { state, button, .. } => self.mouse_input(state, button),
-            WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position),
+            WindowEvent::MouseInput { state, button, .. } => {
+                if !self.tab_mouse_input(state, button, event_loop) {
+                    self.mouse_input(state, button);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => self.pointer_moved(position),
+            WindowEvent::CursorLeft { .. } => {
+                if self.tab_hover.take().is_some()
+                    && let Some(s) = &self.session
+                {
+                    s.window.request_redraw();
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
                 self.present_frame();
@@ -3275,9 +3849,35 @@ mod tests {
     }
 
     #[test]
+    fn tab_helpers() {
+        assert_eq!(neighbor_tab(0, 3), 1);
+        assert_eq!(neighbor_tab(1, 3), 2);
+        assert_eq!(neighbor_tab(2, 3), 1);
+        assert_eq!(neighbor_tab(0, 1), 0);
+        assert_eq!(shortcut_tab(2, 5), 2);
+        assert_eq!(shortcut_tab(8, 5), 4);
+        assert_eq!(shortcut_tab(8, 12), 11);
+        assert_eq!(tab_title(""), "Terminal");
+        assert_eq!(tab_title("  "), "Terminal");
+        assert_eq!(tab_title("vim"), "vim");
+        assert_eq!(
+            below_tab_bar(PhysicalSize::new(800, 600), 30),
+            PhysicalSize::new(800, 570)
+        );
+        assert_eq!(
+            below_tab_bar(PhysicalSize::new(800, 20), 30),
+            PhysicalSize::new(800, 0)
+        );
+    }
+
+    #[test]
     fn only_new_window_suppresses_shortcut_repeats() {
         for action in [
             Action::NewWindow,
+            Action::NewTab,
+            Action::CloseTab,
+            Action::NextTab,
+            Action::SelectTab(0),
             Action::LineUp,
             Action::LineDown,
             Action::Increase,
@@ -3289,7 +3889,10 @@ mod tests {
             for (repeat, synthetic) in [(true, false), (false, true), (true, true)] {
                 assert_eq!(
                     suppress_shortcut_repeat(&action, repeat, synthetic),
-                    matches!(action, Action::NewWindow)
+                    matches!(
+                        action,
+                        Action::NewWindow | Action::NewTab | Action::CloseTab
+                    )
                 );
             }
         }
@@ -4053,6 +4656,29 @@ mod tests {
         ] {
             assert!(parse(&args).is_err());
         }
+    }
+
+    #[test]
+    fn configure_term_applies_compare_runs_to_every_terminal() {
+        let mut config = config::Config::default();
+        let mut term = Terminal::new(80, 24);
+        configure_term(&mut term, &config, 100);
+        assert!(term.compare_runs());
+        assert_eq!(term.compare_ignore(), &config.compare_ignore);
+
+        config.compare_runs = false;
+        config.compare_ignore = term_core::Ignore::new(&["build #\\d+"]).unwrap();
+        let mut new_tab = Terminal::new(80, 24);
+        configure_term(&mut new_tab, &config, 100);
+        configure_term(&mut term, &config, 100);
+        for term in [&new_tab, &term] {
+            assert!(!term.compare_runs());
+            assert_eq!(term.compare_ignore(), &config.compare_ignore);
+        }
+
+        config.compare_runs = true;
+        configure_term(&mut term, &config, 100);
+        assert!(term.compare_runs());
     }
 
     #[test]

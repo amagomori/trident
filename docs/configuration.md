@@ -19,6 +19,7 @@ paste_protection = true     # false: never confirm multi-line or control-charact
 clipboard_read = false      # true: let programs read the clipboard with OSC 52
 confirm_close = true        # false: close the window at once even while a program runs
 compare_runs = true         # false: don't mark output that changed since the last run (or use the [compare_runs] table below)
+tab_bar = "always"          # "auto": only with two or more tabs; "never": hide it (tab shortcuts still work)
 desktop_notifications = true # false: ignore OSC 9/777/99 notification requests
 vsync = true                # false: present without waiting for vblank (lower latency, may tear)
 app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset (see App icons in usage.md)
@@ -64,7 +65,7 @@ wgpu's `AutoNoVsync` present mode (Immediate, else Mailbox, else FIFO) on macOS 
 It cut latency on a 120 Hz Mac, but tearing is unmeasured, so the default stays `true`.
 Surfaces that only offer FIFO (e.g. OpenGL on Linux) keep vsync and log a diagnostic.
 
-Actions: `new_window`, `search`, `copy`, `paste`, `paste_primary` (primary selection where supported),
+Actions: `new_window`, `new_tab`, `close_tab`, `next_tab`, `previous_tab`, `select_tab_1` through `select_tab_9`, `search`, `copy`, `paste`, `paste_primary` (primary selection where supported),
 `increase_font_size`, `decrease_font_size`, `reset_font_size`, `clear_scrollback`,
 `scroll_line_up`, `scroll_line_down`, `scroll_page_up`, `scroll_page_down`,
 `scroll_to_top`, `scroll_to_bottom`, `jump_to_prompt_up`, `jump_to_prompt_down`,

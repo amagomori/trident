@@ -2,21 +2,23 @@
 //! PTY's foreground would kill it, so the close waits for confirmation first.
 
 /// The confirmation prompt shown in the banner while a close waits; `program` is the
-/// foreground program's name when it could be read.
-pub fn prompt(program: Option<&str>) -> String {
+/// foreground program's name when it could be read, and `tab` says a tab is closing
+/// rather than the window.
+pub fn prompt(program: Option<&str>, tab: bool) -> String {
     let what = match program {
         Some(name) => format!("{name} is still running."),
         None => "A program is still running.".to_owned(),
     };
-    format!("{what} Close the window? Enter closes, Esc cancels")
+    let target = if tab { "tab" } else { "window" };
+    format!("{what} Close the {target}? Enter closes, Esc cancels")
 }
 
 /// The banner while a close waits: its prompt, then any other banner text.
 #[cold]
-pub fn banner(program: Option<&str>, other: Option<String>) -> String {
+pub fn banner(program: Option<&str>, tab: bool, other: Option<String>) -> String {
     match other {
-        Some(other) => format!("{} | {other}", prompt(program)),
-        None => prompt(program),
+        Some(other) => format!("{} | {other}", prompt(program, tab)),
+        None => prompt(program, tab),
     }
 }
 
@@ -276,8 +278,14 @@ unsafe extern "C-unwind" fn reply_to_quit(
     }
 }
 
+/// The app menu's Close Window shortcut is Cmd-Shift plus this key. Cmd-W is left to the
+/// `close_tab` binding: a menu key equivalent is matched before the key reaches the window, so
+/// Cmd-W there would close every tab.
+#[cfg(any(target_os = "macos", test))]
+const CLOSE_WINDOW_KEY: &str = "w";
+
 /// Makes every app quit go through `window`'s close confirmation (see `should_terminate`) and
-/// adds Close Window (Cmd-W) to the app menu. Needs winit's application delegate and default
+/// adds Close Window (Cmd-Shift-W) to the app menu. Needs winit's application delegate and default
 /// menu to be installed.
 #[cfg(target_os = "macos")]
 #[cold]
@@ -347,7 +355,7 @@ pub fn route_app_quit_through_close(
             let action: Option<Sel> = msg_send![&*item, action];
             if action == Some(sel!(terminate:)) {
                 let title = NSString::from_str("Close Window");
-                let key = NSString::from_str("w");
+                let key = NSString::from_str(CLOSE_WINDOW_KEY);
                 let close: Allocated<AnyObject> = msg_send![class!(NSMenuItem), alloc];
                 let close: Retained<AnyObject> = msg_send![
                     close,
@@ -355,6 +363,9 @@ pub fn route_app_quit_through_close(
                     action: sel!(performClose:),
                     keyEquivalent: &*key
                 ];
+                const COMMAND: usize = 1 << 20;
+                const SHIFT: usize = 1 << 17;
+                let _: () = msg_send![&*close, setKeyEquivalentModifierMask: COMMAND | SHIFT];
                 let _: () = msg_send![&*menu, insertItem: &*close, atIndex: index];
                 return;
             }
@@ -367,17 +378,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn close_window_menu_leaves_cmd_w_to_close_tab() {
+        use crate::config::{Action, Chord, default_bindings_for};
+        let macos = default_bindings_for(true);
+        assert_eq!(
+            macos.get(&Chord::parse("super+w").unwrap()),
+            Some(&Action::CloseTab)
+        );
+        let close_window = Chord::parse(&format!("super+shift+{CLOSE_WINDOW_KEY}")).unwrap();
+        assert!(!macos.contains_key(&close_window));
+    }
+
+    #[test]
     fn prompt_names_the_program() {
         assert_eq!(
-            prompt(Some("vim")),
+            prompt(Some("vim"), false),
             "vim is still running. Close the window? Enter closes, Esc cancels"
         );
         assert_eq!(
-            prompt(None),
+            prompt(None, false),
             "A program is still running. Close the window? Enter closes, Esc cancels"
         );
         assert_eq!(
-            banner(Some("ssh"), Some("Output paused".into())),
+            prompt(Some("sleep"), true),
+            "sleep is still running. Close the tab? Enter closes, Esc cancels"
+        );
+        assert_eq!(
+            banner(Some("ssh"), false, Some("Output paused".into())),
             "ssh is still running. Close the window? Enter closes, Esc cancels | Output paused"
         );
     }

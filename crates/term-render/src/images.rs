@@ -357,6 +357,12 @@ impl ImagePipeline {
         drawn
     }
 
+    /// Drops every uploaded image, for when the next frame shows a different terminal
+    /// whose image ids and versions may match the old one's.
+    pub fn forget(&mut self) {
+        self.textures.clear();
+    }
+
     pub fn is_empty(&self) -> bool {
         self.quads.is_empty()
     }

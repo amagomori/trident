@@ -97,6 +97,11 @@ pub struct Renderer {
     // Reused between frames to avoid allocating.
     row_lens: Vec<u32>,
     staging: Vec<Instance>,
+    /// Physical pixels above the grid taken by the tab bar.
+    top_inset: u32,
+    tab_bar: Option<crate::TabBar>,
+    /// Where the tab bar's instances start among the overlays.
+    bar_start: u32,
     #[cfg(target_os = "linux")]
     shm: Option<crate::present_shm::ShmPresenter>,
 }
@@ -320,6 +325,9 @@ impl Renderer {
             rerun: Vec::new(),
             row_lens: Vec::new(),
             staging: Vec::new(),
+            top_inset: 0,
+            tab_bar: None,
+            bar_start: 0,
             #[cfg(target_os = "linux")]
             shm,
         })
@@ -342,9 +350,27 @@ impl Renderer {
         }
     }
 
+    /// Shows `bar` in the top `height` physical pixels and moves the grid below it.
+    pub fn set_tab_bar(&mut self, bar: Option<crate::TabBar>, height: u32) {
+        self.top_inset = if bar.is_some() { height } else { 0 };
+        self.tab_bar = bar;
+    }
+
+    /// The height of the area below the tab bar that the grid and its overlays use.
+    fn area_height(&self) -> u32 {
+        self.config.height.saturating_sub(self.top_inset)
+    }
+
     /// Whether the last frame drew text or decorations that blink.
     pub fn blinking(&self) -> bool {
         self.row_blinks.contains(&true)
+    }
+
+    /// Forgets what the last frame drew, so the next one, which shows a different
+    /// `Terminal`, rebuilds every row and uploads its images.
+    pub fn forget_frame(&mut self) {
+        self.damage.invalidate();
+        self.images.forget();
     }
 
     /// Glyph rasterizations depend on the font size, so drop them when it changes.
@@ -481,7 +507,7 @@ impl Renderer {
     }
 
     fn grid_clip(&self, term: &Terminal, metrics: &CellMetrics, padding: f32) -> [u32; 4] {
-        let (sw, sh) = (self.config.width, self.config.height);
+        let (sw, sh) = (self.config.width, self.area_height());
         let x = (padding.max(0.0) as u32).min(sw);
         let y = (padding.max(0.0) as u32).min(sh);
         let right = ((padding + term.cols() as f32 * metrics.width).ceil() as u32).min(sw);
@@ -744,7 +770,7 @@ impl Renderer {
         // Scrollback position indicator.
         if (term.display_offset() > 0 || pixel_offset > 0.0) && term.scrollback_len() > 0 {
             let total = (term.scrollback_len() + term.rows()) as f32;
-            let screen_h = self.config.height as f32;
+            let screen_h = self.area_height() as f32;
             let thumb_h = (screen_h * term.rows() as f32 / total).max(ch);
             let progress = 1.0
                 - (term.display_offset() as f32 + pixel_offset / ch) / term.scrollback_len() as f32;
@@ -767,7 +793,7 @@ impl Renderer {
                 search.preedit.clone(),
                 search.status.chars().count(),
                 self.config.width as f32,
-                self.config.height as f32,
+                self.area_height() as f32,
                 cw,
                 ch,
             );
@@ -891,13 +917,13 @@ impl Renderer {
             let layout = crate::banner::layout(
                 text,
                 self.config.width as f32,
-                self.config.height as f32,
+                self.area_height() as f32,
                 cw,
                 ch,
             );
             let scale = layout.scale;
             let x = (self.config.width as f32 - layout.width) / 2.0;
-            let y = (self.config.height as f32 - layout.height) / 2.0;
+            let y = (self.area_height() as f32 - layout.height) / 2.0;
             overlays.push(self.rect(x, y, layout.width, layout.height, term.palette.foreground));
             'banner: for (row, line) in layout.lines.iter().enumerate() {
                 for (i, c) in line.chars().enumerate() {
@@ -926,8 +952,113 @@ impl Renderer {
             }
         }
 
+        self.bar_start = overlays.len() as u32;
+        if !self.draw_tab_bar(term, fonts, &mut overlays) {
+            ok = false;
+        }
         self.overlays = overlays;
         ok
+    }
+
+    /// Draws the tab bar above the grid; false if the atlas filled up.
+    fn draw_tab_bar(
+        &mut self,
+        term: &Terminal,
+        fonts: &mut Fonts,
+        out: &mut Vec<Instance>,
+    ) -> bool {
+        let Some(bar) = self.tab_bar.take() else {
+            return true;
+        };
+        let ok = self.build_tab_bar(term, fonts, &bar, out);
+        self.tab_bar = Some(bar);
+        ok
+    }
+
+    fn build_tab_bar(
+        &mut self,
+        term: &Terminal,
+        fonts: &mut Fonts,
+        bar: &crate::TabBar,
+        out: &mut Vec<Instance>,
+    ) -> bool {
+        use crate::TabHit;
+        let mix = |a: Rgb, b: Rgb, t: f32| {
+            let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+            (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
+        };
+        let palette = &term.palette;
+        let (bg, fg) = (palette.background, palette.foreground);
+        let (cw, ch) = (fonts.metrics.width, fonts.metrics.height);
+        let width = self.config.width as f32;
+        let layout = crate::tab_layout(bar.titles.len(), width, cw, ch);
+        let height = self.top_inset as f32;
+        let rule = fonts.metrics.stroke.max(1.0);
+        let strip = mix(bg, fg, 0.08);
+        let hovered = mix(bg, fg, 0.14);
+        let dim = mix(fg, strip, 0.4);
+        for [x, w] in layout.inactive_runs(bar.active) {
+            out.push(self.rect(x, 0.0, w, height, strip));
+        }
+        let text_y = ((height - ch) / 2.0).floor();
+        let mut glyphs: Vec<(f32, char, Rgb)> = Vec::new();
+        for (i, (tab, title)) in layout.tabs.iter().zip(&bar.titles).enumerate() {
+            let active = i == bar.active;
+            if active {
+                out.push(self.rect(
+                    tab.x,
+                    0.0,
+                    tab.width,
+                    (rule * 2.0).max(2.0),
+                    palette.ansi[4],
+                ));
+            } else if matches!(bar.hover, Some(TabHit::Tab(h) | TabHit::Close(h)) if h == i) {
+                out.push(self.rect(tab.x, 0.0, tab.width, height, hovered));
+            }
+            if !active && i + 1 != bar.active {
+                out.push(self.rect(
+                    tab.x + tab.width - rule,
+                    height * 0.25,
+                    rule,
+                    height * 0.5,
+                    hovered,
+                ));
+            }
+            let color = if active { fg } else { dim };
+            let title = crate::fit_title(title, tab.title_columns);
+            for (col, c) in title.chars().enumerate() {
+                glyphs.push((tab.x + cw * (col as f32 + 1.0), c, color));
+            }
+            let [x, y, w, h] = tab.close;
+            if bar.hover == Some(TabHit::Close(i)) {
+                out.push(self.rect(x, y, w, h, mix(bg, fg, 0.25)));
+            }
+            glyphs.push((x + (w - cw) / 2.0, '\u{00d7}', color));
+        }
+        let [x, y, w, h] = layout.new;
+        if bar.hover == Some(TabHit::New) {
+            out.push(self.rect(x + 2.0, y + 2.0, w - 4.0, h - 4.0, hovered));
+        }
+        glyphs.push((x + (w - cw) / 2.0, '+', fg));
+        out.push(self.rect(0.0, height - rule, width, rule, hovered));
+        for (x, c, color) in glyphs {
+            let key = GlyphKey {
+                c,
+                style: Style::new(false, false),
+                cells: 1,
+            };
+            match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                Ok(Some(g)) => out.push(Instance {
+                    pos: [x + g.left, text_y + g.top],
+                    size: [g.width, g.height],
+                    uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
+                    color: self.color(color, 1.0),
+                }),
+                Ok(None) => {}
+                Err(_) => return false,
+            }
+        }
+        true
     }
 
     /// Draws the pinned command header; false if the atlas filled up.
@@ -1068,7 +1199,7 @@ impl Renderer {
         };
         self.upload_instances();
         let uniforms = Uniforms {
-            screen: [self.config.width as f32, self.config.height as f32],
+            screen: [self.config.width as f32, self.area_height().max(1) as f32],
             atlas: [self.atlas.mono.size as f32; 2],
             color_atlas: [self.atlas.color.as_ref().map_or(1, |p| p.size) as f32; 2],
             _pad: [0.0; 2],
@@ -1103,10 +1234,15 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            let (width, inset, area) = (self.config.width, self.top_inset, self.area_height());
             let clip = self.image_clip;
-            if clip[2] == 0 || clip[3] == 0 {
+            if clip[2] == 0 || clip[3] == 0 || area == 0 {
                 return false;
             }
+            // The grid draws below the tab bar in its own viewport; scissors stay in
+            // surface coordinates.
+            pass.set_viewport(0.0, inset as f32, width as f32, area as f32, 0.0, 1.0);
+            let clip = [clip[0], clip[1] + inset, clip[2], clip[3]];
             pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
             if self.images.is_empty() {
                 for region in 0..3 {
@@ -1122,8 +1258,20 @@ impl Renderer {
                 self.draw_region(&mut pass, 2);
                 self.images.draw(&mut pass, Layer::AboveText, clip);
             }
-            pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
-            self.draw_region(&mut pass, 3);
+            pass.set_scissor_rect(0, inset, width, area);
+            let overlays = (3 * self.instance_capacity) as u32;
+            self.draw_range(
+                &mut pass,
+                overlays..overlays + self.bar_start.min(self.lens[3]),
+            );
+            if inset > 0 && self.lens[3] > self.bar_start {
+                pass.set_viewport(0.0, 0.0, width as f32, area as f32, 0.0, 1.0);
+                pass.set_scissor_rect(0, 0, width, inset.min(self.config.height));
+                self.draw_range(
+                    &mut pass,
+                    overlays + self.bar_start..overlays + self.lens[3],
+                );
+            }
         }
         self.queue.submit([encoder.finish()]);
         if let Some(pre_present) = pre_present {
@@ -1202,7 +1350,10 @@ impl Renderer {
 
     fn draw_region(&self, pass: &mut wgpu::RenderPass, region: usize) {
         let start = (region * self.instance_capacity) as u32;
-        let range = start..start + self.lens[region];
+        self.draw_range(pass, start..start + self.lens[region]);
+    }
+
+    fn draw_range(&self, pass: &mut wgpu::RenderPass, range: std::ops::Range<u32>) {
         if range.is_empty() {
             return;
         }
