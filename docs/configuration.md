@@ -1,12 +1,21 @@
 # Configuration
 
-The optional config file is `$XDG_CONFIG_HOME/trident/config.toml`, or
-`~/.config/trident/config.toml` when XDG_CONFIG_HOME is unset (on Linux and macOS).
-A config at the pre-rename `terminal/config.toml` path is still read while the new one
-doesn't exist.
-`--config <PATH>` overrides this location. A missing file uses defaults.
-`--font`, `--font-size`, `--scrollback`, and `-e` override the corresponding config
-values, including on reload.
+This page is the reference for Trident's config file: every setting, key bindings, scrollback,
+shell integration, live reload and color themes. For keys and everyday use, see
+[Usage](usage.md).
+
+## Config file
+
+Trident reads `$XDG_CONFIG_HOME/trident/config.toml`, or `~/.config/trident/config.toml` if
+`XDG_CONFIG_HOME` is unset, on both Linux and macOS. The file is optional, and so is every entry
+in it.
+
+- `--config <PATH>` reads another file instead.
+- `--font`, `--font-size`, `--scrollback` and `-e` override their config values, including after
+  a reload.
+- If only an old `terminal/config.toml` exists, Trident reads that.
+
+This example shows every setting with its default or an example value:
 
 ```toml
 # All entries are optional; omitted colors use Tokyo Night.
@@ -60,21 +69,33 @@ bright_white = "#c0caf5"
 "ctrl+shift+v" = "none"     # remove a default shortcut; pass key to the shell
 ```
 
-`vsync = false` (opt-in, live-reloaded) presents frames without waiting for vblank, using
-wgpu's `AutoNoVsync` present mode (Immediate, else Mailbox, else FIFO) on macOS and Linux.
-It cut latency on a 120 Hz Mac, but tearing is unmeasured, so the default stays `true`.
-Surfaces that only offer FIFO (e.g. OpenGL on Linux) keep vsync and log a diagnostic.
+`vsync = false` shows frames without waiting for the display refresh. This can lower latency but
+can cause tearing. Where the graphics driver can't turn vsync off, such as OpenGL on Linux, vsync
+stays on and Trident logs a note.
 
-Actions: `new_window`, `new_tab`, `close_tab`, `next_tab`, `previous_tab`, `select_tab_1` through `select_tab_9`, `search`, `copy`, `paste`, `paste_primary` (primary selection where supported),
-`increase_font_size`, `decrease_font_size`, `reset_font_size`, `clear_scrollback`,
-`scroll_line_up`, `scroll_line_down`, `scroll_page_up`, `scroll_page_down`,
-`scroll_to_top`, `scroll_to_bottom`, `jump_to_prompt_up`, `jump_to_prompt_down`,
-`select_command_output`, `none`,
-or `{ send = "..." }`. Chords use `ctrl`, `shift`, `alt` (alias `option`), and
-`super` (alias `cmd`), plus a character or named key such as `pageup`, `home`,
-`insert`, `enter`, `escape`, `space`, arrows, or `f1` through `f35`.
+## Key bindings
 
-To cap how much history one command can take, use the table form of `scrollback`:
+`[keybindings]` entries are added on top of the platform defaults listed in
+[Usage](usage.md#keyboard-and-mouse).
+
+A key chord combines `ctrl`, `shift`, `alt` (or `option`) and `super` (or `cmd`) with a
+character or a named key, such as `pageup`, `home`, `insert`, `enter`, `escape`, `space`, an
+arrow, or `f1` through `f35`.
+
+A chord maps to one of these:
+
+| Kind | Actions |
+| --- | --- |
+| Windows and tabs | `new_window`, `new_tab`, `close_tab`, `next_tab`, `previous_tab`, `select_tab_1` through `select_tab_9` |
+| Clipboard and search | `copy`, `paste`, `paste_primary` (primary selection, where supported), `search` |
+| Font size | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
+| Scrolling | `scroll_line_up`, `scroll_line_down`, `scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `clear_scrollback` |
+| Shell integration | `jump_to_prompt_up`, `jump_to_prompt_down`, `select_command_output` |
+| Other | `none` removes a default and passes the key to the program. `{ send = "..." }` sends text. |
+
+## Scrollback
+
+To limit how much history one command can take, use the table form of `scrollback`:
 
 ```toml
 [scrollback]
@@ -83,19 +104,23 @@ command_budget = true       # false: plain oldest-first eviction
 command_share = 0.5         # 0 < share <= 1 of `lines` one command's output may use
 ```
 
-With OSC 133 marks, a command whose output outgrows its share keeps its first and last
-lines and drops the middle, leaving one dim line such as `… 48,213 lines of make output
-dropped`, so earlier commands stay in history. Without marks, eviction is oldest-first.
-Both settings are live-reloaded.
+With [shell integration](#shell-integration), a command whose output outgrows its share keeps its
+first and last lines and drops the middle. One dim line, such as `… 48,213 lines of make output
+dropped`, takes its place, so earlier commands stay in history. Without shell integration, the
+oldest lines go first.
 
-With OSC 133 marks, a command's output is compared with the last run of the same command
-line: changed lines get an amber tint and a bar in the left margin, and a red tick marks
-where lines were removed. Text that varies on every run is ignored, so a rerun whose only changes are
-timings shows no marks while a changed test result does. The default patterns cover ISO
-dates and times, clock and elapsed times (`07:02:11`), durations (`0.42s`, `12 ms`,
-`1m3s`), PIDs (`pid 4242`, `process 31337`, a `[1] 12345` job notice) and temp paths
-(`/tmp/…`, `/var/folders/…`, `/var/tmp/…`, `/dev/shm/…`, `.tmpXXXXXX`). Add your own
-with the table form of `compare_runs`:
+## Compare runs
+
+With [shell integration](#shell-integration), Trident compares a command's output with the last
+run of the same command line:
+
+- Changed lines get an amber tint and a bar in the left margin.
+- A red tick marks where lines were removed.
+
+Text that varies on every run is ignored, so a rerun that only changes timings shows no marks,
+but a changed test result does. The built-in patterns cover dates and times, durations (`0.42s`,
+`1m3s`), process IDs and temporary paths (`/tmp/…`, `/var/folders/…`). To add your own, use the
+table form of `compare_runs`:
 
 ```toml
 [compare_runs]
@@ -104,103 +129,104 @@ default_ignore = true       # false: drop the built-in patterns above
 ignore = ['build #\d+', 'seed=\w+'] # extra regular expressions, matched per logical line
 ```
 
-Patterns use Rust `regex` syntax; each match counts as equal to any other match, so
-`seed=1` and `seed=99` compare equal. An invalid pattern is a config error naming it.
-Comparison is on by default: it runs only when a command ends, on at most 20,000 output
-lines, and output is never altered, only marked. All three settings are live-reloaded;
-changing the patterns forgets earlier runs (marks already shown stay), so the next run of
-each command is compared from then on.
+- Patterns use Rust `regex` syntax. Any two matches of a pattern compare equal, so `seed=1` and
+  `seed=99` count as the same.
+- Comparison runs when a command ends, on up to 20,000 lines of output. Output is only marked,
+  never changed.
+- Changing the patterns forgets earlier runs, so each command is compared from its next run.
 
-Shell integration uses OSC 133 marks emitted by your shell. With integration enabled,
-clearing at a prompt preserves the screen in scrollback (explicit scrollback clears
-still wipe it). Failed commands have a thin red marker beside their prompt.
-While you scroll back through a command's output, that command stays pinned in a bar at
-the top with its exit status and run time; click the bar to jump to its prompt.
-Cmd+Up/Down on macOS or Ctrl+Shift+Up/Down on Linux jumps between prompts.
-Cmd+Shift+A on macOS or Ctrl+Shift+A on Linux selects the latest command output
-starting in or above the viewport. These shortcuts can be rebound with
-`jump_to_prompt_up`, `jump_to_prompt_down`, and `select_command_output`.
+## Shell integration
 
-To enable marks, source the matching optional snippet from your interactive shell
-configuration (replace `/path/to/terminal` with this checkout):
+Shell integration lets your shell mark prompts and commands (OSC 133) and report its directory
+(OSC 7). With it, Trident:
+
+- Marks failed commands with a thin red bar beside their prompt.
+- Pins the command you're scrolling through in a bar at the top, with its exit status and run
+  time. Click the bar to jump to its prompt.
+- Jumps between prompts with Cmd+Up/Down on macOS or Ctrl+Shift+Up/Down on Linux, and selects the
+  latest command output with Cmd+Shift+A or Ctrl+Shift+A. To rebind these, use
+  `jump_to_prompt_up`, `jump_to_prompt_down` and `select_command_output`.
+- Keeps the screen in scrollback when you clear it at a prompt. `clear_scrollback` still erases
+  it.
+- Opens new windows and tabs in the current directory.
+- Enables the per-command scrollback limit and [compare runs](#compare-runs).
+
+To turn it on, source the snippet for your shell from your shell config, after your prompt is set
+up. Trident installs the snippets in a `shell-integration` directory:
+
+| Install | Directory |
+| --- | --- |
+| macOS app | `/Applications/Trident.app/Contents/Resources/shell-integration` |
+| .deb or AUR | `/usr/share/trident/shell-integration` |
+| Tarball in `~/.local` | `~/.local/share/trident/shell-integration` |
+| Source checkout | `shell-integration` in the checkout |
+
+For example, with the .deb:
 
 ```sh
 # ~/.zshrc
-source /path/to/terminal/shell-integration/terminal.zsh
+source /usr/share/trident/shell-integration/terminal.zsh
 # ~/.bashrc
-source /path/to/terminal/shell-integration/terminal.bash
+source /usr/share/trident/shell-integration/terminal.bash
 # ~/.config/fish/config.fish
-source /path/to/terminal/shell-integration/terminal.fish
+source /usr/share/trident/shell-integration/terminal.fish
 ```
 
-Source after setting up your prompt. The snippets retain existing prompts and
-hooks; don't source them if another integration already emits OSC 133. The fish
-snippet skips fish 4+ because it emits these marks natively.
-Bash 4.4+ is required for command-start marks via `PS0` and command completion
-tracking. Older Bash (including macOS `/bin/bash` 3.2) gets prompt marks only,
-not command C/D tracking. Existing `PROMPT_COMMAND` arrays are retained as arrays
-on Bash 5.1+; string hooks and older Bash use a prepended string hook.
+- The snippets keep your existing prompt and hooks. Don't source them if another integration
+  already sends OSC 133.
+- fish 4 and later sends these marks itself, so the fish snippet does nothing there.
+- Bash before 4.4, including macOS `/bin/bash` 3.2, gets prompt marks only, without command
+  start and exit status.
+- Any program that sends `OSC 7 ; file://host/path` sets the directory too. Directories on other
+  hosts and ones that no longer exist are ignored.
 
-The snippets also report the current directory with OSC 7 at each prompt, so a new
-window starts in the directory of the window it was opened from. Any shell or program
-that sends `OSC 7 ; file://host/path` works the same way; directories on other hosts
-(over ssh) and ones that no longer exist are ignored.
+## Live reload
 
-New windows launch an independent process with the same command-line options.
-Line-scroll shortcuts leave the prompt-jump chords Cmd+Up/Down and
-Ctrl+Shift+Up/Down available for shell integration.
+Trident watches the config file and applies changes about 100 ms after you save, including
+saves through a symlink and a file created after launch.
 
-Changes are watched in the file's parent directory, including atomic editor saves,
-and applied after about 100 ms of quiet. If the config directory (or a symlink
-target's directory) doesn't exist yet, the nearest existing ancestor is watched
-instead, so creating it and the file later is picked up without a restart.
-Symlinked configs are followed through every hop, including retargeted links.
-Fonts, padding, colors, scrollback, and bindings apply live. An unrelated edit
-preserves interactive font-size adjustments. Shell and env changes take effect at
-the next launch, with a note on stderr.
+- Fonts, padding, colors, scrollback, key bindings and the other settings apply at once. Your
+  font-size adjustments survive an unrelated edit.
+- `shell` and `[env]` changes apply to the next launch, and Trident prints a note on stderr.
 
-Unknown keys, invalid types/values, and malformed TOML are errors with the file,
-line, column, and entry printed to stderr and shown in a banner (alongside the
-output-paused notice when applicable). Startup errors use defaults; reload errors
-keep the last valid config. Fixing the config clears the banner.
+## Config errors
+
+If the file has an unknown key, a wrong type or value, or malformed TOML, Trident shows the file,
+line, column and entry in a banner and on stderr. An error at startup uses the defaults; an error
+on reload keeps the last valid config. When you fix the file, the banner clears.
 
 ## Color themes
 
-Bundled themes are `tokyo-night` (the unchanged default), `tokyo-day`,
-`solarized-dark`, and `solarized-light`. Set one at the top of the config:
+The bundled themes are `tokyo-night` (the default), `tokyo-day`, `solarized-dark` and
+`solarized-light`. To use one, set it at the top of the config:
 
 ```toml
 theme = "solarized-dark"
 ```
 
-To follow the OS appearance, use `theme = "auto"` (Tokyo Night / Tokyo Day),
-or select your own pair:
+To follow the OS light or dark appearance, set `theme = "auto"` for Tokyo Night and Tokyo Day, or
+pick your own pair:
 
 ```toml
 theme = { light = "solarized-light", dark = "solarized-dark" }
 ```
 
-Automatic mode reads the initial appearance and switches the existing window
-live, without restarting the shell or losing scrollback. On macOS this uses native
-appearance events; on Linux (X11 and Wayland) it uses the desktop's
-`org.freedesktop.portal.Settings` appearance portal. A desktop without this portal,
-an unavailable appearance, or “no preference” uses the dark theme. Fixed themes
-ignore OS appearance changes. No appearance listener is started for fixed themes.
+Trident switches open windows when the appearance changes, without restarting the shell. On
+Linux, this needs a desktop that provides the `org.freedesktop.portal.Settings` portal; without
+it, Trident uses the dark theme.
 
-Programs can follow the theme: `CSI ? 996 n` asks for the current color scheme and
-gets `CSI ? 997 ; 1 n` (dark) or `CSI ? 997 ; 2 n` (light) back, judged by the
-theme's background. With mode 2031 set (`CSI ? 2031 h`), the same report is sent
-whenever a switch (OS appearance or config reload) changes dark to light or back.
+Programs can ask which scheme is active with `CSI ? 996 n`. Trident replies `CSI ? 997 ; 1 n` for
+dark or `CSI ? 997 ; 2 n` for light. A program that sets mode 2031 (`CSI ? 2031 h`) gets the same
+report whenever the scheme changes.
 
-A theme name may instead be an absolute path or a path relative to the config's
-directory, for example `theme = "themes/my-theme.toml"`. Theme files have a
-`[colors]` table with the same 20 keys and `"#rrggbb"` values shown above (16 ANSI
-colors plus foreground, background, cursor, selection); omitted keys inherit
-Tokyo Night. The files in [`themes/`](../themes/) are complete examples and are also
-embedded in the binary, so bundled themes need no installation. Config `[colors]`
-entries override the selected theme (both palettes in automatic mode).
+### Optional: Your own theme
 
-Both files in an automatic pair are validated before applying either. Referenced
-theme files are hot-reloaded, including atomic saves, missing files created later,
-and symlinks. An invalid or unreadable theme shows a diagnostic banner and keeps
-the last valid palettes, just like an invalid config.
+A theme can also be a path to a TOML file, absolute or relative to the config's directory, for
+example `theme = "themes/my-theme.toml"`.
+
+- The file has a `[colors]` table with the same 20 keys as the config's `[colors]`. Omitted keys
+  use Tokyo Night.
+- The files in [`themes/`](../themes/) are complete examples.
+- `[colors]` in the config overrides the theme, both themes of an automatic pair included.
+- Theme files reload like the config. An invalid theme shows a banner and keeps the last valid
+  colors.
