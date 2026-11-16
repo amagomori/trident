@@ -2927,6 +2927,19 @@ fn prompt_click_forgets_erased_input_padding_before_a_right_prompt() {
 }
 
 #[test]
+fn prompt_click_ignores_an_alternate_screen_line_editor_widget() {
+    let mut t = term(
+        60,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07echo hel\x1b[90mlo world\x1b[m\x1b[1;40H\x1b[33mRIGHT-CLOCK\x1b[m\x1b[1;11H",
+    );
+    t.advance(b"\x1b[?1049h\x1b]2;widget\x07                                                            \x1b[1;20H\x1b[3P\x1b[4@\x1b[?1049l");
+    assert_eq!(click(&t, 0, 59), Some(PromptClick::Move(0)));
+    t.advance(b"\x1b[1;3H\x1b[90mecho\x1b[m                    \x1b[33mhello\x1b[m\x1b[K\x1b[1;3H");
+    assert_eq!(click(&t, 0, 59), Some(PromptClick::Move(29)));
+}
+
+#[test]
 fn prompt_click_needs_an_input_zone_on_the_primary_screen() {
     assert_eq!(click(&term(20, 4, "$ echo hi"), 0, 2), None);
     assert_eq!(click(&term(20, 4, "\x1b]133;A\x07$ "), 0, 1), None);

@@ -1775,7 +1775,9 @@ impl Terminal {
         let end = self.cursor.col + usize::from(self.cursor.pending_wrap);
         let row = self.cursor.row;
         self.lines_mut()[row].touch(end);
-        if let Some((line, start)) = self.shell.input_cursor {
+        if !self.alt_active
+            && let Some((line, start)) = self.shell.input_cursor
+        {
             let current = self.history + row as u64;
             if line == current && start < end {
                 self.record_input_write(line, start..end);
@@ -1838,6 +1840,9 @@ impl Terminal {
 
     #[cold]
     fn shift_input_writes(&mut self, row: usize, col: usize, removed: usize, inserted: usize) {
+        if self.alt_active {
+            return;
+        }
         let line = self.history + row as u64;
         let cols = self.cols;
         let shift = |c: usize| {

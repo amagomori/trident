@@ -314,12 +314,11 @@ impl Perform for Terminal {
             }
             _ => {}
         }
-        self.shell.input_cursor = (!self.alt_active
-            && matches!(self.shell.zone, super::Zone::Prompt | super::Zone::Input))
-        .then_some((
-            self.history + self.cursor.row as u64,
-            self.cursor.col + usize::from(self.cursor.pending_wrap),
-        ));
+        self.shell.input_cursor =
+            matches!(self.shell.zone, super::Zone::Prompt | super::Zone::Input).then_some((
+                self.history + self.cursor.row as u64,
+                self.cursor.col + usize::from(self.cursor.pending_wrap),
+            ));
     }
 }
 
