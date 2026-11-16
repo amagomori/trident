@@ -81,6 +81,10 @@ pushes nothing new. `--base-url` points the files at local artifacts, to try the
 The Linux `.desktop` entry is `packaging/linux/trident.desktop`; the tarball, .deb and AppImage
 install it with the `hicolor` icons `assets/generate_icons.py` writes to `assets/icons/tide-*.png`.
 
+`assets/social-preview.png` (1280x640) is the repository's social preview image. GitHub shows a
+social preview only for public repositories, so upload it under Settings > General > Social preview
+once the repository is public.
+
 ## Measuring latency
 
 On Wayland with presentation feedback and a known refresh period, redraws and flood
