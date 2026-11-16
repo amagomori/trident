@@ -1,32 +1,37 @@
 # Benchmarks
 
-Trident `ca6b30d` against other terminals, each with the same font, size and scrollback. Lower is
+Trident against other terminals, each with the same font, size and scrollback. Lower is
 better. These numbers compare terminals on one machine; they aren't real-display latency.
 
 ## macOS
 
-Alacritty 0.17.0, WezTerm 20240203 and Ghostty 1.4.0 on a macOS 26.6 VM (Apple M4 Pro, 12 vCPU,
-paravirtual Metal). Each value is the median of interleaved rounds.
+Trident `0c8392b` (memory: `89f684d`), Alacritty 0.17.0, WezTerm 20240203 and Ghostty 1.4.0
+on a macOS 26.6 VM (Apple M4, 8 vCPU, paravirtual Metal). Rerun with the corrected
+[#147 harness](https://github.com/amagomori/trident/pull/147); medians of interleaved rounds.
 
 | | Trident | Alacritty | kitty | WezTerm | Ghostty |
 |---|---|---|---|---|---|
-| First paint (ms) | 71.6 | 68.8 | n/a | 76.6 | **66.1** |
-| Memory at open (MiB) | **91.6** | 105.0 | n/a | 101.4 | 104.6 |
-| Keypress latency, median (ms) | **18.2** | 22.6 | n/a | 49.8 | n/a |
-| `cat` of 100 MiB (s) | **0.54** | 1.67 | n/a | 2.77 | 0.80 |
-| vtebench dense cells (ms) | **9.0** | 11.5 | n/a | 18.0 | 15.5 |
-| vtebench scrolling (ms) | **19.5** | 29.5 | n/a | 79.0 | 24.5 |
-| vtebench unicode (ms) | **7.0** | 9.0 | n/a | 24.5 | **7.0** |
+| First paint (ms) | 67.6 | 65.7 | n/a | 68.1 | **65.6** |
+| Memory at open (MiB) | **87.9** | 108.1 | n/a | 99.8 | 105.3 |
+| Keypress latency, median (ms) | 30.9 | **21.6** | n/a | 45.8 | n/a |
+| `cat` of 100 MiB (s) | **0.58** | 1.68 | n/a | 2.88 | 1.15 |
+| vtebench dense cells (ms) | **13.5** | 22.5 | n/a | 28.5 | 27.5 |
+| vtebench scrolling (ms) | **23.5** | 28.0 | n/a | 79.5 | 26.5 |
+| vtebench unicode (ms) | **5.5** | 7.8 | n/a | 28.5 | 10.5 |
 
-Trident leads or ties within noise everywhere; first paint is within noise for all four. The one
-trail is memory after a 50,000-line burst: 117.7 MiB against WezTerm's 114.0 (+3.3%), from the
-app icon loading added in [#104](https://github.com/amagomori/trident/pull/104). kitty needs OpenGL 3.3, which the VM lacks, and Ghostty's
-keypress latency on the VM (about 600 ms) is a compositing artifact, so neither is shown.
+Trident leads on memory, `cat` and vtebench; scrolling is within noise of Alacritty and Ghostty.
+First paint trails Ghostty by 3.1% (noise ±3.0%); keypress latency trails Alacritty by 43%
+(noise ±28.5%). After a 50,000-line burst, memory is within noise of WezTerm: 115.9 vs 112.5 MiB
+(noise ±4.2%). The earlier results used a different VM; interleaved old/new builds here showed
+no latency regression.
+
+kitty needs OpenGL 3.3, which the VM lacks, and Ghostty's keypress latency on the VM (about
+600 ms) is a compositing artifact, so neither is shown.
 
 ## Linux
 
-Alacritty 0.17.0, kitty 0.50.0, WezTerm 20240203 and Ghostty 1.4.0 on a Linux VM (8 vCPU, Xvfb,
-software GL). Each value is the mean of two rounds.
+Trident `ca6b30d`, Alacritty 0.17.0, kitty 0.50.0, WezTerm 20240203 and Ghostty 1.4.0 on a Linux
+VM (8 vCPU, Xvfb, software GL). Each value is the mean of two rounds.
 
 | | Trident | Alacritty | kitty | WezTerm | Ghostty |
 |---|---|---|---|---|---|
