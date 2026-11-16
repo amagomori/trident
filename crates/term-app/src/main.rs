@@ -361,7 +361,7 @@ struct Pane {
     id: u64,
     composition: ime::Composition,
     link_pressed: bool,
-    hover: Option<term_core::Link>,
+    hover: Option<links::Hover>,
     scroll: PixelScroll,
     pty_cell: (f32, f32),
     term: Terminal,
@@ -693,6 +693,7 @@ impl Session {
         swap(&mut self.composition, &mut pane.composition);
         swap(&mut self.link_pressed, &mut pane.link_pressed);
         swap(&mut self.hover, &mut pane.hover);
+        self.file_hover.take();
         swap(&mut self.scroll, &mut pane.scroll);
         swap(&mut self.pty_cell, &mut pane.pty_cell);
         swap(&mut self.term, &mut pane.term);
