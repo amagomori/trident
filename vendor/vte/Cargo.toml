@@ -1,0 +1,22 @@
+[package]
+name = "vte"
+version = "0.15.0"
+authors = ["Joe Wilm <joe@jwilm.com>", "Christian Duerr <contact@christianduerr.com>"]
+description = "Trident's fork of vte 0.15.0 with a one-pass CSI fast path"
+repository = "https://github.com/alacritty/vte"
+readme = "README.md"
+license = "Apache-2.0 OR MIT"
+edition = "2021"
+rust-version = "1.62.1"
+publish = false
+
+[features]
+default = ["std"]
+std = ["memchr/std"]
+
+[dependencies]
+arrayvec = { version = "0.7.2", default-features = false }
+memchr = { version = "2.7.4", default-features = false }
+
+[dev-dependencies]
+upstream = { package = "vte", version = "=0.15.0" }

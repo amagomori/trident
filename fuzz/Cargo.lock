@@ -228,7 +228,7 @@ dependencies = [
  "png",
  "regex",
  "unicode-width",
- "vte",
+ "vte 0.15.0",
 ]
 
 [[package]]
@@ -237,6 +237,8 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "term-core",
+ "vte 0.15.0",
+ "vte 0.15.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -244,6 +246,14 @@ name = "unicode-width"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+
+[[package]]
+name = "vte"
+version = "0.15.0"
+dependencies = [
+ "arrayvec",
+ "memchr",
+]
 
 [[package]]
 name = "vte"

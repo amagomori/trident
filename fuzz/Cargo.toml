@@ -10,6 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 term-core = { path = "../crates/term-core" }
+vte = { path = "../vendor/vte" }
+upstream = { package = "vte", version = "=0.15.0" }
 
 # Outside the main workspace: cargo-fuzz builds it with nightly and sanitizer flags.
 [workspace]
@@ -17,6 +19,13 @@ term-core = { path = "../crates/term-core" }
 [[bin]]
 name = "terminal"
 path = "fuzz_targets/terminal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vte_parity"
+path = "fuzz_targets/vte_parity.rs"
 test = false
 doc = false
 bench = false
