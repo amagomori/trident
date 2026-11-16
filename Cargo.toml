@@ -33,6 +33,7 @@ png = "0.18"
 pollster = "0.4"
 portable-pty = "0.9"
 resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "svgz", "raster-images"] }
+shlex = "2"
 ttf-parser = "0.25"
 unicode-width = "0.2"
 vte = { path = "vendor/vte" }

@@ -42,6 +42,7 @@ auto_secure_input = true    # macOS: false never turns on Secure Keyboard Entry 
 hide_mouse_when_typing = true # false: keep the mouse pointer shown while you type
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 term = "xterm-256color"     # "xterm-trident" once installed (falls back if not found)
+editor = ["code", "--goto", "{file}:{line}:{column}"] # path:line links; default: $VISUAL/$EDITOR (see usage.md)
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
 EDITOR = "vim"

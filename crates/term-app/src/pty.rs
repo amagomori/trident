@@ -734,6 +734,19 @@ impl Pty {
         self.output.probe.program()
     }
 
+    /// The terminal's foreground process group: the running program, else the shell.
+    pub fn foreground_process(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            let fd = self.output.probe.fd.as_ref()?;
+            // SAFETY: fd is a PTY master descriptor owned by this probe.
+            let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+            (group > 0).then_some(group)
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
     /// Whether a program holds the foreground, as a check that outlives this borrow, for the
     /// macOS app quit hook.
     #[cfg(target_os = "macos")]
