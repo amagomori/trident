@@ -21,6 +21,7 @@ pub struct Config {
     pub compare_runs: bool,
     pub compare_ignore: term_core::Ignore,
     pub confirm_close: bool,
+    pub visual_bell: bool,
     pub tab_bar: TabBarMode,
     pub vsync: bool,
     pub app_icon: AppIcon,
@@ -52,6 +53,7 @@ impl Default for Config {
             compare_runs: true,
             compare_ignore: term_core::Ignore::default(),
             confirm_close: true,
+            visual_bell: false,
             tab_bar: TabBarMode::Always,
             vsync: true,
             app_icon: AppIcon::default(),
@@ -81,6 +83,7 @@ struct Raw {
     clipboard_read: Option<bool>,
     compare_runs: Option<CompareRunsEntry>,
     confirm_close: Option<bool>,
+    visual_bell: Option<bool>,
     tab_bar: Option<String>,
     vsync: Option<bool>,
     app_icon: Option<String>,
@@ -567,6 +570,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         paste_protection: raw.paste_protection.unwrap_or(true),
         clipboard_read: raw.clipboard_read.unwrap_or(false),
         confirm_close: raw.confirm_close.unwrap_or(true),
+        visual_bell: raw.visual_bell.unwrap_or(false),
         desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
         menu_bar_icon: raw.menu_bar_icon.unwrap_or(true),
@@ -1243,6 +1247,9 @@ mod tests {
         assert!(parse_text("").unwrap().confirm_close);
         assert!(!parse_text("confirm_close = false").unwrap().confirm_close);
         assert!(parse_text("confirm_close = 1").is_err());
+        assert!(!parse_text("").unwrap().visual_bell);
+        assert!(parse_text("visual_bell = true").unwrap().visual_bell);
+        assert!(parse_text("visual_bell = 'yes'").is_err());
         assert!(parse_text("").unwrap().desktop_notifications);
         assert!(
             !parse_text("desktop_notifications = false")

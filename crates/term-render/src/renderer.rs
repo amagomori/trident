@@ -15,6 +15,10 @@ use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 /// Compare-with-last-run: rows that differ from the command's previous run.
 const RERUN_COLOR: Rgb = (230, 170, 50);
 const RERUN_REMOVED: Rgb = (220, 50, 47);
+/// How strongly the visual bell tints the grid with the foreground color.
+const FLASH_ALPHA: f32 = 0.2;
+/// Drawn before a tab's title while the tab has an unseen bell.
+const BELL_MARK: char = '\u{25cf}';
 
 fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
@@ -90,6 +94,9 @@ pub struct Renderer {
     overlays: Vec<Instance>,
     /// Whether blinking cells show their text this frame.
     pub blink_visible: bool,
+    /// Whether the visual bell tints the grid this frame; drawn as one overlay, so it
+    /// damages no rows.
+    pub flash: bool,
     /// Whether each drawn row has cells that blink.
     row_blinks: Vec<bool>,
     /// Compare-with-last-run marks of each drawn row this frame.
@@ -320,6 +327,7 @@ impl Renderer {
             offsets: Default::default(),
             overlays: Vec::new(),
             blink_visible: true,
+            flash: false,
             cursor_visible: true,
             row_blinks: Vec::new(),
             rerun: Vec::new(),
@@ -913,6 +921,19 @@ impl Renderer {
             }
         }
 
+        if self.flash {
+            overlays.push(Instance {
+                color: self.color(term.palette.foreground, FLASH_ALPHA),
+                ..self.rect(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.area_height() as f32,
+                    term.palette.foreground,
+                )
+            });
+        }
+
         if let Some(text) = banner {
             let layout = crate::banner::layout(
                 text,
@@ -1025,9 +1046,16 @@ impl Renderer {
                 ));
             }
             let color = if active { fg } else { dim };
-            let title = crate::fit_title(title, tab.title_columns);
+            let bell = bar.bells.get(i).copied().unwrap_or(false);
+            let skip = if bell {
+                glyphs.push((tab.x + cw, BELL_MARK, palette.ansi[3]));
+                2
+            } else {
+                0
+            };
+            let title = crate::fit_title(title, tab.title_columns.saturating_sub(skip));
             for (col, c) in title.chars().enumerate() {
-                glyphs.push((tab.x + cw * (col as f32 + 1.0), c, color));
+                glyphs.push((tab.x + cw * ((col + skip) as f32 + 1.0), c, color));
             }
             let [x, y, w, h] = tab.close;
             if bar.hover == Some(TabHit::Close(i)) {

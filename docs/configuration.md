@@ -27,6 +27,7 @@ drop_preview = true         # false: file drops insert only the shell-quoted pat
 paste_protection = true     # false: never confirm multi-line or control-character pastes
 clipboard_read = false      # true: let programs read the clipboard with OSC 52
 confirm_close = true        # false: close the window at once even while a program runs
+visual_bell = false         # true: briefly flash the grid on BEL (background tabs always get a bell mark)
 compare_runs = true         # false: don't mark output that changed since the last run (or use the [compare_runs] table below)
 tab_bar = "always"          # Linux: "auto": only with two or more tabs; "never": hide it (tab shortcuts still work); macOS uses native tabs
 desktop_notifications = true # false: ignore OSC 9/777/99 notification requests

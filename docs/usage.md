@@ -144,6 +144,14 @@ printf '\e]777;notify;Title;Body\a'
 Trident shows at most five notifications per ten seconds, as plain text up to 1,024 characters.
 To ignore them, set `desktop_notifications = false`.
 
+## Bell
+
+A BEL (`printf '\a'`) in an unfocused window asks for attention (the taskbar or Dock icon).
+A bell in a background tab marks that tab until it is shown: a `●` before its title in the
+Linux tab bar, a `🔔` prefix on the macOS tab title. Set `visual_bell = true` to also flash
+the active tab's grid for about 120 ms; a stream of bells (`yes $'\a'`) flashes once until
+it pauses for a quarter second.
+
 ## App icons
 
 `app_icon` picks the Dock icon on macOS and the window icon on Linux from eight variants:
