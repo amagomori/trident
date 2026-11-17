@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Trident — Failure focus prototype</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #111517; color: #e4e9e8; --muted: #9baaa7; --line: #303c3b; --accent: #8edbc6; --failure: #ffaaa0; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 36px clamp(16px,4vw,64px); }
+    button, input, textarea { font: inherit; }
+    button { cursor: pointer; color: inherit; background: #212c2b; border: 1px solid #3f5350; border-radius: 6px; padding: 8px 12px; }
+    button:hover { background: #2e403c; border-color: var(--accent); }
+    button:disabled { cursor: default; opacity: .45; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .primary { background: #9ae4d0; border-color: #9ae4d0; color: #14251f; font-weight: 650; }
+    .primary:hover { background: #b7f4e3; }
+    .quiet { background: transparent; }
+    .eyebrow { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); }
+    .intro { max-width: 1240px; margin: 0 auto 26px; }
+    .intro-top { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+    .prototype { border: 1px solid var(--line); border-radius: 4px; padding: 5px 8px; color: var(--muted); font-size: 12px; }
+    h1 { font-size: clamp(25px,3.2vw,38px); letter-spacing: -.035em; margin: 16px 0 9px; font-weight: 580; }
+    .intro p { color: var(--muted); margin: 0; line-height: 1.65; font-size: 14px; }
+    .terminal { max-width: 1240px; margin: auto; border: 1px solid #3a4846; border-radius: 10px; overflow: hidden; background: #171d1f; box-shadow: 0 18px 50px #0003; }
+    .titlebar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--line); background: #20292a; font-size: 13px; }
+    .titlebar strong { font-weight: 550; }
+    .titlebar span { color: var(--muted); font-size: 12px; }
+    .command { padding: 15px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); }
+    .command code { font-size: 13px; }
+    .path { color: var(--accent); }
+    .source-actions, .nav-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .source-actions button, .nav-actions button { font-size: 12px; padding: 7px 10px; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--line); background: #1d2827; }
+    .counts { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+    .counts strong { color: var(--failure); font-weight: 650; }
+    .view-label { font-size: 12px; color: var(--muted); }
+    #workspace { display: grid; grid-template-columns: 270px minmax(0,1fr); min-height: 410px; }
+    #workspace.raw-mode { grid-template-columns: minmax(0,1fr); }
+    .failures { background: #161e20; border-right: 1px solid var(--line); padding: 18px 12px; }
+    .section-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .09em; margin: 0 8px 12px; }
+    .failure-item { width: 100%; text-align: left; display: block; background: transparent; border: 1px solid transparent; margin-bottom: 8px; padding: 12px; }
+    .failure-item[aria-current="true"] { background: #2b3533; border-color: #596b63; box-shadow: inset 3px 0 var(--failure); }
+    .failure-item strong { font-size: 12px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; font-weight: 550; }
+    .failure-item span { display: block; margin-top: 7px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+    .failure-item .failure-number { display: inline; color: var(--failure); margin-right: 6px; }
+    .pane { min-width: 0; }
+    .pane-head { padding: 17px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+    .pane-head h2 { margin: 0 0 6px; font-family: ui-monospace, monospace; font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+    .pane-head p { margin: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .pane-head button { font-size: 12px; white-space: nowrap; }
+    .log { padding: 16px 0; max-height: 440px; overflow: auto; font: 12px/1.85 ui-monospace, "SFMono-Regular", Consolas, monospace; tab-size: 4; }
+    .log-line { display: flex; width: max-content; min-width: 100%; padding-right: 22px; white-space: pre; }
+    .line-no { display: inline-block; flex: 0 0 57px; width: 57px; padding-right: 16px; text-align: right; color: #73817f; user-select: none; }
+    .log-line.error .line-text { color: var(--failure); }
+    .log-line.success .line-text { color: #a3c5a8; }
+    .log-line.selected { background: #57392d55; box-shadow: inset 3px 0 #de9f74; }
+    .empty { padding: 54px 28px; max-width: 680px; }
+    .empty h2 { font-size: 18px; font-weight: 500; }
+    .empty p { font-size: 13px; color: var(--muted); line-height: 1.7; }
+    .footbar { padding: 11px 18px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
+    kbd { font: inherit; padding: 2px 5px; border: 1px solid #43524f; border-radius: 3px; margin-right: 3px; }
+    .note { color: var(--muted); font-size: 12px; line-height: 1.6; max-width: 1240px; margin: 18px auto 0; }
+    #announcement { min-height: 21px; color: var(--accent); font-size: 12px; max-width: 1240px; margin: 10px auto 0; }
+    dialog { width: min(720px,90vw); border: 1px solid #526862; border-radius: 10px; background: #1c2526; color: inherit; padding: 24px; }
+    dialog::backdrop { background: #080d10c9; }
+    dialog h2 { margin-top: 0; font-size: 20px; font-weight: 550; }
+    dialog p { font-size: 13px; color: var(--muted); line-height: 1.7; }
+    textarea { width: 100%; height: 240px; padding: 12px; resize: vertical; border: 1px solid #526862; border-radius: 5px; background: #131b1d; color: inherit; font-family: ui-monospace, monospace; font-size: 12px; }
+    .dialog-actions { margin-top: 16px; display: flex; justify-content: flex-end; gap: 10px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    [hidden] { display: none !important; }
+    @media (max-width: 760px) {
+      body { padding: 22px 12px; }
+      .command, .toolbar, .pane-head { align-items: flex-start; flex-direction: column; }
+      #workspace { grid-template-columns: minmax(0,1fr); }
+      .failures { border-right: 0; border-bottom: 1px solid var(--line); max-height: 190px; overflow: auto; }
+      .failure-item { padding: 8px 12px; }
+      .intro-top, .footbar { flex-wrap: wrap; }
+      .log { max-height: 350px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="intro">
+    <div class="intro-top"><div class="eyebrow">Trident / interaction sketch</div><span class="prototype">Offline prototype · not in the terminal</span></div>
+    <h1>Find the failure. Keep the context.</h1>
+    <p>A read-only lens for noisy Cargo test output. Skip the passing tests, not the evidence.</p>
+  </header>
+  <main class="terminal" aria-label="Failure focus prototype">
+    <div class="titlebar"><strong>Trident <span>/ test output</span></strong><span id="source-label">Fictional sample log</span></div>
+    <div class="command">
+      <code id="command-line"><span class="path">~/atlas</span> $ cargo test --workspace</code>
+      <div class="source-actions"><button id="sample" class="quiet">Reset sample</button><button id="paste">Paste log</button><button id="open">Open log file</button><input id="file" type="file" accept=".log,.txt,text/plain" hidden></div>
+    </div>
+    <div class="toolbar">
+      <div id="counts" class="counts" aria-live="polite"></div>
+      <div class="nav-actions"><span id="view-label" class="view-label">Complete transcript</span><button id="toggle" class="primary">Focus failures</button></div>
+    </div>
+    <div id="workspace" class="raw-mode">
+      <nav id="failure-list" class="failures" aria-label="Failed tests" hidden></nav>
+      <section class="pane" aria-label="Log details">
+        <div id="pane-head" class="pane-head" hidden>
+          <div><h2 id="failure-title"></h2><p id="failure-location"></p></div>
+          <div class="nav-actions"><button id="previous" aria-label="Previous failure">Previous</button><button id="next" aria-label="Next failure">Next</button><button id="copy">Copy failure</button></div>
+        </div>
+        <div id="log" class="log" tabindex="0" aria-label="Full log"></div>
+        <div id="empty" class="empty" hidden><h2>No Cargo test failures recognized</h2><p>This is not a success verdict. Compiler errors, custom runners and interleaved output may not be recognized. The full log is still available.</p></div>
+      </section>
+    </div>
+    <footer class="footbar"><span id="context-note">The complete log is preserved.</span><span><kbd>[</kbd><kbd>]</kbd> previous / next failure · <kbd>Esc</kbd> full output</span></footer>
+  </main>
+  <p class="note">Try it: <strong>Focus failures</strong>, choose a test, then <strong>Show in full output</strong>. The sample is fictional. You can open or paste your own plain-text log (up to 1 MiB / 20,000 lines); it stays in this page, with no network requests or saved history. ANSI colors are removed.</p>
+  <p id="announcement" role="status" aria-live="polite"></p>
+  <dialog id="paste-dialog" aria-labelledby="paste-title">
+    <h2 id="paste-title">Focus a test log</h2>
+    <p>Paste Cargo's plain-text test output. This prototype does not run commands or change files.</p>
+    <label for="paste-text" class="sr-only">Cargo test output</label><textarea id="paste-text" placeholder="Paste a Cargo test log here…" spellcheck="false"></textarea>
+    <p id="paste-error" role="alert"></p>
+    <div class="dialog-actions"><button id="cancel-paste">Cancel</button><button id="apply-paste" class="primary">Open pasted log</button></div>
+  </dialog>
+
+  <script id="failure-parser">
+    // Pure parser, also exercised by parser.test.cjs. This is a heuristic for Cargo's
+    // default human-readable test format, not a verdict on arbitrary command output.
+    const FailureFocus = (() => {
+      const MAX_BYTES = 1024 * 1024;
+      const MAX_LINES = 20000;
+      function parse(source) {
+        if (new TextEncoder().encode(source).length > MAX_BYTES) {
+          throw new Error('Log is larger than 1 MiB. Open a smaller transcript.');
+        }
+        const lines = source.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+          .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').split('\n');
+        if (lines.length > MAX_LINES) throw new Error('Log has more than 20,000 lines. Open a smaller transcript.');
+        const failures = [];
+        let suite = 'Test output', suiteId = 0, active = null;
+        let passed = 0, failed = 0, ignored = 0, summaries = 0;
+        const finish = end => {
+          if (active) active.ranges[active.ranges.length - 1].end = end;
+          active = null;
+        };
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const run = line.match(/^\s*(?:Running|Doc-tests)\s+(.+)$/);
+          const result = line.match(/^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;/);
+          const detail = line.match(/^---- (.+) (?:stdout|stderr) ----$/);
+          if (run || result || line === 'failures:' || detail) finish(i);
+          if (run) { suite = run[1]; suiteId++; }
+          if (result) {
+            passed += Number(result[1]); failed += Number(result[2]);
+            ignored += Number(result[3]); summaries++;
+          }
+          const status = line.match(/^test (.+) \.\.\. FAILED$/);
+          if (status || detail) {
+            const name = (status || detail)[1];
+            let failure = failures.findLast(item => item.name === name && item.suiteId === suiteId);
+            if (!failure) {
+              failure = { name, suite, suiteId, statusLine: i, ranges: [], location: null };
+              failures.push(failure);
+            }
+            if (detail) {
+              failure.ranges.push({ start: i, end: lines.length });
+              active = failure;
+            }
+          }
+          if (active && !active.location) {
+            // Cargo's Rust panic line, including the optional modern thread ID.
+            const location = line.match(/^thread '.+'(?: \(\d+\))? panicked at (.+:\d+:\d+):?$/);
+            if (location) active.location = location[1];
+          }
+        }
+        finish(lines.length);
+        return { lines, failures, passed, failed, ignored, summaries };
+      }
+      return { parse, MAX_BYTES, MAX_LINES };
+    })();
+  </script>
+  <script id="failure-ui">
+    const SAMPLE = `   Compiling demo-core v0.1.0 (/workspace/atlas/core)
+   Compiling demo-render v0.1.0 (/workspace/atlas/render)
+    Finished \`test\` profile [unoptimized + debuginfo] target(s) in 1.42s
+     Running unittests src/lib.rs (target/debug/deps/demo_core-1234)
+
+running 5 tests
+test cache::tests::cold_start ... ok
+test cache::tests::same_key_reuses_entry ... ok
+test cache::tests::evicts_oldest ... FAILED
+test parser::tests::split_utf8 ... ok
+test parser::tests::empty_input ... ok
+
+failures:
+
+---- cache::tests::evicts_oldest stdout ----
+
+thread 'cache::tests::evicts_oldest' (314) panicked at src/cache.rs:84:9:
+assertion \`left == right\` failed: oldest entry should be evicted
+  left: Some("frame-001")
+ right: None
+note: run with \`RUST_BACKTRACE=1\` environment variable to display a backtrace
+
+
+failures:
+    cache::tests::evicts_oldest
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/demo_render-5678)
+
+running 3 tests
+test grid::tests::empty_frame ... ok
+test grid::tests::keeps_wide_cells ... FAILED
+test grid::tests::single_cell ... ok
+
+failures:
+
+---- grid::tests::keeps_wide_cells stdout ----
+
+thread 'grid::tests::keeps_wide_cells' panicked at src/grid.rs:127:5:
+assertion \`left == right\` failed: wide cell was split at the edge
+  left: 79
+ right: 80
+
+
+failures:
+    grid::tests::keeps_wide_cells
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: 2 targets failed:
+    -p demo-core --lib
+    -p demo-render --lib`;
+
+    const $ = id => document.getElementById(id);
+    let model, selected = 0, focused = false, sourceName = 'Fictional sample log';
+    const say = message => { $('announcement').textContent = message; };
+    const element = (tag, text, className) => {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    };
+    function load(text, name) {
+      const parsed = FailureFocus.parse(text);
+      model = parsed; selected = 0; focused = false; sourceName = name;
+      $('source-label').textContent = name;
+      $('command-line').textContent = name === 'Fictional sample log' ? '~/atlas $ cargo test --workspace' : 'Read-only log snapshot';
+      render();
+    }
+    function rangesFor(failure) {
+      return failure.ranges.length ? failure.ranges : [{ start: failure.statusLine, end: failure.statusLine + 1 }];
+    }
+    function render(jump = false) {
+      const failure = model.failures[selected];
+      $('counts').replaceChildren(element('strong', `${model.failures.length} recognized failure${model.failures.length === 1 ? '' : 's'}`));
+      const summary = model.summaries ? `${model.passed} passed · ${model.failed} failed · ${model.ignored} ignored in completed summaries` : 'No completed test summary detected';
+      $('counts').append(element('span', summary));
+      $('toggle').textContent = focused ? 'Show in full output' : 'Focus failures';
+      $('view-label').textContent = focused ? 'Failure focus' : 'Complete transcript';
+      $('workspace').classList.toggle('raw-mode', !focused);
+      $('failure-list').hidden = !focused || !failure;
+      $('pane-head').hidden = !focused || !failure;
+      $('empty').hidden = !focused || Boolean(failure);
+      $('log').hidden = focused && !failure;
+      $('log').setAttribute('aria-label', focused ? 'Selected failure details' : 'Full log');
+      $('context-note').textContent = focused ? 'Only the view changed. Your full log is one click away.' : `${model.lines.length} lines · full log · ${sourceName}`;
+      $('failure-list').replaceChildren(element('p', 'Failed tests', 'section-label'));
+      model.failures.forEach((item, index) => {
+        const button = element('button', undefined, 'failure-item');
+        button.setAttribute('aria-current', String(index === selected));
+        button.append(element('span', String(index + 1).padStart(2, '0'), 'failure-number'), element('strong', item.name), element('span', item.location || 'No source location reported'), element('span', item.suite));
+        button.addEventListener('click', () => { selected = index; render(); $('log').focus(); });
+        $('failure-list').append(button);
+      });
+      if (failure) {
+        $('failure-title').textContent = failure.name;
+        $('failure-location').textContent = failure.location || 'No source location reported';
+        $('previous').disabled = selected === 0;
+        $('next').disabled = selected === model.failures.length - 1;
+      }
+      const visible = focused && failure ? rangesFor(failure) : [{ start: 0, end: model.lines.length }];
+      const highlight = jump && failure ? rangesFor(failure) : [];
+      const fragment = document.createDocumentFragment();
+      for (const range of visible) {
+        for (let i = range.start; i < range.end; i++) {
+          const text = model.lines[i];
+          const row = element('div', undefined, 'log-line');
+          row.id = `line-${i}`;
+          if (/FAILED|panicked at|^error:|^assertion/.test(text)) row.classList.add('error');
+          else if (/ \.\.\. ok$/.test(text)) row.classList.add('success');
+          if (highlight.some(span => i >= span.start && i < span.end)) row.classList.add('selected');
+          const number = element('span', String(i + 1), 'line-no');
+          number.setAttribute('aria-hidden', 'true');
+          row.append(number, element('span', text || ' ', 'line-text'));
+          fragment.append(row);
+        }
+      }
+      $('log').replaceChildren(fragment);
+      $('log').scrollTop = 0;
+      if (jump && failure) {
+        document.getElementById(`line-${rangesFor(failure)[0].start}`)?.scrollIntoView({ block: 'center' });
+        $('log').focus({ preventScroll: true });
+      }
+    }
+    function move(delta) {
+      if (!model.failures.length) return;
+      selected = Math.max(0, Math.min(model.failures.length - 1, selected + delta));
+      focused = true; render(); $('log').focus();
+      say(`Failure ${selected + 1} of ${model.failures.length}: ${model.failures[selected].name}`);
+    }
+    $('toggle').addEventListener('click', () => { focused = !focused; render(!focused); });
+    $('previous').addEventListener('click', () => move(-1));
+    $('next').addEventListener('click', () => move(1));
+    $('sample').addEventListener('click', () => { load(SAMPLE, 'Fictional sample log'); say('Fictional sample restored.'); });
+    $('open').addEventListener('click', () => $('file').click());
+    $('file').addEventListener('change', async event => {
+      const file = event.target.files[0];
+      if (!file) return;
+      try {
+        if (file.size > FailureFocus.MAX_BYTES) throw new Error('Log is larger than 1 MiB. Open a smaller transcript.');
+        load(await file.text(), file.name);
+        say('Local log opened. It is not uploaded or saved.');
+      } catch (error) { say(error.message); }
+      finally { event.target.value = ''; }
+    });
+    $('paste').addEventListener('click', () => { $('paste-error').textContent = ''; $('paste-dialog').showModal(); $('paste-text').focus(); });
+    $('cancel-paste').addEventListener('click', () => $('paste-dialog').close());
+    $('apply-paste').addEventListener('click', () => {
+      try {
+        if (!$('paste-text').value.trim()) throw new Error('Paste a log before opening it.');
+        load($('paste-text').value, 'Pasted local log');
+        $('paste-dialog').close(); $('paste-text').value = '';
+        say('Pasted log opened. No text is uploaded or saved.');
+      } catch (error) { $('paste-error').textContent = error.message; }
+    });
+    $('copy').addEventListener('click', async () => {
+      const failure = model.failures[selected];
+      if (!failure) return;
+      const text = `${failure.suite}\n${failure.name}\n\n` + rangesFor(failure).map(range => model.lines.slice(range.start, range.end).join('\n')).join('\n');
+      try { await navigator.clipboard.writeText(text); say('Failure copied with its suite and original details.'); }
+      catch { say('Clipboard unavailable here. Select and copy the failure text directly.'); }
+    });
+    document.addEventListener('keydown', event => {
+      if ($('paste-dialog').open || event.target.matches('input, textarea, [contenteditable]') || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key === '[' || event.key === ']') { event.preventDefault(); move(event.key === '[' ? -1 : 1); }
+      if (event.key === 'Escape' && focused) { focused = false; render(true); }
+    });
+    load(SAMPLE, sourceName);
+  </script>
+</body>
+</html>
