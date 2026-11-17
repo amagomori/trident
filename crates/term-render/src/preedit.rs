@@ -96,7 +96,7 @@ mod tests {
             [(0, 0, 1), (1, 0, 0), (1, 0, 0), (1, 1, 2), (3, 1, 0)]
         );
 
-        let mut fonts = crate::font::Fonts::new(None, 16.0).expect("bundled font");
+        let mut fonts = crate::font::Fonts::bundled(16.0);
         let accent = fonts
             .rasterize('\u{301}', crate::font::Style::Regular, 1)
             .expect("combining acute");

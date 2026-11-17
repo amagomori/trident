@@ -5,7 +5,11 @@
 use crate::builtin;
 use crate::color;
 use crate::fallback::{self, FontFile, SystemFonts};
-use ab_glyph::{Font, FontArc, FontRef, GlyphId, PxScale, ScaleFont, point};
+use crate::family::FontFaces;
+use ab_glyph::{
+    Font, FontArc, FontRef, GlyphId, Outline, OutlineCurve, OutlinedGlyph, Point, PxScale,
+    ScaleFont, point,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -18,6 +22,8 @@ pub const FAMILY: &str = "JetBrains Mono";
 pub(crate) const BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
 const ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf");
 const BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf");
+/// The bundled faces, by [`Style`].
+pub(crate) const BUNDLED: [&[u8]; 4] = [REGULAR, BOLD, ITALIC, BOLD_ITALIC];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Style {
@@ -113,18 +119,12 @@ fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
 }
 
 pub struct Fonts {
-    faces: [FontArc; 4],
+    faces: FontFaces,
     system: SystemFonts,
     /// Fallback fonts by file, each loaded on first need (`None` if it failed to load).
     fallbacks: HashMap<FontFile, Option<Fallback>>,
     pub px: f32,
     pub metrics: CellMetrics,
-}
-
-fn load(bytes: Vec<u8>) -> Option<FontArc> {
-    ab_glyph::FontVec::try_from_vec_and_index(bytes, 0)
-        .ok()
-        .map(FontArc::new)
 }
 
 /// ab_glyph scales by line height; convert from a font size in pixels per em.
@@ -133,22 +133,58 @@ fn scale(font: &FontArc, px: f32) -> PxScale {
     PxScale::from(px * font.height_unscaled() / units_per_em)
 }
 
-impl Fonts {
-    /// Uses the bundled JetBrains Mono unless `custom` points to a font file.
-    pub fn new(custom: Option<&Path>, px: f32) -> Result<Fonts, String> {
-        let faces = match custom {
-            Some(path) => {
-                let bytes = std::fs::read(path)
-                    .map_err(|e| format!("cannot read font {}: {e}", path.display()))?;
-                let font =
-                    load(bytes).ok_or_else(|| format!("cannot parse font {}", path.display()))?;
-                [font.clone(), font.clone(), font.clone(), font]
-            }
-            None => [REGULAR, BOLD, ITALIC, BOLD_ITALIC]
-                .map(|b| FontArc::try_from_slice(b).expect("bundled font")),
+/// Horizontal shear of synthesized italics, about 11 degrees.
+const SLANT: f32 = 0.2;
+
+/// Shears `outline` (in font units, y up) to the right around height `pivot`, so glyphs
+/// lean without drifting out of their cells.
+fn slant_outline(outline: &mut Outline, pivot: f32) {
+    let shear = |p: &mut Point| p.x += (p.y - pivot) * SLANT;
+    let mut min = point(f32::MAX, f32::MAX);
+    let mut max = point(f32::MIN, f32::MIN);
+    for curve in &mut outline.curves {
+        let points: Vec<&mut Point> = match curve {
+            OutlineCurve::Line(a, b) => vec![a, b],
+            OutlineCurve::Quad(a, b, c) => vec![a, b, c],
+            OutlineCurve::Cubic(a, b, c, d) => vec![a, b, c, d],
         };
+        for p in points {
+            shear(p);
+            min = point(min.x.min(p.x), min.y.min(p.y));
+            max = point(max.x.max(p.x), max.y.max(p.y));
+        }
+    }
+    if min.x <= max.x {
+        // ab_glyph keeps the top (largest y) in `min`, as pixel rows grow downwards.
+        outline.bounds = ab_glyph::Rect {
+            min: point(min.x, max.y),
+            max: point(max.x, min.y),
+        };
+    }
+}
+
+/// Widens each row of a `width`-wide coverage map `strength` pixels to the right, taking
+/// the strongest coverage in reach: a synthesized bold.
+fn embolden_coverage(coverage: &[u8], width: usize, strength: usize) -> Vec<u8> {
+    let wide = width + strength;
+    let mut out = vec![0u8; wide * (coverage.len() / width)];
+    for (row, out) in coverage.chunks_exact(width).zip(out.chunks_exact_mut(wide)) {
+        for (x, v) in out.iter_mut().enumerate() {
+            let from = x.saturating_sub(strength);
+            *v = row[from..(x + 1).min(width)]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+        }
+    }
+    out
+}
+
+impl Fonts {
+    pub fn new(faces: &FontFaces, px: f32) -> Fonts {
         let mut fonts = Fonts {
-            faces,
+            faces: faces.clone(),
             system: SystemFonts::new(),
             fallbacks: HashMap::new(),
             px,
@@ -161,12 +197,17 @@ impl Fonts {
             },
         };
         fonts.set_size(px);
-        Ok(fonts)
+        fonts
+    }
+
+    /// The bundled JetBrains Mono.
+    pub fn bundled(px: f32) -> Fonts {
+        Fonts::new(&FontFaces::bundled(), px)
     }
 
     pub fn set_size(&mut self, px: f32) {
         self.px = px;
-        let font = &self.faces[0];
+        let font = &self.faces.face(Style::Regular).font;
         let scaled = font.as_scaled(scale(font, px));
         let width = scaled.h_advance(font.glyph_id('M')).round().max(1.0);
         let height = (scaled.ascent() - scaled.descent()).ceil().max(1.0);
@@ -205,11 +246,13 @@ impl Fonts {
         let px = self.px;
         let mark = cells == 0;
         let cells = cells.max(1);
-        let face = &self.faces[style as usize];
+        let face = self.faces.face(style);
+        let (mut embolden, mut slant) = (face.embolden, face.slant);
         let emoji = !mark && fallback::prefers_emoji(c, cells);
-        let font = if face.glyph_id(c) != GlyphId(0) && !emoji {
-            face.clone()
+        let font = if face.font.glyph_id(c) != GlyphId(0) && !emoji {
+            face.font.clone()
         } else {
+            (embolden, slant) = (false, false);
             match self.fallback_for(c, emoji, mark) {
                 Some(Fallback {
                     face: Some(color_face),
@@ -229,7 +272,11 @@ impl Fonts {
                 }
                 Some(f) => f.font.clone(),
                 None if mark => return None,
-                None => self.faces[style as usize].clone(),
+                None => {
+                    let face = self.faces.face(style);
+                    (embolden, slant) = (face.embolden, face.slant);
+                    face.font.clone()
+                }
             }
         };
         let id = font.glyph_id(c);
@@ -241,9 +288,16 @@ impl Fonts {
             px_scale.x *= available / advance;
             px_scale.y *= available / advance;
         }
-        let outlined = font.outline_glyph(id.with_scale_and_position(px_scale, point(0.0, 0.0)))?;
+        let glyph = id.with_scale_and_position(px_scale, point(0.0, 0.0));
+        let outlined = if slant {
+            let mut outline = font.outline(id)?;
+            slant_outline(&mut outline, font.ascent_unscaled() / 3.0);
+            OutlinedGlyph::new(glyph, outline, font.as_scaled(px_scale).scale_factor())
+        } else {
+            font.outline_glyph(glyph)?
+        };
         let bounds = outlined.px_bounds();
-        let width = bounds.width() as usize;
+        let mut width = bounds.width() as usize;
         let height = bounds.height() as usize;
         if width == 0 || height == 0 {
             return None;
@@ -254,6 +308,11 @@ impl Fonts {
                 *v = (c.clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         });
+        if embolden {
+            let strength = (px / 20.0).round().max(1.0) as usize;
+            coverage = embolden_coverage(&coverage, width, strength);
+            width += strength;
+        }
         Some(RasterizedGlyph {
             width,
             height,
@@ -338,7 +397,7 @@ mod tests {
     use super::*;
 
     fn fonts() -> Fonts {
-        Fonts::new(None, 16.0).expect("bundled font")
+        Fonts::bundled(16.0)
     }
 
     #[test]
