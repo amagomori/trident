@@ -216,7 +216,7 @@ enum UserEvent {
     /// The pointer moved with Cmd held; its position is read back from `AppKit`.
     #[cfg(target_os = "macos")]
     PointerMoved,
-    /// The window with this `native_tabs::key` left native fullscreen, and AppKit has set
+    /// The window with this `native_tabs::key` left native fullscreen, and `AppKit` has set
     /// its frame.
     #[cfg(target_os = "macos")]
     ExitedFullScreen(usize),
@@ -932,7 +932,7 @@ fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) 
 type Frame = (PhysicalPosition<i32>, PhysicalSize<u32>);
 
 /// Whether `window` is fullscreen. On macOS this includes a native tab opened while its
-/// group was fullscreen, which AppKit takes into fullscreen without telling winit.
+/// group was fullscreen, which `AppKit` takes into fullscreen without telling winit.
 fn is_fullscreen(window: &Window) -> bool {
     #[cfg(target_os = "macos")]
     if native_tabs::is_fullscreen(window) {
@@ -942,7 +942,7 @@ fn is_fullscreen(window: &Window) -> bool {
 }
 
 /// The frame a new native tab's window opens at: the active window's, or while it is
-/// fullscreen the one it had before, which AppKit restores the whole tab group to.
+/// fullscreen the one it had before, which `AppKit` restores the whole tab group to.
 #[cfg(any(target_os = "macos", test))]
 fn new_tab_frame(fullscreen: bool, current: Option<Frame>, normal: Option<Frame>) -> Option<Frame> {
     if fullscreen {
@@ -952,8 +952,8 @@ fn new_tab_frame(fullscreen: bool, current: Option<Frame>, normal: Option<Frame>
     }
 }
 
-/// Puts the window back at its pre-fullscreen frame once AppKit has left fullscreen: with a
-/// tab opened while fullscreen active, AppKit restores the tab group screen-sized.
+/// Puts the window back at its pre-fullscreen frame once `AppKit` has left fullscreen: with a
+/// tab opened while fullscreen active, `AppKit` restores the tab group screen-sized.
 #[cfg(any(target_os = "macos", test))]
 #[derive(Default)]
 struct FullscreenExit {
@@ -985,7 +985,7 @@ impl FullscreenExit {
         self.restore.is_none()
     }
 
-    /// Once AppKit has left fullscreen: the frame to move the window from `current` to.
+    /// Once `AppKit` has left fullscreen: the frame to move the window from `current` to.
     fn finish(&mut self, current: Option<Frame>, normal: Option<Frame>) -> Option<Frame> {
         let was_fullscreen = std::mem::take(&mut self.was_fullscreen);
         self.restore
@@ -1970,7 +1970,7 @@ impl App {
         }
     }
 
-    /// Moves the active window back to the frame it had before fullscreen, if AppKit left
+    /// Moves the active window back to the frame it had before fullscreen, if `AppKit` left
     /// fullscreen at another one.
     #[cfg(target_os = "macos")]
     fn restore_normal_frame(&mut self) {
