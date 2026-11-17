@@ -202,9 +202,15 @@ source /usr/share/trident/shell-integration/terminal.bash
 source /usr/share/trident/shell-integration/terminal.fish
 ```
 
-- The snippets keep your existing prompt and hooks. Don't source them if another integration
-  already sends OSC 133.
-- fish 4 and later sends these marks itself, so the fish snippet does nothing there.
+- The snippets keep your existing prompt and hooks. Don't combine them with another prompt
+  integration, except fish's built-in marks.
+- fish 4 and later supplies its own command marks. The fish snippet adds the input boundary
+  and the same click-to-move adapter used by the zsh snippet.
+- With these fish/zsh snippets, a prompt click queries the editor's current buffer once,
+  then checks it against the screen before moving. This handles wide characters on rows
+  redrawn by the shell and distinguishes real spaces from painted margin padding. The
+  snippets use `base64`; restart the shell after updating them. Tabs, literal newlines,
+  partially scrolled-away input and text that does not match the screen do not move.
 - Bash before 4.4, including macOS `/bin/bash` 3.2, gets prompt marks only, without command
   start and exit status.
 - Any program that sends `OSC 7 ; file://host/path` sets the directory too. Directories on other

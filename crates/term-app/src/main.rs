@@ -373,6 +373,7 @@ struct Session {
     fonts: Fonts,
     term: Terminal,
     pty: Pty,
+    input_query: prompt_click::InputQuery,
     /// Output parsed since the last frame was drawn.
     since_frame: usize,
     /// When output was first held back.
@@ -416,6 +417,7 @@ struct Pane {
     pty_cell: (f32, f32),
     term: Terminal,
     pty: Pty,
+    input_query: prompt_click::InputQuery,
     since_frame: usize,
     deferred: Option<Instant>,
     synchronized_since: Option<Instant>,
@@ -465,6 +467,7 @@ impl Pane {
             pty_cell,
             term,
             pty,
+            input_query: prompt_click::InputQuery::default(),
             since_frame: 0,
             deferred: None,
             synchronized_since: None,
@@ -770,6 +773,7 @@ impl Session {
         swap(&mut self.pty_cell, &mut pane.pty_cell);
         swap(&mut self.term, &mut pane.term);
         swap(&mut self.pty, &mut pane.pty);
+        swap(&mut self.input_query, &mut pane.input_query);
         swap(&mut self.since_frame, &mut pane.since_frame);
         swap(&mut self.deferred, &mut pane.deferred);
         swap(&mut self.synchronized_since, &mut pane.synchronized_since);
@@ -1757,6 +1761,7 @@ impl App {
             fonts,
             term,
             pty,
+            input_query: prompt_click::InputQuery::default(),
             since_frame: 0,
             deferred: None,
             resize: ResizeThrottle::default(),
@@ -2114,6 +2119,7 @@ impl App {
         if index == self.active_tab || index >= self.tabs.len() {
             return;
         }
+        self.cancel_prompt_click();
         let Some(s) = &mut self.session else { return };
         let Some(mut pane) = self.tabs[index].take() else {
             return;
@@ -2155,6 +2161,7 @@ impl App {
     /// Closes tab `index`, asking first while a program other than the shell runs in it.
     /// Closing the last tab closes the window.
     fn close_tab(&mut self, index: usize, event_loop: &ActiveEventLoop) {
+        self.cancel_prompt_click();
         if self.tabs.len() <= 1 {
             self.close_requested(event_loop);
             return;
@@ -2213,6 +2220,7 @@ impl App {
     #[cfg(target_os = "macos")]
     #[cold]
     fn close_window(&mut self, event_loop: &ActiveEventLoop) {
+        self.cancel_prompt_click();
         let group = self.native_tab_order();
         if group.is_empty() || group.len() >= self.tabs.len() {
             self.close_requested(event_loop);
@@ -2335,6 +2343,11 @@ impl App {
         }
         let responses = pane.term.take_responses();
         pane.pty.write(&responses);
+        if pane.term.take_prompt_input().is_some()
+            && let Some((_, queued)) = pane.input_query.finish()
+        {
+            pane.pty.write(&queued);
+        }
         for request in pane.term.take_clipboard_requests() {
             match request {
                 ClipboardRequest::Store { primary, text } => self.clipboard.set(text, primary),
@@ -2476,6 +2489,7 @@ impl App {
     }
 
     fn resize_grid(&mut self) {
+        self.cancel_prompt_click();
         let tab_bar_shown = tab_bar_drawn(self.config.tab_bar.shown(self.tabs.len()));
         let Some(s) = &mut self.session else { return };
         s.scroll.reset();
@@ -2708,6 +2722,7 @@ impl App {
         if from_leftover && s.output.is_empty() && s.output.waiting_since.is_none() {
             self.process_output();
         }
+        self.finish_prompt_input();
     }
 
     fn present_frame(&mut self) {
@@ -2927,6 +2942,9 @@ impl App {
             self.clear_pager_error();
         }
         let Some(s) = &mut self.session else { return };
+        if s.input_query.buffer(bytes) {
+            return;
+        }
         if let Some(log) = &mut s.latency {
             log.input(Instant::now());
         }
@@ -2981,8 +2999,12 @@ impl App {
         if self.config.paste_protection
             && paste::needs_confirmation(text, s.term.modes.bracketed_paste)
         {
-            self.pending_paste = Some(text.to_owned());
-            s.window.request_redraw();
+            let text = text.to_owned();
+            self.cancel_prompt_click();
+            self.pending_paste = Some(text);
+            if let Some(s) = &self.session {
+                s.window.request_redraw();
+            }
             return;
         }
         self.send_paste(text);
@@ -3018,6 +3040,7 @@ impl App {
     /// the banner asks first, and a second close request confirms.
     #[cold]
     fn close_requested(&mut self, event_loop: &ActiveEventLoop) {
+        self.cancel_prompt_click();
         let running = self
             .session
             .as_ref()
@@ -3314,6 +3337,7 @@ impl App {
         }
         match action {
             Action::Search => {
+                self.cancel_prompt_click();
                 let search = self.search.get_or_insert_with(search::Search::default);
                 if let Some(s) = &self.session {
                     search.covered_rows = find_bar_rows(
@@ -3789,7 +3813,7 @@ impl App {
         let pressed = state == ElementState::Pressed;
         if button == MouseButton::Left {
             if pressed && !self.left_down && self.click_ledger() {
-                self.click_to_move.cancel();
+                self.cancel_prompt_click();
                 self.ledger_click = true;
                 return;
             }
@@ -3808,12 +3832,12 @@ impl App {
             || self.hover_link(),
         ) {
             Some(links::MouseAction::Release) => {
-                self.click_to_move.cancel();
+                self.cancel_prompt_click();
                 self.session.as_mut().unwrap().link_pressed = false;
                 return;
             }
             Some(links::MouseAction::Open(hover)) => {
-                self.click_to_move.cancel();
+                self.cancel_prompt_click();
                 self.session.as_mut().unwrap().link_pressed = true;
                 self.open_link(hover.target);
                 return;
@@ -3834,7 +3858,7 @@ impl App {
             return;
         }
         if self.mouse_reporting() {
-            self.click_to_move.cancel();
+            self.cancel_prompt_click();
             let button = match button {
                 MouseButton::Left => ReportButton::Left,
                 MouseButton::Middle => ReportButton::Middle,
@@ -3852,7 +3876,7 @@ impl App {
                 }
                 self.left_down = true;
                 let Some((row, col)) = self.cell_at(self.mouse_pos) else {
-                    self.click_to_move.cancel();
+                    self.cancel_prompt_click();
                     return;
                 };
                 let Some(s) = &self.session else { return };
@@ -3890,6 +3914,37 @@ impl App {
         }
     }
 
+    /// Context entry is a one-way cancellation, even if the context is dismissed
+    /// before the multi-click interval expires. Never revive its old gesture.
+    fn cancel_prompt_click(&mut self) {
+        self.click_to_move.cancel();
+        if let Some(s) = &mut self.session {
+            s.pty.write(&s.input_query.cancel());
+        }
+    }
+
+    fn finish_prompt_input(&mut self) {
+        let allowed = self.prompt_click_allowed();
+        let Some(s) = &mut self.session else { return };
+        let Some((text, cursor)) = s.term.take_prompt_input() else {
+            return;
+        };
+        let Some((point, queued)) = s.input_query.finish() else {
+            return;
+        };
+        let mut bytes = Vec::new();
+        if allowed
+            && let Some(point) = point
+            && let Some(click) = s.term.prompt_click_input(point, &text, cursor)
+        {
+            bytes = input::encode_prompt_click(click, s.term.modes.app_cursor);
+        }
+        bytes.extend_from_slice(&queued);
+        if !bytes.is_empty() {
+            self.write_input(&bytes);
+        }
+    }
+
     fn prompt_click_allowed(&self) -> bool {
         self.search.is_none()
             && self.pending_paste.is_none()
@@ -3905,7 +3960,14 @@ impl App {
         if !self.prompt_click_allowed() {
             return;
         }
-        let Some(s) = &self.session else { return };
+        let Some(s) = &mut self.session else { return };
+        if s.term.has_prompt_input_adapter() {
+            if s.input_query.begin(point, Instant::now()) {
+                s.term.take_prompt_input(); // ignore unsolicited/stale data
+                s.pty.write(prompt_click::INPUT_QUERY);
+            }
+            return;
+        }
         let Some(click) = s.term.prompt_click(point) else {
             return;
         };
@@ -4344,6 +4406,9 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(point) = self.click_to_move.take_ready(now) {
             self.move_cursor_to(point);
         }
+        if let Some(s) = &mut self.session {
+            s.pty.write(&s.input_query.expire(now));
+        }
         if exit_ready(self.exit_deadline, false, now) {
             event_loop.exit();
             return;
@@ -4440,6 +4505,9 @@ impl ApplicationHandler<UserEvent> for App {
         self.update_ime_cursor_area();
         let mut deadline = self.click_to_move.deadline();
         if let Some(s) = &mut self.session {
+            if let Some(at) = s.input_query.deadline() {
+                deadline = Some(deadline.map_or(at, |deadline| deadline.min(at)));
+            }
             if sync_expired(s.synchronized_since, Instant::now()) {
                 s.term.modes.synchronized_output = false;
                 s.synchronized_since = None;
@@ -4533,6 +4601,7 @@ impl ApplicationHandler<UserEvent> for App {
             #[cfg(not(target_os = "macos"))]
             WindowEvent::CloseRequested => self.close_requested(event_loop),
             WindowEvent::Resized(size) => {
+                self.cancel_prompt_click();
                 if let Some(search) = &mut self.search {
                     search.dirty = true;
                 }
@@ -4547,7 +4616,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
                 if !focused {
-                    self.click_to_move.cancel();
+                    self.cancel_prompt_click();
                 }
                 self.typing_pointer.show();
                 let changed = std::mem::replace(&mut self.focused, focused) != focused;
@@ -4659,7 +4728,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(event) => {
                 if matches!(&event, Ime::Preedit(text, _) if !text.is_empty()) {
-                    self.click_to_move.cancel();
+                    self.cancel_prompt_click();
                 }
                 if let Some(s) = &mut self.session {
                     s.composition.update(&event);

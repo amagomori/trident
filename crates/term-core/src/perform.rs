@@ -281,6 +281,7 @@ impl Perform for Terminal {
             }
             [b"9", b"4", args @ ..] => self.progress_report(args),
             [b"9", rest @ ..] => self.shell.notifications.osc9(rest),
+            [b"777", b"trident", b"prompt-input", rest @ ..] => self.prompt_input_report(rest),
             [b"777", rest @ ..] => self.shell.notifications.osc777(rest),
             [b"99", rest @ ..] => {
                 if let Some(reply) = self.shell.notifications.osc99(rest) {

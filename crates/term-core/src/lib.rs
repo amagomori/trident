@@ -18,6 +18,7 @@ pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
 pub use osc::{ClipboardRequest, WorkingDirectory};
 mod perform;
+mod prompt_input;
 mod reflow;
 mod rerun;
 
@@ -52,6 +53,7 @@ struct ShellState {
     input_start: Option<(u64, usize)>,
     track_input: bool,
     input_writes: Vec<(u64, std::ops::Range<usize>)>,
+    prompt_input: prompt_input::State,
     /// The prompt asked for clicks as SGR mouse reports (`OSC 133 ; A ; click_events=1`).
     click_events: bool,
     commands: VecDeque<Command>,
@@ -958,6 +960,7 @@ impl Terminal {
         let flag = match mark {
             b"A" => {
                 self.shell.zone = Zone::Prompt;
+                self.shell.prompt_input = prompt_input::State::default();
                 self.shell.click_events = args.contains(&&b"click_events=1"[..]);
                 Some(RowFlags::PROMPT_START)
             }
@@ -1062,6 +1065,7 @@ impl Terminal {
                 input_start: None,
                 track_input: false,
                 input_writes: Vec::new(),
+                prompt_input: prompt_input::State::default(),
                 click_events: false,
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
