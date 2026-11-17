@@ -349,11 +349,12 @@ impl Terminal {
         if !joins(c) {
             return;
         }
-        if let Some((row, col)) = self.cluster_cell() {
-            if self.append(row, col, c) && self.shell.track_input {
-                // A leading input mark can join the last prompt cell, before OSC B.
-                self.record_printed(row, col..col + 1);
-            }
+        if let Some((row, col)) = self.cluster_cell()
+            && self.append(row, col, c)
+            && self.shell.track_input
+        {
+            // A leading input mark can join the last prompt cell, before OSC B.
+            self.record_printed(row, col..col + 1);
         }
     }
 
