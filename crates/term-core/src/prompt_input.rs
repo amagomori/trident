@@ -149,6 +149,9 @@ impl Terminal {
                 return None;
             }
             if col >= self.cols || col + width > self.cols {
+                if point.line == line && point.col >= col {
+                    target = steps;
+                }
                 line += 1;
                 col = 0;
             }
@@ -423,5 +426,19 @@ mod tests {
         );
         t.advance(b"\x1b]777;trident;prompt-input;data;3;YWJjCg==;scalar\x07");
         assert!(t.take_prompt_input().is_some());
+    }
+
+    #[test]
+    fn wide_wrap_padding_and_painted_sentinel_are_the_boundary_before_the_wide_glyph() {
+        let mut terminal_wrap = Terminal::new(6, 5);
+        terminal_wrap.advance("\x1b]133;A\x07$ \x1b]133;B\x07abc日x".as_bytes());
+        check(&terminal_wrap, "abc日x", 0, 5, -2);
+        check(&terminal_wrap, "abc日x", 1, 0, -2);
+        check(&terminal_wrap, "abc日x", 1, 1, -2);
+        let mut zsh_redraw = Terminal::new(6, 5);
+        zsh_redraw.advance("\x1b]133;A\x07$ \x1b]133;B\x07abc\x1b[7m \x1b[27m\r\n日x".as_bytes());
+        check(&zsh_redraw, "abc日x", 0, 5, -2);
+        check(&zsh_redraw, "abc日x", 1, 0, -2);
+        check(&zsh_redraw, "abc日x", 1, 1, -2);
     }
 }
