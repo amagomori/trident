@@ -8,6 +8,7 @@ macro_rules! diag {
 mod app_icon;
 #[cfg(target_os = "linux")]
 mod appearance;
+mod bell;
 mod clipboard;
 mod close_confirm;
 mod command_notify;
@@ -16,11 +17,13 @@ mod drop_files;
 mod flow_control;
 #[cfg(any(target_os = "linux", test))]
 mod frame_clock;
+mod hover_preview;
 mod ime;
 mod input;
 mod latency;
 mod osc_notify;
 mod paste;
+mod pointer;
 #[cfg(target_os = "macos")]
 mod present_macos;
 #[cfg(target_os = "linux")]
@@ -34,11 +37,13 @@ mod secure_input;
 mod show;
 mod terminfo;
 mod theme;
+mod window_state;
 
 use config::Action;
 use input::MouseButton as ReportButton;
 use pty::Pty;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::{File, FileType};
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
@@ -61,11 +66,55 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::window::{Theme, Window, WindowId};
+use winit::window::{Fullscreen, Theme, Window, WindowId};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const STARTUP_STDERR: &str = "TERMINAL_STARTUP_STDERR";
 const WORKING_DIRECTORY: &str = "TERMINAL_WORKING_DIRECTORY";
+const WINDOW_CELLS: &str = "TERMINAL_WINDOW_CELLS";
+const REMOVE_ON_EXIT: &str = "TERMINAL_REMOVE_ON_EXIT";
+
+/// A file this window removes when it exits, such as the output a pager window shows.
+static REMOVE_ON_EXIT_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn remove_on_exit() {
+    if let Some(path) = REMOVE_ON_EXIT_PATH.get() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn exit(code: i32) -> ! {
+    remove_on_exit();
+    std::process::exit(code)
+}
+
+/// Removes `path` when SIGTERM, SIGHUP or SIGINT ends this window, which skips `exit`.
+fn remove_on_signal(path: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt;
+    static PATH: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
+    extern "C" fn remove_and_reraise(signal: libc::c_int) {
+        // SAFETY: unlink, signal and raise are async-signal-safe, and the path is set
+        // before the handler is installed.
+        unsafe {
+            if let Some(path) = PATH.get() {
+                libc::unlink(path.as_ptr());
+            }
+            libc::signal(signal, libc::SIG_DFL);
+            libc::raise(signal);
+        }
+    }
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    if PATH.set(path).is_err() {
+        return;
+    }
+    let handler = remove_and_reraise as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        // SAFETY: the handler only makes async-signal-safe calls.
+        unsafe { libc::signal(signal, handler) };
+    }
+}
 /// Bounds how long startup waits for the portal's color scheme before the
 /// first PTY output is parsed; the read overlaps window and GPU setup.
 #[cfg(target_os = "linux")]
@@ -147,15 +196,20 @@ enum UserEvent {
     /// A long command finished in the tab with this pane id.
     CommandFinished(u64, command_notify::Finished),
     ConfigChanged,
+    HoverPreview(hover_preview::Ready),
     /// The PTY of the tab with this pane id has output.
     Output(u64),
     /// The PTY of the tab with this pane id exited.
     Exit(u64),
+    PagerFailed(String),
     #[cfg(target_os = "macos")]
     Presented,
     /// The native tab bar's + button was clicked.
     #[cfg(target_os = "macos")]
     NewTab,
+    /// The pointer moved with Cmd held; its position is read back from AppKit.
+    #[cfg(target_os = "macos")]
+    PointerMoved,
 }
 
 struct Options {
@@ -168,6 +222,8 @@ struct Options {
     copy_on_select: bool,
     command: Vec<String>,
     working_directory: Option<PathBuf>,
+    /// The size of the window that opened this one, in cells.
+    window_cells: Option<(usize, usize)>,
 }
 
 impl Options {
@@ -187,13 +243,35 @@ impl Options {
         }
     }
 
-    fn command<'a>(&'a self, config: &'a config::Config) -> &'a [String] {
-        if self.command.is_empty() {
+    /// What the window's first tab runs: `-e`'s command, else the shell. New tabs
+    /// always run the shell.
+    fn command<'a>(&'a self, config: &'a config::Config, first_tab: bool) -> &'a [String] {
+        if self.command.is_empty() || !first_tab {
             &config.shell
         } else {
             &self.command
         }
     }
+}
+
+/// The arguments a new window is started with: this launch's, without `-e` and its
+/// command, so the new window opens the shell.
+fn new_window_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut kept = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "-e" || arg == "--command" {
+            break;
+        }
+        let takes_value = ["--config", "--scrollback", "--font", "--font-size"]
+            .iter()
+            .any(|option| arg == *option);
+        kept.push(arg);
+        if takes_value && let Some(value) = args.next() {
+            kept.push(value);
+        }
+    }
+    kept
 }
 
 fn usage() -> ! {
@@ -235,6 +313,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
         copy_on_select: false,
         command: Vec::new(),
         working_directory: None,
+        window_cells: None,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -279,7 +358,10 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
 struct Session {
     composition: ime::Composition,
     link_pressed: bool,
-    hover: Option<term_core::Link>,
+    hover: Option<links::Hover>,
+    /// The last `path:line` under the pointer and the file it names, so hovering the same
+    /// reference each frame doesn't touch the filesystem.
+    file_hover: std::cell::RefCell<Option<(term_core::FileLink, Option<PathBuf>)>>,
     ime_cursor_area: Option<[f32; 4]>,
     scroll: PixelScroll,
     pty_cell: (f32, f32),
@@ -329,7 +411,7 @@ struct Pane {
     id: u64,
     composition: ime::Composition,
     link_pressed: bool,
-    hover: Option<term_core::Link>,
+    hover: Option<links::Hover>,
     scroll: PixelScroll,
     pty_cell: (f32, f32),
     term: Terminal,
@@ -340,6 +422,8 @@ struct Pane {
     output: PendingOutput,
     title: String,
     progress: Option<term_core::Progress>,
+    /// Set by a bell while the tab is in the background, until it is shown.
+    bell: bell::Mark,
     #[cfg(target_os = "macos")]
     window: TabWindow,
 }
@@ -361,6 +445,7 @@ struct TabWindow {
     redraw_pending: bool,
     drawable_wait: Option<Instant>,
     occluded: bool,
+    normal_cells: (usize, usize),
 }
 
 impl Pane {
@@ -386,6 +471,7 @@ impl Pane {
             output: PendingOutput::default(),
             title: String::new(),
             progress: None,
+            bell: bell::Mark::default(),
             #[cfg(target_os = "macos")]
             window,
         }
@@ -428,6 +514,10 @@ fn shortcut_tab(index: usize, count: usize) -> usize {
 /// Runs every byte of `batch` through `term`, applying shell-return resets; the bytes
 /// processed.
 fn advance_all(term: &mut Terminal, batch: pty::Output) -> usize {
+    term.set_line_editing(batch.line_editing);
+    if batch.line_sent {
+        term.line_sent();
+    }
     let mut start = 0;
     for offset in batch.shell_returns {
         while start < offset {
@@ -448,6 +538,8 @@ type QuitChecks = std::rc::Rc<std::cell::RefCell<Vec<(u64, Box<dyn Fn() -> bool>
 struct PendingOutput {
     bytes: Vec<u8>,
     shell_returns: Vec<usize>,
+    line_editing: Option<usize>,
+    line_sent: bool,
     waiting_since: Option<Instant>,
 }
 
@@ -456,6 +548,8 @@ impl PendingOutput {
         let leftover = pty::Output {
             bytes: std::mem::take(&mut self.bytes),
             shell_returns: std::mem::take(&mut self.shell_returns),
+            line_editing: self.line_editing,
+            line_sent: std::mem::take(&mut self.line_sent),
         };
         let mut processed = 0;
         for batch in [leftover, queued] {
@@ -485,6 +579,10 @@ impl PendingOutput {
         }
         let from_leftover = !self.is_empty();
         let mut batch = self.next_batch(take_pty);
+        term.set_line_editing(batch.line_editing);
+        if batch.line_sent {
+            term.line_sent();
+        }
         let processed = advance_output(term, &mut batch);
         self.retain(
             batch,
@@ -501,17 +599,22 @@ impl PendingOutput {
 
     fn next_batch(&mut self, take_pty: impl FnOnce() -> pty::Output) -> pty::Output {
         if self.is_empty() {
-            take_pty()
+            let mut output = take_pty();
+            output.line_sent |= std::mem::take(&mut self.line_sent);
+            output
         } else {
             pty::Output {
                 bytes: std::mem::take(&mut self.bytes),
                 shell_returns: std::mem::take(&mut self.shell_returns),
+                line_editing: self.line_editing,
+                line_sent: std::mem::take(&mut self.line_sent),
             }
         }
     }
 
     fn retain(&mut self, mut batch: pty::Output, consumed: usize, frame_ended: bool, now: Instant) {
         self.bytes = batch.bytes.split_off(consumed);
+        self.line_editing = batch.line_editing.map(|at| at.saturating_sub(consumed));
         self.shell_returns = batch
             .shell_returns
             .into_iter()
@@ -522,6 +625,11 @@ impl PendingOutput {
 
     fn coalesce(&mut self, queued: pty::Output) -> bool {
         let offset = self.bytes.len();
+        self.line_sent |= queued.line_sent;
+        self.line_editing = match queued.line_editing {
+            Some(0) if offset > 0 => self.line_editing.or(Some(offset)),
+            at => at.map(|at| offset + at),
+        };
         self.bytes.extend(queued.bytes);
         self.shell_returns
             .extend(queued.shell_returns.into_iter().map(|at| offset + at));
@@ -657,6 +765,7 @@ impl Session {
         swap(&mut self.composition, &mut pane.composition);
         swap(&mut self.link_pressed, &mut pane.link_pressed);
         swap(&mut self.hover, &mut pane.hover);
+        self.file_hover.take();
         swap(&mut self.scroll, &mut pane.scroll);
         swap(&mut self.pty_cell, &mut pane.pty_cell);
         swap(&mut self.term, &mut pane.term);
@@ -783,8 +892,206 @@ fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) 
     (repeat || held_at_focus)
         && matches!(
             action,
-            Action::NewWindow | Action::NewTab | Action::CloseTab
+            Action::NewWindow
+                | Action::NewTab
+                | Action::CloseTab
+                | Action::ToggleFullscreen
+                | Action::ShowLastCommandOutput
         )
+}
+
+/// The fullscreen state `toggle_fullscreen` asks for: borderless on the current monitor,
+/// or windowed again.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn toggled_fullscreen(current: Option<Fullscreen>) -> Option<Fullscreen> {
+    match current {
+        Some(_) => None,
+        None => Some(Fullscreen::Borderless(None)),
+    }
+}
+
+/// A pager window: the output file it shows, the locale it needs, and where to report
+/// that it failed.
+struct PagerWindow {
+    file: PathBuf,
+    locale: Option<&'static str>,
+    failed: EventLoopProxy<UserEvent>,
+}
+
+/// Starts another window of this executable with `args`, reporting its startup errors
+/// and exit status under `label`. A pager window removes its file when it exits, so the
+/// file outlives this window; this window removes it too once the pager window is gone.
+fn open_window(
+    label: &'static str,
+    args: Vec<std::ffi::OsString>,
+    working_directory: Option<PathBuf>,
+    cells: Option<String>,
+    pager: Option<PagerWindow>,
+) {
+    let cleanup = pager.as_ref().map(|pager| pager.file.clone());
+    // Capture on the UI thread before moving into the window launcher. Pager windows
+    // belong to the same app quit group as ordinary New Window windows.
+    #[cfg(target_os = "macos")]
+    let quit_group = close_confirm::current_quit_group();
+    let spawned = std::thread::Builder::new()
+        .name(label.replace(' ', "-"))
+        .spawn(move || {
+            let result = std::env::current_exe().and_then(|exe| {
+                let (stderr, startup_stderr) = new_window_stderr();
+                let mut command = std::process::Command::new(exe);
+                command
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(stderr);
+                if startup_stderr {
+                    command.env(STARTUP_STDERR, "1");
+                }
+                if let Some(dir) = working_directory {
+                    command.env(WORKING_DIRECTORY, dir);
+                }
+                if let Some(cells) = cells {
+                    command.env(WINDOW_CELLS, cells);
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(group) = quit_group {
+                    command.env(close_confirm::QUIT_GROUP, group);
+                }
+                if let Some(pager) = &pager {
+                    command.env(REMOVE_ON_EXIT, &pager.file);
+                    if let Some(locale) = pager.locale {
+                        command.env("LC_CTYPE", locale);
+                    }
+                }
+                command.spawn()
+            });
+            match result {
+                Ok(mut child) => {
+                    if let Some(stderr) = child.stderr.take()
+                        && let Err(error) = forward_new_window_stderr(stderr, std::io::stderr())
+                    {
+                        let _ = writeln!(std::io::stderr(), "{label}: {error}");
+                    }
+                    let failure = wait_window(
+                        label,
+                        &mut child,
+                        pager.as_ref().map(|pager| pager.file.as_path()),
+                    );
+                    match (failure, &pager) {
+                        (Some(failure), Some(pager)) => {
+                            let _ = pager.failed.send_event(UserEvent::PagerFailed(failure));
+                        }
+                        (Some(failure), None) => {
+                            let _ = writeln!(std::io::stderr(), "trident: {failure}");
+                        }
+                        (None, _) => {}
+                    }
+                }
+                Err(error) => {
+                    let _ = writeln!(std::io::stderr(), "{label}: {error}");
+                    if let Some(pager) = pager {
+                        let _ = std::fs::remove_file(&pager.file);
+                        let _ = pager
+                            .failed
+                            .send_event(UserEvent::PagerFailed(format!("{label}: {error}")));
+                    }
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        let _ = writeln!(std::io::stderr(), "{label}: {error}");
+        if let Some(path) = cleanup {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Waits for the window `child` and removes `remove` once it is gone, however it ended.
+/// Returns a message when the window failed rather than exiting or being killed.
+fn wait_window(
+    label: &str,
+    child: &mut std::process::Child,
+    remove: Option<&std::path::Path>,
+) -> Option<String> {
+    let status = child.wait();
+    if let Some(path) = remove {
+        let _ = std::fs::remove_file(path);
+    }
+    match status {
+        Ok(status) if status.success() => None,
+        Ok(status) if status.code().is_none() => {
+            let _ = writeln!(std::io::stderr(), "trident: {label} exited with {status}");
+            None
+        }
+        Ok(status) => Some(format!("{label} exited with {status}")),
+        Err(error) => Some(format!("{label}: {error}")),
+    }
+}
+
+/// Finds the file a window would start for `program`, looking it up on `path` as the PTY
+/// does: relative paths and `PATH` entries resolve against `directory`, the new window's
+/// directory. The window is given the result, since the PTY does not resolve a relative
+/// path such as `bin/pager` against its directory.
+fn find_program(
+    program: &str,
+    path: Option<&std::ffi::OsStr>,
+    directory: &std::path::Path,
+) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let runnable = |candidate: &std::path::Path| {
+        let candidate = directory.join(candidate);
+        std::fs::metadata(&candidate)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .then_some(candidate)
+    };
+    if program.contains('/') {
+        return runnable(std::path::Path::new(program))
+            .ok_or_else(|| format!("pager: cannot run {program}"));
+    }
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .find_map(|dir| runnable(&dir.join(program)))
+        .ok_or_else(|| format!("pager: {program} is not on PATH; set pager to its full path"))
+}
+
+/// A UTF-8 character type for a pager window whose environment names no locale, as an
+/// app opened from Finder has none; the output file is always UTF-8.
+fn pager_locale(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<&'static str> {
+    let named = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .any(|name| var(name).is_some_and(|value| !value.is_empty()));
+    (!named).then_some(if cfg!(target_os = "macos") {
+        "UTF-8"
+    } else {
+        "C.UTF-8"
+    })
+}
+
+/// Writes `text` to a new private file for a pager window to read.
+fn write_pager_file(text: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let path = std::env::temp_dir().join(format!(
+        "trident-output-{}-{nanos}-{}.txt",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    if let Err(error) = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+    {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(path)
 }
 
 /// The directory a new window should start in: the shell's OSC 7 directory when it is
@@ -796,6 +1103,33 @@ fn local_working_directory(cwd: Option<&term_core::WorkingDirectory>) -> Option<
         || hostname().is_some_and(|name| same_host(&name, &cwd.host));
     let path = PathBuf::from(&cwd.path);
     (local && path.is_absolute() && path.is_dir()).then_some(path)
+}
+
+/// Start another Trident window with `args`, in `working_directory` and with `cells`
+/// columns and rows when given.
+fn spawn_window(
+    args: Vec<std::ffi::OsString>,
+    working_directory: Option<PathBuf>,
+    cells: Option<String>,
+) {
+    open_window("new window", args, working_directory, cells, None);
+}
+
+/// Where a relative `path:line` may live: the shell's OSC 7 directory, then the
+/// foreground process's working directory (no OSC 7, or a build tool run elsewhere).
+fn file_link_bases(s: &Session) -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = local_working_directory(s.term.working_directory())
+        .into_iter()
+        .collect();
+    if let Some(dir) = s
+        .pty
+        .foreground_process()
+        .and_then(close_confirm::process_working_directory)
+        && !bases.contains(&dir)
+    {
+        bases.push(dir);
+    }
+    bases
 }
 
 fn same_host(a: &str, b: &str) -> bool {
@@ -1064,6 +1398,13 @@ struct App {
     appearance_generation: u64,
     config: config::Config,
     config_error: Option<String>,
+    /// The window's latest size in cells while neither maximized nor fullscreen; on macOS,
+    /// each native tab's window keeps its own, swapped in with the tab.
+    normal_cells: (usize, usize),
+    /// Why the last pager window could not open, shown until the next input.
+    pager_error: Option<String>,
+    /// Captured before the app quit hook reaps the PTYs, for the source window's banner.
+    pager_exit_code: i32,
     icons: app_icon::Shown,
     /// Until the startup icons are set up: the latest time to do it.
     icons_latest: Option<Instant>,
@@ -1104,7 +1445,10 @@ struct App {
     /// The window is fully hidden (winit `Occluded`), for OSC 99 `o=invisible`.
     occluded: bool,
     notification_throttle: osc_notify::Throttle,
+    flash: bell::Flash,
     mouse_pos: PhysicalPosition<f64>,
+    typing_pointer: pointer::TypingPointer,
+    hover_preview: hover_preview::HoverPreview,
     left_down: bool,
     /// The left press landed on the pinned command header; swallow its release.
     ledger_click: bool,
@@ -1174,6 +1518,9 @@ impl App {
             font_size: options.size(&config),
             config,
             config_error,
+            normal_cells: window_state::DEFAULT_CELLS,
+            pager_error: None,
+            pager_exit_code: 0,
             icons: app_icon::Shown::default(),
             icons_latest: None,
             output_at: Instant::now(),
@@ -1200,7 +1547,10 @@ impl App {
             secure_input: Default::default(),
             occluded: false,
             notification_throttle: osc_notify::Throttle::default(),
+            flash: bell::Flash::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
+            typing_pointer: pointer::TypingPointer::default(),
+            hover_preview: hover_preview::HoverPreview::new(),
             left_down: false,
             ledger_click: false,
             reported_button: None,
@@ -1235,31 +1585,55 @@ impl App {
         };
         self.watch_appearance();
         let font = self.options.font(&self.config);
-        let m = probe.metrics;
-        let logical_size = LogicalSize::new(
-            100.0 * m.width + 2.0 * self.config.padding,
-            30.0 * m.height + 2.0 * self.config.padding + self.tab_bar_height(1, &probe) as f32,
-        );
-        let guess = event_loop
+        let monitor = event_loop
             .primary_monitor()
-            .map_or(1.0, |m| m.scale_factor());
+            .or_else(|| event_loop.available_monitors().next());
+        let guess = monitor.as_ref().map_or(1.0, |m| m.scale_factor());
         let guessed_fonts = if guess == 1.0 {
             probe
         } else {
             Fonts::new(font, self.font_size * guess as f32)?
         };
+        let guessed_tab_bar = self.tab_bar_height(1, &guessed_fonts);
+        let initial = window_state::initial(
+            self.options.window_cells,
+            (self.config.window_columns, self.config.window_rows),
+            self.config.remember_window_size,
+            || window_state::load(&window_state::path()?),
+        );
+        let cells = window_state::clamp(
+            initial.cells,
+            monitor.map(|m| {
+                grid_size_for(
+                    below_tab_bar(m.size(), guessed_tab_bar),
+                    guess,
+                    &guessed_fonts,
+                    self.config.padding,
+                )
+            }),
+        );
+        let physical_size = window_size_for(
+            cells,
+            guess,
+            &guessed_fonts,
+            self.config.padding,
+            guessed_tab_bar,
+        );
+        let logical_size = LogicalSize::new(
+            f64::from(physical_size.width) / guess,
+            f64::from(physical_size.height) / guess,
+        );
         let (spawn_cols, spawn_rows) = grid_size_for(
-            below_tab_bar(
-                logical_size.to_physical(guess),
-                self.tab_bar_height(1, &guessed_fonts),
-            ),
+            below_tab_bar(physical_size, guessed_tab_bar),
             guess,
             &guessed_fonts,
             self.config.padding,
         );
+        self.normal_cells = (spawn_cols, spawn_rows);
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let pty = self.spawn_pty(
             0,
+            self.options.command(&self.config, true),
             self.options.working_directory.as_deref(),
             spawn_cols,
             spawn_rows,
@@ -1267,7 +1641,8 @@ impl App {
         )?;
         let attrs = Window::default_attributes()
             .with_title("Trident")
-            .with_inner_size(logical_size);
+            .with_inner_size(logical_size)
+            .with_maximized(initial.maximized);
         #[cfg(target_os = "linux")]
         let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
             attrs, "trident", "trident",
@@ -1371,6 +1746,7 @@ impl App {
             composition: ime::Composition::default(),
             link_pressed: false,
             hover: None,
+            file_hover: Default::default(),
             ime_cursor_area: None,
             scroll: PixelScroll::default(),
             pty_cell: cell,
@@ -1409,6 +1785,7 @@ impl App {
     fn spawn_pty(
         &self,
         id: u64,
+        command: &[String],
         cwd: Option<&std::path::Path>,
         cols: usize,
         rows: usize,
@@ -1422,7 +1799,7 @@ impl App {
             env.insert("TERM".into(), term.into());
         }
         let mut pty = Pty::spawn(
-            self.options.command(&self.config),
+            command,
             &env,
             cwd,
             cols,
@@ -1444,6 +1821,33 @@ impl App {
     }
 
     /// The tab bar's height with `tabs` tabs open, 0 when it is hidden.
+    fn save_window_state(&self) {
+        let Some(s) = self
+            .session
+            .as_ref()
+            .filter(|_| self.config.remember_window_size)
+        else {
+            return;
+        };
+        let maximized = s.window.is_maximized();
+        let cells = if maximized || s.window.fullscreen().is_some() {
+            self.normal_cells
+        } else {
+            (s.term.cols(), s.term.rows())
+        };
+        let Some(path) = window_state::path() else {
+            return;
+        };
+        if let Err(error) =
+            window_state::save(&path, window_state::WindowState { cells, maximized })
+        {
+            diag!(
+                "trident: cannot save window size to {}: {error}",
+                path.display()
+            );
+        }
+    }
+
     fn tab_bar_height(&self, tabs: usize, fonts: &Fonts) -> u32 {
         if tab_bar_drawn(self.config.tab_bar.shown(tabs)) {
             term_render::tab_bar_height(fonts.metrics.height)
@@ -1489,7 +1893,14 @@ impl App {
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         self.next_pane += 1;
         let id = self.next_pane;
-        let pty = match self.spawn_pty(id, cwd.as_deref(), cols, rows, cell) {
+        let pty = match self.spawn_pty(
+            id,
+            self.options.command(&self.config, false),
+            cwd.as_deref(),
+            cols,
+            rows,
+            cell,
+        ) {
             Ok(pty) => pty,
             Err(error) => {
                 diag!("trident: new tab: {error}");
@@ -1563,6 +1974,7 @@ impl App {
             redraw_pending: false,
             drawable_wait: None,
             occluded: false,
+            normal_cells: self.normal_cells,
         })
     }
 
@@ -1614,19 +2026,23 @@ impl App {
         };
         s.swap_pane(&mut pane);
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+        std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         let latency = s.latency.take();
         let search = self.search.take();
         let focused = std::mem::replace(&mut self.focused, false);
         let pending_paste = self.pending_paste.take();
         let pending_close = self.pending_close.take();
         let tab_hover = self.tab_hover.take();
+        let flash = std::mem::take(&mut self.flash);
         f(self);
+        self.flash = flash;
         self.tab_hover = tab_hover;
         self.pending_close = pending_close;
         self.pending_paste = pending_paste;
         self.focused = focused;
         self.search = search;
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+        std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         if let Some(s) = &mut self.session {
             s.latency = latency;
             s.swap_pane(&mut pane);
@@ -1706,11 +2122,13 @@ impl App {
             s.pty.write(b"\x1b[O");
         }
         s.swap_pane(&mut pane);
+        pane.bell.show();
         #[cfg(not(target_os = "macos"))]
         s.renderer.forget_frame();
         #[cfg(target_os = "macos")]
         {
             std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
+            std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
             native_tabs::show(&s.window);
         }
         self.tabs[self.active_tab] = Some(pane);
@@ -1900,6 +2318,8 @@ impl App {
         let queued = pty::Output {
             bytes: std::mem::take(&mut pane.output.bytes),
             shell_returns: std::mem::take(&mut pane.output.shell_returns),
+            line_editing: pane.output.line_editing,
+            line_sent: std::mem::take(&mut pane.output.line_sent),
         };
         pane.output.waiting_since = None;
         let batch = pane.pty.take_output();
@@ -1936,18 +2356,21 @@ impl App {
             changed |= pane.progress != progress;
             pane.progress = progress;
         }
+        let bell = std::mem::take(&mut pane.term.bell);
+        changed |= bell && pane.bell.ring(false);
         #[cfg(target_os = "macos")]
         {
             if changed {
-                pane.window
-                    .window
-                    .set_title(&progress::window_title(&pane.title, pane.progress));
+                pane.window.window.set_title(
+                    &pane
+                        .bell
+                        .title(&progress::window_title(&pane.title, pane.progress)),
+                );
             }
             if !pane.window.occluded {
                 pane.window.window.request_redraw();
             }
         }
-        let bell = std::mem::take(&mut pane.term.bell);
         for notification in pane.term.take_notifications() {
             if self.config.desktop_notifications
                 && osc_notify::wanted(notification.occasion, self.focused, || Some(false))
@@ -2037,6 +2460,21 @@ impl App {
         }
     }
 
+    /// Catches up with a pointer move winit did not report.
+    #[cfg(target_os = "macos")]
+    fn sync_pointer(&mut self) {
+        let pos = self
+            .session
+            .as_ref()
+            .and_then(|s| native_tabs::pointer_position(&s.window));
+        if let Some(pos) = pos
+            && pos != self.tab_pointer
+        {
+            self.typing_pointer.show();
+            self.pointer_moved(pos);
+        }
+    }
+
     fn resize_grid(&mut self) {
         let tab_bar_shown = tab_bar_drawn(self.config.tab_bar.shown(self.tabs.len()));
         let Some(s) = &mut self.session else { return };
@@ -2066,6 +2504,9 @@ impl App {
             }
         }
         let grid_changed = (cols, rows) != (s.term.cols(), s.term.rows());
+        if grid_changed && !s.window.is_maximized() && s.window.fullscreen().is_none() {
+            self.normal_cells = (cols, rows);
+        }
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         let covered = find_bar_rows(
@@ -2224,9 +2665,14 @@ impl App {
             s.window
                 .set_title(&progress::window_title(&s.title, s.progress));
         }
-        if std::mem::take(&mut s.term.bell) && !self.focused {
-            s.window
-                .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        if std::mem::take(&mut s.term.bell) {
+            if !self.focused {
+                s.window
+                    .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+            }
+            if self.config.visual_bell && self.flash.ring(Instant::now()) {
+                s.window.request_redraw();
+            }
         }
         let visible = std::cell::OnceCell::new();
         for notification in s.term.take_notifications() {
@@ -2335,8 +2781,10 @@ impl App {
             search.refresh(&mut s.term, false);
         }
         self.update_ime_cursor_area();
+        let floating = self.hover_preview_overlay();
         let hover = self.hover_link();
         let Some(s) = &mut self.session else { return };
+        s.renderer.set_floating(floating);
         if s.term.modes.synchronized_output {
             s.redraw_pending = true;
             return;
@@ -2365,6 +2813,11 @@ impl App {
             (Some(error), Some(flow)) => Some(format!("{error} | {flow}")),
             (Some(error), None) => Some(error.to_owned()),
             (None, flow) => flow,
+        };
+        let banner = match (&self.pager_error, banner) {
+            (Some(error), Some(banner)) => Some(format!("{error} | {banner}")),
+            (Some(error), None) => Some(error.clone()),
+            (None, banner) => banner,
         };
         let banner = match &self.pending_paste {
             Some(text) => Some(paste::banner(text, banner)),
@@ -2409,11 +2862,17 @@ impl App {
             cursor_blink(blinking, s.blink_since, Instant::now());
         s.renderer.cursor_visible = cursor_visible;
         s.cursor_blink_at = cursor_blink_at;
+        s.renderer.flash = self.flash.showing(Instant::now());
         let tab_bar = (s.tab_bar > 0).then(|| term_render::TabBar {
             titles: self
                 .tabs
                 .iter()
                 .map(|pane| tab_title(pane.as_ref().map_or(&s.title, |pane| &pane.title)))
+                .collect(),
+            bells: self
+                .tabs
+                .iter()
+                .map(|pane| pane.as_ref().is_some_and(|pane| pane.bell.is_set()))
                 .collect(),
             active: self.active_tab,
             hover: self.tab_hover,
@@ -2428,7 +2887,7 @@ impl App {
             banner.as_deref(),
             search.as_ref(),
             s.composition.preedit().filter(|_| search.is_none()),
-            hover.as_ref(),
+            hover.as_ref().map(|hover| &hover.link),
             Some(&mut pre_present),
         );
         s.blink_at = s.renderer.blinking().then_some(blink_flip);
@@ -2436,7 +2895,7 @@ impl App {
             if self.startup_stderr {
                 if let Err(error) = finish_startup_stderr() {
                     let _ = writeln!(std::io::stderr(), "trident: startup stderr: {error}");
-                    std::process::exit(1);
+                    exit(1);
                 }
                 self.startup_stderr = false;
             }
@@ -2455,8 +2914,18 @@ impl App {
         }
     }
 
+    fn hide_pointer_for_typing(&mut self) {
+        if let Some(s) = &self.session {
+            self.typing_pointer
+                .typed(self.config.hide_mouse_when_typing, &s.window);
+        }
+    }
+
     fn write_input(&mut self, bytes: &[u8]) {
         self.flush_prompt_click();
+        if self.pager_error.is_some() {
+            self.clear_pager_error();
+        }
         let Some(s) = &mut self.session else { return };
         if let Some(log) = &mut s.latency {
             log.input(Instant::now());
@@ -2469,6 +2938,23 @@ impl App {
             || s.cursor_blink_at.is_none() && s.term.cursor_blink
         {
             s.request_frame();
+        }
+    }
+
+    #[cold]
+    fn clear_pager_error(&mut self) {
+        self.pager_error = None;
+        if let Some(s) = &self.session {
+            s.window.request_redraw();
+        }
+    }
+
+    #[cold]
+    fn show_pager_error(&mut self, error: String) {
+        let _ = writeln!(std::io::stderr(), "trident: {error}");
+        self.pager_error = Some(error);
+        if let Some(s) = &self.session {
+            s.window.request_redraw();
         }
     }
 
@@ -2487,14 +2973,19 @@ impl App {
             return;
         }
         let Some(s) = &self.session else { return };
+        let text = if self.config.trim_paste {
+            paste::trim(&text)
+        } else {
+            &text
+        };
         if self.config.paste_protection
-            && paste::needs_confirmation(&text, s.term.modes.bracketed_paste)
+            && paste::needs_confirmation(text, s.term.modes.bracketed_paste)
         {
-            self.pending_paste = Some(text);
+            self.pending_paste = Some(text.to_owned());
             s.window.request_redraw();
             return;
         }
-        self.send_paste(&text);
+        self.send_paste(text);
     }
 
     fn send_paste(&mut self, text: &str) {
@@ -2730,6 +3221,9 @@ impl App {
                 diag!("{warning}");
             }
             self.config = next;
+            if !self.config.hide_mouse_when_typing {
+                self.typing_pointer.show();
+            }
             #[cfg(target_os = "macos")]
             close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
             #[cfg(target_os = "macos")]
@@ -2866,55 +3360,64 @@ impl App {
                     .session
                     .as_ref()
                     .and_then(|s| local_working_directory(s.term.working_directory()));
-                if let Err(error) =
-                    std::thread::Builder::new()
-                        .name("new-window".into())
-                        .spawn(move || {
-                            let result = std::env::current_exe().and_then(|exe| {
-                                let (stderr, startup_stderr) = new_window_stderr();
-                                let mut command = std::process::Command::new(exe);
-                                command
-                                    .args(std::env::args_os().skip(1))
-                                    .stdin(Stdio::null())
-                                    .stdout(Stdio::null())
-                                    .stderr(stderr);
-                                if startup_stderr {
-                                    command.env(STARTUP_STDERR, "1");
-                                }
-                                if let Some(dir) = working_directory {
-                                    command.env(WORKING_DIRECTORY, dir);
-                                }
-                                command.spawn()
-                            });
-                            match result {
-                                Ok(mut child) => {
-                                    if let Some(stderr) = child.stderr.take()
-                                        && let Err(error) =
-                                            forward_new_window_stderr(stderr, std::io::stderr())
-                                    {
-                                        let _ = writeln!(std::io::stderr(), "new window: {error}");
-                                    }
-                                    match child.wait() {
-                                        Ok(status) if !status.success() => {
-                                            let _ = writeln!(
-                                                std::io::stderr(),
-                                                "trident: new window exited with {status}"
-                                            );
-                                        }
-                                        Err(error) => {
-                                            let _ =
-                                                writeln!(std::io::stderr(), "new window: {error}");
-                                        }
-                                        Ok(_) => {}
-                                    }
-                                }
-                                Err(error) => {
-                                    let _ = writeln!(std::io::stderr(), "new window: {error}");
-                                }
-                            }
-                        })
-                {
-                    let _ = writeln!(std::io::stderr(), "new window: {error}");
+                spawn_window(
+                    new_window_args(std::env::args_os().skip(1)),
+                    working_directory,
+                    self.window_cells(),
+                );
+            }
+            Action::ShowLastCommandOutput => {
+                let Some(output) = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.term.last_command_output())
+                else {
+                    return false;
+                };
+                let env = &self.config.env;
+                let var = |name: &str| {
+                    env.get(name)
+                        .map(Into::into)
+                        .or_else(|| std::env::var_os(name))
+                };
+                let directory = self
+                    .options
+                    .working_directory
+                    .clone()
+                    .or_else(pty::default_working_directory)
+                    .unwrap_or_default();
+                let opened =
+                    find_program(&self.config.pager[0], var("PATH").as_deref(), &directory)
+                        .and_then(|program| {
+                            write_pager_file(&output)
+                                .map(|file| (program, file))
+                                .map_err(|error| format!("pager: {error}"))
+                        });
+                match opened {
+                    Ok((program, file)) => {
+                        let mut args = new_window_args(std::env::args_os().skip(1));
+                        args.push("-e".into());
+                        args.push(program.into());
+                        args.extend(self.config.pager[1..].iter().map(Into::into));
+                        args.push(file.clone().into());
+                        let pager = PagerWindow {
+                            file,
+                            locale: pager_locale(var),
+                            failed: self.proxy.clone(),
+                        };
+                        open_window("pager", args, Some(directory), None, Some(pager));
+                    }
+                    Err(error) => self.show_pager_error(error),
+                }
+            }
+            Action::ToggleFullscreen => {
+                // The window's `Resized` events then resize the grid through `s.resize`.
+                if let Some(s) = &self.session {
+                    #[cfg(target_os = "macos")]
+                    native_tabs::toggle_fullscreen(&s.window);
+                    #[cfg(not(target_os = "macos"))]
+                    s.window
+                        .set_fullscreen(toggled_fullscreen(s.window.fullscreen()));
                 }
             }
             Action::None => return false,
@@ -2931,6 +3434,7 @@ impl App {
             Action::Send(text) => {
                 if self.search.is_none() {
                     self.write_input(text.as_bytes());
+                    self.hide_pointer_for_typing();
                 }
             }
             Action::JumpToPromptUp | Action::JumpToPromptDown | Action::SelectCommandOutput => {
@@ -3110,7 +3614,14 @@ impl App {
             .is_some_and(|s| input::tracks_mouse(s.term.modes.mouse, self.modifiers))
     }
 
-    fn hover_link(&self) -> Option<term_core::Link> {
+    /// The current grid size, for a new window to open at.
+    fn window_cells(&self) -> Option<String> {
+        self.session
+            .as_ref()
+            .map(|s| window_state::format_cells((s.term.cols(), s.term.rows())))
+    }
+
+    fn hover_link(&self) -> Option<links::Hover> {
         if !self.focused || !links::command_modifier(self.modifiers) {
             return None;
         }
@@ -3149,7 +3660,71 @@ impl App {
         {
             return None;
         }
-        s.term.link_at(s.term.viewport_to_point_signed(row, col))
+        let point = s.term.viewport_to_point_signed(row, col);
+        if let Some(link) = s.term.link_at(point) {
+            return Some(links::Hover {
+                target: links::Target::Uri(link.uri.clone()),
+                link,
+            });
+        }
+        let file_link = s.term.file_link_at(point)?;
+        let mut cache = s.file_hover.borrow_mut();
+        let path = match &*cache {
+            Some((cached, path)) if *cached == file_link => path.clone(),
+            _ => {
+                let path = links::resolve(
+                    &file_link.path,
+                    &file_link_bases(s),
+                    std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+                );
+                *cache = Some((file_link.clone(), path.clone()));
+                path
+            }
+        };
+        Some(links::Hover {
+            link: file_link.link(),
+            target: links::Target::File {
+                path: path?,
+                line: file_link.line,
+                column: file_link.column,
+            },
+        })
+    }
+
+    fn open_link(&self, target: links::Target) {
+        match target {
+            links::Target::Uri(uri) => links::open(uri),
+            links::Target::File { path, line, column } => {
+                let environment = ["VISUAL", "EDITOR"].into_iter().find_map(|name| {
+                    self.config
+                        .env
+                        .get(name)
+                        .cloned()
+                        .or_else(|| std::env::var(name).ok())
+                        .filter(|v| !v.trim().is_empty())
+                });
+                let editor = links::editor(
+                    &self.config.editor,
+                    environment.as_deref(),
+                    &path,
+                    line,
+                    column,
+                );
+                let working_directory = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| local_working_directory(s.term.working_directory()))
+                    .or_else(|| path.parent().map(std::path::Path::to_owned));
+                let cells = self.window_cells();
+                links::open_file(editor, &self.config.env, |command, dir| {
+                    spawn_window(
+                        links::window_args(std::env::args_os().skip(1), command),
+                        dir.or(working_directory),
+                        cells,
+                    );
+                });
+            }
+        }
     }
 
     fn refresh_link(&mut self) {
@@ -3157,6 +3732,9 @@ impl App {
         if let Some(s) = &mut self.session
             && s.hover != link
         {
+            if link.is_none() {
+                s.file_hover.take();
+            }
             s.window.set_cursor(if link.is_some() {
                 winit::window::CursorIcon::Pointer
             } else {
@@ -3165,6 +3743,7 @@ impl App {
             s.hover = link;
             s.request_frame();
         }
+        self.refresh_hover_preview();
     }
 
     fn report_mouse(&mut self, button: ReportButton, pressed: bool, motion: bool) {
@@ -3218,6 +3797,10 @@ impl App {
                 return;
             }
         }
+        if pressed && let Some(s) = &self.session {
+            // Resolve the reference again: the directory or the file may have changed.
+            s.file_hover.take();
+        }
         match links::mouse_action(
             button,
             pressed,
@@ -3229,10 +3812,10 @@ impl App {
                 self.session.as_mut().unwrap().link_pressed = false;
                 return;
             }
-            Some(links::MouseAction::Open(link)) => {
+            Some(links::MouseAction::Open(hover)) => {
                 self.click_to_move.cancel();
                 self.session.as_mut().unwrap().link_pressed = true;
-                links::open(link.uri);
+                self.open_link(hover.target);
                 return;
             }
             None => {}
@@ -3537,6 +4120,22 @@ fn grid_size(window: &Window, fonts: &Fonts, padding: f32, tab_bar: u32) -> (usi
     )
 }
 
+/// The inner size `grid_size_for` turns back into `cells`.
+fn window_size_for(
+    (cols, rows): (usize, usize),
+    scale: f64,
+    fonts: &Fonts,
+    padding: f32,
+    tab_bar: u32,
+) -> PhysicalSize<u32> {
+    let pad = (2.0 * padding * scale as f32).ceil();
+    let side = |cells: usize, cell: f32| (cells as f32 * cell + pad).ceil() as u32;
+    PhysicalSize::new(
+        side(cols, fonts.metrics.width),
+        side(rows, fonts.metrics.height) + tab_bar,
+    )
+}
+
 fn grid_size_for(
     size: PhysicalSize<u32>,
     scale: f64,
@@ -3579,6 +4178,8 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(target_os = "macos")]
                 native_tabs::handle_new_tab_button(&session.window, self.proxy.clone());
                 #[cfg(target_os = "macos")]
+                native_tabs::watch_command_moves();
+                #[cfg(target_os = "macos")]
                 native_tabs::install_window_menu();
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
@@ -3594,11 +4195,23 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     /// A macOS app quit ends the process from AppKit without returning from the event loop,
-    /// so the latency log is written here instead of when the session drops.
+    /// so the latency log, every tab's shell, and the pager file are cleaned up here
+    /// instead of when the session drops.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(s) = &mut self.session {
             s.latency.take();
         }
+        self.save_window_state();
+        // AppKit may never return from this callback; collect the pager status before
+        // hang_up_all takes its child, but keep the normal exit code to report on Linux.
+        self.pager_exit_code = window_exit_code(self);
+        pty::hang_up_all(
+            self.session
+                .iter_mut()
+                .map(|s| &mut s.pty)
+                .chain(self.tabs.iter_mut().flatten().map(|pane| &mut pane.pty)),
+        );
+        remove_on_exit();
     }
 
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
@@ -3606,6 +4219,8 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             #[cfg(target_os = "macos")]
             UserEvent::NewTab => self.new_tab(event_loop),
+            #[cfg(target_os = "macos")]
+            UserEvent::PointerMoved => self.sync_pointer(),
             #[cfg(target_os = "linux")]
             UserEvent::Appearance(generation, theme) => {
                 if self.appearance_watch.is_some() && generation == self.appearance_generation {
@@ -3623,6 +4238,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ConfigChanged => self.reload_config(),
+            UserEvent::PagerFailed(error) => self.show_pager_error(error),
+            UserEvent::HoverPreview(ready) => self.hover_preview_ready(ready),
             UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
                 self.output_ready()
             }
@@ -3875,6 +4492,13 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(due) = self.show_icons_when_idle() {
             deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
         }
+        if self.flash.expire(now) {
+            if let Some(s) = &self.session {
+                s.window.request_redraw();
+            }
+        } else if let Some(due) = self.flash.deadline() {
+            deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
+        }
         deadline = exit_wakeup(deadline, self.exit_deadline);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if self.exit_deadline.is_some() && self.exit_presentation.target.is_some() {
@@ -3925,6 +4549,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if !focused {
                     self.click_to_move.cancel();
                 }
+                self.typing_pointer.show();
                 let changed = std::mem::replace(&mut self.focused, focused) != focused;
                 if let Some(s) = &mut self.session {
                     s.blink_since = Instant::now();
@@ -3951,6 +4576,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
+                #[cfg(target_os = "macos")]
+                if links::command_modifier(self.modifiers) {
+                    self.sync_pointer();
+                }
                 self.refresh_link();
             }
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
@@ -4000,6 +4629,7 @@ impl ApplicationHandler<UserEvent> for App {
                 );
                 if let Some(bytes) = bytes {
                     self.write_input(&bytes);
+                    self.hide_pointer_for_typing();
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
@@ -4047,16 +4677,24 @@ impl ApplicationHandler<UserEvent> for App {
                     && self.pending_close.is_none()
                 {
                     self.write_input(text.as_bytes());
+                    self.hide_pointer_for_typing();
                 }
                 self.refresh_link();
                 self.update_ime_cursor_area();
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                self.typing_pointer.show();
                 if !self.tab_mouse_input(state, button, event_loop) {
                     self.mouse_input(state, button);
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => self.pointer_moved(position),
+            WindowEvent::CursorMoved { position, .. } => {
+                // Hiding the pointer can report a motion event at the same position.
+                if position != self.tab_pointer {
+                    self.typing_pointer.show();
+                }
+                self.pointer_moved(position)
+            }
             WindowEvent::CursorLeft { .. } => {
                 if self.tab_hover.take().is_some()
                     && let Some(s) = &self.session
@@ -4064,7 +4702,10 @@ impl ApplicationHandler<UserEvent> for App {
                     s.window.request_redraw();
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.typing_pointer.show();
+                self.mouse_wheel(delta)
+            }
             WindowEvent::RedrawRequested => {
                 self.present_frame();
             }
@@ -4083,8 +4724,24 @@ fn main() {
     // SAFETY: main has not started any threads or spawned the PTY yet.
     unsafe { std::env::remove_var(STARTUP_STDERR) };
     let working_directory = std::env::var_os(WORKING_DIRECTORY).map(PathBuf::from);
+    let window_cells = std::env::var(WINDOW_CELLS).ok();
+    #[cfg(target_os = "macos")]
+    let quit_group = std::env::var(close_confirm::QUIT_GROUP).ok();
     // SAFETY: as above.
-    unsafe { std::env::remove_var(WORKING_DIRECTORY) };
+    unsafe {
+        std::env::remove_var(WORKING_DIRECTORY);
+        std::env::remove_var(WINDOW_CELLS);
+        #[cfg(target_os = "macos")]
+        std::env::remove_var(close_confirm::QUIT_GROUP);
+    }
+    if let Some(path) = std::env::var_os(REMOVE_ON_EXIT) {
+        remove_on_signal(path.as_ref());
+        let _ = REMOVE_ON_EXIT_PATH.set(path.into());
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(REMOVE_ON_EXIT) };
+    }
+    #[cfg(target_os = "macos")]
+    close_confirm::join_quit_group(quit_group);
     if std::env::args().nth(1).as_deref() == Some("show") {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
@@ -4094,30 +4751,55 @@ fn main() {
     let options = match parse_args() {
         Ok(o) => Options {
             working_directory: working_directory.filter(|dir| dir.is_dir()),
+            window_cells: window_cells.as_deref().and_then(window_state::parse_cells),
             ..o
         },
         Err(e) => {
             diag!("trident: {e}");
-            std::process::exit(2);
+            exit(2);
         }
     };
     let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
         Ok(l) => l,
         Err(e) => {
             diag!("trident: cannot start event loop: {e}");
-            std::process::exit(1);
+            exit(1);
         }
     };
     let mut app = App::new(options, event_loop.create_proxy());
     app.startup_stderr = startup_stderr;
-    if let Err(e) = event_loop.run_app(&mut app) {
+    let run = event_loop.run_app(&mut app);
+    let code = app.pager_exit_code;
+    let error = app.error.take();
+    // Dropping the app reaps every tab's command, killing one that ignores SIGHUP.
+    drop(app);
+    remove_on_exit();
+    if let Err(e) = run {
         diag!("trident: {e}");
         std::process::exit(1);
     }
-    if let Some(e) = app.error {
+    if let Some(e) = error {
         diag!("trident: {e}");
         std::process::exit(1);
     }
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+/// How long a pager window waits for its pager's exit status once its output has ended.
+const PAGER_STATUS_WAIT: Duration = Duration::from_millis(500);
+
+/// A pager window whose pager exited by itself exits with the pager's status, so the
+/// window that opened it can report a pager that failed. Other windows exit 0.
+fn window_exit_code(app: &mut App) -> i32 {
+    if REMOVE_ON_EXIT_PATH.get().is_none() || app.exit_deadline.is_none() {
+        return 0;
+    }
+    app.session
+        .as_mut()
+        .and_then(|s| s.pty.exit_code(PAGER_STATUS_WAIT))
+        .map_or(0, |code| i32::try_from(code).unwrap_or(1))
 }
 
 #[cfg(test)]
@@ -4416,18 +5098,20 @@ mod tests {
     }
 
     #[test]
-    fn only_new_window_suppresses_shortcut_repeats() {
+    fn only_window_opening_shortcuts_suppress_repeats() {
         for action in [
             Action::NewWindow,
             Action::NewTab,
             Action::CloseTab,
             Action::NextTab,
             Action::SelectTab(0),
+            Action::ShowLastCommandOutput,
             Action::LineUp,
             Action::LineDown,
             Action::Increase,
             Action::Decrease,
             Action::Copy,
+            Action::ToggleFullscreen,
             Action::None,
         ] {
             assert!(!suppress_shortcut_repeat(&action, false, false));
@@ -4436,10 +5120,209 @@ mod tests {
                     suppress_shortcut_repeat(&action, repeat, synthetic),
                     matches!(
                         action,
-                        Action::NewWindow | Action::NewTab | Action::CloseTab
+                        Action::NewWindow
+                            | Action::NewTab
+                            | Action::CloseTab
+                            | Action::ToggleFullscreen
+                            | Action::ShowLastCommandOutput
                     )
                 );
             }
+        }
+    }
+
+    #[test]
+    fn toggle_fullscreen_goes_borderless_and_back() {
+        assert!(matches!(
+            toggled_fullscreen(None),
+            Some(Fullscreen::Borderless(None))
+        ));
+        assert!(toggled_fullscreen(Some(Fullscreen::Borderless(None))).is_none());
+    }
+
+    #[test]
+    fn pager_window_keeps_options_but_not_the_command() {
+        let options = |args: &[&str]| {
+            new_window_args(args.iter().map(std::ffi::OsString::from))
+                .into_iter()
+                .map(|arg| arg.into_string().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert!(options(&[]).is_empty());
+        assert_eq!(
+            options(&[
+                "--config",
+                "-e",
+                "--font-size",
+                "20",
+                "--copy-on-select",
+                "-e",
+                "vim",
+                "--font",
+                "x"
+            ]),
+            ["--config", "-e", "--font-size", "20", "--copy-on-select"]
+        );
+        assert_eq!(
+            options(&["--scrollback", "5", "--font", "/f.ttf", "--command", "top"]),
+            ["--scrollback", "5", "--font", "/f.ttf"]
+        );
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("trident-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pager_window_file_is_removed_however_the_window_ends() {
+        let dir = scratch_dir("wait-window");
+        for (script, failed) in [
+            ("exit 0", false),
+            ("kill -TERM $$", false),
+            ("kill -KILL $$", false),
+            ("exit 1", true),
+            ("exit 2", true),
+        ] {
+            let file = dir.join("output.txt");
+            std::fs::write(&file, "out\n").unwrap();
+            let mut child = std::process::Command::new("/bin/sh")
+                .args(["-c", script])
+                .spawn()
+                .unwrap();
+            let failure = wait_window("pager", &mut child, Some(&file));
+            assert!(!file.exists(), "{script}");
+            assert_eq!(failure.is_some(), failed, "{script}: {failure:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    const SIGNAL_TEST_FILE: &str = "TRIDENT_SIGNAL_TEST_FILE";
+    const SIGNAL_TEST_SIGNAL: &str = "TRIDENT_SIGNAL_TEST_SIGNAL";
+
+    /// Run by `pager_signal_removes_the_file_and_still_ends_the_window` in a process of
+    /// its own: installs the handler for the file it is given, then raises the signal.
+    #[test]
+    fn raise_with_remove_on_signal() {
+        let (Some(file), Some(signal)) = (
+            std::env::var_os(SIGNAL_TEST_FILE),
+            std::env::var(SIGNAL_TEST_SIGNAL)
+                .ok()
+                .and_then(|s| s.parse::<libc::c_int>().ok()),
+        ) else {
+            return;
+        };
+        remove_on_signal(file.as_ref());
+        // SAFETY: raising a signal in this process has no memory effects.
+        unsafe { libc::raise(signal) };
+        unreachable!("signal {signal} did not end the process");
+    }
+
+    #[test]
+    fn pager_signal_removes_the_file_and_still_ends_the_window() {
+        use std::os::unix::process::ExitStatusExt;
+        let dir = scratch_dir("remove-on-signal");
+        for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+            let file = dir.join(format!("output-{signal}.txt"));
+            std::fs::write(&file, "out\n").unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::raise_with_remove_on_signal",
+                    "--test-threads=1",
+                ])
+                .env(SIGNAL_TEST_FILE, &file)
+                .env(SIGNAL_TEST_SIGNAL, signal.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), Some(signal), "{status}");
+            assert!(!file.exists(), "{signal}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_or_unrunnable_pager_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("find-program");
+        let runnable = dir.join("pager");
+        let plain = dir.join("notes");
+        std::fs::write(&runnable, "#!/bin/sh\n").unwrap();
+        std::fs::write(&plain, "").unwrap();
+        std::fs::set_permissions(&runnable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let path = std::env::join_paths(["/nonexistent".as_ref(), dir.as_path()]).unwrap();
+        let root = std::path::Path::new("/");
+        assert_eq!(
+            find_program("pager", Some(&path), root),
+            Ok(runnable.clone())
+        );
+        assert_eq!(
+            find_program(runnable.to_str().unwrap(), None, root),
+            Ok(runnable.clone())
+        );
+        let parent = dir.parent().unwrap();
+        let name = dir.file_name().unwrap().to_str().unwrap();
+        assert_eq!(
+            find_program(&format!("{name}/pager"), None, parent),
+            Ok(runnable.clone())
+        );
+        let relative = std::ffi::OsString::from(name);
+        assert_eq!(
+            find_program("pager", Some(&relative), parent),
+            Ok(runnable.clone())
+        );
+        for (program, path) in [
+            ("pager", None),
+            ("notes", Some(path.as_os_str())),
+            ("missing", Some(path.as_os_str())),
+            (plain.to_str().unwrap(), Some(path.as_os_str())),
+            (dir.to_str().unwrap(), Some(path.as_os_str())),
+            ("/nonexistent/less", Some(path.as_os_str())),
+        ] {
+            let error = find_program(program, path, std::path::Path::new("/")).unwrap_err();
+            assert!(
+                error.starts_with("pager: ") && error.contains(program),
+                "{error}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pager_gets_a_utf8_locale_only_when_none_is_named() {
+        let utf8 = if cfg!(target_os = "macos") {
+            "UTF-8"
+        } else {
+            "C.UTF-8"
+        };
+        assert_eq!(pager_locale(|_| None), Some(utf8));
+        assert_eq!(pager_locale(|_| Some("".into())), Some(utf8));
+        for name in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            let var = |n: &str| (n == name).then(|| "en_US.UTF-8".into());
+            assert_eq!(pager_locale(var), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn pager_file_is_private_and_ends_with_a_newline() {
+        use std::os::unix::fs::PermissionsExt;
+        let first = write_pager_file("\x1b[0;1mbold\x1b[0m\nplain").unwrap();
+        let second = write_pager_file("").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "\x1b[0;1mbold\x1b[0m\nplain\n"
+        );
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "\n");
+        let mode = std::fs::metadata(&first).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        for path in [first, second] {
+            std::fs::remove_file(path).unwrap();
         }
     }
 
@@ -4661,6 +5544,7 @@ mod tests {
             font_size: super::DEFAULT_FONT_SIZE,
             command: Vec::new(),
             working_directory: None,
+            window_cells: None,
             option_as_alt: true,
             copy_on_select: false,
         };
@@ -4670,7 +5554,8 @@ mod tests {
         );
         assert_eq!(options.size(&config), 22.0);
         assert_eq!(options.scrollback(&config), 42);
-        assert_eq!(options.command(&config), ["zsh", "-l"]);
+        assert_eq!(options.command(&config, true), ["zsh", "-l"]);
+        assert_eq!(options.command(&config, false), ["zsh", "-l"]);
         options.font = Some("/cli.ttf".into());
         options.font_size_override = true;
         options.font_size = 18.0;
@@ -4685,13 +5570,15 @@ mod tests {
         let mut reloaded = config.clone();
         reloaded.scrollback = 123;
         assert_eq!(options.scrollback(&reloaded), 90);
-        assert_eq!(options.command(&config), ["bash"]);
+        assert_eq!(options.command(&config, true), ["bash"]);
+        assert_eq!(options.command(&config, false), ["zsh", "-l"]);
     }
 
     fn batch(bytes: &[u8]) -> pty::Output {
         pty::Output {
             bytes: bytes.to_vec(),
             shell_returns: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -4730,6 +5617,7 @@ mod tests {
             pty::Output {
                 bytes,
                 shell_returns,
+                ..Default::default()
             },
         )
     }
@@ -4785,6 +5673,7 @@ mod tests {
             pty::Output {
                 bytes: b"\x1b[?2026l\x1b[?2026hthird".to_vec(),
                 shell_returns: vec![8],
+                ..Default::default()
             },
         );
         let text: String = term
@@ -4960,6 +5849,28 @@ mod tests {
     }
 
     #[test]
+    fn coalesced_output_keeps_where_line_editing_starts() {
+        let family = "\u{1f468}\u{200d}\u{1f469}";
+        let mut output = PendingOutput {
+            bytes: b"\x1b[?2026h".to_vec(),
+            ..Default::default()
+        };
+        let queued = |bytes: String, line_editing| pty::Output {
+            bytes: bytes.into_bytes(),
+            line_editing,
+            ..Default::default()
+        };
+        output.coalesce(queued(format!("{family}|\r\n"), None));
+        output.coalesce(queued(family.to_string(), Some(0)));
+        assert!(output.coalesce(queued("\x1b[?2026l".into(), Some(0))));
+        assert_eq!(output.line_editing, Some(8 + family.len() + 3));
+        let mut term = Terminal::new(10, 2);
+        output.advance(&mut term, false, || panic!("coalesced output first"));
+        assert_eq!(term.grapheme(&term.viewport_row(0).cells[0]), Some(family));
+        assert_eq!(term.viewport_row(1).cells[2].c, '\u{1f469}');
+    }
+
+    #[test]
     fn queued_completed_frames_replace_an_unsubmitted_frame() {
         let mut term = Terminal::new(10, 2);
         let mut output = PendingOutput::default();
@@ -5012,6 +5923,7 @@ mod tests {
         assert!(!output.coalesce(pty::Output {
             bytes: Vec::new(),
             shell_returns: vec![0],
+            ..Default::default()
         }));
         assert_eq!(output.shell_returns, [output.bytes.len()]);
         assert!(output.coalesce(batch(b"\x1b[?2026l")));
@@ -5436,6 +6348,56 @@ mod tests {
     }
 
     #[test]
+    fn new_windows_drop_the_command_and_keep_other_options() {
+        let args = |list: &[&str]| -> Vec<OsString> { list.iter().map(OsString::from).collect() };
+        assert_eq!(
+            new_window_args(args(&[
+                "--font-size",
+                "14",
+                "-e",
+                "sh",
+                "-c",
+                "echo ran; exec zsh",
+            ])),
+            args(&["--font-size", "14"])
+        );
+        assert_eq!(
+            new_window_args(args(&[
+                "--copy-on-select",
+                "--command",
+                "vim",
+                "--config",
+                "x"
+            ])),
+            args(&["--copy-on-select"])
+        );
+        assert_eq!(
+            new_window_args(args(&[
+                "--config",
+                "-e",
+                "--font",
+                "--command",
+                "-e",
+                "top"
+            ])),
+            args(&["--config", "-e", "--font", "--command"])
+        );
+        assert_eq!(
+            new_window_args(args(&["--option-as-alt", "--scrollback", "5"])),
+            args(&["--option-as-alt", "--scrollback", "5"])
+        );
+        assert!(new_window_args(args(&["-e", "top"])).is_empty());
+        let options = parse_args_from(
+            new_window_args(args(&["--font-size", "14", "-e", "top"]))
+                .into_iter()
+                .map(|arg| arg.into_string().unwrap()),
+        )
+        .unwrap();
+        assert!(options.command.is_empty());
+        assert_eq!(options.font_size, 14.0);
+    }
+
+    #[test]
     fn clipboard_copy_on_select_is_opt_in_and_not_a_command_argument() {
         assert!(!parse_args_from(std::iter::empty()).unwrap().copy_on_select);
         let args = [
@@ -5523,6 +6485,7 @@ mod tests {
                 ]
                 .concat(),
                 shell_returns: vec![setup.len(), setup.len() * 2 + prompt.len()],
+                ..Default::default()
             },
         );
         assert_eq!(term.modes.mouse, MouseMode::Off);
@@ -5533,6 +6496,7 @@ mod tests {
             &mut pty::Output {
                 bytes: Vec::new(),
                 shell_returns: Vec::new(),
+                ..Default::default()
             },
         );
         assert!(term.modes.bracketed_paste);
@@ -5554,6 +6518,7 @@ mod tests {
         let mut queued = Some(pty::Output {
             bytes: b"\r099\x1b[?2026l".to_vec(),
             shell_returns: vec![0],
+            ..Default::default()
         });
         assert!(!wake_pending.swap(true, Ordering::AcqRel));
         output.presented();
@@ -5746,6 +6711,7 @@ mod tests {
         let mut output = pty::Output {
             bytes: [first.as_slice(), second.as_slice(), prompt.as_slice()].concat(),
             shell_returns: vec![first.len(), first.len() + second.len()],
+            ..Default::default()
         };
         let consumed = advance_output(&mut term, &mut output);
         assert_eq!(consumed, first.len() + second.len());
@@ -5775,6 +6741,7 @@ mod tests {
             pty::Output {
                 bytes: Vec::new(),
                 shell_returns: vec![0],
+                ..Default::default()
             },
             0,
             false,
@@ -5810,6 +6777,39 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn window_size_round_trips_to_its_cells() {
+        for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            for padding in [0.0, PADDING, 6.3] {
+                for tab_bar in [0, 37] {
+                    for cells in [(20, 5), (80, 24), (100, 30), (317, 91)] {
+                        let size = window_size_for(cells, scale, &fonts, padding, tab_bar);
+                        assert_eq!(
+                            grid_size_for(below_tab_bar(size, tab_bar), scale, &fonts, padding),
+                            cells,
+                            "{scale} {padding} {tab_bar} {cells:?}"
+                        );
+                    }
+                }
+            }
+        }
+        let fonts = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let screen = PhysicalSize::new(1920, 1080);
+        let max = grid_size_for(screen, 1.0, &fonts, PADDING);
+        let size = window_size_for(
+            window_state::clamp((1000, 1000), Some(max)),
+            1.0,
+            &fonts,
+            PADDING,
+            0,
+        );
+        assert!(
+            size.width <= screen.width && size.height <= screen.height,
+            "{size:?}"
+        );
+    }
+
     #[test]
     fn icons_wait_for_the_first_frame_and_quiet_output() {
         let now = Instant::now();

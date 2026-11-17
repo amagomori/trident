@@ -4,7 +4,7 @@
 Builds are unsigned: the macOS app is only ad-hoc signed (`codesign -s -`), which Apple
 Silicon needs to run it at all; there is no Developer ID signature or notarization.
 
-  release.py version --tag v0.1.0                   check the tag against Cargo.toml
+  release.py version --tag v1.0.0                   check the tag against Cargo.toml
   release.py linux --binary B --version V --out D    tarball, .deb and (with --appimagetool
                     [--appimagetool T --runtime R]   and --runtime) an AppImage
   release.py macos --binary B --version V --out D    Trident.app and, where hdiutil exists, a .dmg
@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[3]
 NAME = "Trident"
 PACKAGE = "trident"
 BUNDLE_ID = "com.amagomori.trident"
-REPO = "amagomori/terminal"
+REPO = "amagomori/trident"
 HOMEPAGE = f"https://github.com/{REPO}"
 SUMMARY = "Fast, GPU-rendered terminal emulator"
 MACOS_MINIMUM = "11.0"
@@ -506,9 +506,15 @@ def changelog(tag, since=None, cwd=ROOT, repo=REPO):
         lines += [f"- {title} ([#{n}](https://github.com/{repo}/pull/{n}))" for n, title in prs]
     else:
         lines.append("No pull requests merged since the last release.")
-    lines += ["", "Builds are unsigned, so macOS reports a downloaded .dmg as damaged: run "
-              f"`xattr -d com.apple.quarantine {NAME}-{tag.removeprefix('v')}-macos-universal.dmg` "
-              "before opening it. Verify downloads with `sha256sum -c SHA256SUMS`."]
+    image = f'"$HOME/Downloads/{dmg_name(tag.removeprefix("v"))}"'
+    lines += ["", "Builds are unsigned and not notarized. For a browser-downloaded DMG in "
+              f"`~/Downloads`, compare `shasum -a 256 {image}` with the DMG's entry in the "
+              "release's `SHA256SUMS`. Only if they match, run "
+              f"`xattr -d com.apple.quarantine {image}` **before opening the DMG**. "
+              f"Then open the DMG and drag {NAME} to Applications. Before opening {NAME} "
+              f"the first time, run `xattr -dr com.apple.quarantine /Applications/{NAME}.app`. "
+              "These steps apply only to this download and app; the Homebrew cask handles "
+              "quarantine for you. Verify Linux downloads with `sha256sum -c SHA256SUMS`."]
     if since:
         lines += ["", f"**Full changelog**: https://github.com/{repo}/compare/{since}...{tag}"]
     return "\n".join(lines) + "\n"

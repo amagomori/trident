@@ -232,6 +232,54 @@ pub(super) fn drop_preview(
     Some((output, image_rows))
 }
 
+/// What a hover preview of a file shows.
+pub(super) enum Preview {
+    /// RGBA8 with straight alpha, at most the requested size; with a description such as
+    /// "PNG 640×480".
+    Image(u32, u32, Vec<u8>, String),
+    Text(String),
+    /// A description of contents there is no preview for.
+    Binary(String),
+}
+
+/// Previews `bytes`, the start of the file at `path` (`complete` when they are all of it):
+/// images scaled down to fit `max` pixels, or text.
+pub(super) fn preview(bytes: &[u8], complete: bool, path: &Path, max: (u32, u32)) -> Preview {
+    let window = Window {
+        cols: 1,
+        rows: 2,
+        cell_w: max.0 as f32,
+        cell_h: max.1 as f32,
+        tmux: false,
+    };
+    let options = Options::default();
+    let image = |rgba: Result<Rgba, String>, name: String| match rgba {
+        Ok(i) => Preview::Image(i.width, i.height, i.pixels, name),
+        Err(e) => Preview::Binary(e),
+    };
+    match detect(bytes) {
+        Kind::Raster(format) if complete => {
+            let name = match image::ImageReader::with_format(io::Cursor::new(bytes), format)
+                .into_dimensions()
+            {
+                Ok((w, h)) => format!("{} {w}×{h}", format_name(format)),
+                Err(_) => format_name(format),
+            };
+            image(decode_raster(bytes, format, &options, window), name)
+        }
+        Kind::Svg if complete => image(render_svg(bytes, path, &options, window), "SVG".into()),
+        Kind::Raster(format) => Preview::Binary(format!("{} image", format_name(format))),
+        Kind::Svg => Preview::Binary("SVG image".into()),
+        Kind::Text => Preview::Text(String::from_utf8_lossy(bytes).into_owned()),
+        Kind::DecodedText(text) => Preview::Text(text),
+        Kind::Binary(kind) => Preview::Binary(kind),
+    }
+}
+
+pub(super) fn size_label(bytes: u64) -> String {
+    human_size(bytes)
+}
+
 /// `io::Error`'s message without the " (os error N)" suffix.
 fn io_message(e: &io::Error) -> String {
     let message = e.to_string();

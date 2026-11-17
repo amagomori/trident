@@ -10,6 +10,24 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// A window started from `/` (as from Finder) runs in the inherited home, not an
+/// `[env].HOME` override. Pager lookup and PTY spawning must use the same directory.
+pub fn default_working_directory() -> Option<std::path::PathBuf> {
+    inherited_working_directory(
+        std::env::current_dir().ok(),
+        std::env::var_os("HOME").map(Into::into),
+    )
+}
+
+fn inherited_working_directory(
+    current: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    current
+        .filter(|dir| dir != std::path::Path::new("/"))
+        .or(home)
+}
+
 /// Output the reader thread queues before it waits for the UI, once it also holds
 /// `MIN_LINES` lines. That many lines is well past a screen plus default scrollback, so a
 /// flood's batch is long enough to skip building the lines it evicts, even with long lines.
@@ -42,6 +60,9 @@ struct Queue {
     pending: Mutex<Pending>,
     room: Condvar,
     probe: Probe,
+    /// The user typed since the last line they sent: only then can a read be the line
+    /// editor's echo. A command's output, and the next prompt, follow a sent line.
+    typing: AtomicBool,
 }
 
 /// Asks whether the shell itself is the PTY's foreground process group.
@@ -96,6 +117,17 @@ impl Probe {
         is_idle_shell(args) || (self.login.is_some() && args == self.login.as_slice())
     }
 
+    fn editor_modes(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.fd
+                .as_ref()
+                .is_some_and(|fd| editor_modes(fd.as_raw_fd()))
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
     fn shell(&self) -> Option<bool> {
         #[cfg(unix)]
         {
@@ -128,6 +160,8 @@ struct Pending {
     unchecked_from: Option<usize>,
     /// Bytes read since the last escape byte, if any.
     since_escape: Option<usize>,
+    /// Start of the reads queued since the last one without a line editor's modes.
+    editing_from: Option<usize>,
 }
 
 impl Pending {
@@ -169,7 +203,8 @@ impl Pending {
         }
     }
 
-    fn append(&mut self, bytes: &[u8], checked: bool) {
+    fn append(&mut self, bytes: &[u8], checked: bool, editing: bool) {
+        self.editing_from = editing.then(|| self.editing_from.unwrap_or(self.bytes.len()));
         if !checked && self.unchecked_from.is_none() {
             self.unchecked_from = Some(self.bytes.len());
         }
@@ -185,6 +220,8 @@ impl Pending {
         Output {
             bytes: std::mem::take(&mut self.bytes),
             shell_returns: std::mem::take(&mut self.shell_returns),
+            line_editing: self.editing_from.take(),
+            line_sent: false,
         }
     }
 
@@ -194,9 +231,15 @@ impl Pending {
     }
 }
 
+#[derive(Default)]
 pub struct Output {
     pub bytes: Vec<u8>,
     pub shell_returns: Vec<usize>,
+    /// Where the trailing reads that found a line editor's modes (see `Pty::line_editing`)
+    /// start: the shell's echo and redraws, which it measures one codepoint at a time.
+    pub line_editing: Option<usize>,
+    /// The user sent a line since the last output was taken.
+    pub line_sent: bool,
 }
 
 #[derive(Default)]
@@ -220,11 +263,13 @@ impl Foreground {
 pub struct Pty {
     pub flow: crate::flow_control::FlowControl,
     pub flow_redraw: bool,
+    /// The user sent a line since the output was last taken (see `Output::line_sent`).
+    line_sent: bool,
     master: Box<dyn MasterPty + Send>,
     /// Input queued for the writer thread, so a full PTY never blocks the UI.
     input: Sender<Input>,
     pause_boundary: Option<Arc<AtomicU64>>,
-    /// `None` only once `drop` has handed it to the reaper thread.
+    /// `None` once `drop` has handed it to the reaper thread or `exit_code` has reaped it.
     child: Option<Box<dyn Child + Send + Sync>>,
     output: Arc<Queue>,
     /// Set while a wake-up is queued, so a burst of output wakes the UI only once.
@@ -240,6 +285,21 @@ pub struct Pty {
 struct Input {
     bytes: Vec<u8>,
     pause_boundary: Option<Arc<AtomicU64>>,
+}
+
+/// A line editor's modes (readline, zle, also in python or psql): no canonical mode or echo,
+/// signals on, and CR left unmapped, unlike a program's silent read.
+#[cfg(unix)]
+fn editor_modes(fd: std::os::fd::RawFd) -> bool {
+    let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: fd is a live PTY master; tcgetattr initializes attrs on success.
+    if unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: tcgetattr succeeded.
+    let attrs = unsafe { attrs.assume_init() };
+    attrs.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG) == libc::ISIG
+        && attrs.c_iflag & (libc::ICRNL | libc::INLCR) != libc::ICRNL
 }
 
 #[cfg(unix)]
@@ -520,14 +580,11 @@ impl Pty {
         for (key, value) in env {
             cmd.env(key, value);
         }
-        if let Some(dir) = cwd {
-            cmd.cwd(dir);
-        } else if let Some(home) = std::env::var_os("HOME")
-            && std::env::current_dir()
-                .map(|d| d == std::path::Path::new("/"))
-                .unwrap_or(true)
+        if let Some(dir) = cwd
+            .map(std::path::PathBuf::from)
+            .or_else(default_working_directory)
         {
-            cmd.cwd(home);
+            cmd.cwd(dir);
         }
         // portable-pty starts the default shell as a login shell, with argv[0] `-<basename>`.
         let login = cmd.is_default_prog().then(|| {
@@ -640,12 +697,20 @@ impl Pty {
             .name("pty-reader".into())
             .spawn(move || {
                 let mut buf = vec![0u8; READ_BUFFER];
+                let mut was_editing = false;
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             #[cfg(unix)]
                             reader_activity.kick();
+                            // The modes are read after the bytes were written: a read that
+                            // finds the editor's modes just set is the end of a command's
+                            // output and the prompt, not the editor's own redraw.
+                            let modes = queue.probe.editor_modes();
+                            let editing =
+                                modes && was_editing && queue.typing.load(Ordering::SeqCst);
+                            was_editing = modes;
                             let sequence = queue.read_sequence.fetch_add(1, Ordering::SeqCst) + 1;
                             let read_bytes =
                                 queue.read_bytes.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
@@ -666,7 +731,7 @@ impl Pty {
                             }
                             p.sequence = sequence;
                             p.read_bytes = read_bytes;
-                            p.append(&buf[..n], checked);
+                            p.append(&buf[..n], checked, editing);
                             drop(p);
                             if !pending.swap(true, Ordering::AcqRel) {
                                 wake(false);
@@ -684,6 +749,7 @@ impl Pty {
         Ok(Pty {
             flow: Default::default(),
             flow_redraw: false,
+            line_sent: false,
             master: pair.master,
             input,
             pause_boundary: None,
@@ -697,6 +763,24 @@ impl Pty {
             watcher: None,
             finished: Arc::new(finished),
         })
+    }
+
+    /// The command's exit code, waiting up to `within` for it to exit after its output
+    /// ended. `None` while it still runs or when a signal ended it.
+    pub fn exit_code(&mut self, within: Duration) -> Option<u32> {
+        let deadline = Instant::now() + within;
+        let status = loop {
+            match self.child.as_mut()?.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        };
+        // Reaped, so `drop` must not signal its pid, which may be reused by now.
+        self.child = None;
+        status.signal().is_none().then(|| status.exit_code())
     }
 
     pub fn set_command_notifications(&mut self, enabled: bool) -> Result<(), String> {
@@ -729,9 +813,27 @@ impl Pty {
         Ok(())
     }
 
+    /// The shell's process id.
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.child.as_ref()?.process_id()
+    }
+
     /// The process group of a program running in the foreground instead of the shell.
     pub fn running_program(&self) -> Option<i32> {
         self.output.probe.program()
+    }
+
+    /// The terminal's foreground process group: the running program, else the shell.
+    pub fn foreground_process(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            let fd = self.output.probe.fd.as_ref()?;
+            // SAFETY: fd is a PTY master descriptor owned by this probe.
+            let group = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+            (group > 0).then_some(group)
+        }
+        #[cfg(not(unix))]
+        None
     }
 
     /// Whether a program holds the foreground, as a check that outlives this borrow, for the
@@ -754,7 +856,8 @@ impl Pty {
     /// Everything the shell wrote since the last call.
     pub fn take_output(&mut self) -> Output {
         let mut p = self.output.pending.lock().unwrap();
-        let output = p.take_output(Instant::now(), || self.output.probe.shell());
+        let mut output = p.take_output(Instant::now(), || self.output.probe.shell());
+        output.line_sent = std::mem::take(&mut self.line_sent);
         if !output.bytes.is_empty() {
             if let Some(boundary) = &self.pause_boundary {
                 self.flow
@@ -778,6 +881,12 @@ impl Pty {
         if bytes.is_empty() {
             return;
         }
+        let line_end = memchr::memrchr2(b'\r', b'\n', bytes);
+        self.line_sent |= line_end.is_some();
+        self.output.typing.store(
+            line_end.is_none_or(|end| end + 1 < bytes.len()),
+            Ordering::SeqCst,
+        );
         let settings = self.flow_flags().unwrap_or_default();
         self.flow_redraw |= self.flow.input(
             bytes,
@@ -829,18 +938,7 @@ impl Pty {
     fn editor_modes(&self) -> bool {
         #[cfg(unix)]
         {
-            let Some(fd) = self.master.as_raw_fd() else {
-                return false;
-            };
-            let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
-            // SAFETY: fd belongs to the live master; tcgetattr initializes attrs on success.
-            if unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) } != 0 {
-                return false;
-            }
-            // SAFETY: tcgetattr succeeded.
-            let attrs = unsafe { attrs.assume_init() };
-            attrs.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG) == libc::ISIG
-                && attrs.c_iflag & (libc::ICRNL | libc::INLCR) != libc::ICRNL
+            self.master.as_raw_fd().is_some_and(editor_modes)
         }
         #[cfg(not(unix))]
         false
@@ -906,6 +1004,35 @@ impl Drop for Pty {
     }
 }
 
+/// Hangs up on the shell of every one of `ptys` at once, killing one that lingers, and waits
+/// for them: an app quit on macOS ends the process from AppKit, which never drops the PTYs.
+pub fn hang_up_all<'a>(ptys: impl IntoIterator<Item = &'a mut Pty>) {
+    fn hang_up(mut child: Box<dyn Child + Send + Sync>) {
+        match child.kill() {
+            Ok(()) => drop(child.wait()),
+            Err(_) => drop(child.try_wait()),
+        }
+    }
+    let mut hang_ups = Vec::new();
+    for child in ptys.into_iter().filter_map(|pty| pty.child.take()) {
+        // The child is sent only once its thread exists, so a failed spawn still hangs up.
+        let (send, receive) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("pty-hang-up".into())
+            .spawn(move || receive.recv().map(hang_up))
+        {
+            Ok(thread) => {
+                let _ = send.send(child);
+                hang_ups.push(thread);
+            }
+            Err(_) => hang_up(child),
+        }
+    }
+    for hang_up in hang_ups {
+        let _ = hang_up.join();
+    }
+}
+
 /// Hangs up on `child`, killing it if it lingers, and waits for it so it never stays a
 /// zombie: a shell that outlives portable-pty's grace period gets SIGKILL and no wait. The
 /// wait runs on its own thread, as it can outlast the UI's frame.
@@ -923,6 +1050,23 @@ fn reap(mut child: Box<dyn Child + Send + Sync>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_directory_uses_inherited_home_only_from_root_or_unknown_cwd() {
+        let home = std::path::PathBuf::from("/inherited-home");
+        let cwd = std::path::PathBuf::from("/project");
+        for current in [None, Some("/".into())] {
+            assert_eq!(
+                inherited_working_directory(current, Some(home.clone())),
+                Some(home.clone())
+            );
+        }
+        assert_eq!(
+            inherited_working_directory(Some(cwd.clone()), Some(home)),
+            Some(cwd)
+        );
+        assert_eq!(inherited_working_directory(Some("/".into()), None), None);
+    }
 
     #[cfg(unix)]
     fn nonblocking_pipe() -> (std::fs::File, std::fs::File) {
@@ -1168,6 +1312,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn exit_code_reports_how_the_command_exited() {
+        let spawn = |script: &str| {
+            Pty::spawn(
+                &["/bin/sh".into(), "-c".into(), script.into()],
+                &Default::default(),
+                None,
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap()
+        };
+        assert_eq!(spawn("exit 2").exit_code(Duration::from_secs(10)), Some(2));
+        assert_eq!(spawn("exit 0").exit_code(Duration::from_secs(10)), Some(0));
+        assert_eq!(
+            spawn("kill -TERM $$").exit_code(Duration::from_secs(10)),
+            None
+        );
+        let mut running = spawn("sleep 30");
+        assert_eq!(running.exit_code(Duration::from_millis(50)), None);
+        assert!(
+            running.child.is_some(),
+            "a running command stays for drop to reap"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn drop_reaps_a_shell_that_ignores_hangup() {
         let mut pty = Pty::spawn(
             &[
@@ -1199,6 +1373,59 @@ mod tests {
             assert!(Instant::now() < deadline, "shell {pid} was not reaped");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hang_up_all_reaps_every_shell_before_returning() {
+        let spawn = || {
+            Pty::spawn(
+                &[
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "trap '' HUP; echo ready; while :; do sleep 1; done".into(),
+                ],
+                &Default::default(),
+                None,
+                80,
+                24,
+                (8.0, 16.0),
+                |_| {},
+                |_| {},
+            )
+            .unwrap()
+        };
+        let mut ptys = [spawn(), spawn(), spawn()];
+        let pids: Vec<libc::pid_t> = ptys
+            .iter()
+            .map(|pty| pty.child.as_ref().unwrap().process_id().unwrap() as libc::pid_t)
+            .collect();
+        for pty in &mut ptys {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut seen = Vec::new();
+            while !String::from_utf8_lossy(&seen).contains("ready\r\n") {
+                assert!(Instant::now() < deadline, "output: {seen:?}");
+                seen.extend_from_slice(&pty.take_output().bytes);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let started = Instant::now();
+        hang_up_all(ptys.iter_mut());
+        // The three grace periods overlap.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // A zombie still answers signal 0; only a reaped pid is gone.
+        for pid in pids {
+            assert_ne!(
+                unsafe { libc::kill(pid, 0) },
+                0,
+                "shell {pid} was not reaped"
+            );
+        }
+        assert!(ptys.iter().all(|pty| pty.child.is_none()));
     }
 
     /// Every argv form QA tried on #71 and #60 (as the shell sees it after `env` or a path),
@@ -1370,6 +1597,157 @@ mod tests {
         wait_for(&mut pty, true);
         drop(pty);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Readline and zle move over and erase emoji sequences one codepoint at a time, so their
+    /// echo keeps per-codepoint cells while the same sequence printed by a command joins.
+    #[cfg(unix)]
+    #[test]
+    fn line_editor_echo_keeps_codepoint_cells_and_output_joins() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let bash = ["bash", "--norc", "--noprofile", "-i"];
+        line_editor_session(&bash, family);
+        line_editor_session(&bash, "\u{1f1ef}\u{1f1f5}");
+        if std::process::Command::new("zsh")
+            .arg("-fc")
+            .arg("true")
+            .status()
+            .is_ok()
+        {
+            // zsh draws a ZWJ as `<200d>` unless COMBINING_CHARS is set.
+            // No flag: a zsh built with Unicode 9 widths (macOS) counts each regional
+            // indicator as two columns where libc counts one, so no single width fits both.
+            line_editor_session(&["zsh", "-f", "-i"], "\u{1f44d}\u{1f3fd}");
+        } else {
+            eprintln!("no zsh on this system; skipping it");
+        }
+    }
+
+    #[cfg(unix)]
+    fn line_editor_session(args: &[&str], sequence: &str) {
+        let env = [
+            ("LANG".to_owned(), "C.UTF-8".to_owned()),
+            ("LC_ALL".to_owned(), "C.UTF-8".to_owned()),
+            ("PS1".to_owned(), "$ ".to_owned()),
+            // zsh picks the vi keymap from a `vi` editor.
+            ("EDITOR".to_owned(), "emacs".to_owned()),
+            ("VISUAL".to_owned(), "emacs".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let args: Vec<String> = args.iter().map(|&a| a.into()).collect();
+        let mut pty = Pty::spawn(&args, &env, None, 40, 10, (8.0, 16.0), |_| {}, |_| {}).unwrap();
+        let mut term = term_core::Terminal::new(40, 10);
+        let row_text = |term: &term_core::Terminal, row: usize| {
+            let mut text = String::new();
+            for cell in &term.viewport_row(row).cells {
+                if !cell.flags.contains(term_core::Flags::WIDE_SPACER) {
+                    term.push_cell_text(cell, &mut text);
+                }
+            }
+            text.trim_end().to_owned()
+        };
+        let pump = |pty: &mut Pty,
+                    term: &mut term_core::Terminal,
+                    what: &str,
+                    done: &dyn Fn(&term_core::Terminal) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let output = pty.take_output();
+                term.set_line_editing(output.line_editing);
+                if output.line_sent {
+                    term.line_sent();
+                }
+                term.advance(&output.bytes);
+                if done(term) && pty.output.pending.lock().unwrap().bytes.is_empty() {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{args:?} never {what}: {:?} at {:?}",
+                    (0..3).map(|row| row_text(term, row)).collect::<Vec<_>>(),
+                    term.cursor_position()
+                );
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        };
+        let cursor = |term: &term_core::Terminal| term.cursor_position().map(|(_, col)| col);
+        pump(&mut pty, &mut term, "prompted", &|t| {
+            row_text(t, 0) == "$" && cursor(t) == Some(2)
+        });
+        // As the editor counts them after the 17 columns of `$ printf '%s|\n' `: emoji take
+        // two columns, regional indicators one and a ZWJ none.
+        let width = |s: &str| {
+            let cols = |c: char| match c as u32 {
+                0x200d => 0,
+                0x1f1e6..=0x1f1ff => 1,
+                _ => 2,
+            };
+            17 + s.chars().map(cols).sum::<usize>()
+        };
+        let last = sequence.chars().last().unwrap();
+        let kept = &sequence[..sequence.len() - last.len_utf8()];
+        let end = width(sequence);
+        pty.write(format!("printf '%s|\\n' {sequence}").as_bytes());
+        pump(&mut pty, &mut term, "echoed", &|t| cursor(t) == Some(end));
+        pty.write(b"\x01");
+        pump(&mut pty, &mut term, "at the start", &|t| {
+            cursor(t) == Some(2)
+        });
+        pty.write(b"\x05");
+        pump(&mut pty, &mut term, "at the end", &|t| {
+            cursor(t) == Some(end)
+        });
+        // Backspace deletes the last codepoint; the screen agrees.
+        pty.write(b"\x7f");
+        pump(&mut pty, &mut term, "erased", &|t| {
+            cursor(t) == Some(width(kept))
+        });
+        assert_eq!(row_text(&term, 0), format!("$ printf '%s|\\n' {kept}"));
+        pty.write(format!("{last}\r").as_bytes());
+        pump(&mut pty, &mut term, "printed", &|t| {
+            row_text(t, 2) == "$" && cursor(t) == Some(2)
+        });
+        let row = term.viewport_row(1);
+        assert_eq!(term.grapheme(&row.cells[0]), Some(sequence), "{args:?}");
+        assert_eq!(term.base_char(&row.cells[2]), '|');
+    }
+
+    /// A command that leaves the PTY in a line editor's modes while it prints (or a shell
+    /// already back at its prompt when its output is read) is not echoing the user.
+    #[cfg(unix)]
+    #[test]
+    fn output_after_a_sent_line_is_never_editor_echo() {
+        let script = "read line; stty -icanon -echo -icrnl; printf 'x\\n'; sleep 0.3; \
+                      printf 'A\\360\\237\\221\\215\\360\\237\\217\\275B\\n'; sleep 0.3; \
+                      printf 'done\\n'; sleep 5";
+        let args = ["sh".into(), "-c".into(), script.into()];
+        let env = [("LC_ALL".to_owned(), "C.UTF-8".to_owned())]
+            .into_iter()
+            .collect();
+        let mut pty = Pty::spawn(&args, &env, None, 40, 10, (8.0, 16.0), |_| {}, |_| {}).unwrap();
+        let mut term = term_core::Terminal::new(40, 10);
+        pty.write(b"go\r");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let row = loop {
+            let output = pty.take_output();
+            term.set_line_editing(output.line_editing);
+            if output.line_sent {
+                term.line_sent();
+            }
+            term.advance(&output.bytes);
+            if let Some(row) =
+                (0..4).find(|&r| term.base_char(&term.viewport_row(r).cells[0]) == 'd')
+            {
+                break row - 1;
+            }
+            assert!(Instant::now() < deadline, "the script never finished");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let cells = &term.viewport_row(row).cells;
+        assert_eq!(term.base_char(&cells[0]), 'A');
+        assert_eq!(term.grapheme(&cells[1]), Some("\u{1f44d}\u{1f3fd}"));
+        assert_eq!(term.base_char(&cells[3]), 'B');
     }
 
     #[cfg(unix)]
@@ -1606,8 +1984,27 @@ mod tests {
 
     fn read(pending: &mut Pending, at: Instant, bytes: &[u8], shell: Option<bool>) -> bool {
         let checked = pending.check_foreground(at, bytes, || shell);
-        pending.append(bytes, checked);
+        pending.append(bytes, checked, false);
         checked
+    }
+
+    #[test]
+    fn line_editing_starts_after_the_last_read_without_its_modes() {
+        let mut pending = Pending::default();
+        pending.append(b"edit", true, true);
+        pending.append(b"output\n", true, false);
+        pending.append(b"prompt", true, true);
+        pending.append(b"echo", true, true);
+        assert_eq!(
+            pending.take_output(Instant::now(), || None).line_editing,
+            Some(11)
+        );
+        pending.append(b"edit", true, true);
+        pending.append(b"output", true, false);
+        assert_eq!(
+            pending.take_output(Instant::now(), || None).line_editing,
+            None
+        );
     }
 
     #[test]

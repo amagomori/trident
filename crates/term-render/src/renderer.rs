@@ -15,6 +15,10 @@ use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 /// Compare-with-last-run: rows that differ from the command's previous run.
 const RERUN_COLOR: Rgb = (230, 170, 50);
 const RERUN_REMOVED: Rgb = (220, 50, 47);
+/// How strongly the visual bell tints the grid with the foreground color.
+const FLASH_ALPHA: f32 = 0.2;
+/// Drawn before a tab's title while the tab has an unseen bell.
+const BELL_MARK: char = '\u{25cf}';
 
 fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
@@ -53,6 +57,17 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 
+/// An image drawn over the whole window at `pos` (physical pixels, top-left), outside the
+/// terminal's own image placements. Bump `version` when `image` changes.
+#[derive(Clone, Debug)]
+pub struct FloatingImage {
+    pub image: Arc<term_core::images::Image>,
+    pub version: u64,
+    pub pos: [f32; 2],
+    /// Underlined like a hovered link while no link is hovered.
+    pub underline: Option<term_core::Link>,
+}
+
 pub struct Renderer {
     /// The blink phase of a focused cursor; false hides it until the next frame.
     pub cursor_visible: bool,
@@ -71,6 +86,9 @@ pub struct Renderer {
     instance_capacity: usize,
     atlas: Atlas,
     images: ImagePipeline,
+    /// A transient card drawn over everything, such as a file preview.
+    floating: ImagePipeline,
+    floating_image: Option<FloatingImage>,
     /// Instances in each region this frame.
     lens: [u32; 4],
     /// The grid area images are clipped to: x, y, width, height in physical pixels.
@@ -90,6 +108,9 @@ pub struct Renderer {
     overlays: Vec<Instance>,
     /// Whether blinking cells show their text this frame.
     pub blink_visible: bool,
+    /// Whether the visual bell tints the grid this frame; drawn as one overlay, so it
+    /// damages no rows.
+    pub flash: bool,
     /// Whether each drawn row has cells that blink.
     row_blinks: Vec<bool>,
     /// Compare-with-last-run marks of each drawn row this frame.
@@ -293,6 +314,7 @@ impl Renderer {
         let instance_capacity = 1024;
         let instances = create_instance_buffer(&device, 4 * instance_capacity);
         let images = ImagePipeline::new(&device, format);
+        let floating = ImagePipeline::new(&device, format);
 
         Ok(Renderer {
             surface,
@@ -308,6 +330,8 @@ impl Renderer {
             instance_capacity,
             atlas,
             images,
+            floating,
+            floating_image: None,
             lens: [0; 4],
             image_clip: [0; 4],
             srgb: format.is_srgb(),
@@ -320,6 +344,7 @@ impl Renderer {
             offsets: Default::default(),
             overlays: Vec::new(),
             blink_visible: true,
+            flash: false,
             cursor_visible: true,
             row_blinks: Vec::new(),
             rerun: Vec::new(),
@@ -331,6 +356,11 @@ impl Renderer {
             #[cfg(target_os = "linux")]
             shm,
         })
+    }
+
+    /// Sets or clears the floating image drawn from the next frame on.
+    pub fn set_floating(&mut self, floating: Option<FloatingImage>) {
+        self.floating_image = floating;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -471,6 +501,11 @@ impl Renderer {
         hover: Option<&term_core::Link>,
         pre_present: Option<&mut dyn FnMut()>,
     ) -> bool {
+        let underline = self
+            .floating_image
+            .as_ref()
+            .and_then(|f| f.underline.clone());
+        let hover = hover.or(underline.as_ref());
         for _ in 0..2 {
             if self.build(
                 term,
@@ -502,6 +537,14 @@ impl Renderer {
         if !quads.is_empty() || !self.images.is_empty() {
             self.images
                 .prepare(&self.device, &self.queue, &self.uniforms, term, quads);
+        }
+        if self.floating_image.is_some() || !self.floating.is_empty() {
+            let image = self
+                .floating_image
+                .as_ref()
+                .map(|f| (&*f.image, f.version, f.pos));
+            self.floating
+                .prepare_single(&self.device, &self.queue, &self.uniforms, image);
         }
         self.draw(term.palette.background, pre_present)
     }
@@ -642,8 +685,33 @@ impl Renderer {
                         cell.flags.contains(Flags::BOLD),
                         cell.flags.contains(Flags::ITALIC),
                     );
-                    let cluster = term.grapheme(cell);
-                    let base = term.base_char(cell);
+                    let mut cluster = term.grapheme(cell);
+                    let mut base = term.base_char(cell);
+                    let mut shaped = None;
+                    if let Some(text) = cluster {
+                        if let Some(syllable) = grapheme::compose_hangul(text) {
+                            (base, cluster) = (syllable, None);
+                        } else if grapheme::is_emoji_sequence(text) {
+                            match self.atlas.get_sequence(
+                                text,
+                                style,
+                                cells as u8,
+                                fonts,
+                                &self.device,
+                                &self.queue,
+                            ) {
+                                Ok(glyph) => shaped = glyph,
+                                Err(_) => {
+                                    self.damage.invalidate();
+                                    ok = false;
+                                    break 'rows;
+                                }
+                            }
+                            if shaped.is_some() {
+                                cluster = None;
+                            }
+                        }
+                    }
                     let marks = cluster.into_iter().flat_map(grapheme::overlay_marks);
                     for (index, c) in std::iter::once(base).chain(marks).enumerate() {
                         if index == 0 && c == ' ' {
@@ -654,7 +722,11 @@ impl Renderer {
                             style,
                             cells: if index == 0 { cells as u8 } else { 0 },
                         };
-                        match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                        let glyph = match shaped {
+                            Some(g) if index == 0 => Ok(Some(g)),
+                            _ => self.atlas.get(key, fonts, &self.device, &self.queue),
+                        };
+                        match glyph {
                             Ok(Some(g)) => {
                                 // Center marks over a wide base. Fonts often draw a
                                 // combining mark left of its origin, over the glyph before
@@ -913,6 +985,19 @@ impl Renderer {
             }
         }
 
+        if self.flash {
+            overlays.push(Instance {
+                color: self.color(term.palette.foreground, FLASH_ALPHA),
+                ..self.rect(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.area_height() as f32,
+                    term.palette.foreground,
+                )
+            });
+        }
+
         if let Some(text) = banner {
             let layout = crate::banner::layout(
                 text,
@@ -1025,9 +1110,16 @@ impl Renderer {
                 ));
             }
             let color = if active { fg } else { dim };
-            let title = crate::fit_title(title, tab.title_columns);
+            let bell = bar.bells.get(i).copied().unwrap_or(false);
+            let skip = if bell {
+                glyphs.push((tab.x + cw, BELL_MARK, palette.ansi[3]));
+                2
+            } else {
+                0
+            };
+            let title = crate::fit_title(title, tab.title_columns.saturating_sub(skip));
             for (col, c) in title.chars().enumerate() {
-                glyphs.push((tab.x + cw * (col as f32 + 1.0), c, color));
+                glyphs.push((tab.x + cw * ((col + skip) as f32 + 1.0), c, color));
             }
             let [x, y, w, h] = tab.close;
             if bar.hover == Some(TabHit::Close(i)) {
@@ -1271,6 +1363,11 @@ impl Renderer {
                     &mut pass,
                     overlays + self.bar_start..overlays + self.lens[3],
                 );
+            }
+            if !self.floating.is_empty() {
+                pass.set_viewport(0.0, inset as f32, width as f32, area as f32, 0.0, 1.0);
+                self.floating
+                    .draw(&mut pass, Layer::AboveText, [0, inset, width, area]);
             }
         }
         self.queue.submit([encoder.finish()]);

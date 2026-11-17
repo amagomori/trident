@@ -41,6 +41,13 @@ class Version(Base):
         self.assertEqual(release.version_from_tag(f"v{version}"), version)
         self.assertEqual(release.version_from_tag(f"v{version}-rc.1"), f"{version}-rc.1")
 
+    def test_workspace_lockfile_matches_release_version(self):
+        locked = dict(re.findall(r'^name = "(term-app|term-core|term-render)"\n'
+                                 r'version = "([^"]+)"$',
+                                 (release.ROOT / "Cargo.lock").read_text(), re.M))
+        self.assertEqual(locked, {name: release.cargo_version()
+                                  for name in ("term-app", "term-core", "term-render")})
+
     def test_rejects_mismatch_and_bad_tags(self):
         for tag in ("v99.0.0", release.cargo_version(), "v1.2", "latest"):
             with self.assertRaises(release.ReleaseError, msg=tag):
@@ -199,7 +206,7 @@ class Packages(Base):
         text = release.cask("1.2.3", "aa" * 32)
         self.assertTrue(text.startswith('cask "trident" do\n  version "1.2.3"\n'))
         self.assertIn(f'  sha256 "{"aa" * 32}"\n', text)
-        self.assertIn('  url "https://github.com/amagomori/terminal/releases/download/'
+        self.assertIn('  url "https://github.com/amagomori/trident/releases/download/'
                       'v#{version}/Trident-#{version}-macos-universal.dmg"\n', text)
         self.assertIn('  app "Trident.app"\n', text)
         self.assertIn('  binary "#{appdir}/Trident.app/Contents/MacOS/trident"\n', text)
@@ -217,7 +224,7 @@ class Packages(Base):
                      "arch=('x86_64')", "provides=('trident')", "conflicts=('trident')",
                      f"sha256sums=('{'bb' * 32}')",
                      'source=("Trident-${_tag}-linux-x86_64.tar.gz::https://github.com/amagomori/'
-                     'terminal/releases/download/v${_tag}/Trident-${_tag}-linux-x86_64.tar.gz")'):
+                     'trident/releases/download/v${_tag}/Trident-${_tag}-linux-x86_64.tar.gz")'):
             self.assertIn(line, lines)
         self.assertIn('  install -Dm755 bin/trident "$pkgdir/usr/bin/trident"', lines)
         if shutil.which("bash"):
@@ -229,7 +236,7 @@ class Packages(Base):
         self.assertEqual(lines[0], "pkgbase = trident-bin")
         self.assertEqual(lines[-1], "pkgname = trident-bin")
         self.assertIn("\tsource = Trident-1.2.3-linux-x86_64.tar.gz::https://github.com/amagomori/"
-                      "terminal/releases/download/v1.2.3/Trident-1.2.3-linux-x86_64.tar.gz", lines)
+                      "trident/releases/download/v1.2.3/Trident-1.2.3-linux-x86_64.tar.gz", lines)
         self.assertIn(f"\tsha256sums = {'bb' * 32}", lines)
         self.assertIn("\tpkgver = 1.2.3", lines)
         if shutil.which("makepkg"):
@@ -342,13 +349,27 @@ class Changelog(unittest.TestCase):
                                  "- KAN-2: Second feature ([#2](https://github.com/o/r/pull/2))"])
         self.assertIn("https://github.com/o/r/compare/v0.1.0...v0.2.0", notes)
         self.assertIn("unsigned", notes)
-        self.assertIn("xattr -d com.apple.quarantine Trident-0.2.0-macos-universal.dmg", notes)
+        self.assertIn("xattr -dr com.apple.quarantine /Applications/Trident.app", notes)
 
     def test_first_release_lists_everything(self):
         notes = release.changelog("v0.1.0", cwd=self.repo, repo="o/r")
         self.assertEqual(re.findall(r"^- .*$", notes, re.M),
                          ["- KAN-1: First feature ([#1](https://github.com/o/r/pull/1))"])
-        self.assertNotIn("compare", notes)
+        self.assertNotIn("/compare/", notes)
+
+    def test_browser_dmg_install_instructions(self):
+        notes = release.changelog("v1.0.0-rc.1", cwd=self.repo, repo="o/r")
+        image = '"$HOME/Downloads/Trident-1.0.0-rc.1-macos-universal.dmg"'
+        checksum = f"shasum -a 256 {image}"
+        container = f"xattr -d com.apple.quarantine {image}"
+        mount = "Then open the DMG"
+        app = "xattr -dr com.apple.quarantine /Applications/Trident.app"
+        self.assertIn("SHA256SUMS", notes)
+        self.assertIn("Only if they match", notes)
+        self.assertIn("**before opening the DMG**", notes)
+        self.assertLess(notes.index(checksum), notes.index(container))
+        self.assertLess(notes.index(container), notes.index(mount))
+        self.assertLess(notes.index(mount), notes.index(app))
 
     def test_untagged_release_previews_head(self):
         self.commit("KAN-4: Unreleased feature (#4)")

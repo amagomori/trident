@@ -4,11 +4,11 @@ members = ["crates/term-core", "crates/term-render", "crates/term-app", "vendor/
 default-members = ["crates/term-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
-repository = "https://github.com/amagomori/terminal"
+repository = "https://github.com/amagomori/trident"
 
 [workspace.dependencies]
 regex = "1"
@@ -33,7 +33,9 @@ png = "0.18"
 pollster = "0.4"
 portable-pty = "0.9"
 resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "svgz", "raster-images"] }
+shlex = "2"
 ttf-parser = "0.25"
+harfrust = "0.15"
 unicode-width = "0.2"
 vte = { path = "vendor/vte" }
 wgpu = "30"

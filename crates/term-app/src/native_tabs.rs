@@ -3,12 +3,16 @@
 //! between windows.
 
 use std::cell::RefCell;
+use std::ptr::NonNull;
 
+use block2::RcBlock;
 use objc2::rc::Allocated;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 use objc2::{class, msg_send, sel};
+use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_foundation::{NSArray, NSString};
+use winit::dpi::PhysicalPosition;
 use winit::event_loop::EventLoopProxy;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
@@ -122,13 +126,89 @@ unsafe extern "C-unwind" fn new_window_for_tab(_: *mut AnyObject, _: Sel, _: *mu
     });
 }
 
+/// Enters or leaves native (Spaces) fullscreen, as the green button does: AppKit takes the
+/// whole tab group along, so the tabs stay attached.
+pub fn toggle_fullscreen(window: &Window) {
+    let Some(window) = ns_window(window) else {
+        return;
+    };
+    // SAFETY: a live NSWindow on the main thread; toggleFullScreen: takes an ignored sender.
+    unsafe {
+        let _: () = msg_send![&*window, toggleFullScreen: std::ptr::null::<AnyObject>()];
+    }
+}
+
+/// The pointer over `window`'s view in physical pixels from its top left, read from AppKit
+/// rather than from the last motion event; `None` outside the view.
+pub fn pointer_position(window: &Window) -> Option<PhysicalPosition<f64>> {
+    let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) else {
+        return None;
+    };
+    // SAFETY: ns_view is the live view of `window`, on the main thread; each message matches
+    // its NSView or NSWindow signature, and a nil view converts from window coordinates.
+    let (point, bounds) = unsafe {
+        let view: &AnyObject = handle.ns_view.cast().as_ref();
+        let ns_window: Option<Retained<AnyObject>> = msg_send![view, window];
+        let in_window: CGPoint = msg_send![&*ns_window?, mouseLocationOutsideOfEventStream];
+        let point: CGPoint =
+            msg_send![view, convertPoint: in_window, fromView: std::ptr::null::<AnyObject>()];
+        let bounds: CGRect = msg_send![view, bounds];
+        let flipped: bool = msg_send![view, isFlipped];
+        let y = if flipped {
+            point.y
+        } else {
+            bounds.size.height - point.y
+        };
+        (CGPoint { x: point.x, y }, bounds)
+    };
+    let inside = (0.0..=bounds.size.width).contains(&point.x)
+        && (0.0..=bounds.size.height).contains(&point.y);
+    let scale = window.scale_factor();
+    inside.then(|| PhysicalPosition::new(point.x * scale, point.y * scale))
+}
+
+/// Sends `UserEvent::PointerMoved` for every mouse move made with Cmd held. After leaving
+/// native fullscreen those moves can stop arriving as `CursorMoved`, which left Cmd-hover
+/// without an underline or preview. Needs `handle_new_tab_button` first.
+pub fn watch_command_moves() {
+    const COMMAND: usize = 1 << 20;
+    const MOUSE_MOVED: u64 = 1 << 5;
+    static WATCHING: std::sync::Once = std::sync::Once::new();
+    WATCHING.call_once(|| {
+        let handler = RcBlock::new(|event: NonNull<AnyObject>| -> *mut AnyObject {
+            // SAFETY: AppKit hands the monitor a live NSEvent on the main thread.
+            let flags: usize = unsafe { msg_send![event.as_ref(), modifierFlags] };
+            if flags & COMMAND != 0 {
+                PROXY.with(|slot| {
+                    if let Some(proxy) = &*slot.borrow() {
+                        let _ = proxy.send_event(UserEvent::PointerMoved);
+                    }
+                });
+            }
+            event.as_ptr()
+        });
+        // SAFETY: the handler has the NSEvent* (^)(NSEvent*) signature AppKit expects and is
+        // copied by it; the monitor stays installed for the life of the process.
+        unsafe {
+            let monitor: Option<Retained<AnyObject>> = msg_send![
+                class!(NSEvent),
+                addLocalMonitorForEventsMatchingMask: MOUSE_MOVED,
+                handler: &*handler
+            ];
+            std::mem::forget(monitor);
+        }
+    });
+}
+
 /// The Window menu's items as (title, action), `None` for a separator. None has a key
 /// equivalent, so every chord stays with `config.bindings`. The tab items are the
 /// standard NSWindow tab actions, so AppKit validates them, retitles Show/Hide Tab Bar
 /// and sends them to the key window; it only adds the window list to the menu itself.
-const WINDOW_MENU: [Option<(&str, &std::ffi::CStr)>; 12] = [
+/// AppKit also retitles Enter/Exit Full Screen and adds no second full screen item.
+const WINDOW_MENU: [Option<(&str, &std::ffi::CStr)>; 13] = [
     Some(("Minimize", c"performMiniaturize:")),
     Some(("Zoom", c"performZoom:")),
+    Some(("Enter Full Screen", c"toggleFullScreen:")),
     None,
     Some(("Show Tab Bar", c"toggleTabBar:")),
     Some(("Show All Tabs", c"toggleTabOverview:")),
@@ -216,6 +296,7 @@ mod tests {
             "moveTabToNewWindow:",
             "mergeAllWindows:",
             "performMiniaturize:",
+            "toggleFullScreen:",
         ] {
             assert!(actions.contains(&action), "Window menu lacks {action}");
         }

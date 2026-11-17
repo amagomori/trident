@@ -1,17 +1,15 @@
 size=8x2 active=primary
-cursor row=0 col=7 visible=true shape=block pending_wrap=false
+cursor row=0 col=5 visible=true shape=block pending_wrap=false
 cursor attributes: fg=default-fg bg=default-bg flags=[] underline-color=index(1)
 scroll_region=0..=1 history=0 display_offset=0
 primary:
-  row 0 wrap=false text="e\u{301}👩\u{200d} 💻 a\u{323}x "
+  row 0 wrap=false text="e\u{301}👩\u{200d}💻 a\u{323}x   "
     cells 0..1: fg=default-fg bg=default-bg flags=[underline-curly,grapheme] underline-color=index(1)
     cells 1..2: fg=default-fg bg=default-bg flags=[underline-double,wide,grapheme] underline-color=index(1)
     cells 2..3: fg=default-fg bg=default-bg flags=[underline-double,wide-spacer] underline-color=index(1)
-    cells 3..4: fg=default-fg bg=default-bg flags=[underline-double,wide] underline-color=index(1)
-    cells 4..5: fg=default-fg bg=default-bg flags=[underline-double,wide-spacer] underline-color=index(1)
-    cells 5..6: fg=default-fg bg=default-bg flags=[underline-double,grapheme] underline-color=index(1)
-    cells 6..7: fg=default-fg bg=default-bg flags=[] underline-color=index(1)
-    cells 7..8: fg=default-fg bg=default-bg flags=[]
+    cells 3..4: fg=default-fg bg=default-bg flags=[underline-double,grapheme] underline-color=index(1)
+    cells 4..5: fg=default-fg bg=default-bg flags=[] underline-color=index(1)
+    cells 5..8: fg=default-fg bg=default-bg flags=[]
   row 1 wrap=false text="        "
     cells 0..8: fg=default-fg bg=default-bg flags=[]
 scrollback (oldest first):

@@ -138,6 +138,62 @@ fn shell_integration_prompt_redraw_and_empty_output() {
 }
 
 #[test]
+fn last_command_output_is_latest_nonempty_output_wherever_the_view_is() {
+    let mut t = Terminal::new(20, 3);
+    assert_eq!(t.last_command_output(), None);
+    t.advance(b"\x1b]133;A\x07$ seq 1 9\r\n\x1b]133;C\x07");
+    for n in 1..=9 {
+        t.advance(format!("{n}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ true\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+    t.advance(b"\x1b]133;A\x07$ ");
+    let nine = (1..=9)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(t.last_command_output().as_deref(), Some(nine.as_str()));
+    t.advance(b"echo hi\r\n\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    t.scroll_to_line(0);
+    assert_eq!(t.last_command_output().as_deref(), Some("hi"));
+    assert!(t.selection.is_none());
+    t.select_command_output();
+    assert_eq!(t.selection_text().as_deref(), Some(nine.as_str()));
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.last_command_output(), None);
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.last_command_output().as_deref(), Some("hi"));
+}
+
+#[test]
+fn last_command_output_keeps_styles_as_sgr() {
+    let mut t = Terminal::new(40, 4);
+    t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07");
+    t.advance(b"\x1b[1;31mred\x1b[0m plain \x1b[38;5;200mx\x1b[48;2;1;2;3my\x1b[m\r\n");
+    t.advance(b"\x1b[3;94;102mbright\r\nnext\x1b[m\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    assert_eq!(
+        t.last_command_output().as_deref(),
+        Some(concat!(
+            "\x1b[0;1;31mred\x1b[0m plain \x1b[0;38;5;200mx\x1b[0;38;5;200;48;2;1;2;3my\x1b[0m\n",
+            "\x1b[0;3;94;102mbright\x1b[0m\n",
+            "\x1b[0;3;94;102mnext\x1b[0m",
+        ))
+    );
+}
+
+#[test]
+fn last_command_output_joins_soft_wraps_and_stops_at_a_partial_line() {
+    let mut t = Terminal::new(10, 4);
+    t.advance(
+        "\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07日本語abcdefgh\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ "
+            .as_bytes(),
+    );
+    assert_eq!(t.last_command_output().as_deref(), Some("日本語abcdefgh"));
+    let mut t = Terminal::new(20, 3);
+    t.advance("\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07%                    \r\x1b]133;A\x07$ ".as_bytes());
+    assert_eq!(t.last_command_output().as_deref(), Some("abc"));
+}
+
+#[test]
 fn shell_integration_output_ends_before_missing_newline_marker() {
     for marker in ["%", "⏎"] {
         let mut t = Terminal::new(20, 3);

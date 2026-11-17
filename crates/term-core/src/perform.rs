@@ -29,6 +29,7 @@ impl Perform for Terminal {
             0x09 => self.tab(1),
             0x0a..=0x0c => {
                 self.prompt_redraw = false;
+                self.feed_line();
                 self.linefeed();
                 if self.modes.linefeed_newline {
                     self.cursor.col = 0;

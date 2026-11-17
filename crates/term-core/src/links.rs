@@ -9,6 +9,85 @@ pub struct Link {
     pub pieces: Vec<(Point, Point)>,
 }
 
+/// A `path:line[:column]` reference in plain output, as compilers, grep and Python
+/// tracebacks print it. The path is as printed: relative paths are left to the caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLink {
+    pub path: String,
+    pub line: u32,
+    pub column: Option<u32>,
+    pub start: Point,
+    pub end: Point,
+}
+
+impl FileLink {
+    /// The cells to underline, as a [`Link`] whose URI is the reference as printed.
+    pub fn link(&self) -> Link {
+        let uri = match self.column {
+            Some(column) => format!("{}:{}:{column}", self.path, self.line),
+            None => format!("{}:{}", self.path, self.line),
+        };
+        Link {
+            uri,
+            start: self.start,
+            end: self.end,
+            pieces: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Reference<'a> {
+    offset: usize,
+    len: usize,
+    path: &'a str,
+    line: u32,
+    column: Option<u32>,
+}
+
+/// File references in `text`: `path:line[:column]` (gcc, rustc, grep -n, Go, tsc) and
+/// `File "path", line N` (Python tracebacks).
+fn file_references(text: &str) -> Vec<Reference<'_>> {
+    use std::sync::OnceLock;
+    static TOKEN: OnceLock<regex::Regex> = OnceLock::new();
+    static COLON: OnceLock<regex::Regex> = OnceLock::new();
+    static PYTHON: OnceLock<regex::Regex> = OnceLock::new();
+    let token = TOKEN.get_or_init(|| regex::Regex::new(r#"[^\s"'`()<>\[\]{}|,;]+"#).unwrap());
+    let colon =
+        COLON.get_or_init(|| regex::Regex::new(r"^(.+?):([0-9]{1,9})(?::([0-9]{1,9}))?").unwrap());
+    let python =
+        PYTHON.get_or_init(|| regex::Regex::new(r#"File "([^"]+)", line ([0-9]{1,9})"#).unwrap());
+    let number = |m: Option<regex::Match>| m.and_then(|m| m.as_str().parse().ok());
+    let mut found = Vec::new();
+    for m in python.captures_iter(text) {
+        let (path, line) = (m.get(1).unwrap(), m.get(2).unwrap());
+        found.push(Reference {
+            offset: path.start(),
+            len: line.end() - path.start(),
+            path: path.as_str(),
+            line: number(Some(line)).unwrap_or_default(),
+            column: None,
+        });
+    }
+    for t in token.find_iter(text) {
+        let Some(c) = colon.captures(t.as_str()) else {
+            continue;
+        };
+        let path = c.get(1).unwrap().as_str();
+        if path.bytes().all(|b| b.is_ascii_digit() || b == b':') || path.contains("://") {
+            continue;
+        }
+        found.push(Reference {
+            offset: t.start(),
+            len: c.get(0).unwrap().len(),
+            path,
+            line: number(c.get(2)).unwrap_or_default(),
+            column: number(c.get(3)),
+        });
+    }
+    found
+}
+
 impl Link {
     pub fn contains(&self, point: Point) -> bool {
         let after = self.pieces.partition_point(|(start, _)| *start <= point);
@@ -339,20 +418,10 @@ impl Terminal {
     }
 
     pub fn link_at(&self, point: Point) -> Option<Link> {
-        if point.line < self.first_line()
-            || point.line >= self.history + self.rows as u64
-            || point.col >= self.cols
-        {
+        if !self.on_screen_or_history(point) {
             return None;
         }
-        let mut first = point.line;
-        while first > self.first_line() && self.line(first - 1).wrapped() {
-            first -= 1;
-        }
-        let mut last = point.line;
-        while last + 1 < self.history + self.rows as u64 && self.line(last).wrapped() {
-            last += 1;
-        }
+        let (first, last) = self.logical_line(point.line);
         let index = self.line(point.line).cells[point.col].hyperlink;
         if self
             .links
@@ -405,30 +474,7 @@ impl Terminal {
                 pieces,
             });
         }
-        // Cells hidden past the right edge still belong to the line; they get columns past
-        // `cols` so the link's ends can be clamped back onto visible cells.
-        let cells = (first..=last).flat_map(|line| {
-            let row = self.line(line);
-            row.cells
-                .iter()
-                .chain(row.hidden_cells())
-                .enumerate()
-                .map(move |(col, cell)| (Point { line, col }, cell))
-        });
-        let mut text = String::new();
-        let mut positions = Vec::new();
-        for (p, cell) in cells {
-            if cell.flags.contains(Flags::WIDE_SPACER)
-                || cell.flags.contains(Flags::PAD)
-                || cell.flags.contains(Flags::WIDE_WRAP)
-            {
-                continue;
-            }
-            for _ in 0..self.cell_text_len(cell) {
-                positions.push(p);
-            }
-            self.push_cell_text(cell, &mut text);
-        }
+        let (text, positions) = self.logical_text(first, last);
         for (offset, _) in text.char_indices() {
             let tail = &text[offset..];
             let Some(scheme) = ["https://", "http://", "ftp://", "file://", "mailto:"]
@@ -464,22 +510,7 @@ impl Terminal {
             if uri.len() <= scheme.len() {
                 continue;
             }
-            let mut start = positions[offset];
-            let mut end = positions[offset + uri.len() - 1];
-            if start.col >= self.cols {
-                start = Point {
-                    line: start.line + 1,
-                    col: 0,
-                };
-            }
-            if end.col >= self.cols {
-                end.col = self.cols - 1;
-            } else if self.line(end.line).cells[end.col]
-                .flags
-                .contains(Flags::WIDE)
-            {
-                end.col += 1;
-            }
+            let (start, end) = self.text_span(&positions, offset, uri.len());
             let link = Link {
                 uri: uri.to_owned(),
                 start,
@@ -491,6 +522,96 @@ impl Terminal {
             }
         }
         None
+    }
+
+    /// The `path:line` reference printed under `point`, for opening in an editor.
+    #[cold]
+    #[inline(never)]
+    pub fn file_link_at(&self, point: Point) -> Option<FileLink> {
+        if !self.on_screen_or_history(point) {
+            return None;
+        }
+        let (first, last) = self.logical_line(point.line);
+        let (text, positions) = self.logical_text(first, last);
+        file_references(&text).into_iter().find_map(|r| {
+            let (start, end) = self.text_span(&positions, r.offset, r.len);
+            (start <= point && point <= end).then(|| FileLink {
+                path: r.path.to_owned(),
+                line: r.line,
+                column: r.column,
+                start,
+                end,
+            })
+        })
+    }
+
+    fn on_screen_or_history(&self, point: Point) -> bool {
+        point.line >= self.first_line()
+            && point.line < self.history + self.rows as u64
+            && point.col < self.cols
+    }
+
+    /// The first and last lines of the soft-wrapped line holding `line`.
+    fn logical_line(&self, line: u64) -> (u64, u64) {
+        let mut first = line;
+        while first > self.first_line() && self.line(first - 1).wrapped() {
+            first -= 1;
+        }
+        let mut last = line;
+        while last + 1 < self.history + self.rows as u64 && self.line(last).wrapped() {
+            last += 1;
+        }
+        (first, last)
+    }
+
+    /// The text of lines `first..=last` and the cell each of its bytes came from.
+    fn logical_text(&self, first: u64, last: u64) -> (String, Vec<Point>) {
+        // Cells hidden past the right edge still belong to the line; they get columns past
+        // `cols` so the link's ends can be clamped back onto visible cells.
+        let cells = (first..=last).flat_map(|line| {
+            let row = self.line(line);
+            row.cells
+                .iter()
+                .chain(row.hidden_cells())
+                .enumerate()
+                .map(move |(col, cell)| (Point { line, col }, cell))
+        });
+        let mut text = String::new();
+        let mut positions = Vec::new();
+        for (p, cell) in cells {
+            if cell.flags.contains(Flags::WIDE_SPACER)
+                || cell.flags.contains(Flags::PAD)
+                || cell.flags.contains(Flags::WIDE_WRAP)
+            {
+                continue;
+            }
+            for _ in 0..self.cell_text_len(cell) {
+                positions.push(p);
+            }
+            self.push_cell_text(cell, &mut text);
+        }
+        (text, positions)
+    }
+
+    /// The visible cells covered by `len` bytes of `logical_text` from `offset`.
+    fn text_span(&self, positions: &[Point], offset: usize, len: usize) -> (Point, Point) {
+        let mut start = positions[offset];
+        let mut end = positions[offset + len - 1];
+        if start.col >= self.cols {
+            start = Point {
+                line: start.line + 1,
+                col: 0,
+            };
+        }
+        if end.col >= self.cols {
+            end.col = self.cols - 1;
+        } else if self.line(end.line).cells[end.col]
+            .flags
+            .contains(Flags::WIDE)
+        {
+            end.col += 1;
+        }
+        (start, end)
     }
 }
 
@@ -1028,6 +1149,135 @@ mod tests {
                 t.advance(format!("{scheme}{suffix}").as_bytes());
                 assert!(t.link_at(Point { line: 0, col: 0 }).is_none());
             }
+        }
+    }
+    fn file_link(t: &Terminal, line: u64, col: usize) -> Option<(String, u32, Option<u32>)> {
+        t.file_link_at(Point { line, col })
+            .map(|l| (l.path, l.line, l.column))
+    }
+
+    #[test]
+    fn file_references_in_compiler_and_grep_output() {
+        for (input, path, line, column) in [
+            (
+                "src/main.rs:10:5: error: expected",
+                "src/main.rs",
+                10,
+                Some(5),
+            ),
+            (
+                "  --> crates/a/src/lib.rs:7:13",
+                "crates/a/src/lib.rs",
+                7,
+                Some(13),
+            ),
+            ("src/lib.rs:42:    let x = 1;", "src/lib.rs", 42, None),
+            ("./main.go:5:2: undefined: x", "./main.go", 5, Some(2)),
+            ("/tmp/a b.c:3", "b.c", 3, None),
+            ("    at f (/srv/app.js:12:9)", "/srv/app.js", 12, Some(9)),
+            ("make: *** [Makefile:12: all] Error 1", "Makefile", 12, None),
+            ("tests/t.py:8: AssertionError", "tests/t.py", 8, None),
+            ("~/notes.md:3:1", "~/notes.md", 3, Some(1)),
+            ("src/界.rs:2:1 bad", "src/界.rs", 2, Some(1)),
+        ] {
+            let mut t = Terminal::new(80, 2);
+            t.advance(input.as_bytes());
+            let width = |s: &str| {
+                s.chars()
+                    .map(|c| if c == '界' { 2 } else { 1 })
+                    .sum::<usize>()
+            };
+            let start = width(&input[..input.find(path).unwrap()]);
+            let printed = match column {
+                Some(column) => format!("{path}:{line}:{column}"),
+                None => format!("{path}:{line}"),
+            };
+            let end = start + width(&printed) - 1;
+            for col in start..=end {
+                if t.line(0).cells[col].flags.contains(Flags::WIDE_SPACER) {
+                    continue;
+                }
+                assert_eq!(
+                    file_link(&t, 0, col),
+                    Some((path.to_owned(), line, column)),
+                    "{input:?} at {col}"
+                );
+            }
+            let link = t
+                .file_link_at(Point {
+                    line: 0,
+                    col: start,
+                })
+                .unwrap();
+            assert_eq!(
+                link.start,
+                Point {
+                    line: 0,
+                    col: start
+                }
+            );
+            assert_eq!(link.end, Point { line: 0, col: end });
+            assert_eq!(link.link().uri, printed);
+            if start > 0 {
+                assert_eq!(file_link(&t, 0, start - 1), None, "{input:?}");
+            }
+            assert_eq!(file_link(&t, 0, end + 1), None, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn python_tracebacks() {
+        let mut t = Terminal::new(80, 2);
+        t.advance(br#"  File "/srv/my app.py", line 12, in <module>"#);
+        let link = t.file_link_at(Point { line: 0, col: 10 }).unwrap();
+        assert_eq!(
+            (link.path.as_str(), link.line, link.column),
+            ("/srv/my app.py", 12, None)
+        );
+        assert_eq!(link.start, Point { line: 0, col: 8 });
+        assert_eq!(link.end, Point { line: 0, col: 31 });
+        assert!(t.file_link_at(Point { line: 0, col: 32 }).is_none());
+    }
+
+    #[test]
+    fn non_references() {
+        for input in [
+            "12:30:45 started",
+            "src/main.rs has no line",
+            "https://example.com:8080/a",
+            "a.rs: error",
+            ":12",
+            "a.rs:x12",
+        ] {
+            let mut t = Terminal::new(40, 2);
+            t.advance(input.as_bytes());
+            for col in 0..40 {
+                assert_eq!(file_link(&t, 0, col), None, "{input:?} at {col}");
+            }
+        }
+        assert!(
+            Terminal::new(8, 2)
+                .file_link_at(Point { line: 5, col: 0 })
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn file_references_follow_soft_wraps() {
+        let mut t = Terminal::new(10, 4);
+        t.advance(b"x crates/term/src/a.rs:123:4 y");
+        let link = t.file_link_at(Point { line: 2, col: 1 }).unwrap();
+        assert_eq!(
+            (link.path.as_str(), link.line, link.column),
+            ("crates/term/src/a.rs", 123, Some(4))
+        );
+        assert_eq!(link.start, Point { line: 0, col: 2 });
+        assert_eq!(link.end, Point { line: 2, col: 7 });
+        assert_eq!(file_link(&t, 0, 1), None);
+        // A reference that runs into cells cut off by a resize still ends on a visible cell.
+        t.resize(6, 4);
+        if let Some(link) = t.file_link_at(Point { line: 0, col: 3 }) {
+            assert!(link.end.col < 6);
         }
     }
 }

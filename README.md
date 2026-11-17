@@ -18,14 +18,20 @@ Trident runs on macOS 11 or later, on Apple silicon and Intel.
 
 - With [Homebrew](https://brew.sh): `brew install --cask amagomori/tap/trident`. To update, run
   `brew upgrade`.
-- From [Releases](https://github.com/amagomori/trident/releases):
-  1. Download `Trident-<version>-macos-universal.dmg`.
-  2. Builds are unsigned, so macOS reports the download as damaged. Clear the quarantine flag:
-     `xattr -d com.apple.quarantine ~/Downloads/Trident-<version>-macos-universal.dmg`.
-  3. Open the image and drag Trident to Applications.
+- From [Releases](https://github.com/amagomori/trident/releases): download
+  `Trident-<version>-macos-universal.dmg` and `SHA256SUMS` into `~/Downloads`.
 
-  If you already copied the app from a quarantined image, run
-  `xattr -dr com.apple.quarantine /Applications/Trident.app`.
+Builds are unsigned and not notarized. For a browser download, replace `<version>` below and
+compare `shasum -a 256 "$HOME/Downloads/Trident-<version>-macos-universal.dmg"` with the DMG's
+entry in `SHA256SUMS`. Only if they match, run this in Terminal **before opening the DMG**:
+
+```sh
+xattr -d com.apple.quarantine "$HOME/Downloads/Trident-<version>-macos-universal.dmg"
+```
+
+Then open the DMG and drag Trident to Applications. Before opening Trident the first time, run
+`xattr -dr com.apple.quarantine /Applications/Trident.app`. These steps apply only to this
+download and app; the Homebrew cask handles quarantine for you.
 
 ### Linux
 
@@ -91,6 +97,7 @@ entry is optional. For all settings, see [Configuration](docs/configuration.md).
 - [Configuration](docs/configuration.md): settings, key bindings, shell integration, themes
 - [Development](docs/development.md): crate layout, tests, releases, latency and comparison harnesses
 - [Conformance](docs/conformance.md): vttest and esctest results
+- [Benchmarks](docs/benchmarks.md): Trident against Alacritty, kitty, WezTerm and Ghostty on macOS and Linux
 
 ## License
 

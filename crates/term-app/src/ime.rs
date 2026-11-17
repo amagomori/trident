@@ -407,6 +407,7 @@ mod tests {
             (COMMAND | SHIFT, "a"),
             (COMMAND, "\u{f700}"),
             (COMMAND | OPTION, "\u{f701}"),
+            (COMMAND | CONTROL, "f"),
         ] {
             assert!(is_command_chord(&chords, flags, key), "{flags:#x} {key:?}");
         }
@@ -418,7 +419,7 @@ mod tests {
             (SHIFT, "\u{f72c}"),
             (COMMAND, "q"),
             (COMMAND, "j"),
-            (COMMAND | CONTROL, "f"),
+            (COMMAND | CONTROL, "g"),
             (COMMAND, ""),
         ] {
             assert!(!is_command_chord(&chords, flags, key), "{flags:#x} {key:?}");

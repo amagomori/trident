@@ -16,17 +16,27 @@ pub struct Config {
     pub notify_long_commands_after: u64,
     pub desktop_notifications: bool,
     pub drop_preview: bool,
+    pub hover_preview: bool,
     pub paste_protection: bool,
+    pub trim_paste: bool,
     pub clipboard_read: bool,
     pub compare_runs: bool,
     pub compare_ignore: term_core::Ignore,
     pub confirm_close: bool,
+    pub visual_bell: bool,
     pub tab_bar: TabBarMode,
     pub vsync: bool,
     pub app_icon: AppIcon,
     pub menu_bar_icon: bool,
     pub auto_secure_input: bool,
+    pub hide_mouse_when_typing: bool,
+    pub window_columns: Option<usize>,
+    pub window_rows: Option<usize>,
+    pub remember_window_size: bool,
     pub shell: Vec<String>,
+    pub pager: Vec<String>,
+    /// The editor for `path:line` links; empty uses `$VISUAL`/`$EDITOR`.
+    pub editor: Vec<String>,
     pub term: String,
     pub env: BTreeMap<String, String>,
     pub themes: theme::Themes,
@@ -47,17 +57,26 @@ impl Default for Config {
             notify_long_commands_after: 10,
             desktop_notifications: true,
             drop_preview: true,
+            hover_preview: false,
             paste_protection: true,
+            trim_paste: true,
             clipboard_read: false,
             compare_runs: true,
             compare_ignore: term_core::Ignore::default(),
             confirm_close: true,
+            visual_bell: false,
             tab_bar: TabBarMode::Always,
             vsync: true,
             app_icon: AppIcon::default(),
             menu_bar_icon: true,
             auto_secure_input: true,
+            hide_mouse_when_typing: true,
+            window_columns: None,
+            window_rows: None,
+            remember_window_size: true,
             shell: Vec::new(),
+            pager: ["less", "-R", "+G"].map(String::from).to_vec(),
+            editor: Vec::new(),
             term: crate::terminfo::FALLBACK.to_string(),
             env: BTreeMap::new(),
             themes: theme::Themes::default(),
@@ -77,16 +96,25 @@ struct Raw {
     notify_long_commands_after: Option<u64>,
     desktop_notifications: Option<bool>,
     drop_preview: Option<bool>,
+    hover_preview: Option<bool>,
     paste_protection: Option<bool>,
+    trim_paste: Option<bool>,
     clipboard_read: Option<bool>,
     compare_runs: Option<CompareRunsEntry>,
     confirm_close: Option<bool>,
+    visual_bell: Option<bool>,
     tab_bar: Option<String>,
     vsync: Option<bool>,
     app_icon: Option<String>,
     menu_bar_icon: Option<bool>,
     auto_secure_input: Option<bool>,
+    hide_mouse_when_typing: Option<bool>,
+    window_columns: Option<u64>,
+    window_rows: Option<u64>,
+    remember_window_size: Option<bool>,
     shell: Option<Shell>,
+    pager: Option<Shell>,
+    editor: Option<Shell>,
     term: Option<String>,
     env: BTreeMap<String, String>,
     colors: BTreeMap<String, String>,
@@ -255,6 +283,8 @@ pub enum Action {
     JumpToPromptUp,
     JumpToPromptDown,
     SelectCommandOutput,
+    ToggleFullscreen,
+    ShowLastCommandOutput,
     None,
     Send(String),
 }
@@ -286,6 +316,8 @@ impl Action {
                 "jump_to_prompt_up" => Self::JumpToPromptUp,
                 "jump_to_prompt_down" => Self::JumpToPromptDown,
                 "select_command_output" => Self::SelectCommandOutput,
+                "toggle_fullscreen" => Self::ToggleFullscreen,
+                "show_last_command_output" => Self::ShowLastCommandOutput,
                 "none" => Self::None,
                 _ => match name
                     .strip_prefix("select_tab_")
@@ -376,6 +408,32 @@ pub fn default_bindings() -> BTreeMap<Chord, Action> {
 }
 
 #[test]
+fn toggle_fullscreen_defaults_to_ctrl_cmd_f_on_macos_and_f11_on_linux() {
+    assert_eq!(
+        Action::parse(Binding::Name("toggle_fullscreen".into())).unwrap(),
+        Action::ToggleFullscreen
+    );
+    for (macos, chord, unbound) in [
+        (true, "ctrl+super+f", "f11"),
+        (false, "f11", "ctrl+super+f"),
+    ] {
+        let defaults = default_bindings_for(macos);
+        assert_eq!(
+            defaults[&Chord::parse(chord).unwrap()],
+            Action::ToggleFullscreen
+        );
+        assert_eq!(defaults.get(&Chord::parse(unbound).unwrap()), None);
+        assert_eq!(
+            defaults
+                .values()
+                .filter(|action| **action == Action::ToggleFullscreen)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn shell_integration_bindings() {
     for macos in [false, true] {
         let defaults = default_bindings_for(macos);
@@ -387,6 +445,11 @@ fn shell_integration_bindings() {
                 if macos { "shift+a" } else { "a" },
                 "select_command_output",
                 Action::SelectCommandOutput,
+            ),
+            (
+                if macos { "shift+g" } else { "g" },
+                "show_last_command_output",
+                Action::ShowLastCommandOutput,
             ),
         ] {
             assert_eq!(
@@ -457,6 +520,10 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
             Chord::parse("super+shift+a").unwrap(),
             Action::SelectCommandOutput,
         );
+        bindings.insert(
+            Chord::parse("super+shift+g").unwrap(),
+            Action::ShowLastCommandOutput,
+        );
         bindings.insert(Chord::parse("super+k").unwrap(), Action::Clear);
         for (key, action) in [
             ("=", Action::Increase),
@@ -474,7 +541,13 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
             Chord::parse("ctrl+shift+a").unwrap(),
             Action::SelectCommandOutput,
         );
+        bindings.insert(
+            Chord::parse("ctrl+shift+g").unwrap(),
+            Action::ShowLastCommandOutput,
+        );
     }
+    let fullscreen = if macos { "ctrl+super+f" } else { "f11" };
+    bindings.insert(Chord::parse(fullscreen).unwrap(), Action::ToggleFullscreen);
     for (key, action) in [
         ("pageup", Action::PageUp),
         ("pagedown", Action::PageDown),
@@ -564,13 +637,18 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     let mut config = Config {
         font: raw.font,
         drop_preview: raw.drop_preview.unwrap_or(true),
+        hover_preview: raw.hover_preview.unwrap_or(false),
         paste_protection: raw.paste_protection.unwrap_or(true),
+        trim_paste: raw.trim_paste.unwrap_or(true),
         clipboard_read: raw.clipboard_read.unwrap_or(false),
         confirm_close: raw.confirm_close.unwrap_or(true),
+        visual_bell: raw.visual_bell.unwrap_or(false),
         desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
         menu_bar_icon: raw.menu_bar_icon.unwrap_or(true),
         auto_secure_input: raw.auto_secure_input.unwrap_or(true),
+        hide_mouse_when_typing: raw.hide_mouse_when_typing.unwrap_or(true),
+        remember_window_size: raw.remember_window_size.unwrap_or(true),
         ..Config::default()
     };
     if let Some(name) = raw.tab_bar {
@@ -605,6 +683,23 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
             return Err(error("font_size", "expected a number between 4 and 200"));
         }
         config.font_size = size;
+    }
+    for (key, value, field) in [
+        (
+            "window_columns",
+            raw.window_columns,
+            &mut config.window_columns,
+        ),
+        ("window_rows", raw.window_rows, &mut config.window_rows),
+    ] {
+        if let Some(value) = value {
+            *field = Some(
+                usize::try_from(value)
+                    .ok()
+                    .filter(|n| (1..=crate::window_state::MAX_CELLS).contains(n))
+                    .ok_or_else(|| error(key, "expected a whole number between 1 and 10000"))?,
+            );
+        }
     }
     if let Some(padding) = raw.padding {
         if !padding.is_finite() || !(0.0..=1000.0).contains(&padding) {
@@ -649,6 +744,22 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
     };
     if config.shell.first().is_some_and(|s| s.is_empty()) {
         return Err(error("shell", "expected a nonempty program"));
+    }
+    match raw.pager {
+        Some(Shell::Program(program)) => config.pager = vec![program],
+        Some(Shell::Command(command)) => config.pager = command,
+        None => {}
+    }
+    if config.pager.first().is_none_or(|s| s.is_empty()) {
+        return Err(error("pager", "expected a nonempty program"));
+    }
+    config.editor = match raw.editor {
+        Some(Shell::Program(command)) => command.split_whitespace().map(str::to_owned).collect(),
+        Some(Shell::Command(command)) => command,
+        None => Vec::new(),
+    };
+    if config.editor.first().is_some_and(|s| s.is_empty()) {
+        return Err(error("editor", "expected a nonempty program"));
     }
     if let Some(term) = raw.term {
         if term.is_empty() || term.contains(['/', ' ']) {
@@ -1056,6 +1167,35 @@ mod tests {
     }
 
     #[test]
+    fn window_size() {
+        let config = parse_text("").unwrap();
+        assert_eq!((config.window_columns, config.window_rows), (None, None));
+        assert!(config.remember_window_size);
+        let config =
+            parse_text("window_columns = 120\nwindow_rows = 40\nremember_window_size = false")
+                .unwrap();
+        assert_eq!(
+            (config.window_columns, config.window_rows),
+            (Some(120), Some(40))
+        );
+        assert!(!config.remember_window_size);
+        assert!(config.warnings.is_empty());
+        assert_eq!(parse_text("window_rows = 3").unwrap().window_rows, Some(3));
+        for text in [
+            "window_columns = 0",
+            "window_rows = -1",
+            "window_columns = 10001",
+            "window_columns = 80.5",
+            "window_rows = \"24\"",
+            "remember_window_size = 1",
+        ] {
+            assert!(parse_text(text).is_err(), "{text}");
+        }
+        let error = parse_text("window_columns = 0").unwrap_err();
+        assert!(error.contains("window_columns"), "{error}");
+    }
+
+    #[test]
     fn app_icon() {
         let config = parse_text("").unwrap();
         assert_eq!(config.app_icon, AppIcon::Tide);
@@ -1091,6 +1231,17 @@ mod tests {
                 .auto_secure_input
         );
         assert!(parse_text("auto_secure_input = 1").is_err());
+    }
+
+    #[test]
+    fn hide_mouse_when_typing() {
+        assert!(parse_text("").unwrap().hide_mouse_when_typing);
+        assert!(
+            !parse_text("hide_mouse_when_typing = false")
+                .unwrap()
+                .hide_mouse_when_typing
+        );
+        assert!(parse_text("hide_mouse_when_typing = \"yes\"").is_err());
     }
 
     #[test]
@@ -1213,6 +1364,8 @@ mod tests {
     fn defaults_and_full_config() {
         assert!(parse_text("").unwrap().drop_preview);
         assert!(!parse_text("drop_preview = false").unwrap().drop_preview);
+        assert!(!parse_text("").unwrap().hover_preview);
+        assert!(parse_text("hover_preview = true").unwrap().hover_preview);
         assert!(parse_text("").unwrap().paste_protection);
         assert!(!parse_text("").unwrap().clipboard_read);
         assert!(parse_text("clipboard_read = true").unwrap().clipboard_read);
@@ -1240,9 +1393,14 @@ mod tests {
                 .unwrap()
                 .paste_protection
         );
+        assert!(parse_text("").unwrap().trim_paste);
+        assert!(!parse_text("trim_paste = false").unwrap().trim_paste);
         assert!(parse_text("").unwrap().confirm_close);
         assert!(!parse_text("confirm_close = false").unwrap().confirm_close);
         assert!(parse_text("confirm_close = 1").is_err());
+        assert!(!parse_text("").unwrap().visual_bell);
+        assert!(parse_text("visual_bell = true").unwrap().visual_bell);
+        assert!(parse_text("visual_bell = 'yes'").is_err());
         assert!(parse_text("").unwrap().desktop_notifications);
         assert!(
             !parse_text("desktop_notifications = false")
@@ -1332,6 +1490,36 @@ bright_white = "#fefdfc"
             parse_text("shell = '/bin/zsh'").unwrap().shell,
             ["/bin/zsh"]
         );
+        assert_eq!(
+            parse_text("editor = 'code --goto {file}:{line}'")
+                .unwrap()
+                .editor,
+            ["code", "--goto", "{file}:{line}"]
+        );
+        assert_eq!(
+            parse_text("editor = ['/Applications/My Editor', '{file}']")
+                .unwrap()
+                .editor,
+            ["/Applications/My Editor", "{file}"]
+        );
+        assert!(parse_text("").unwrap().editor.is_empty());
+        assert!(parse_text("editor = ''").unwrap().editor.is_empty());
+        assert!(parse_text("editor = ['']").unwrap_err().contains("editor"));
+    }
+
+    #[test]
+    fn pager_defaults_to_less_and_accepts_a_program_or_command() {
+        assert_eq!(parse_text("").unwrap().pager, ["less", "-R", "+G"]);
+        assert_eq!(parse_text("pager = 'most'").unwrap().pager, ["most"]);
+        assert_eq!(
+            parse_text("pager = ['bat', '--paging=always']")
+                .unwrap()
+                .pager,
+            ["bat", "--paging=always"]
+        );
+        for text in ["pager = ''", "pager = []", "pager = ['']"] {
+            assert!(parse_text(text).unwrap_err().contains("pager"), "{text}");
+        }
     }
 
     #[test]

@@ -286,6 +286,18 @@ mod tests {
     }
 
     #[test]
+    fn modifier_only_presses_send_nothing() {
+        for (named, mods) in [
+            (NamedKey::Shift, ModifiersState::SHIFT),
+            (NamedKey::Control, ModifiersState::CONTROL),
+            (NamedKey::Alt, ModifiersState::ALT),
+            (NamedKey::Super, ModifiersState::SUPER),
+        ] {
+            assert_eq!(key(Key::Named(named), None, mods), None);
+        }
+    }
+
+    #[test]
     fn plain_and_control_characters() {
         let none = ModifiersState::empty();
         assert_eq!(key(ch("a"), Some("a"), none), Some(b"a".to_vec()));
