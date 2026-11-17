@@ -164,7 +164,7 @@ define_class!(
 );
 
 /// Sends `UserEvent::ExitedFullScreen` with the window's `key` whenever a window has left native fullscreen. The
-/// event arrives after AppKit and winit have finished setting the window's frame. Needs
+/// event arrives after `AppKit` and winit have finished setting the window's frame. Needs
 /// `handle_new_tab_button` first, which hands over the event loop proxy.
 pub fn observe_fullscreen_exit() {
     let Some(mtm) = MainThreadMarker::new() else {
@@ -273,7 +273,7 @@ pub fn watch_command_moves() {
     });
 }
 
-/// Whether `window` is in native fullscreen, as AppKit reports it: unlike winit's own
+/// Whether `window` is in native fullscreen, as `AppKit` reports it: unlike winit's own
 /// state, this also holds for a tab added to a group that is already fullscreen.
 pub fn is_fullscreen(window: &Window) -> bool {
     const FULL_SCREEN: usize = 1 << 14;
