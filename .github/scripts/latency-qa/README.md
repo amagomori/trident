@@ -1,7 +1,7 @@
 # Latency QA scripts
 
-These scripts compare keypress latency of a PR's release binary with main and with Alacritty. They
-are for QA runners. They need Python 3 (stdlib only unless noted). Run them from a desktop session;
+Compare keypress latency of a PR's release binary with main and with Alacritty. The scripts need
+Python 3 with only the standard library unless noted. Run them from a desktop session because
 Xvfb results don't count as evidence.
 
 | Script | Measures | Platforms |
@@ -34,7 +34,7 @@ Gatekeeper can block the Homebrew cask.
 - Both scripts write `rows.json` (every run) and `summary.json` into `--out`. A run that reaches no
   verdict leaves no `summary.json`.
 - Report the timing source `ab.py` prints. Only `wayland-presentation` is verified presentation
-  timing; `x11-present`, `metal-presented` and `present-return` are labeled unverified.
+  timing. The `x11-present`, `metal-presented` and `present-return` sources are labeled unverified.
 - `ab.py` exits 2 if it gets no echo, or if one workload's runs mix timing sources.
 - `vs_alacritty.py` measures until captured screen pixels change, not light from the panel. On
   macOS, each `keylat` screen grab adds a few milliseconds of detection lag, the same for every

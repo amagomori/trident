@@ -1,14 +1,12 @@
 # Configuration
 
-This page is the reference for Trident's config file: every setting, key bindings, scrollback,
-shell integration, live reload and color themes. For keys and everyday use, see
+Configure Trident's appearance, key bindings, scrollback and shell integration. For everyday tasks, see
 [Usage](usage.md).
 
 ## Config file
 
 Trident reads `$XDG_CONFIG_HOME/trident/config.toml`, or `~/.config/trident/config.toml` if
-`XDG_CONFIG_HOME` is unset, on both Linux and macOS. The file is optional, and so is every entry
-in it.
+`XDG_CONFIG_HOME` is unset, on both Linux and macOS. The file and its entries are optional.
 
 - `--config <PATH>` reads another file instead.
 - `--font`, `--font-size`, `--scrollback` and `-e` override their config values, including after
@@ -81,16 +79,18 @@ bright_white = "#c0caf5"
 `hide_mouse_when_typing` hides the mouse pointer over the window when a key press sends input to
 the shell or the running program, including committed IME text and `{ send = "..." }` bindings.
 Moving the mouse, clicking, scrolling or switching focus shows it again. Modifier keys and
-shortcuts such as copy, tab switching and font size don't hide it, and mouse reporting to programs
-works as before.
+shortcuts such as copy, tab switching and font size don't hide it.
 
-`window_columns` and `window_rows` set the first window's size in cells (1..=10000, then kept to
-at least 20 by 5 and to what fits on the screen). Setting either one opens at that size every time,
-with 100 or 30 for the other. Otherwise, with `remember_window_size = true`, the size in cells and
-the maximized state of the last window to close are saved to `$XDG_STATE_HOME/trident/window.toml`
-(`~/.local/state/trident/window.toml` when unset; `~/Library/Application Support/Trident/window.toml`
-on macOS) and reused at the next launch. A missing or unreadable file means 100 by 30. Windows
-opened with Ctrl+Shift+N (Cmd+N on macOS) take the size of the window they were opened from.
+`window_columns` and `window_rows` accept 1 to 10,000 cells. Trident limits the window to at least
+20 by 5 cells and to what fits on the screen. Setting either value opens at that size every time,
+with 100 columns or 30 rows for the other. Otherwise, `remember_window_size = true` restores the
+last closed window's size and maximized state.
+
+On Linux, Trident saves these to
+`$XDG_STATE_HOME/trident/window.toml`, defaulting to `~/.local/state/trident/window.toml`.
+On macOS, it uses `~/Library/Application Support/Trident/window.toml`.
+A missing or unreadable file means 100 by 30. Windows opened with Ctrl+Shift+N (Cmd+N on macOS)
+take the size of the window they were opened from.
 
 `vsync = false` shows frames without waiting for the display refresh. This can lower latency but
 can cause tearing. Where the graphics driver can't turn vsync off, such as OpenGL on Linux, vsync
@@ -105,7 +105,7 @@ A key chord combines `ctrl`, `shift`, `alt` (or `option`) and `super` (or `cmd`)
 character or a named key, such as `pageup`, `home`, `insert`, `enter`, `escape`, `space`, an
 arrow, or `f1` through `f35`.
 
-A chord maps to one of these:
+A chord maps to one of the following actions.
 
 | Kind | Actions |
 | --- | --- |
@@ -128,9 +128,9 @@ command_share = 0.5         # 0 < share <= 1 of `lines` one command's output may
 ```
 
 With [shell integration](#shell-integration), a command whose output outgrows its share keeps its
-first and last lines and drops the middle. One dim line, such as `… 48,213 lines of make output
-dropped`, takes its place, so earlier commands stay in history. Without shell integration, the
-oldest lines go first.
+first and last lines and drops the middle. A dim line such as `… 48,213 lines of make output
+dropped` replaces the omitted output, keeping earlier commands in history. Without shell
+integration, the oldest lines go first.
 
 ## Compare runs
 
@@ -140,7 +140,7 @@ run of the same command line:
 - Changed lines get an amber tint and a bar in the left margin.
 - A red tick marks where lines were removed.
 
-Text that varies on every run is ignored, so a rerun that only changes timings shows no marks,
+Trident ignores text that varies on every run. A rerun that only changes timings shows no marks,
 but a changed test result does. The built-in patterns cover dates and times, durations (`0.42s`,
 `1m3s`), process IDs and temporary paths (`/tmp/…`, `/var/folders/…`). To add your own, use the
 table form of `compare_runs`:
@@ -222,8 +222,8 @@ saves through a symlink and a file created after launch.
 ## Config errors
 
 If the file has an unknown key, a wrong type or value, or malformed TOML, Trident shows the file,
-line, column and entry in a banner and on stderr. An error at startup uses the defaults; an error
-on reload keeps the last valid config. When you fix the file, the banner clears.
+line, column and entry in a banner and on stderr. At startup, Trident falls back to the defaults.
+On reload, it keeps the last valid config. Fixing the file clears the banner.
 
 ## Color themes
 
@@ -242,14 +242,14 @@ theme = { light = "solarized-light", dark = "solarized-dark" }
 ```
 
 Trident switches open windows when the appearance changes, without restarting the shell. On
-Linux, this needs a desktop that provides the `org.freedesktop.portal.Settings` portal; without
+Linux, this needs a desktop that provides the `org.freedesktop.portal.Settings` portal. Without
 it, Trident uses the dark theme.
 
 Programs can ask which scheme is active with `CSI ? 996 n`. Trident replies `CSI ? 997 ; 1 n` for
 dark or `CSI ? 997 ; 2 n` for light. A program that sets mode 2031 (`CSI ? 2031 h`) gets the same
 report whenever the scheme changes.
 
-### Optional: Your own theme
+### Use your own theme
 
 A theme can also be a path to a TOML file, absolute or relative to the config's directory, for
 example `theme = "themes/my-theme.toml"`.

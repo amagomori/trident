@@ -1,9 +1,8 @@
 # Scroll-region QA
 
-These checks cover a PR that changes how rows are cleared when a scroll region scrolls
-(`Row::reset`). They are for QA runners, on Linux and on a native Mac, against a frozen main and
-PR head pair. Every script exits 2 when its workload didn't run, so a wrong path can't pass as a
-fast run.
+These checks cover changes to `Row::reset`, which clears rows when a scroll region scrolls.
+Run them on Linux and a native Mac against a frozen main and PR head pair. Every script exits 2
+if its workload doesn't run, preventing a wrong path from passing as a fast run.
 
 | Step | Script | Pass |
 |---|---|---|
@@ -26,11 +25,11 @@ FX=$HOME/qa-fixtures; Q=$PWD/.github/scripts
 
 Install vtebench and Alacritty:
 
-- vtebench: `git clone https://github.com/alacritty/vtebench ~/vtebench && cargo install --locked
+- To install vtebench, run `git clone https://github.com/alacritty/vtebench ~/vtebench && cargo install --locked
   --path ~/vtebench`.
-- Alacritty on Linux: from the distribution, or `cargo install --locked alacritty` (needs the
-  fontconfig, freetype, xcb and xkbcommon dev packages and cmake).
-- Alacritty on macOS: copy the app from the release .dmg to `/Applications`, because Gatekeeper
+- On Linux, install Alacritty from the distribution or run `cargo install --locked alacritty`.
+  Building requires the fontconfig, freetype, xcb and xkbcommon dev packages and cmake.
+- On macOS, copy Alacritty from the release .dmg to `/Applications` because Gatekeeper
   can block the Homebrew cask.
 
 On macOS, neither the Alacritty binary nor `~/.cargo/bin` is on `PATH` by default, so before the
@@ -41,7 +40,7 @@ export PATH=$HOME/.cargo/bin:/Applications/Alacritty.app/Contents/MacOS:$PATH
 command -v alacritty vtebench   # both must print a path
 ```
 
-`cfg/alacritty.toml` uses JetBrains Mono, so install it; on macOS, copy the release zip's
+`cfg/alacritty.toml` uses JetBrains Mono. On macOS, install it by copying the release zip's
 `fonts/ttf` into `/Library/Fonts`. With the fallback font, Alacritty on macOS settles at 28 lines
 and `vtebench_ab.py` fails its 100x30 check.
 
@@ -60,29 +59,30 @@ python3 $Q/scroll-region-qa/griddiff.py --main ../t-main --head ../t-head --fixt
 
 ## Read the result
 
-- The A/A bound is the larger absolute end of the A/A 95% CI: ptyab's `A/A delta` line, or the same
-  value per benchmark in `vtebench_ab.py`.
-- Faster beyond the bound: the A/B CI's upper end is below minus the bound. Slower beyond it: the
-  A/B CI's lower end is above the bound.
+- The A/A bound is the larger absolute endpoint of the A/A 95% CI. Use ptyab's `A/A delta` line
+  or the corresponding value per benchmark in `vtebench_ab.py`.
+- A result is faster beyond the bound if the A/B CI's upper endpoint is below minus the bound.
+  It is slower beyond the bound if the lower endpoint is above the bound.
 - ptyab's last line, `A/A noise bound`, is the largest single A/A pair. It's informational, since
   one outlier pair sets it.
 - `region_full` (full-width lines) is a control with little or no expected win. `region_bg`
   (colored erase) can also improve. Neither may regress.
 
 `griddiff.py` is the check that catches a wrong reset bound, such as a row that leaves one occupied
-cell unblanked. `vim_splits.py` is a visual smoke test for regions and splits; vim's redraws don't
+cell unblanked. `vim_splits.py` is a visual smoke test for regions and splits. Vim's redraws don't
 reach the bounded path.
 
 ## Platform notes
 
-- Linux: an X11 display (Xvfb + Mesa is enough), `xdotool` and ImageMagick `import` for
-  `vim_splits.py`. Software rendering makes the PTY A/B rendering-bound; report it.
-- macOS: a native Mac, Xcode command line tools, Rust, Python 3, vim
-  (`/usr/bin/vim`). `vim_splits.py` uses System Events and `screencapture`, so the shell running
+- On Linux, use an X11 display, `xdotool` and ImageMagick `import` for `vim_splits.py`. Xvfb with
+  Mesa is sufficient, but report that software rendering makes the PTY A/B rendering-bound.
+- On a native Mac, install Xcode command line tools, Rust and Python 3, and use `/usr/bin/vim`.
+  The `vim_splits.py` script uses System Events and `screencapture`, so the shell running
   it needs **Accessibility** and **Screen Recording** permission. Before timing, run
   `xcrun simctl shutdown all` and `sudo mdutil -a -i off`. A macOS VM has a paravirtual Metal
   device and no Retina panel, so say so with the results.
-- Keep the window at its 100x30 default; `vtebench_ab.py` fails if a terminal reports another size.
+- Keep the window at its 100x30 default. The `vtebench_ab.py` script fails if a terminal reports
+  another size.
 - `vtebench_ab.py` and `griddiff.py` run patched copies of vtebench's scripts
   (`vtebench_tty.py`), because upstream's tty lookup breaks on macOS and without a tty.
 - `griddiff.py` keeps its dumper builds and failing streams in `--out` (default `~/qa-griddiff`).

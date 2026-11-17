@@ -1,9 +1,9 @@
 # Process-group QA scripts
 
-These scripts check a PR that changes how Trident tracks the shell's foreground process group:
-CPU cost under output, terminal modes left on by a dead command, and notification and title
-latency. They are for QA runners. They need Python 3 (stdlib only) on Linux or macOS. Run them from
-a desktop session; `--xvfb` is a smoke check only.
+These scripts check changes to Trident's foreground process-group tracking. They measure CPU cost
+under output, terminal modes left on by a dead command, and notification and title latency.
+They need Python 3 with only the standard library on Linux or macOS. Run them from a desktop
+session. Use `--xvfb` only for a smoke check.
 
 | Script | Measures |
 | --- | --- |
@@ -13,9 +13,9 @@ a desktop session; `--xvfb` is a smoke check only.
 
 ## Prerequisites
 
-- Linux: an X11 session with `xdotool`, `xprop`, `xmessage`, `xclip` and `dbus-monitor`, and the
+- On Linux, use an X11 session with `xdotool`, `xprop`, `xmessage`, `xclip` and `dbus-monitor`, and the
   desktop session bus.
-- macOS: **Accessibility** permission for the app that runs the scripts. The stock
+- On macOS, grant **Accessibility** permission to the app that runs the scripts. The stock
   `/usr/bin/python3` and `/bin/bash` are enough.
 
 ## Run
