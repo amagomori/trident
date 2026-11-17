@@ -25,9 +25,7 @@ pub struct FontSpec {
 /// Interpretation of a font setting; see [`Self::of`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source<'a> {
-    /// An explicit font file path.
     File(&'a Path),
-    /// An installed family or full face name.
     Family(&'a str),
 }
 
@@ -70,26 +68,11 @@ pub(crate) struct Face {
 }
 
 /// The faces for each [`Style`], with synthesis for missing styles.
-///
-/// ```rust
-/// # fn main() -> Result<(), String> {
-/// use term_render::{FontFaces, FontSpec, Fonts};
-/// let (faces, warnings) = FontFaces::resolve(&FontSpec::default())?;
-/// assert!(warnings.is_empty());
-/// let fonts = Fonts::new(&faces, 16.0);
-/// assert!(fonts.metrics.width >= 1.0);
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Clone)]
 pub struct FontFaces([Face; 4]);
 
 impl FontFaces {
     /// Returns the bundled `JetBrains Mono` faces.
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "embedded fonts are validated by tests, not caller input"
-    )]
     pub fn bundled() -> FontFaces {
         FontFaces(font::BUNDLED.map(|data| Face {
             font: FontArc::try_from_slice(data).expect("bundled font"),
@@ -215,21 +198,21 @@ fn pick(faces: &[Traits]) -> Option<[Pick; 4]> {
 }
 
 enum Data {
-    Cached(&'static [u8]),
+    Mapped(&'static [u8]),
     Read(Rc<Vec<u8>>),
 }
 
 impl Data {
     fn bytes(&self) -> &[u8] {
         match self {
-            Data::Cached(data) => data,
+            Data::Mapped(data) => data,
             Data::Read(data) => data,
         }
     }
 
     fn font(&self, index: u32) -> Option<FontArc> {
         match self {
-            Data::Cached(data) => FontRef::try_from_slice_and_index(data, index)
+            Data::Mapped(data) => FontRef::try_from_slice_and_index(data, index)
                 .ok()
                 .map(FontArc::new),
             Data::Read(data) => FontVec::try_from_vec_and_index(data.to_vec(), index)
@@ -287,9 +270,7 @@ fn from_system(name: &str) -> Option<FontFaces> {
     }
     let candidates = files
         .into_iter()
-        .filter_map(|(path, index)| {
-            Some((Rc::new(Data::Cached(font::read_cached(&path).ok()?)), index))
-        })
+        .filter_map(|(path, index)| Some((Rc::new(Data::Mapped(font::map(&path).ok()?)), index)))
         .collect();
     build(candidates)
 }

@@ -23,16 +23,13 @@ pub enum TabHit {
     Tab(usize),
     /// A tab's close button, by zero-based index.
     Close(usize),
-    /// The new-tab button.
     New,
 }
 
 /// One tab's place in the bar, in physical pixels from the bar's left edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabRect {
-    /// Left edge in physical pixels.
     pub x: f32,
-    /// Width in physical pixels.
     pub width: f32,
     /// The close button: `[x, y, width, height]`.
     pub close: [f32; 4],
@@ -43,9 +40,7 @@ pub struct TabRect {
 /// Tab-bar drawing and hit-test geometry; see [`tab_layout`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabLayout {
-    /// Bar height in physical pixels.
     pub height: f32,
-    /// Tab rectangles in display order.
     pub tabs: Vec<TabRect>,
     /// The new-tab button: `[x, y, width, height]`.
     pub new: [f32; 4],
@@ -60,8 +55,7 @@ const MAX_TAB_COLUMNS: f32 = 28.0;
 
 /// Splits a physical-pixel width among tabs capped at 28 cell columns each.
 ///
-/// Leaves room for the new-tab button. `cw` and `ch` are positive cell width
-/// and
+/// Leaves room for the new-tab button. `cw` and `ch` are positive cell width and
 /// height in physical pixels.
 ///
 /// # Examples

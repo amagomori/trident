@@ -27,7 +27,6 @@ CI runs the same checks on Linux and macOS for every pull request.
 Follow the [canonical source-documentation standard](https://github.com/amagomori/.github/blob/main/docs/rust_documentation.md)
 when writing or reviewing Rust comments, rustdoc, Python docstrings and other first-party
 source comments. The standard is maintained in `amagomori/.github`; do not copy it here.
-For the repository-wide review and exclusions, see the [audit checklist](source_documentation_audit.md).
 
 Run the documentation gates locally before opening a PR:
 
@@ -39,10 +38,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items -p term-
 cargo test --doc -p term-core -p term-render
 ```
 
-Both CI platforms run these checks. `term-core` and `term-render` warn on missing public
-documentation; the three first-party crates opt into the workspace's documentation and
-unsafe-comment Clippy lints. Vendored code does not inherit those lints. A green Linux
-run does not check macOS-only code; run the same commands on macOS as well.
+Both CI platforms run these checks. The three first-party crates opt into
+`doc_markdown`, `missing_safety_doc` and `undocumented_unsafe_blocks`; vendored code
+does not inherit them. There is no blanket missing-documentation, error-heading,
+panic-heading or example quota. Document non-obvious contracts and use examples
+where they help, not to satisfy coverage counts. A green Linux run does not check
+macOS-only code; run the same commands on macOS as well.
 
 Linters check structure, links and examples, not whether prose is correct. Review comments
 against the implementation, including ownership, units, bounds, errors, panics and unsafe

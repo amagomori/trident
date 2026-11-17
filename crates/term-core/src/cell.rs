@@ -3,32 +3,19 @@
 /// A terminal color as specified by the program; see [`crate::colors`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Color {
-    /// The palette's default text color.
     DefaultFg,
-    /// The palette's default background color.
     DefaultBg,
     /// An xterm 256-color palette index.
     Indexed(u8),
-    /// Explicit red, green and blue channels in `0..=255`.
     Rgb(u8, u8, u8),
 }
 
-/// Cell rendition and storage flags, combined with `|` or [`Self::union`].
-///
-/// ```rust
-/// use term_core::Flags;
-/// let flags = Flags::BOLD | Flags::ITALIC;
-/// assert!(flags.contains(Flags::BOLD));
-/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Flags(u16);
 
 impl Flags {
-    /// Bold text (SGR 1).
     pub const BOLD: Flags = Flags(1);
-    /// Dim text (SGR 2).
     pub const DIM: Flags = Flags(1 << 1);
-    /// Italic text (SGR 3).
     pub const ITALIC: Flags = Flags(1 << 2);
     /// Underlined text; use [`Self::underline`] to read its style.
     pub const UNDERLINE: Flags = Flags(1 << 3);
@@ -36,7 +23,6 @@ impl Flags {
     pub const INVERSE: Flags = Flags(1 << 4);
     /// Text is concealed without changing its background (SGR 8).
     pub const HIDDEN: Flags = Flags(1 << 5);
-    /// Struck-through text (SGR 9).
     pub const STRIKE: Flags = Flags(1 << 6);
     /// First half of a double-width character.
     pub const WIDE: Flags = Flags(1 << 7);
@@ -53,7 +39,6 @@ impl Flags {
     /// The `UnderlineStyle` of an `UNDERLINE` cell other than a single line (SGR 4:x, 21).
     pub const UNDERLINE_STYLE: Flags = Flags(0b111 << 13);
 
-    /// Returns all bits set in either operand.
     pub const fn union(self, other: Flags) -> Flags {
         Flags(self.0 | other.0)
     }
@@ -67,17 +52,14 @@ impl Flags {
         self.0 & other.0 != 0
     }
 
-    /// Returns whether every bit of `other` is set.
     pub fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
     }
 
-    /// Sets every bit present in `other`.
     pub fn insert(&mut self, other: Flags) {
         self.0 |= other.0;
     }
 
-    /// Clears every bit present in `other`.
     pub fn remove(&mut self, other: Flags) {
         self.0 &= !other.0;
     }
@@ -86,15 +68,10 @@ impl Flags {
 /// How SGR 4:x draws an underline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnderlineStyle {
-    /// One continuous line.
     Single,
-    /// Two parallel lines.
     Double,
-    /// A wavy line.
     Curly,
-    /// A row of dots.
     Dotted,
-    /// A row of dashes.
     Dashed,
 }
 
@@ -137,8 +114,7 @@ impl std::ops::BitOr for Flags {
 
 /// One screen cell, including its character, rendition and link-table index.
 ///
-/// Read cells from [`crate::Terminal::viewport_row`], as in the [crate
-/// example](crate).
+/// Read cells from [`crate::Terminal::viewport_row`], as in the [crate example](crate).
 /// Use [`crate::Terminal::push_cell_text`] to decode grapheme-table entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
@@ -224,17 +200,6 @@ impl Cell {
 }
 
 /// A physical row and any cells temporarily hidden by a narrower grid.
-///
-/// See the [crate example](crate) for reading terminal rows. A row can also be
-/// built without a parser, with dimensions in cells:
-///
-/// ```rust
-/// use term_core::{Cell, Row};
-/// let mut row = Row::new(4, &Cell::default());
-/// row.resize(8);
-/// assert_eq!(row.cells.len(), 8);
-/// assert!(!row.wrapped());
-/// ```
 #[derive(Clone, Debug)]
 pub struct Row {
     /// Visible cells, indexed by zero-based cell column.

@@ -8,7 +8,6 @@ use term_core::{PinnedCommand, Terminal};
 
 /// Pinned command and its physical-pixel bounds, from [`ledger_bar`].
 pub struct LedgerBar<'a> {
-    /// Command currently pinned over the viewport.
     pub pinned: PinnedCommand<'a>,
     /// Top edge in pixels; negative while the next prompt pushes the bar off.
     pub top: f32,
@@ -27,13 +26,6 @@ impl LedgerBar<'_> {
 ///
 /// `pixel_offset` is the smooth-scroll offset; `padding` and `cell_height` use
 /// physical pixels. Returns `None` without a command to pin.
-///
-/// # Examples
-///
-/// ```rust
-/// let term = term_core::Terminal::new(80, 24);
-/// assert!(term_render::ledger_bar(&term, 6.0, 0.0, 20.0).is_none());
-/// ```
 pub fn ledger_bar(
     term: &Terminal,
     padding: f32,

@@ -12,7 +12,6 @@ pub const MATCH_LIMIT: usize = 10_000;
 /// An inclusive cell range in absolute line coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Match {
-    /// First matched cell.
     pub start: Point,
     /// Last matched cell, including the spacer of a wide character.
     pub end: Point,

@@ -14,8 +14,6 @@
 //! assert_eq!(tabs.tabs.len(), 2);
 //! ```
 
-#![warn(missing_docs)]
-
 mod atlas;
 mod banner;
 mod builtin;

@@ -281,8 +281,7 @@ struct QuitHook {
 /// # Safety
 ///
 /// Must be invoked on the main thread using the `applicationShouldTerminate:`
-/// ABI
-/// after installing the quit hook. The arguments are unused.
+/// ABI after installing the quit hook. The arguments are unused.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn should_terminate(
     _this: *mut objc2::runtime::AnyObject,

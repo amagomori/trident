@@ -100,7 +100,6 @@ pub struct Renderer {
     /// The grid area images are clipped to: x, y, width, height in physical pixels.
     image_clip: [u32; 4],
     srgb: bool,
-    /// Human-readable adapter name and backend, for diagnostics.
     pub adapter_info: String,
     /// False when the surface only offers FIFO, so `vsync = false` cannot take effect.
     pub vsync_optional: bool,

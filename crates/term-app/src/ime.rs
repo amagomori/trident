@@ -131,16 +131,13 @@ pub fn set_command_chords(bindings: &BTreeMap<Chord, Action>) {
 /// clearing it.
 ///
 /// winit waits for the input method's `doCommandBySelector:` response, which
-/// Command
-/// keys do not produce. This `interpretKeyEvents:` override supplies that
-/// response
-/// for bound chords; other events still go to the input method.
+/// Command keys do not produce. This `interpretKeyEvents:` override supplies
+/// that response for bound chords; other events still go to the input method.
 ///
 /// # Safety
 ///
 /// Must be invoked on the main thread using the `interpretKeyEvents:` ABI, with
-/// a
-/// live text-input view and a null or live `NSArray` of `NSEvent` objects.
+/// a live text-input view and a null or live `NSArray` of `NSEvent` objects.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn interpret_key_events(
     this: *mut objc2::runtime::AnyObject,

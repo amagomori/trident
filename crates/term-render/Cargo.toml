@@ -11,6 +11,7 @@ repository.workspace = true
 ab_glyph.workspace = true
 ab_glyph_rasterizer.workspace = true
 bytemuck.workspace = true
+memmap2.workspace = true
 png.workspace = true
 pollster.workspace = true
 term-core.workspace = true

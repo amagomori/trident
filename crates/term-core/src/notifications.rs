@@ -19,12 +19,9 @@ const MAX_ID: usize = 256;
 /// Requested desktop-notification priority.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Urgency {
-    /// Nonurgent information.
     Low,
-    /// Ordinary notification priority.
     #[default]
     Normal,
-    /// Urgent information; presentation remains application policy.
     Critical,
 }
 
@@ -49,9 +46,7 @@ pub struct Notification {
     pub title: String,
     /// Notification message, bounded to the parser's text limit.
     pub body: String,
-    /// Requested priority.
     pub urgency: Urgency,
-    /// Requested visibility/focus policy.
     pub occasion: Occasion,
 }
 
@@ -98,9 +93,8 @@ impl Notifications {
         }
     }
 
-    /// `OSC 9 ; message`. `ConEmu`'s numbered OSC 9 commands (progress, tab
-    /// title...) are
-    /// not notifications and are ignored.
+    /// `OSC 9 ; message`. `ConEmu`'s numbered OSC 9 commands (progress, tab title...)
+    /// are not notifications and are ignored.
     pub(crate) fn osc9(&mut self, params: &[&[u8]]) {
         if let Some(first) = params.first()
             && is_conemu_command(first)

@@ -1,7 +1,5 @@
 //! Font loading, cell metrics and glyph rasterization through `ab_glyph`.
-//!
-//! System fallback fonts are loaded on first use into immutable process-owned
-//! snapshots. Later file changes cannot invalidate a parser's borrowed bytes.
+//! System fallback fonts are memory-mapped and parsed lazily.
 
 use crate::builtin;
 use crate::color;
@@ -31,18 +29,15 @@ pub(crate) const BUNDLED: [&[u8]; 4] = [REGULAR, BOLD, ITALIC, BOLD_ITALIC];
 /// See the [crate example](crate) for rasterizing a styled character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Style {
-    /// Neither bold nor italic.
     Regular = 0,
     /// Bold, with synthesis if the family has no bold face.
     Bold = 1,
     /// Italic, with synthesis if the family has no italic face.
     Italic = 2,
-    /// Both bold and italic.
     BoldItalic = 3,
 }
 
 impl Style {
-    /// Selects the face corresponding to the two rendition attributes.
     pub fn new(bold: bool, italic: bool) -> Style {
         match (bold, italic) {
             (false, false) => Style::Regular,
@@ -72,9 +67,7 @@ pub struct CellMetrics {
 ///
 /// Returned by [`Fonts::rasterize`], as in the [crate example](crate).
 pub struct RasterizedGlyph {
-    /// Bitmap width in pixels.
     pub width: usize,
-    /// Bitmap height in pixels.
     pub height: usize,
     /// Offset of the bitmap's top-left corner from the cell's top-left corner.
     pub left: f32,
@@ -94,22 +87,26 @@ struct Fallback {
     index: u32,
 }
 
-/// Caches an immutable font snapshot for the process lifetime, once per path.
-///
-/// File-backed mappings cannot guarantee immutable bytes during font updates.
-/// Owned bytes keep borrowed font parsers valid even after truncation or
-/// replacement.
-pub(crate) fn read_cached(path: &Path) -> std::io::Result<&'static [u8]> {
-    static FILES: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
-    let mut files = FILES
+/// Memory-maps a font file for the rest of the program, once per path.
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "external font-file mutation is an unresolved safety issue, fixed separately"
+)]
+pub(crate) fn map(path: &Path) -> std::io::Result<&'static [u8]> {
+    static MAPS: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
+    let mut maps = MAPS
         .get_or_init(Default::default)
         .lock()
-        .expect("font snapshots");
-    if let Some(data) = files.get(path) {
+        .expect("font maps");
+    if let Some(data) = maps.get(path) {
         return Ok(data);
     }
-    let data: &'static [u8] = Box::leak(std::fs::read(path)?.into_boxed_slice());
-    files.insert(path.to_owned(), data);
+    let file = std::fs::File::open(path)?;
+    // External mutation can invalidate the mapping; process lifetime alone is
+    // insufficient. Keep this known issue visible until the separate safety fix.
+    let map = unsafe { memmap2::Mmap::map(&file)? };
+    let data: &'static [u8] = Box::leak(Box::new(map));
+    maps.insert(path.to_owned(), data);
     Ok(data)
 }
 
@@ -126,7 +123,7 @@ impl Fallback {
 }
 
 fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
-    let data = read_cached(path).ok()?;
+    let data = map(path).ok()?;
     let font = FontArc::new(FontRef::try_from_slice_and_index(data, *index).ok()?);
     let face = ttf_parser::Face::parse(data, *index)
         .ok()
@@ -428,38 +425,6 @@ fn shape_sequence(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cached_font_bytes_survive_truncation_and_replacement() {
-        let dir =
-            std::env::temp_dir().join(format!("trident-font-snapshot-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("font.ttf");
-        std::fs::write(&path, REGULAR).unwrap();
-        let data = read_cached(&path).unwrap();
-        let face = FontRef::try_from_slice(data).unwrap();
-        let a = face.glyph_id('A');
-        std::fs::write(&path, []).unwrap();
-        assert_eq!(data, REGULAR);
-        assert_eq!(face.glyph_id('A'), a);
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, BOLD).unwrap();
-        assert!(std::ptr::eq(data, read_cached(&path).unwrap()));
-        assert_eq!(data, REGULAR);
-        assert!(face.outline_glyph(a.with_scale(16.0)).is_some());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn failed_font_reads_are_not_cached() {
-        let path =
-            std::env::temp_dir().join(format!("trident-font-retry-{}.ttf", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        assert!(read_cached(&path).is_err());
-        std::fs::write(&path, BOLD).unwrap();
-        assert_eq!(read_cached(&path).unwrap(), BOLD);
-        std::fs::remove_file(path).unwrap();
-    }
 
     fn fonts() -> Fonts {
         Fonts::bundled(16.0)

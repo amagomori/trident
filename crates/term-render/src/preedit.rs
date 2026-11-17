@@ -11,7 +11,6 @@ use unicode_width::UnicodeWidthChar;
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Preedit<'a> {
-    /// Uncommitted composition text.
     pub text: &'a str,
     /// UTF-8 byte offsets of the caret and selection end, or `None` to hide it.
     pub cursor: Option<(usize, usize)>,

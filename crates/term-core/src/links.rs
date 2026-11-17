@@ -7,9 +7,7 @@ use crate::{Cell, Color, Flags, Point, Terminal};
 pub struct Link {
     /// Target URI as reported by OSC 8 or recognized in text.
     pub uri: String,
-    /// First cell of the primary range.
     pub start: Point,
-    /// Last cell of the primary range.
     pub end: Point,
     /// Other visible runs of the same OSC 8 link, which share its explicit `id`, in order.
     pub pieces: Vec<(Point, Point)>,
@@ -25,7 +23,6 @@ pub struct FileLink {
     pub line: u32,
     /// Printed one-based column, or `None` when omitted.
     pub column: Option<u32>,
-    /// First cell of the printed reference.
     pub start: Point,
     /// Last cell of the printed reference, inclusive.
     pub end: Point,

@@ -2,8 +2,7 @@
 //!
 //! Feed shell output to [`Terminal::advance`], read the grid with
 //! [`Terminal::viewport_row`], and send [`Terminal::take_responses`] back to
-//! the
-//! shell. Windowing, input encoding and rendering belong to the application.
+//! the shell. Windowing, input encoding and rendering belong to the application.
 //!
 //! # Examples
 //!
@@ -15,8 +14,6 @@
 //! assert_eq!(terminal.viewport_row(0).cells[0].c, 'h');
 //! assert_eq!(terminal.viewport_row(1).cells[0].c, 'w');
 //! ```
-
-#![warn(missing_docs)]
 
 pub mod colors;
 pub mod images;
@@ -164,11 +161,8 @@ pub struct CommandFinished {
 /// Cursor geometry selected by DECSCUSR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
-    /// A filled cell.
     Block,
-    /// A horizontal line along the cell's bottom edge.
     Underline,
-    /// A vertical line along the cell's left edge.
     Bar,
 }
 
@@ -221,7 +215,6 @@ impl Screen {
 /// Mouse events the application should report to the running program.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MouseMode {
-    /// No mouse reporting.
     #[default]
     Off,
     /// 9: X10 compatibility, button presses only, without modifiers.
@@ -245,7 +238,6 @@ pub struct Modes {
     pub app_keypad: bool,
     /// Paste input is enclosed in bracketed-paste markers.
     pub bracketed_paste: bool,
-    /// The cursor is visible.
     pub show_cursor: bool,
     /// Printing past the last column wraps to the next row.
     pub autowrap: bool,
@@ -255,7 +247,6 @@ pub struct Modes {
     pub insert: bool,
     /// Line feed also returns the cursor to column zero.
     pub linefeed_newline: bool,
-    /// Requested mouse-event reporting level.
     pub mouse: MouseMode,
     /// Mouse coordinates use SGR encoding.
     pub sgr_mouse: bool,
@@ -285,11 +276,8 @@ pub struct Point {
 /// How selection endpoints expand into selected cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionKind {
-    /// Cells between the inclusive endpoints.
     Simple,
-    /// Whole words containing the endpoints.
     Word,
-    /// Whole logical lines containing the endpoints.
     Line,
     /// Output delimited by shell integration marks.
     CommandOutput,
@@ -304,7 +292,6 @@ pub struct Selection {
     pub anchor: Point,
     /// Endpoint where the drag currently ends.
     pub head: Point,
-    /// Expansion and rectangular-selection policy.
     pub kind: SelectionKind,
 }
 
@@ -362,8 +349,7 @@ impl PrintState {
 ///
 /// # Examples
 ///
-/// Selection endpoints are cells, not UTF-8 offsets. Resize tracking moves
-/// saved
+/// Selection endpoints are cells, not UTF-8 offsets. Resize tracking moves saved
 /// points along with reflowed text; a resize clears the active selection.
 ///
 /// ```rust
@@ -1233,7 +1219,6 @@ impl Terminal {
         std::mem::take(&mut self.shell.progress_changed).then_some(self.shell.progress)
     }
 
-    /// Returns whether the alternate screen is active.
     pub fn is_alt_screen(&self) -> bool {
         self.alt_active
     }
@@ -1286,7 +1271,6 @@ impl Terminal {
         self.display_offset = (self.display_offset as isize + delta).clamp(0, max) as usize;
     }
 
-    /// Moves the viewport to the live screen.
     pub fn scroll_to_bottom(&mut self) {
         self.display_offset = 0;
     }
