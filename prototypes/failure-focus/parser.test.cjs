@@ -88,3 +88,10 @@ test('bounds input bytes (including UTF-8) and line count instead of silently tr
   assert.equal(parse('a'.repeat(1024 * 1024)).lines[0].length, 1024 * 1024);
   assert.equal(parse('\n'.repeat(19999)).lines.length, 20000);
 });
+
+test('attaches expected-panic diagnostics to their suffixed status record', () => {
+  const result = parse('test tests::rejects_input - should panic ... FAILED\nfailures:\n---- tests::rejects_input stdout ----\nnote: test did not panic as expected\nfailures:\n    tests::rejects_input');
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].name, 'tests::rejects_input');
+  assert.deepEqual(result.failures[0].ranges, [{ start: 2, end: 4 }]);
+});

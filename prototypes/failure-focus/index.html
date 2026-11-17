@@ -154,7 +154,7 @@
           }
           const status = line.match(/^test (.+) \.\.\. FAILED$/);
           if (status || detail) {
-            const name = (status || detail)[1];
+            const name = status ? status[1].replace(/ - should panic$/, '') : detail[1];
             let failure = failures.findLast(item => item.name === name && item.suiteId === suiteId);
             if (!failure) {
               failure = { name, suite, suiteId, statusLine: i, ranges: [], location: null };
