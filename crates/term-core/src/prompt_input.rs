@@ -115,6 +115,22 @@ impl Terminal {
         self.shell.prompt_input.ready && self.shell.zone == Zone::Input && !self.alt_active
     }
 
+    /// Counts the prompts the shell has started (`OSC 133 ; A`).
+    ///
+    /// A query sent before a later prompt started can no longer be answered
+    /// for its own editor: the shell or a command it ran consumed it.
+    ///
+    /// ```
+    /// use term_core::Terminal;
+    /// let mut term = Terminal::new(44, 5);
+    /// let before = term.prompts_started();
+    /// term.advance(b"\x1b]133;A\x07> \x1b]133;B\x07");
+    /// assert_eq!(term.prompts_started(), before + 1);
+    /// ```
+    pub fn prompts_started(&self) -> u64 {
+        self.shell.prompts_started
+    }
+
     /// Takes the latest complete shell reply, including a rejected snapshot.
     ///
     /// Valid snapshots contain the exact buffer and Unicode scalar cursor

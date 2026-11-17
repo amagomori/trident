@@ -1336,6 +1336,17 @@ fn sync_expired(since: Option<Instant>, now: Instant) -> bool {
     since.is_some_and(|since| now.duration_since(since) >= SYNC_TIMEOUT)
 }
 
+/// A query still pending once a later prompt started was read by a command or
+/// the shell, which will never answer it; free its slot so later clicks work.
+fn retire_lost_query(s: &mut Session, prompt: u64, now: Instant) {
+    let pending = s.input_query.is_pending();
+    let queued = s.input_query.retire_lost(prompt, now);
+    if pending && !s.input_query.is_pending() {
+        prompt_click::trace(format_args!("unanswered before a new prompt, retired"));
+    }
+    s.pty.write(&queued);
+}
+
 fn exit_ready(deadline: Option<Instant>, presented: bool, now: Instant) -> bool {
     deadline.is_some_and(|deadline| presented || now >= deadline)
 }
@@ -4165,7 +4176,10 @@ impl App {
         }
         let Some(s) = &mut self.session else { return };
         if let Some(context) = s.term.prompt_input_context() {
-            let sent = s.input_query.begin(point, context, Instant::now());
+            let now = Instant::now();
+            let prompt = s.term.prompts_started();
+            retire_lost_query(s, prompt, now);
+            let sent = s.input_query.begin(point, context, prompt, now);
             prompt_click::trace(format_args!("click {point:?}, query sent {sent}"));
             if sent {
                 s.term.take_prompt_input(); // ignore unsolicited/stale data
@@ -4635,6 +4649,7 @@ impl ApplicationHandler<UserEvent> for App {
                 prompt_click::trace(format_args!("expired, releasing {} bytes", queued.len()));
             }
             s.pty.write(&queued);
+            retire_lost_query(s, s.term.prompts_started(), now);
         }
         if exit_ready(self.exit_deadline, false, now) {
             event_loop.exit();
@@ -4732,7 +4747,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.update_ime_cursor_area();
         let mut deadline = self.click_to_move.deadline();
         if let Some(s) = &mut self.session {
-            if let Some(at) = s.input_query.deadline() {
+            if let Some(at) = s.input_query.wake_at() {
                 deadline = Some(deadline.map_or(at, |deadline| deadline.min(at)));
             }
             if sync_expired(s.synchronized_since, Instant::now()) {

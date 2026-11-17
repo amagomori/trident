@@ -70,6 +70,8 @@ struct ShellState {
     input_writes: Vec<(u64, std::ops::Range<usize>)>,
     prompt_input: prompt_input::State,
     prompt_generation: u64,
+    /// Prompts started (`OSC 133 ; A`), on either screen.
+    prompts_started: u64,
     /// The prompt asked for clicks as SGR mouse reports (`OSC 133 ; A ; click_events=1`).
     click_events: bool,
     commands: VecDeque<Command>,
@@ -1033,6 +1035,7 @@ impl Terminal {
         let flag = match mark {
             b"A" => {
                 self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
+                self.shell.prompts_started = self.shell.prompts_started.wrapping_add(1);
                 self.shell.zone = Zone::Prompt;
                 self.shell.prompt_input = prompt_input::State::default();
                 self.shell.click_events = args.contains(&&b"click_events=1"[..]);
@@ -1147,6 +1150,7 @@ impl Terminal {
                 input_writes: Vec::new(),
                 prompt_input: prompt_input::State::default(),
                 prompt_generation: 0,
+                prompts_started: 0,
                 click_events: false,
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the installed fish/zsh query binding through a real 44-column PTY.
 
-No display is needed. Example (test fish 3 and 4 separately):
+No display is needed. Each fish 4 also runs with fish_features=no-mark-prompt.
+Example (test fish 3 and 4 separately):
   python3 .github/scripts/prompt_input_test.py --fish /usr/bin/fish --fish /opt/fish/bin/fish --zsh /usr/bin/zsh
 """
 import argparse
@@ -14,6 +15,7 @@ import re
 import select
 import signal
 import struct
+import subprocess
 import tempfile
 import termios
 import time
@@ -24,7 +26,8 @@ READY = b"\x1b]777;trident;prompt-input;ready\x07"
 REPLY = re.compile(rb"\x1b]777;trident;prompt-input;data;(\d+);([A-Za-z0-9+/=]*);(scalar|glyph)\x07")
 
 
-def exercise(shell, kind):
+def exercise(shell, kind, features=None):
+    label = f"{shell}, fish_features={features}" if features else shell
     with tempfile.TemporaryDirectory(prefix="trident-prompt-input-") as directory:
         integration = ROOT / "shell-integration" / f"terminal.{kind}"
         if kind == "zsh":
@@ -44,6 +47,8 @@ def exercise(shell, kind):
                     r'bind \e\[1114108u _terminal_test_clear']
         pid, fd = pty.fork()
         if pid == 0:
+            if features:
+                os.environ["fish_features"] = features
             os.environ.update(TERM="xterm-256color", LANG="C.UTF-8", LC_ALL="C.UTF-8",
                               TERM_PROGRAM="trident",
                               ZDOTDIR=directory, XDG_CONFIG_HOME=directory,
@@ -87,7 +92,10 @@ def exercise(shell, kind):
                     assert 0 <= output.rfind(b"\x1b]133;A") < output.rfind(prompt) < output.rfind(READY), output
                     assert output.rfind(READY) < output.rfind(b"\x1b]133;B\x07"), output
                     assert output.count(READY) == 1, output
-                print(f"PASS fish ({shell}): 3 prompt replacements preserve fresh readiness and status")
+                    # Exactly one command start mark, ours or fish's native one, so the
+                    # terminal never queries the editor while the command owns input.
+                    assert output.count(b"\x1b]133;C") == 1, output
+                print(f"PASS fish ({label}): 3 prompt replacements preserve fresh readiness and status")
             cases = ["", ": abc", ": 日本😀e\u0301    ", ": " + "a" * 39 + "日本😀bc", ": a\nb"]
             for text in cases:
                 # Clear the entire editor (Ctrl-U is line-local in fish). Paste
@@ -99,7 +107,7 @@ def exercise(shell, kind):
                 assert payload == text + "\n", (kind, text, payload)
                 assert cursor == len(text), (kind, text, cursor, len(text))
                 assert match[3] == (b"scalar" if kind == "fish" else b"glyph"), match[3]
-            print(f"PASS {kind} ({shell}): {len(cases)} exact buffer/cursor replies at 44 columns")
+            print(f"PASS {kind} ({label}): {len(cases)} exact buffer/cursor replies at 44 columns")
         finally:
             os.close(fd)
             os.kill(pid, signal.SIGKILL)
@@ -115,7 +123,11 @@ def main():
         parser.error("pass at least one --fish or --zsh executable")
     for kind in ["fish", "zsh"]:
         for shell in getattr(args, kind):
-            exercise(str(Path(shell).resolve()), kind)
+            shell = str(Path(shell).resolve())
+            exercise(shell, kind)
+            if kind == "fish" and subprocess.run(
+                    [shell, "-c", "status test-feature mark-prompt"]).returncode == 0:
+                exercise(shell, kind, "no-mark-prompt")
 
 
 if __name__ == "__main__":

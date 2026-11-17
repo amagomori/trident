@@ -6,10 +6,13 @@ pub const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 // matching bindings, even when a binding contains that exact raw sequence.
 pub const INPUT_QUERY: &[u8] = b"\x1b[1114109u";
 const QUERY_TIMEOUT: Duration = Duration::from_millis(250);
+const LOST_REPLY_GRACE: Duration = Duration::from_secs(1);
 
 /// A query belongs to one PTY. Preserve the ordering of a click and the next key
 /// while its editor supplies the real buffer. A canceled query is kept as a
 /// tombstone until its reply arrives, so a late reply cannot service a new click.
+/// A query still unanswered once a later prompt starts was read by a command or
+/// the shell; after a grace period for a late reply, its slot is freed.
 #[derive(Default)]
 pub struct InputQuery {
     pending: Option<PendingQuery>,
@@ -20,10 +23,18 @@ struct PendingQuery {
     context: Option<PromptInputContext>,
     deadline: Instant,
     queued: Vec<u8>,
+    prompt: u64,
+    retire_at: Option<Instant>,
 }
 
 impl InputQuery {
-    pub fn begin(&mut self, point: Point, context: PromptInputContext, now: Instant) -> bool {
+    pub fn begin(
+        &mut self,
+        point: Point,
+        context: PromptInputContext,
+        prompt: u64,
+        now: Instant,
+    ) -> bool {
         if let Some(pending) = &mut self.pending {
             if pending.target.is_some() && pending.context.as_ref() == Some(&context) {
                 pending.target = Some(point);
@@ -37,6 +48,8 @@ impl InputQuery {
             context: Some(context),
             deadline: now + QUERY_TIMEOUT,
             queued: Vec::new(),
+            prompt,
+            retire_at: None,
         });
         true
     }
@@ -82,6 +95,36 @@ impl InputQuery {
         self.pending
             .as_ref()
             .and_then(|pending| pending.target.map(|_| pending.deadline))
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// The next time [`Self::expire`] or [`Self::retire_lost`] has work to do.
+    pub fn wake_at(&self) -> Option<Instant> {
+        let retire_at = self.pending.as_ref().and_then(|pending| pending.retire_at);
+        match (self.deadline(), retire_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Cancels a query sent before the shell's `prompt`-th prompt started and frees its
+    /// slot after the grace period. Returns typing to release now.
+    pub fn retire_lost(&mut self, prompt: u64, now: Instant) -> Vec<u8> {
+        let Some(pending) = &mut self.pending else {
+            return Vec::new();
+        };
+        if pending.prompt == prompt {
+            return Vec::new();
+        }
+        let retire_at = *pending.retire_at.get_or_insert(now + LOST_REPLY_GRACE);
+        let queued = self.cancel();
+        if now >= retire_at {
+            self.pending = None;
+        }
+        queued
     }
 
     pub fn expire(&mut self, now: Instant) -> Vec<u8> {
@@ -190,10 +233,10 @@ mod tests {
             click.press(Some(first), 1);
             click.release(now + MULTI_CLICK_INTERVAL);
             assert_eq!(click.press(Some(second), 1), Some(first));
-            assert!(query.begin(first, context(), now));
+            assert!(query.begin(first, context(), 0, now));
             click.release(now + MULTI_CLICK_INTERVAL);
             assert_eq!(click.take(), Some(second));
-            assert!(!query.begin(second, context(), now + Duration::from_millis(165)));
+            assert!(!query.begin(second, context(), 0, now + Duration::from_millis(165)));
             assert!(query.buffer(key));
             term.advance(
                 b"\x1b]777;trident;prompt-input;data;16;OiBmb28gYmFyYmF6IHF1eAo=;scalar\x07",
@@ -222,7 +265,7 @@ mod tests {
         for released in [false, true] {
             let mut query = InputQuery::default();
             let mut click = ClickToMove::default();
-            assert!(query.begin(first, context(), now));
+            assert!(query.begin(first, context(), 0, now));
             click.press(Some(second), 1);
             if released {
                 click.release(now + MULTI_CLICK_INTERVAL);
@@ -238,7 +281,7 @@ mod tests {
             let mut term = editor();
             term.advance(b"\x1b[8D");
             let next_context = term.prompt_input_context().unwrap();
-            assert!(query.begin(second, next_context, now));
+            assert!(query.begin(second, next_context, 0, now));
             assert!(query.buffer(b"X"));
             let (point, queued) = query.finish(term.prompt_input_context().as_ref()).unwrap();
             assert_eq!(
@@ -261,15 +304,15 @@ mod tests {
         ] {
             let mut query = InputQuery::default();
             let mut term = editor();
-            assert!(query.begin(point, context(), now));
+            assert!(query.begin(point, context(), 0, now));
             assert!(query.buffer(b"X"));
             term.advance(output);
             let changed = term.prompt_input_context();
             if let Some(next) = changed {
-                assert!(!query.begin(Point { line: 0, col: 6 }, next, now));
+                assert!(!query.begin(Point { line: 0, col: 6 }, next, 0, now));
             }
             assert_eq!(query.finish(term.prompt_input_context().as_ref()), Some((None, b"X".to_vec())));
-            assert!(query.begin(point, context(), now));
+            assert!(query.begin(point, context(), 0, now));
         }
     }
 
@@ -279,10 +322,10 @@ mod tests {
         let point = Point { line: 0, col: 10 };
         let mut query = InputQuery::default();
         let mut term = editor();
-        assert!(query.begin(point, context(), now));
+        assert!(query.begin(point, context(), 0, now));
         assert!(query.buffer(b"X"));
         term.advance(b"\x1b[1D");
-        assert!(!query.begin(point, term.prompt_input_context().unwrap(), now));
+        assert!(!query.begin(point, term.prompt_input_context().unwrap(), 0, now));
         assert!(query.buffer(b"\r"));
         term.advance(b"\x1b[1C");
         assert_eq!(term.prompt_input_context(), Some(context()));
@@ -293,13 +336,57 @@ mod tests {
     }
 
     #[test]
+    fn query_lost_to_a_command_frees_the_pane_after_the_next_prompt() {
+        let now = Instant::now();
+        let point = Point { line: 0, col: 6 };
+        let mut query = InputQuery::default();
+        assert!(query.begin(point, context(), 4, now));
+        assert!(query.buffer(b"z"));
+        // `cat` reads the query and never answers; the deadline cancels the click.
+        assert_eq!(query.expire(now + QUERY_TIMEOUT), b"z");
+        assert!(!query.begin(point, context(), 4, now + Duration::from_secs(5)));
+        // The same prompt never retires the slot; a later one does after the grace.
+        assert!(
+            query
+                .retire_lost(4, now + Duration::from_secs(6))
+                .is_empty()
+        );
+        assert!(query.is_pending());
+        let later = now + Duration::from_secs(7);
+        assert!(query.retire_lost(5, later).is_empty());
+        assert_eq!(query.wake_at(), Some(later + LOST_REPLY_GRACE));
+        // A late reply in the grace period is absorbed, never moving the next click.
+        assert!(
+            query
+                .retire_lost(5, later + LOST_REPLY_GRACE / 2)
+                .is_empty()
+        );
+        assert!(query.is_pending());
+        assert!(query.retire_lost(5, later + LOST_REPLY_GRACE).is_empty());
+        assert!(!query.is_pending());
+        assert!(query.begin(point, context(), 5, later + LOST_REPLY_GRACE));
+    }
+
+    #[test]
+    fn query_lost_before_its_deadline_releases_buffered_typing() {
+        let now = Instant::now();
+        let mut query = InputQuery::default();
+        assert!(query.begin(Point { line: 0, col: 6 }, context(), 0, now));
+        assert!(query.buffer(b"z"));
+        assert_eq!(query.retire_lost(1, now), b"z");
+        assert!(!query.buffer(b"y"));
+        assert!(query.retire_lost(1, now + LOST_REPLY_GRACE).is_empty());
+        assert!(!query.is_pending());
+    }
+
+    #[test]
     fn timeout_and_context_dismissal_never_revive_the_latest_target() {
         let now = Instant::now();
         let point = Point { line: 0, col: 10 };
         for timeout in [false, true] {
             let mut query = InputQuery::default();
-            assert!(query.begin(point, context(), now));
-            assert!(!query.begin(Point { line: 0, col: 6 }, context(), now));
+            assert!(query.begin(point, context(), 0, now));
+            assert!(!query.begin(Point { line: 0, col: 6 }, context(), 0, now));
             assert!(query.buffer(b"X\r"));
             let queued = if timeout {
                 query.expire(now + QUERY_TIMEOUT)
@@ -307,10 +394,10 @@ mod tests {
                 query.cancel()
             };
             assert_eq!(queued, b"X\r");
-            assert!(!query.begin(point, context(), now + Duration::from_secs(60)));
+            assert!(!query.begin(point, context(), 0, now + Duration::from_secs(60)));
             assert!(!query.buffer(b"Y"));
             assert_eq!(query.finish(Some(&context())), Some((None, Vec::new())));
-            assert!(query.begin(point, context(), now));
+            assert!(query.begin(point, context(), 0, now));
         }
     }
 
@@ -319,19 +406,19 @@ mod tests {
         let point = Point { line: 0, col: 8 };
         let now = Instant::now();
         let mut query = InputQuery::default();
-        assert!(query.begin(point, context(), now));
+        assert!(query.begin(point, context(), 0, now));
         assert!(query.buffer(b"X"));
         assert_eq!(
             query.finish(Some(&context())),
             Some((Some(point), b"X".to_vec()))
         );
-        assert!(query.begin(point, context(), now));
+        assert!(query.begin(point, context(), 0, now));
         assert!(query.buffer(b"paste"));
         assert_eq!(query.cancel(), b"paste");
         assert!(!query.buffer(b"X"));
-        assert!(!query.begin(point, context(), now));
+        assert!(!query.begin(point, context(), 0, now));
         assert_eq!(query.finish(Some(&context())), Some((None, Vec::new())));
-        assert!(query.begin(point, context(), now));
+        assert!(query.begin(point, context(), 0, now));
         assert!(query.buffer(b"Y"));
         assert_eq!(query.expire(now + QUERY_TIMEOUT), b"Y");
         assert_eq!(query.deadline(), None);
@@ -344,7 +431,7 @@ mod tests {
         let mut query = InputQuery::default();
         let point = Point { line: 0, col: 3 };
         let now = Instant::now();
-        assert!(query.begin(point, context(), now));
+        assert!(query.begin(point, context(), 0, now));
         assert!(query.buffer(b"X"));
         term.advance(b"\x1b]777;trident;prompt-input;data;bad\x07");
         assert_eq!(
@@ -355,7 +442,7 @@ mod tests {
             query.finish(Some(&context())),
             Some((Some(point), b"X".to_vec()))
         );
-        assert!(query.begin(point, context(), now));
+        assert!(query.begin(point, context(), 0, now));
         assert!(query.buffer(b"Y"));
         query.cancel();
         term.advance(b"\x1b]777;trident;prompt-input;data;3;YWJjCg==;scalar\x07");
@@ -364,7 +451,7 @@ mod tests {
             Some(term_core::PromptInput::Snapshot { .. })
         ));
         assert_eq!(query.finish(Some(&context())), Some((None, Vec::new())));
-        assert!(query.begin(point, context(), now));
+        assert!(query.begin(point, context(), 0, now));
     }
 
     #[test]

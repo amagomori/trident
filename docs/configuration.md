@@ -225,8 +225,9 @@ source /usr/share/trident/shell-integration/terminal.fish
 
 - The snippets keep your existing prompt and hooks. Don't combine them with another prompt
   integration, except fish's built-in marks.
-- fish 4 and later supplies its own command marks. The fish snippet adds the input boundary
-  and the same click-to-move adapter used by the zsh snippet.
+- fish 4 and later supplies its own command marks unless `fish_features` includes
+  `no-mark-prompt`; the fish snippet then writes them itself, as it does for fish 3. It also
+  adds the input boundary and the same click-to-move adapter used by the zsh snippet.
 - With these fish/zsh snippets, a prompt click queries the editor's current buffer once,
   then checks it against the screen before moving. This handles wide characters on rows
   redrawn by the shell and distinguishes real spaces from painted margin padding. The

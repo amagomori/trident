@@ -1,9 +1,10 @@
-# Fish 3 needs OSC 133/7 boundaries; fish 4 supplies native marks.
-# Both versions use the prompt wrapper for on-demand editor snapshots.
+# Fish 4 writes its own OSC 133 marks unless `fish_features=no-mark-prompt`;
+# fish 3 (unknown feature) and disabled marks need ours. Both versions use the
+# prompt wrapper for on-demand editor snapshots.
 if status is-interactive; and not set -q _terminal_integration_loaded
     set -g _terminal_integration_loaded 1
     set -g _terminal_native_marks 0
-    if test (string split . -- $version)[1] -ge 4
+    if status test-feature mark-prompt
         set -g _terminal_native_marks 1
     end
 
