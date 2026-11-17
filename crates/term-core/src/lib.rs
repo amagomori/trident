@@ -42,6 +42,9 @@ enum Zone {
 struct ShellState {
     zone: Zone,
     marks_seen: bool,
+    line_editor: bool,
+    /// Bytes still to parse before a line editor's output starts (`set_line_editing`).
+    editor_after: Option<usize>,
     command_finished: Vec<CommandFinished>,
     mark_line: Option<u64>,
     output_ends: Vec<OutputEnd>,
@@ -251,9 +254,29 @@ struct PrintState(u32);
 impl PrintState {
     const EMPTY: Self = Self(0x110000);
     const CLEAR_ARMED: u32 = 1 << 31;
+    /// A zero width joiner was joined since the last printed character.
+    const JOINER: u32 = 1 << 30;
 
     fn last(&self) -> Option<char> {
-        char::from_u32(self.0 & !Self::CLEAR_ARMED)
+        char::from_u32(self.0 & !(Self::CLEAR_ARMED | Self::JOINER))
+    }
+
+    /// Whether `c` may continue an emoji sequence (see `grapheme::continues_sequence`): it
+    /// follows a joiner, or lies in the range of regional indicators and skin tones.
+    fn may_join(&self, c: char) -> bool {
+        (self.0 & Self::JOINER != 0) | ((c as u32).wrapping_sub(0x1F1E6) <= 0x1F3FF - 0x1F1E6)
+    }
+
+    fn joined(&mut self, c: char) {
+        if c == '\u{200D}' {
+            self.0 |= Self::JOINER;
+        }
+    }
+
+    /// Lets the next character look for a joiner before the cursor, which it can no longer
+    /// rule out from what was printed last.
+    fn allow_join(&mut self) {
+        self.0 |= Self::JOINER;
     }
 
     fn clear_armed(&self) -> bool {
@@ -315,6 +338,8 @@ pub struct Terminal {
     /// Set by a resize while a line editor owns the cursor's line, until the next line feed:
     /// its redraw erases cells without deleting the placements under them (as in kitty).
     prompt_redraw: bool,
+    /// The user sent a line since the last line feed (`line_sent`).
+    line_sent: bool,
     /// Cell size in pixels, as reported by the app.
     cell_pixels: (f32, f32),
     kitty: kitty::Kitty,
@@ -338,6 +363,39 @@ struct Reports {
 }
 
 impl Terminal {
+    /// Tells the terminal where a line editor's output (readline, zle) starts in the bytes it
+    /// is about to parse, as the app reads it from the PTY's modes: `Some(n)` after the next
+    /// `n` bytes, `None` if they hold none. See `per_codepoint_widths`.
+    pub fn set_line_editing(&mut self, from: Option<usize>) {
+        self.shell.line_editor = from == Some(0);
+        self.shell.editor_after = from.filter(|&n| n > 0);
+    }
+
+    /// Tells the terminal the user sent a line (Enter, or a paste with one): the editor's next
+    /// line feed accepts it, and what follows is the command's output.
+    pub fn line_sent(&mut self) {
+        self.line_sent = true;
+    }
+
+    fn feed_line(&mut self) {
+        if self.line_sent {
+            self.line_sent = false;
+            self.shell.line_editor = false;
+        }
+    }
+
+    /// Whether characters take their own `wcwidth` cells, as line editors count them, instead
+    /// of joining into emoji sequences: in the shell's prompt or input (OSC 133), or in a line
+    /// editor's output elsewhere (a REPL a command runs, or a shell without those marks). A
+    /// sequence the editor moves over or erases one codepoint at a time would otherwise leave
+    /// the screen out of step with its line.
+    pub(crate) fn per_codepoint_widths(&self) -> bool {
+        match self.shell.zone {
+            Zone::Prompt | Zone::Input => true,
+            Zone::Output | Zone::None => self.shell.line_editor,
+        }
+    }
+
     pub fn has_shell_marks(&self) -> bool {
         self.shell.marks_seen
     }
@@ -804,6 +862,8 @@ impl Terminal {
             shell: Box::new(ShellState {
                 zone: Zone::None,
                 marks_seen: false,
+                line_editor: false,
+                editor_after: None,
                 command_finished: Vec::new(),
                 mark_line: None,
                 output_ends: Vec::new(),
@@ -862,6 +922,7 @@ impl Terminal {
             bell: false,
             images: images::ImageStore::new(),
             prompt_redraw: false,
+            line_sent: false,
             cell_pixels: (8.0, 16.0),
             kitty: kitty::Kitty::default(),
             parser: vte::Parser::new(),
@@ -878,6 +939,20 @@ impl Terminal {
 
     /// Feed bytes from the shell.
     pub fn advance(&mut self, bytes: &[u8]) {
+        if let Some(n) = self.shell.editor_after {
+            if bytes.len() <= n {
+                self.shell.editor_after = Some(n - bytes.len());
+            } else {
+                self.shell.editor_after = None;
+                self.advance_parsed(&bytes[..n]);
+                self.shell.line_editor = true;
+                return self.advance_parsed(&bytes[n..]);
+            }
+        }
+        self.advance_parsed(bytes);
+    }
+
+    fn advance_parsed(&mut self, bytes: &[u8]) {
         let mut parser = std::mem::take(&mut self.parser);
         let ground = self.parser_ground;
         let mut rest = bytes;
@@ -1689,7 +1764,12 @@ impl Terminal {
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
             self.print_state.disarm_clear();
+            self.print_state.joined(c);
             self.join_zero_width(c);
+            return;
+        }
+        if c as u32 >= 0x80 && self.print_state.may_join(c) && self.join_sequence(c) {
+            self.print_state = PrintState(c as u32);
             return;
         }
 
@@ -2063,6 +2143,7 @@ impl Terminal {
         }
         self.cursor.row = self.cursor.row.min(self.rows - 1);
         self.cursor.col = self.cursor.col.min(self.cols - 1);
+        self.print_state.allow_join();
     }
 
     fn set_alt_screen(&mut self, enable: bool, save_cursor: bool, clear: bool) {
@@ -2124,7 +2205,13 @@ fn default_tabs(cols: usize) -> Vec<bool> {
 // it here spills the hot character writer's state even when insert mode is off.
 #[cold]
 #[inline(never)]
-fn insert_printed_cells(line: &mut Row, col: usize, cols: usize, width: usize, template: &Cell) {
+pub(crate) fn insert_printed_cells(
+    line: &mut Row,
+    col: usize,
+    cols: usize,
+    width: usize,
+    template: &Cell,
+) {
     line.materialize_wrap_padding(col);
     for _ in 0..width {
         line.cells.insert(col, Cell::blank(template));

@@ -3,7 +3,7 @@
 //! point out of scrollback again before the batch ends. So the part before it is parsed only
 //! for what outlives it (cursor, pen, line count), and only the rest builds rows.
 
-use super::{Charset, Row, Terminal, kitty::Scan};
+use super::{Charset, Row, Terminal, grapheme::GhostCluster, kitty::Scan};
 use vte::{Params, Perform};
 
 const ESC: u8 = 0x1b;
@@ -70,9 +70,11 @@ impl Terminal {
     pub(crate) fn advance_ghost(&mut self, parser: &mut vte::Parser, bytes: &[u8]) {
         #[cfg(test)]
         ADVANCES.update(|count| count + 1);
+        let cluster = self.ghost_cluster();
         let mut ghost = Ghost {
             term: self,
             scrolls: 0,
+            cluster,
         };
         parser.advance(&mut ghost, bytes);
         let scrolls = ghost.scrolls;
@@ -130,10 +132,12 @@ impl Terminal {
 struct Ghost<'a> {
     term: &'a mut Terminal,
     scrolls: usize,
+    cluster: GhostCluster,
 }
 
 impl Ghost<'_> {
     fn linefeed(&mut self) {
+        self.cluster.forget();
         let t = &mut *self.term;
         t.cursor.pending_wrap = false;
         if t.cursor.row == t.scroll_bottom {
@@ -142,15 +146,9 @@ impl Ghost<'_> {
             t.cursor.row += 1;
         }
     }
-}
 
-impl Perform for Ghost<'_> {
-    /// `put_char` with autowrap on, insert off and the ASCII charset, minus the cell writes.
-    fn print(&mut self, c: char) {
-        let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if width == 0 {
-            return;
-        }
+    #[inline(always)]
+    fn place(&mut self, c: char, width: usize) {
         if self.term.cursor.pending_wrap {
             self.term.cursor.col = 0;
             self.linefeed();
@@ -170,9 +168,76 @@ impl Perform for Ghost<'_> {
         }
     }
 
+    #[inline(never)]
+    fn print_unicode(&mut self, c: char) {
+        let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if width == 0 {
+            self.term.print_state.joined(c);
+            let at = self.at();
+            self.cluster.push_zero_width(c, at);
+            return;
+        }
+        if self.term.print_state.may_join(c) && self.join_sequence(c) {
+            self.term.print_state = super::PrintState(c as u32);
+            return;
+        }
+        self.place(c, width);
+        let at = self.at();
+        self.cluster.start(c, width == 2, at);
+    }
+
+    fn at(&self) -> usize {
+        GhostCluster::spot(self.term.cursor.col, self.term.cursor.pending_wrap)
+    }
+
+    /// `join_sequence`'s cursor movement: a sequence joining a narrow cell widens it.
+    #[cold]
+    #[inline(never)]
+    fn join_sequence(&mut self, c: char) -> bool {
+        if self.term.per_codepoint_widths() {
+            return false;
+        }
+        let Some(widen) = self.cluster.join(c, self.at()) else {
+            return false;
+        };
+        let cols = self.term.cols;
+        if widen && !self.term.cursor.pending_wrap {
+            let t = &mut *self.term;
+            if t.cursor.col + 1 >= cols {
+                t.cursor.col = cols - 1;
+                t.cursor.pending_wrap = true;
+            } else {
+                t.cursor.col += 1;
+            }
+        } else if widen && cols >= 2 {
+            self.term.cursor.col = 0;
+            self.linefeed();
+            let t = &mut *self.term;
+            t.cursor.col = if cols == 2 { 1 } else { 2 };
+            t.cursor.pending_wrap = cols == 2;
+        }
+        let at = self.at();
+        self.cluster.moved_to(at);
+        true
+    }
+}
+
+impl Perform for Ghost<'_> {
+    /// `put_char` with autowrap on, insert off and the ASCII charset, minus the cell writes.
+    fn print(&mut self, c: char) {
+        // vte prints only graphic ASCII, which is all one column wide.
+        if c as u32 >= 0x80 {
+            self.print_unicode(c);
+            return;
+        }
+        self.place(c, 1);
+    }
+
     fn execute(&mut self, byte: u8) {
+        self.cluster.forget();
         if let 0x0a..=0x0c = byte {
             self.term.prompt_redraw = false;
+            self.term.feed_line();
             self.linefeed();
             if self.term.modes.linefeed_newline {
                 self.term.cursor.col = 0;

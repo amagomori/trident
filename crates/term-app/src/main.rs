@@ -55,7 +55,7 @@ use std::time::{Duration, Instant};
 use term_core::{ClipboardRequest, MouseMode, Point, SelectionKind, Terminal};
 #[cfg(test)]
 use term_render::PADDING;
-use term_render::{Fonts, Renderer};
+use term_render::{FontFaces, FontSpec, Fonts, Renderer};
 mod links;
 #[cfg(target_os = "macos")]
 mod native_tabs;
@@ -219,7 +219,7 @@ struct Options {
     config_path: PathBuf,
     font_size_override: bool,
     scrollback: Option<usize>,
-    font: Option<PathBuf>,
+    font: Option<String>,
     font_size: f32,
     option_as_alt: bool,
     copy_on_select: bool,
@@ -234,8 +234,20 @@ impl Options {
         self.scrollback.unwrap_or(config.scrollback)
     }
 
-    fn font<'a>(&'a self, config: &'a config::Config) -> Option<&'a std::path::Path> {
-        self.font.as_deref().or(config.font.as_deref())
+    /// The config's fonts, or only `--font`'s when given.
+    fn font(&self, config: &config::Config) -> FontSpec {
+        match &self.font {
+            Some(font) => FontSpec {
+                regular: Some(font.clone()),
+                ..FontSpec::default()
+            },
+            None => FontSpec {
+                regular: config.font.clone(),
+                bold: config.font_bold.clone(),
+                italic: config.font_italic.clone(),
+                bold_italic: config.font_bold_italic.clone(),
+            },
+        }
     }
 
     fn size(&self, config: &config::Config) -> f32 {
@@ -284,7 +296,7 @@ fn usage() -> ! {
          {bin} show [--width N] [--height N] [--fit] FILE...\n\n\
          OPTIONS:\n  \
            --config <PATH>     Override the TOML config file location\n  \
-           --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)\n  \
+           --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)\n  \
            --font-size <SIZE>  Font size in points (default: {DEFAULT_FONT_SIZE})\n  \
            --option-as-alt     On macOS, make Option act as Alt/Meta\n  \
            --scrollback <LINES> History lines (default: 10000; 0 disables; max: 1000000)\n  \
@@ -330,7 +342,9 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
                         .ok_or("--scrollback needs an integer between 0 and 1000000")?,
                 );
             }
-            "--font" => options.font = Some(args.next().ok_or("--font needs a path")?.into()),
+            "--font" => {
+                options.font = Some(args.next().ok_or("--font needs a family name or path")?)
+            }
             "--font-size" => {
                 options.font_size_override = true;
                 options.font_size = args
@@ -519,6 +533,10 @@ fn shortcut_tab(index: usize, count: usize) -> usize {
 /// Runs every byte of `batch` through `term`, applying shell-return resets; the bytes
 /// processed.
 fn advance_all(term: &mut Terminal, batch: pty::Output) -> usize {
+    term.set_line_editing(batch.line_editing);
+    if batch.line_sent {
+        term.line_sent();
+    }
     let mut start = 0;
     for offset in batch.shell_returns {
         while start < offset {
@@ -539,6 +557,8 @@ type QuitChecks = std::rc::Rc<std::cell::RefCell<Vec<(u64, Box<dyn Fn() -> bool>
 struct PendingOutput {
     bytes: Vec<u8>,
     shell_returns: Vec<usize>,
+    line_editing: Option<usize>,
+    line_sent: bool,
     waiting_since: Option<Instant>,
 }
 
@@ -547,6 +567,8 @@ impl PendingOutput {
         let leftover = pty::Output {
             bytes: std::mem::take(&mut self.bytes),
             shell_returns: std::mem::take(&mut self.shell_returns),
+            line_editing: self.line_editing,
+            line_sent: std::mem::take(&mut self.line_sent),
         };
         let mut processed = 0;
         for batch in [leftover, queued] {
@@ -576,6 +598,10 @@ impl PendingOutput {
         }
         let from_leftover = !self.is_empty();
         let mut batch = self.next_batch(take_pty);
+        term.set_line_editing(batch.line_editing);
+        if batch.line_sent {
+            term.line_sent();
+        }
         let processed = advance_output(term, &mut batch);
         self.retain(
             batch,
@@ -592,17 +618,22 @@ impl PendingOutput {
 
     fn next_batch(&mut self, take_pty: impl FnOnce() -> pty::Output) -> pty::Output {
         if self.is_empty() {
-            take_pty()
+            let mut output = take_pty();
+            output.line_sent |= std::mem::take(&mut self.line_sent);
+            output
         } else {
             pty::Output {
                 bytes: std::mem::take(&mut self.bytes),
                 shell_returns: std::mem::take(&mut self.shell_returns),
+                line_editing: self.line_editing,
+                line_sent: std::mem::take(&mut self.line_sent),
             }
         }
     }
 
     fn retain(&mut self, mut batch: pty::Output, consumed: usize, frame_ended: bool, now: Instant) {
         self.bytes = batch.bytes.split_off(consumed);
+        self.line_editing = batch.line_editing.map(|at| at.saturating_sub(consumed));
         self.shell_returns = batch
             .shell_returns
             .into_iter()
@@ -613,6 +644,11 @@ impl PendingOutput {
 
     fn coalesce(&mut self, queued: pty::Output) -> bool {
         let offset = self.bytes.len();
+        self.line_sent |= queued.line_sent;
+        self.line_editing = match queued.line_editing {
+            Some(0) if offset > 0 => self.line_editing.or(Some(offset)),
+            at => at.map(|at| offset + at),
+        };
         self.bytes.extend(queued.bytes);
         self.shell_returns
             .extend(queued.shell_returns.into_iter().map(|at| offset + at));
@@ -1457,6 +1493,8 @@ struct App {
     normal_frame: Option<Frame>,
     #[cfg(target_os = "macos")]
     fullscreen_exit: FullscreenExit,
+    /// The faces `options.font(&config)` resolved to.
+    faces: FontFaces,
     /// Why the last pager window could not open, shown until the next input.
     pager_error: Option<String>,
     /// Captured before the app quit hook reaps the PTYs, for the source window's banner.
@@ -1578,6 +1616,7 @@ impl App {
             normal_frame: None,
             #[cfg(target_os = "macos")]
             fullscreen_exit: FullscreenExit::default(),
+            faces: FontFaces::bundled(),
             pager_error: None,
             pager_exit_code: 0,
             icons: app_icon::Shown::default(),
@@ -1626,8 +1665,13 @@ impl App {
     }
 
     fn start(&mut self, event_loop: &ActiveEventLoop) -> Result<Session, String> {
-        let probe = match Fonts::new(self.options.font(&self.config), self.font_size) {
-            Ok(fonts) => fonts,
+        self.faces = match FontFaces::resolve(&self.options.font(&self.config)) {
+            Ok((faces, warnings)) => {
+                for warning in warnings {
+                    diag!("trident: font: {warning}");
+                }
+                faces
+            }
             Err(error) if self.options.font.is_none() => {
                 let error = format!(
                     "trident: {}:1:1: font: {error}",
@@ -1637,12 +1681,12 @@ impl App {
                 self.config_error = Some(error);
                 self.config = config::Config::default();
                 self.font_size = self.options.size(&self.config);
-                Fonts::new(None, self.font_size)?
+                FontFaces::bundled()
             }
             Err(error) => return Err(error),
         };
+        let probe = Fonts::new(&self.faces, self.font_size);
         self.watch_appearance();
-        let font = self.options.font(&self.config);
         let monitor = event_loop
             .primary_monitor()
             .or_else(|| event_loop.available_monitors().next());
@@ -1650,7 +1694,7 @@ impl App {
         let guessed_fonts = if guess == 1.0 {
             probe
         } else {
-            Fonts::new(font, self.font_size * guess as f32)?
+            Fonts::new(&self.faces, self.font_size * guess as f32)
         };
         let guessed_tab_bar = self.tab_bar_height(1, &guessed_fonts);
         let initial = window_state::initial(
@@ -1727,7 +1771,7 @@ impl App {
         let fonts = if scale == guess {
             guessed_fonts
         } else {
-            Fonts::new(font, self.font_size * scale as f32)?
+            Fonts::new(&self.faces, self.font_size * scale as f32)
         };
         let size = window.inner_size();
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
@@ -2080,10 +2124,7 @@ impl App {
         window.set_ime_allowed(true);
         native_tabs::add_tab(&s.window, &window);
         let size = window.inner_size();
-        let fonts = Fonts::new(
-            self.options.font(&self.config),
-            self.font_size * window.scale_factor() as f32,
-        )?;
+        let fonts = Fonts::new(&self.faces, self.font_size * window.scale_factor() as f32);
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
         Ok(TabWindow {
             window,
@@ -2452,6 +2493,8 @@ impl App {
         let queued = pty::Output {
             bytes: std::mem::take(&mut pane.output.bytes),
             shell_returns: std::mem::take(&mut pane.output.shell_returns),
+            line_editing: pane.output.line_editing,
+            line_sent: std::mem::take(&mut pane.output.line_sent),
         };
         pane.output.waiting_since = None;
         let batch = pane.pty.take_output();
@@ -3317,7 +3360,8 @@ impl App {
 
     fn reload_config(&mut self) {
         let result = config::load(&self.options.config_path).and_then(|next| {
-            let font_changed = self.options.font.is_none() && next.font != self.config.font;
+            let spec = self.options.font(&next);
+            let font_changed = spec != self.options.font(&self.config);
             let size_changed =
                 !self.options.font_size_override && next.font_size != self.config.font_size;
             let size = if size_changed {
@@ -3325,19 +3369,17 @@ impl App {
             } else {
                 self.font_size
             };
-            let fonts = if font_changed {
-                let scale = self
-                    .session
-                    .as_ref()
-                    .map_or(1.0, |s| s.window.scale_factor());
-                Some(
-                    Fonts::new(next.font.as_deref(), size * scale as f32).map_err(|e| {
-                        format!(
-                            "trident: {}:1:1: font: {e}",
-                            self.options.config_path.display()
-                        )
-                    })?,
-                )
+            let faces = if font_changed {
+                let (faces, warnings) = FontFaces::resolve(&spec).map_err(|e| {
+                    format!(
+                        "trident: {}:1:1: font: {e}",
+                        self.options.config_path.display()
+                    )
+                })?;
+                for warning in warnings {
+                    diag!("trident: font: {warning}");
+                }
+                Some(faces)
             } else {
                 None
             };
@@ -3354,6 +3396,10 @@ impl App {
             self.config = next;
             if !self.config.hide_mouse_when_typing {
                 self.typing_pointer.show();
+            }
+            let font_changed = faces.is_some();
+            if let Some(faces) = faces {
+                self.faces = faces;
             }
             #[cfg(target_os = "macos")]
             close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
@@ -3390,20 +3436,15 @@ impl App {
                     warn_vsync_unsupported(&self.config, &s.renderer);
                 }
                 s.renderer.set_vsync(self.config.vsync);
-                if let Some(fonts) = fonts {
-                    s.fonts = fonts;
+                if font_changed {
+                    s.fonts = Fonts::new(&self.faces, size * s.window.scale_factor() as f32);
                     s.renderer.clear_glyph_cache();
                     #[cfg(target_os = "macos")]
                     for pane in self.tabs.iter_mut().flatten() {
                         let tab = &mut pane.window;
                         let px = size * tab.window.scale_factor() as f32;
-                        match Fonts::new(self.config.font.as_deref(), px) {
-                            Ok(fonts) => {
-                                tab.fonts = fonts;
-                                tab.renderer.clear_glyph_cache();
-                            }
-                            Err(error) => diag!("trident: font: {error}"),
-                        }
+                        tab.fonts = Fonts::new(&self.faces, px);
+                        tab.renderer.clear_glyph_cache();
                     }
                 }
                 #[cfg(target_os = "macos")]
@@ -5665,7 +5706,7 @@ mod tests {
     fn cli_overrides_config() {
         let config = super::config::parse(
             std::path::Path::new("test.toml"),
-            "font = '/config.ttf'\nfont_size = 22\nscrollback = 42\nshell = ['zsh', '-l']",
+            "font = '/config.ttf'\nfont_bold = 'Fira Code'\nfont_size = 22\nscrollback = 42\nshell = ['zsh', '-l']",
         )
         .unwrap();
         let mut options = super::Options {
@@ -5682,7 +5723,11 @@ mod tests {
         };
         assert_eq!(
             options.font(&config),
-            Some(std::path::Path::new("/config.ttf"))
+            FontSpec {
+                regular: Some("/config.ttf".into()),
+                bold: Some("Fira Code".into()),
+                ..FontSpec::default()
+            }
         );
         assert_eq!(options.size(&config), 22.0);
         assert_eq!(options.scrollback(&config), 42);
@@ -5695,7 +5740,10 @@ mod tests {
         options.command = vec!["bash".into()];
         assert_eq!(
             options.font(&config),
-            Some(std::path::Path::new("/cli.ttf"))
+            FontSpec {
+                regular: Some("/cli.ttf".into()),
+                ..FontSpec::default()
+            }
         );
         assert_eq!(options.size(&config), 18.0);
         assert_eq!(options.scrollback(&config), 90);
@@ -5710,6 +5758,7 @@ mod tests {
         pty::Output {
             bytes: bytes.to_vec(),
             shell_returns: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -5748,6 +5797,7 @@ mod tests {
             pty::Output {
                 bytes,
                 shell_returns,
+                ..Default::default()
             },
         )
     }
@@ -5803,6 +5853,7 @@ mod tests {
             pty::Output {
                 bytes: b"\x1b[?2026l\x1b[?2026hthird".to_vec(),
                 shell_returns: vec![8],
+                ..Default::default()
             },
         );
         let text: String = term
@@ -5978,6 +6029,28 @@ mod tests {
     }
 
     #[test]
+    fn coalesced_output_keeps_where_line_editing_starts() {
+        let family = "\u{1f468}\u{200d}\u{1f469}";
+        let mut output = PendingOutput {
+            bytes: b"\x1b[?2026h".to_vec(),
+            ..Default::default()
+        };
+        let queued = |bytes: String, line_editing| pty::Output {
+            bytes: bytes.into_bytes(),
+            line_editing,
+            ..Default::default()
+        };
+        output.coalesce(queued(format!("{family}|\r\n"), None));
+        output.coalesce(queued(family.to_string(), Some(0)));
+        assert!(output.coalesce(queued("\x1b[?2026l".into(), Some(0))));
+        assert_eq!(output.line_editing, Some(8 + family.len() + 3));
+        let mut term = Terminal::new(10, 2);
+        output.advance(&mut term, false, || panic!("coalesced output first"));
+        assert_eq!(term.grapheme(&term.viewport_row(0).cells[0]), Some(family));
+        assert_eq!(term.viewport_row(1).cells[2].c, '\u{1f469}');
+    }
+
+    #[test]
     fn queued_completed_frames_replace_an_unsubmitted_frame() {
         let mut term = Terminal::new(10, 2);
         let mut output = PendingOutput::default();
@@ -6030,6 +6103,7 @@ mod tests {
         assert!(!output.coalesce(pty::Output {
             bytes: Vec::new(),
             shell_returns: vec![0],
+            ..Default::default()
         }));
         assert_eq!(output.shell_returns, [output.bytes.len()]);
         assert!(output.coalesce(batch(b"\x1b[?2026l")));
@@ -6591,6 +6665,7 @@ mod tests {
                 ]
                 .concat(),
                 shell_returns: vec![setup.len(), setup.len() * 2 + prompt.len()],
+                ..Default::default()
             },
         );
         assert_eq!(term.modes.mouse, MouseMode::Off);
@@ -6601,6 +6676,7 @@ mod tests {
             &mut pty::Output {
                 bytes: Vec::new(),
                 shell_returns: Vec::new(),
+                ..Default::default()
             },
         );
         assert!(term.modes.bracketed_paste);
@@ -6622,6 +6698,7 @@ mod tests {
         let mut queued = Some(pty::Output {
             bytes: b"\r099\x1b[?2026l".to_vec(),
             shell_returns: vec![0],
+            ..Default::default()
         });
         assert!(!wake_pending.swap(true, Ordering::AcqRel));
         output.presented();
@@ -6814,6 +6891,7 @@ mod tests {
         let mut output = pty::Output {
             bytes: [first.as_slice(), second.as_slice(), prompt.as_slice()].concat(),
             shell_returns: vec![first.len(), first.len() + second.len()],
+            ..Default::default()
         };
         let consumed = advance_output(&mut term, &mut output);
         assert_eq!(consumed, first.len() + second.len());
@@ -6843,6 +6921,7 @@ mod tests {
             pty::Output {
                 bytes: Vec::new(),
                 shell_returns: vec![0],
+                ..Default::default()
             },
             0,
             false,
@@ -6861,13 +6940,13 @@ mod tests {
 
     #[test]
     fn guessed_grid_uses_physical_size_and_scaled_padding() {
-        let probe = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let probe = Fonts::bundled(DEFAULT_FONT_SIZE);
         let logical = LogicalSize::new(
             100.0 * probe.metrics.width + 2.0 * PADDING,
             30.0 * probe.metrics.height + 2.0 * PADDING,
         );
         for (scale, expected) in [(1.0, (100, 30)), (2.0, (94, 30))] {
-            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            let fonts = Fonts::bundled(DEFAULT_FONT_SIZE * scale as f32);
             assert_eq!(
                 grid_size_for(logical.to_physical(scale), scale, &fonts, PADDING),
                 expected
@@ -6881,7 +6960,7 @@ mod tests {
     #[test]
     fn window_size_round_trips_to_its_cells() {
         for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
-            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            let fonts = Fonts::bundled(DEFAULT_FONT_SIZE * scale as f32);
             for padding in [0.0, PADDING, 6.3] {
                 for tab_bar in [0, 37] {
                     for cells in [(20, 5), (80, 24), (100, 30), (317, 91)] {
@@ -6895,7 +6974,7 @@ mod tests {
                 }
             }
         }
-        let fonts = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let fonts = Fonts::bundled(DEFAULT_FONT_SIZE);
         let screen = PhysicalSize::new(1920, 1080);
         let max = grid_size_for(screen, 1.0, &fonts, PADDING);
         let size = window_size_for(

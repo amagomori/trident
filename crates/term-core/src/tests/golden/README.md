@@ -1,8 +1,7 @@
 # Terminal-state goldens
 
 Golden tests feed raw input bytes to `term_core::Terminal` and compare the resulting state with a
-checked-in `<name>.snap`. They're for contributors who change VT behavior. They run headless and
-need nothing beyond `cargo`.
+checked-in `<name>.snap`. Run them with `cargo` when changing VT behavior. They don't need a display.
 
 ## Run
 
@@ -14,15 +13,15 @@ A missing snapshot or a mismatch fails the test and prints the case name and the
 
 ## Add a case
 
-1. Add a case to `cases()` in `../golden.rs`: a unique name, initial columns and rows, the raw
-   input bytes and, optionally, a resize that runs after the input.
-2. Write its snapshot: `UPDATE_GOLDEN=1 cargo test -p term-core golden`.
+1. Add a case to `cases()` in `../golden.rs` with a unique name, initial columns and rows, and raw
+   input bytes. You can also specify a resize that runs after the input.
+2. Run `UPDATE_GOLDEN=1 cargo test -p term-core golden` to write its snapshot.
 3. Check the new `<name>.snap` against the expected VT behavior, then run without
    `UPDATE_GOLDEN` to confirm it passes.
 
-Every VT change adds regression cases. If a snapshot shows wrong behavior, don't commit it; file
-the terminal bug separately. Review every changed snapshot the same way when you update existing
-cases.
+Add regression cases for every VT change. If a snapshot shows wrong behavior, file the terminal
+bug separately rather than committing it. Review changed snapshots the same way when updating
+existing cases.
 
 ## Snapshot format
 
@@ -52,4 +51,4 @@ repository's shell integration on an 80x24 PTY (`TERM=xterm-256color`, `LC_ALL=C
 - The test replays each capture in whole chunks and byte by byte. It checks the copied command
   output and that exactly one command completes, with the right exit status.
 
-The cases cover implemented behavior. They don't claim complete VT conformance.
+These cases don't establish complete VT conformance.

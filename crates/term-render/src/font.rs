@@ -5,10 +5,15 @@
 use crate::builtin;
 use crate::color;
 use crate::fallback::{self, FontFile, SystemFonts};
-use ab_glyph::{Font, FontArc, FontRef, GlyphId, PxScale, ScaleFont, point};
+use crate::family::FontFaces;
+use ab_glyph::{
+    Font, FontArc, FontRef, GlyphId, Outline, OutlineCurve, OutlinedGlyph, Point, PxScale,
+    ScaleFont, point,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use term_core::grapheme;
 
 /// The bundled regular face, also used by `terminal show` for SVG text.
 pub static REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
@@ -17,6 +22,8 @@ pub const FAMILY: &str = "JetBrains Mono";
 pub(crate) const BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
 const ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf");
 const BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf");
+/// The bundled faces, by [`Style`].
+pub(crate) const BUNDLED: [&[u8]; 4] = [REGULAR, BOLD, ITALIC, BOLD_ITALIC];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Style {
@@ -63,6 +70,8 @@ pub struct RasterizedGlyph {
 struct Fallback {
     font: FontArc,
     face: Option<ttf_parser::Face<'static>>,
+    data: &'static [u8],
+    index: u32,
 }
 
 /// Memory-maps a font file for the rest of the program, once per path.
@@ -101,22 +110,21 @@ fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
     let face = ttf_parser::Face::parse(data, *index)
         .ok()
         .filter(color::has_color);
-    Some(Fallback { font, face })
+    Some(Fallback {
+        font,
+        face,
+        data,
+        index: *index,
+    })
 }
 
 pub struct Fonts {
-    faces: [FontArc; 4],
+    faces: FontFaces,
     system: SystemFonts,
     /// Fallback fonts by file, each loaded on first need (`None` if it failed to load).
     fallbacks: HashMap<FontFile, Option<Fallback>>,
     pub px: f32,
     pub metrics: CellMetrics,
-}
-
-fn load(bytes: Vec<u8>) -> Option<FontArc> {
-    ab_glyph::FontVec::try_from_vec_and_index(bytes, 0)
-        .ok()
-        .map(FontArc::new)
 }
 
 /// ab_glyph scales by line height; convert from a font size in pixels per em.
@@ -125,22 +133,58 @@ fn scale(font: &FontArc, px: f32) -> PxScale {
     PxScale::from(px * font.height_unscaled() / units_per_em)
 }
 
-impl Fonts {
-    /// Uses the bundled JetBrains Mono unless `custom` points to a font file.
-    pub fn new(custom: Option<&Path>, px: f32) -> Result<Fonts, String> {
-        let faces = match custom {
-            Some(path) => {
-                let bytes = std::fs::read(path)
-                    .map_err(|e| format!("cannot read font {}: {e}", path.display()))?;
-                let font =
-                    load(bytes).ok_or_else(|| format!("cannot parse font {}", path.display()))?;
-                [font.clone(), font.clone(), font.clone(), font]
-            }
-            None => [REGULAR, BOLD, ITALIC, BOLD_ITALIC]
-                .map(|b| FontArc::try_from_slice(b).expect("bundled font")),
+/// Horizontal shear of synthesized italics, about 11 degrees.
+const SLANT: f32 = 0.2;
+
+/// Shears `outline` (in font units, y up) to the right around height `pivot`, so glyphs
+/// lean without drifting out of their cells.
+fn slant_outline(outline: &mut Outline, pivot: f32) {
+    let shear = |p: &mut Point| p.x += (p.y - pivot) * SLANT;
+    let mut min = point(f32::MAX, f32::MAX);
+    let mut max = point(f32::MIN, f32::MIN);
+    for curve in &mut outline.curves {
+        let points: Vec<&mut Point> = match curve {
+            OutlineCurve::Line(a, b) => vec![a, b],
+            OutlineCurve::Quad(a, b, c) => vec![a, b, c],
+            OutlineCurve::Cubic(a, b, c, d) => vec![a, b, c, d],
         };
+        for p in points {
+            shear(p);
+            min = point(min.x.min(p.x), min.y.min(p.y));
+            max = point(max.x.max(p.x), max.y.max(p.y));
+        }
+    }
+    if min.x <= max.x {
+        // ab_glyph keeps the top (largest y) in `min`, as pixel rows grow downwards.
+        outline.bounds = ab_glyph::Rect {
+            min: point(min.x, max.y),
+            max: point(max.x, min.y),
+        };
+    }
+}
+
+/// Widens each row of a `width`-wide coverage map `strength` pixels to the right, taking
+/// the strongest coverage in reach: a synthesized bold.
+fn embolden_coverage(coverage: &[u8], width: usize, strength: usize) -> Vec<u8> {
+    let wide = width + strength;
+    let mut out = vec![0u8; wide * (coverage.len() / width)];
+    for (row, out) in coverage.chunks_exact(width).zip(out.chunks_exact_mut(wide)) {
+        for (x, v) in out.iter_mut().enumerate() {
+            let from = x.saturating_sub(strength);
+            *v = row[from..(x + 1).min(width)]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+        }
+    }
+    out
+}
+
+impl Fonts {
+    pub fn new(faces: &FontFaces, px: f32) -> Fonts {
         let mut fonts = Fonts {
-            faces,
+            faces: faces.clone(),
             system: SystemFonts::new(),
             fallbacks: HashMap::new(),
             px,
@@ -153,12 +197,17 @@ impl Fonts {
             },
         };
         fonts.set_size(px);
-        Ok(fonts)
+        fonts
+    }
+
+    /// The bundled JetBrains Mono.
+    pub fn bundled(px: f32) -> Fonts {
+        Fonts::new(&FontFaces::bundled(), px)
     }
 
     pub fn set_size(&mut self, px: f32) {
         self.px = px;
-        let font = &self.faces[0];
+        let font = &self.faces.face(Style::Regular).font;
         let scaled = font.as_scaled(scale(font, px));
         let width = scaled.h_advance(font.glyph_id('M')).round().max(1.0);
         let height = (scaled.ascent() - scaled.descent()).ceil().max(1.0);
@@ -197,11 +246,13 @@ impl Fonts {
         let px = self.px;
         let mark = cells == 0;
         let cells = cells.max(1);
-        let face = &self.faces[style as usize];
+        let face = self.faces.face(style);
+        let (mut embolden, mut slant) = (face.embolden, face.slant);
         let emoji = !mark && fallback::prefers_emoji(c, cells);
-        let font = if face.glyph_id(c) != GlyphId(0) && !emoji {
-            face.clone()
+        let font = if face.font.glyph_id(c) != GlyphId(0) && !emoji {
+            face.font.clone()
         } else {
+            (embolden, slant) = (false, false);
             match self.fallback_for(c, emoji, mark) {
                 Some(Fallback {
                     face: Some(color_face),
@@ -221,7 +272,11 @@ impl Fonts {
                 }
                 Some(f) => f.font.clone(),
                 None if mark => return None,
-                None => self.faces[style as usize].clone(),
+                None => {
+                    let face = self.faces.face(style);
+                    (embolden, slant) = (face.embolden, face.slant);
+                    face.font.clone()
+                }
             }
         };
         let id = font.glyph_id(c);
@@ -233,9 +288,16 @@ impl Fonts {
             px_scale.x *= available / advance;
             px_scale.y *= available / advance;
         }
-        let outlined = font.outline_glyph(id.with_scale_and_position(px_scale, point(0.0, 0.0)))?;
+        let glyph = id.with_scale_and_position(px_scale, point(0.0, 0.0));
+        let outlined = if slant {
+            let mut outline = font.outline(id)?;
+            slant_outline(&mut outline, font.ascent_unscaled() / 3.0);
+            OutlinedGlyph::new(glyph, outline, font.as_scaled(px_scale).scale_factor())
+        } else {
+            font.outline_glyph(glyph)?
+        };
         let bounds = outlined.px_bounds();
-        let width = bounds.width() as usize;
+        let mut width = bounds.width() as usize;
         let height = bounds.height() as usize;
         if width == 0 || height == 0 {
             return None;
@@ -246,6 +308,11 @@ impl Fonts {
                 *v = (c.clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         });
+        if embolden {
+            let strength = (px / 20.0).round().max(1.0) as usize;
+            coverage = embolden_coverage(&coverage, width, strength);
+            width += strength;
+        }
         Some(RasterizedGlyph {
             width,
             height,
@@ -255,6 +322,74 @@ impl Fonts {
             color: false,
         })
     }
+
+    /// An emoji sequence (ZWJ sequence, flag, skin tone) shaped by a color emoji font that
+    /// draws one of its characters, when that font draws the whole sequence as one glyph.
+    pub fn rasterize_sequence(&mut self, text: &str, cells: usize) -> Option<RasterizedGlyph> {
+        let metrics = self.metrics;
+        let px = self.px;
+        // A text-default base (U+2764, U+261D) can resolve to a text font, so the color font
+        // may only be found through a later character of the sequence.
+        let mut tried = Vec::new();
+        for c in text
+            .chars()
+            .filter(|&c| c as u32 >= 0x80 && c != '\u{200D}' && !grapheme::tag(c))
+        {
+            let Some(fallback) = self.fallback_for(c, true, false) else {
+                continue;
+            };
+            let Some(face) = fallback.face.clone() else {
+                continue;
+            };
+            if tried.contains(&fallback.data.as_ptr()) {
+                continue;
+            }
+            tried.push(fallback.data.as_ptr());
+            let (data, index) = (fallback.data, fallback.index);
+            if let Some(glyph) = shape_sequence(text, cells, &face, data, index, metrics, px) {
+                return Some(glyph);
+            }
+        }
+        None
+    }
+}
+
+/// `text` as one color glyph from `face`, if the font's shaping draws it as one.
+fn shape_sequence(
+    text: &str,
+    cells: usize,
+    face: &ttf_parser::Face<'static>,
+    data: &'static [u8],
+    index: u32,
+    metrics: CellMetrics,
+    px: f32,
+) -> Option<RasterizedGlyph> {
+    let font = harfrust::Font::new(data, index)?;
+    let mut buffer = harfrust::Buffer::new();
+    buffer.push_str(text);
+    buffer.guess_segment_properties();
+    harfrust::shape(
+        &harfrust::ShaperFont::new(&font),
+        &mut buffer,
+        harfrust::ShapeOptions::new(),
+    )
+    .ok()?;
+    let mut drawn = buffer
+        .glyph_infos()
+        .iter()
+        .zip(buffer.glyph_positions())
+        .filter(|(_, p)| p.x_advance != 0);
+    let (info, _) = drawn.next()?;
+    if drawn.next().is_some() {
+        return None;
+    }
+    let target = color::Target {
+        width: metrics.width * cells.max(1) as f32,
+        height: metrics.height,
+        baseline: metrics.baseline,
+        px,
+    };
+    color::rasterize(face, ttf_parser::GlyphId(info.glyph_id as u16), target)
 }
 
 #[cfg(test)]
@@ -262,7 +397,7 @@ mod tests {
     use super::*;
 
     fn fonts() -> Fonts {
-        Fonts::new(None, 16.0).expect("bundled font")
+        Fonts::bundled(16.0)
     }
 
     #[test]
@@ -340,5 +475,59 @@ mod tests {
             .expect("fallback glyph");
         assert!(!glyph.color);
         assert!(glyph.coverage.iter().any(|&c| c > 0));
+    }
+
+    /// Needs a color emoji font with ZWJ and flag sequences (Noto Color Emoji, Apple Color
+    /// Emoji); skipped without one.
+    #[test]
+    fn emoji_sequences_shape_to_one_color_glyph() {
+        let mut fonts = fonts();
+        if fonts
+            .fallback_for('\u{1f468}', true, false)
+            .is_none_or(|f| f.face.is_none())
+        {
+            eprintln!("no color emoji font on this system; skipping");
+            return;
+        }
+        for text in [
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}",
+            "\u{1f469}\u{200d}\u{1f4bb}",
+            "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
+            "\u{1f1ef}\u{1f1f5}",
+            "\u{1f44d}\u{1f3fd}",
+            "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
+        ] {
+            let glyph = fonts.rasterize_sequence(text, 2).expect(text);
+            assert!(glyph.color, "{text}");
+            assert!(
+                glyph.width as f32 <= fonts.metrics.width * 2.0 + 1.0,
+                "{text}"
+            );
+        }
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        let family = fonts.rasterize_sequence(family, 2).unwrap();
+        let man = fonts.rasterize('\u{1f468}', Style::Regular, 2).unwrap();
+        assert_ne!(family.coverage, man.coverage);
+        let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+        let scotland = fonts.rasterize_sequence(scotland, 2).unwrap();
+        let black_flag = fonts.rasterize('\u{1f3f4}', Style::Regular, 2).unwrap();
+        assert_ne!(scotland.coverage, black_flag.coverage);
+        // Two unrelated emoji are not one glyph.
+        assert!(fonts.rasterize_sequence("\u{1f468}\u{1f600}", 2).is_none());
+    }
+
+    /// Needs a font with CJK Extension B (HanaMinB, Noto Serif CJK, SimSun-ExtB); skipped
+    /// without one.
+    #[test]
+    fn cjk_extension_b_comes_from_a_fallback_font() {
+        let mut fonts = fonts();
+        if fonts.fallback_for('\u{20000}', false, false).is_none() {
+            eprintln!("no CJK Extension B font on this system; skipping");
+            return;
+        }
+        for c in ['\u{20000}', '\u{20001}', '\u{2a6d6}'] {
+            let glyph = fonts.rasterize(c, Style::Regular, 2).expect("Ext-B glyph");
+            assert!(glyph.coverage.iter().any(|&v| v > 0));
+        }
     }
 }
