@@ -4728,7 +4728,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Ime(event) => {
-                if matches!(&event, Ime::Preedit(text, _) if !text.is_empty()) {
+                // X11 can report only an empty preedit at a composition boundary.
+                // That boundary still invalidates movement queued before the IME.
+                if matches!(&event, Ime::Preedit(..)) {
                     self.cancel_prompt_click();
                 }
                 if let Some(s) = &mut self.session {
