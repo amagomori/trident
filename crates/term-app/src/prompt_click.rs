@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use term_core::{Point, PromptInputContext};
+use term_core::{Point, PromptClick, PromptInput, PromptInputContext, Terminal};
 
 pub const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 // A CSI-u private-use key. Fish 4 discards unknown CSI-tilde numbers before
@@ -137,6 +137,31 @@ impl ClickToMove {
     pub fn take(&mut self) -> Option<Point> {
         self.pending.take().map(|(_, point)| point)
     }
+}
+
+/// Writes a prompt-click lifecycle event to stderr when `TRIDENT_PROMPT_CLICK_TRACE` is set.
+pub fn trace(event: std::fmt::Arguments) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("TRIDENT_PROMPT_CLICK_TRACE").is_some()) {
+        eprintln!("trident: prompt click {event}");
+    }
+}
+
+/// The movement a shell's reply asks for at `point`, if the editor still owns input.
+/// An application that turned on mouse reporting while the reply was in flight owns
+/// the input now, so cursor keys meant for the editor would reach it instead.
+pub fn reply_click(
+    term: &Terminal,
+    point: Option<Point>,
+    reply: PromptInput,
+) -> Option<PromptClick> {
+    if term.modes.mouse != term_core::MouseMode::Off {
+        return None;
+    }
+    let PromptInput::Snapshot { text, cursor } = reply else {
+        return None;
+    };
+    term.prompt_click_input(point?, &text, cursor)
 }
 
 #[cfg(test)]
@@ -391,5 +416,27 @@ mod tests {
         click.release(deadline);
         click.cancel(); // focus/tab change
         assert_eq!(click.take_ready(deadline), None);
+    }
+
+    #[test]
+    fn held_reply_never_moves_the_cursor_of_an_application_that_reports_the_mouse() {
+        let point = Point { line: 0, col: 8 };
+        let reply = || PromptInput::Snapshot {
+            text: ": foo barbaz qux".into(),
+            cursor: 16,
+        };
+        let mut term = editor();
+        assert_eq!(
+            reply_click(&term, Some(point), reply()),
+            Some(PromptClick::Move(-10))
+        );
+        term.advance(b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(term.prompt_input_context(), Some(context()));
+        assert_eq!(reply_click(&term, Some(point), reply()), None);
+        assert_eq!(reply_click(&editor(), None, reply()), None);
+        assert_eq!(
+            reply_click(&editor(), Some(point), PromptInput::Rejected),
+            None
+        );
     }
 }

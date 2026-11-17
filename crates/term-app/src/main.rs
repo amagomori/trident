@@ -4107,9 +4107,16 @@ impl App {
 
     /// Context entry is a one-way cancellation, even if the context is dismissed
     /// before the multi-click interval expires. Never revive its old gesture.
+    #[track_caller]
     fn cancel_prompt_click(&mut self) {
         self.click_to_move.cancel();
         if let Some(s) = &mut self.session {
+            if s.input_query.deadline().is_some() {
+                prompt_click::trace(format_args!(
+                    "canceled at {}",
+                    std::panic::Location::caller()
+                ));
+            }
             s.pty.write(&s.input_query.cancel());
         }
     }
@@ -4125,11 +4132,14 @@ impl App {
             return;
         };
         let mut bytes = Vec::new();
-        if allowed
-            && let term_core::PromptInput::Snapshot { text, cursor } = reply
-            && let Some(point) = point
-            && let Some(click) = s.term.prompt_click_input(point, &text, cursor)
-        {
+        let click = allowed
+            .then(|| prompt_click::reply_click(&s.term, point, reply))
+            .flatten();
+        prompt_click::trace(format_args!(
+            "reply: target {point:?}, allowed {allowed}, mouse {:?}, click {click:?}",
+            s.term.modes.mouse
+        ));
+        if let Some(click) = click {
             bytes = input::encode_prompt_click(click, s.term.modes.app_cursor);
         }
         bytes.extend_from_slice(&queued);
@@ -4155,7 +4165,9 @@ impl App {
         }
         let Some(s) = &mut self.session else { return };
         if let Some(context) = s.term.prompt_input_context() {
-            if s.input_query.begin(point, context, Instant::now()) {
+            let sent = s.input_query.begin(point, context, Instant::now());
+            prompt_click::trace(format_args!("click {point:?}, query sent {sent}"));
+            if sent {
                 s.term.take_prompt_input(); // ignore unsolicited/stale data
                 s.pty.write(prompt_click::INPUT_QUERY);
             }
@@ -4607,8 +4619,22 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(point) = self.click_to_move.take_ready(now) {
             self.move_cursor_to(point);
         }
+        // A reply that arrived before its deadline still pairs with its click, even when
+        // this wakeup also crossed the deadline before its deferred output was parsed.
+        if self
+            .session
+            .as_ref()
+            .and_then(|s| s.input_query.deadline())
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.process_output();
+        }
         if let Some(s) = &mut self.session {
-            s.pty.write(&s.input_query.expire(now));
+            let queued = s.input_query.expire(now);
+            if s.input_query.deadline().is_none() && !queued.is_empty() {
+                prompt_click::trace(format_args!("expired, releasing {} bytes", queued.len()));
+            }
+            s.pty.write(&queued);
         }
         if exit_ready(self.exit_deadline, false, now) {
             event_loop.exit();
@@ -5304,6 +5330,35 @@ mod tests {
             "{:?}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+
+    #[test]
+    fn bash_integration_keeps_the_editor_locale_after_reporting_the_directory() {
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../shell-integration/terminal.bash"
+        );
+        let bash = std::env::var_os("TERMINAL_TEST_BASH").unwrap_or_else(|| "bash".into());
+        for (lc_all, expected) in [(Some("C.UTF-8"), "2 C.UTF-8"), (None, "2 unset")] {
+            let mut command = std::process::Command::new(&bash);
+            command
+                .args([
+                    "--norc",
+                    "-ic",
+                    r#"source "$1"; _terminal_report_cwd >/dev/null; x=日本; echo "${#x} ${LC_ALL-unset}""#,
+                    "bash",
+                    script,
+                ])
+                .env_remove("LC_ALL")
+                .env("LANG", "C.UTF-8")
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Some(lc_all) = lc_all {
+                command.env("LC_ALL", lc_all);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
     }
 
     #[test]
