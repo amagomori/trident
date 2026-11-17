@@ -95,3 +95,9 @@ test('attaches expected-panic diagnostics to their suffixed status record', () =
   assert.equal(result.failures[0].name, 'tests::rejects_input');
   assert.deepEqual(result.failures[0].ranges, [{ start: 2, end: 4 }]);
 });
+
+test('keeps captured Running text inside diagnostics rather than a new suite', () => {
+  const result = parse('test migration ... FAILED\n---- migration stdout ----\nRunning migrations\nRunning unittests pretend.rs (fake)\nthread \'migration\' panicked at src/db.rs:9:2:\nmissing schema\nfailures:\n    migration');
+  assert.equal(result.failures[0].location, 'src/db.rs:9:2');
+  assert.deepEqual(result.failures[0].ranges, [{ start: 1, end: 6 }]);
+});

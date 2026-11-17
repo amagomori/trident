@@ -143,7 +143,7 @@
         };
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
-          const run = line.match(/^\s*(?:Running|Doc-tests)\s+(.+)$/);
+          const run = !active && line.match(/^\s*(?:Running|Doc-tests)\s+(.+)$/);
           const result = line.match(/^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;/);
           const detail = line.match(/^---- (.+) (?:stdout|stderr) ----$/);
           if (run || result || line === 'failures:' || detail) finish(i);
