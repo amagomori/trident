@@ -1,4 +1,5 @@
-//! Native AppKit window tabs: on macOS every tab is its own `NSWindow`, grouped by a
+//! Native `AppKit` window tabs: on macOS every tab is its own `NSWindow`,
+//! grouped by a
 //! shared tabbing identifier, so the system draws the tab bar and handles dragging tabs
 //! between windows.
 
@@ -99,7 +100,7 @@ pub fn tab_order(window: &Window) -> Vec<usize> {
     }
 }
 
-/// Makes the tab bar's + button, which AppKit shows once a window answers
+/// Makes the tab bar's + button, which `AppKit` shows once a window answers
 /// `newWindowForTab:`, open a tab through the event loop.
 pub fn handle_new_tab_button(window: &Window, proxy: EventLoopProxy<UserEvent>) {
     PROXY.with(|slot| *slot.borrow_mut() = Some(proxy));
@@ -128,6 +129,12 @@ pub fn handle_new_tab_button(window: &Window, proxy: EventLoopProxy<UserEvent>) 
     }
 }
 
+/// Requests a new tab through the event loop from `newWindowForTab:`.
+///
+/// # Safety
+///
+/// Must be invoked on the main thread using the Objective-C `v@:@` method ABI.
+/// Arguments are unused; the event-loop proxy must have been installed first.
 unsafe extern "C-unwind" fn new_window_for_tab(_: *mut AnyObject, _: Sel, _: *mut AnyObject) {
     send(UserEvent::NewTab);
 }
@@ -157,7 +164,7 @@ define_class!(
 );
 
 /// Sends `UserEvent::ExitedFullScreen` with the window's `key` whenever a window has left native fullscreen. The
-/// event arrives after AppKit and winit have finished setting the window's frame. Needs
+/// event arrives after `AppKit` and winit have finished setting the window's frame. Needs
 /// `handle_new_tab_button` first, which hands over the event loop proxy.
 pub fn observe_fullscreen_exit() {
     let Some(mtm) = MainThreadMarker::new() else {
@@ -190,7 +197,8 @@ pub fn observe_fullscreen_exit() {
     });
 }
 
-/// Enters or leaves native (Spaces) fullscreen, as the green button does: AppKit takes the
+/// Enters or leaves native (Spaces) fullscreen, as the green button does:
+/// `AppKit` takes the
 /// whole tab group along, so the tabs stay attached.
 pub fn toggle_fullscreen(window: &Window) {
     let Some(window) = ns_window(window) else {
@@ -202,7 +210,8 @@ pub fn toggle_fullscreen(window: &Window) {
     }
 }
 
-/// The pointer over `window`'s view in physical pixels from its top left, read from AppKit
+/// The pointer over `window`'s view in physical pixels from its top left, read
+/// from `AppKit`
 /// rather than from the last motion event; `None` outside the view.
 pub fn pointer_position(window: &Window) -> Option<PhysicalPosition<f64>> {
     let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) else {
@@ -264,7 +273,7 @@ pub fn watch_command_moves() {
     });
 }
 
-/// Whether `window` is in native fullscreen, as AppKit reports it: unlike winit's own
+/// Whether `window` is in native fullscreen, as `AppKit` reports it: unlike winit's own
 /// state, this also holds for a tab added to a group that is already fullscreen.
 pub fn is_fullscreen(window: &Window) -> bool {
     const FULL_SCREEN: usize = 1 << 14;
@@ -278,9 +287,11 @@ pub fn is_fullscreen(window: &Window) -> bool {
 
 /// The Window menu's items as (title, action), `None` for a separator. None has a key
 /// equivalent, so every chord stays with `config.bindings`. The tab items are the
-/// standard NSWindow tab actions, so AppKit validates them, retitles Show/Hide Tab Bar
+/// standard `NSWindow` tab actions, so `AppKit` validates them, retitles
+/// Show/Hide Tab Bar
 /// and sends them to the key window; it only adds the window list to the menu itself.
-/// AppKit also retitles Enter/Exit Full Screen and adds no second full screen item.
+/// `AppKit` also retitles Enter/Exit Full Screen and adds no second full screen
+/// item.
 const WINDOW_MENU: [Option<(&str, &std::ffi::CStr)>; 13] = [
     Some(("Minimize", c"performMiniaturize:")),
     Some(("Zoom", c"performZoom:")),
@@ -343,7 +354,8 @@ pub fn step_in(order: &[usize], current: usize, step: isize) -> Option<usize> {
     order.get((at + step).rem_euclid(len) as usize).copied()
 }
 
-/// The tab AppKit shows once `closing` leaves tab bar `order`: the next one, else the
+/// The tab `AppKit` shows once `closing` leaves tab bar `order`: the next one,
+/// else the
 /// previous one.
 pub fn neighbor_in(order: &[usize], closing: usize) -> Option<usize> {
     let at = order.iter().position(|&tab| tab == closing)?;

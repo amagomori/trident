@@ -33,7 +33,7 @@ enum Backend {
 #[cfg(target_os = "linux")]
 const X11_MIN_REQUEST_BYTES: usize = 4096;
 
-/// The fixed part of a ChangeProperty request.
+/// The fixed part of a `ChangeProperty` request.
 #[cfg(target_os = "linux")]
 const X11_CHANGE_PROPERTY_HEADER: usize = 24;
 
@@ -41,7 +41,8 @@ const X11_CHANGE_PROPERTY_HEADER: usize = 24;
 #[cfg(target_os = "linux")]
 const X11_CORE_REQUEST_BYTES: usize = u16::MAX as usize * 4;
 
-/// Whether `len` bytes fit in the single ChangeProperty request arboard answers X11
+/// Whether `len` bytes fit in the single `ChangeProperty` request arboard
+/// answers X11
 /// selection requests with. It has no INCR transfer, so anything larger never reaches
 /// the requestor.
 #[cfg(target_os = "linux")]
@@ -88,7 +89,8 @@ impl Clipboard {
                     let RawDisplayHandle::Wayland(display) = display.as_raw() else {
                         unreachable!()
                     };
-                    // The retained window keeps the display alive until after the backend drops.
+                    // SAFETY: This is the window's live wl_display; _window retains
+                    // it until after the clipboard backend and its worker are dropped.
                     Ok(Backend::Wayland(unsafe {
                         smithay_clipboard::Clipboard::new(display.display.as_ptr())
                     }))

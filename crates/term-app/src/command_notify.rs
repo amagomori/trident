@@ -996,6 +996,7 @@ mod tests {
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].duration, Duration::from_secs(12));
         }
+        // SAFETY: member is this test's child, verified alive immediately above.
         assert_eq!(unsafe { libc::kill(member, libc::SIGTERM) }, 0);
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut member_exited = false;
@@ -1168,6 +1169,7 @@ mod tests {
             reader: Some(reader),
         };
         let shell_pid = shell.child.process_id().unwrap();
+        // SAFETY: pair.master owns the live fd throughout this immediate duplication.
         let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
             .try_clone_to_owned()
             .unwrap();
@@ -1244,8 +1246,8 @@ mod tests {
             receiver.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
-        // SAFETY: this is the foreground job observed above, not the shell or test process.
         assert_eq!(
+            // SAFETY: This is the foreground job observed above, not our test's group.
             unsafe { libc::kill(-shell.group.unwrap(), libc::SIGTERM) },
             0
         );
@@ -1300,6 +1302,7 @@ mod tests {
         use portable_pty::{PtySize, native_pty_system};
         use std::sync::atomic::Ordering;
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        // SAFETY: pair.master owns the live fd throughout this immediate duplication.
         let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
             .try_clone_to_owned()
             .unwrap();

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""ptyab.py --a MAIN_BIN --b HEAD_BIN --fixture dense.txt [--pairs 10]
-Wall time from launch to exit for `terminal -e cat FIXTURE`, interleaved A/A and A/B pairs.
+"""Measure release-binary PTY launch-to-exit time with A/A and A/B pairs.
+
+Usage: ptyab.py --a MAIN_BIN --b HEAD_BIN --fixture dense.txt [--pairs 10]
+Time `trident -e cat FIXTURE`, interleaving the two builds within each pair.
 
 The app starts `-e` children in $HOME, so the fixture is passed as an absolute path. Every
 run checks that `cat` exited 0 inside the app and exits 2 if it did not."""

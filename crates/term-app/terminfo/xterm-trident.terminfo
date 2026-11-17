@@ -1,14 +1,14 @@
-# terminfo entry for Trident (https://github.com/amagomori/terminal).
+# Terminfo entry for Trident (https://github.com/amagomori/trident).
 # Install: `trident --install-terminfo`, or `tic -x xterm-trident.terminfo`.
 # Without it, Trident sets TERM=xterm-256color. `xterm-terminal`, the name
 # before the rename, is kept as an alias so existing configs keep working.
 #
 # Based on xterm-256color. Added: truecolor (Tc, setrgbf, setrgbb), styled
-# underlines (Smulx; every style is drawn as a single underline for now),
+# underlines (Smulx),
 # bracketed paste (BE, BD, PS, PE), synchronized output (Sync) and window
-# title (hs, tsl, fsl, dsl). Removed: xterm features Trident does not
-# implement (blink, flash, palette and cursor color changes, OSC 52, meta
-# mode, left/right margins, printer and memory lock).
+# title (hs, tsl, fsl, dsl). The canceled capabilities below are not advertised
+# by this entry. This profile is not a complete list of the parser's features:
+# for example, styled underlines, text blink and OSC 52 are supported directly.
 # Cursor visibility leaves blinking (mode 12) alone: cnorm only shows the
 # cursor, so a blinking DECSCUSR style set before it (tmux sends Ss, then
 # cnorm on every cursor show) keeps blinking. cvvis is dropped because its

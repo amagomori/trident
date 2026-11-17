@@ -12,12 +12,17 @@ use std::rc::Rc;
 /// path or a family name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FontSpec {
+    /// Regular font file/family, or `None` for the bundled family.
     pub regular: Option<String>,
+    /// Bold override, or `None` to choose from the regular family.
     pub bold: Option<String>,
+    /// Italic override, or `None` to choose from the regular family.
     pub italic: Option<String>,
+    /// Bold-italic override, or `None` to choose from the regular family.
     pub bold_italic: Option<String>,
 }
 
+/// Interpretation of a font setting; see [`Self::of`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source<'a> {
     File(&'a Path),
@@ -27,6 +32,14 @@ pub enum Source<'a> {
 impl<'a> Source<'a> {
     /// A file if `value` is one or looks like a path or font file name; otherwise a family
     /// (or full face) name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use term_render::FontSource;
+    /// assert!(matches!(FontSource::of("/fonts/mono.ttf"), FontSource::File(_)));
+    /// assert_eq!(FontSource::of("JetBrains Mono"), FontSource::Family("JetBrains Mono"));
+    /// ```
     pub fn of(value: &'a str) -> Source<'a> {
         let path = Path::new(value);
         let font_file = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
@@ -54,12 +67,12 @@ pub(crate) struct Face {
     pub slant: bool,
 }
 
-/// The faces for each [`Style`].
+/// The faces for each [`Style`], with synthesis for missing styles.
 #[derive(Clone)]
 pub struct FontFaces([Face; 4]);
 
 impl FontFaces {
-    /// The bundled JetBrains Mono.
+    /// Returns the bundled `JetBrains Mono` faces.
     pub fn bundled() -> FontFaces {
         FontFaces(font::BUNDLED.map(|data| Face {
             font: FontArc::try_from_slice(data).expect("bundled font"),
@@ -75,6 +88,11 @@ impl FontFaces {
     /// Finds the faces `spec` names, with warnings for those it could not find. A family
     /// that is not installed falls back to the bundled font, and a missing style override
     /// to the style from `font`; only an unreadable `font` file is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the regular font file cannot be read or has no usable
+    /// faces. Failed style overrides are returned as warnings instead.
     pub fn resolve(spec: &FontSpec) -> Result<(FontFaces, Vec<String>), String> {
         let mut warnings = Vec::new();
         let mut faces = match spec.regular.as_deref().map(Source::of) {

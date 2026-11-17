@@ -1,4 +1,4 @@
-"""Memory (RSS) and idle CPU of the real `terminal` app, compared base vs head by bench.py.
+"""Compare Trident's RSS and idle CPU between base and head through bench.py.
 
 Each run opens the app on a private Xvfb display with software GL (llvmpipe), so it needs
 Linux, Xvfb and Mesa but no GPU. The shell inside waits on a FIFO, which gives two phases:
@@ -64,8 +64,10 @@ def status(pid: int, key: str) -> int:
 
 
 def settle(proc: subprocess.Popen, timeout: float = 30.0) -> None:
-    """Wait until the app stops using CPU (window drawn, output parsed). An app that never
-    goes idle is measured anyway after `timeout`, so it shows up as idle CPU."""
+    """Wait for the window to draw and output parsing to stop using CPU.
+
+    Measure even an app that never idles after `timeout`, so its busy CPU is reported.
+    """
     start = time.monotonic()
     prev = cpu_secs(proc.pid)
     while time.monotonic() - start < timeout:

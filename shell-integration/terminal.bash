@@ -1,3 +1,6 @@
+# Report prompt, command and working-directory boundaries with OSC 133 and OSC 7.
+# Preserve the preceding command's status across prompt hooks. Bash before 4.4
+# has no PS0 command-start hook, so it reports prompt boundaries and the directory only.
 [[ $- == *i* ]] || return
 [[ ${_terminal_integration_loaded-} ]] && return
 _terminal_integration_loaded=1

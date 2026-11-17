@@ -1,5 +1,5 @@
 //! The kitty graphics protocol: `ESC _ G <control> ; <payload> ESC \` transmits, places,
-//! deletes and queries images (https://sw.kovidgoyal.net/kitty/graphics-protocol/).
+//! deletes and queries images (<https://sw.kovidgoyal.net/kitty/graphics-protocol/>).
 //! Shared memory, animation and Unicode placeholders are not supported.
 //!
 //! vte drops APC strings, so [`Terminal::advance`] diverts them here before the parser

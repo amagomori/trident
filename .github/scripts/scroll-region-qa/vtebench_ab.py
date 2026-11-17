@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""vtebench_ab.py --main BIN --head BIN --alacritty BIN [--vtebench BIN] [--vtebench-dir DIR]
-                  [--rounds 8] [--max-secs 3] [--benchmarks a,b] [--out results.json]
+"""Compare vtebench workloads across release binaries with A/A noise bounds.
+
+Usage: vtebench_ab.py --main BIN --head BIN --alacritty BIN [--vtebench BIN]
+    [--vtebench-dir DIR] [--rounds 8] [--max-secs 3] [--benchmarks a,b]
+    [--out results.json]
 
 Runs the vtebench suite inside main, a byte copy of main (A/A), head and Alacritty, in shuffled
 rounds, all at 100x30 with the configs in cfg/. It runs copies of the benchmarks whose size lookup

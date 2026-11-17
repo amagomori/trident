@@ -105,7 +105,8 @@ const ICNS_TYPES: [(&[u8; 4], u32); 10] = [
 ];
 
 /// Largest Dock icon rep in pixels: the Dock size and magnification both top out at 128 pt,
-/// which is 256 px at 2x. AppKit keeps the larger reps' decoded pixels around (~3 MiB of
+/// which is 256 px at 2x. `AppKit` keeps the larger reps' decoded pixels around
+/// (~3 MiB of
 /// open RSS for the 512 and 1024 px ones) though the Dock never draws them.
 #[cfg(any(target_os = "macos", test))]
 const DOCK_MAX_PX: u32 = 256;
@@ -246,6 +247,8 @@ mod macos {
         #[name = "TridentMenuBarShow"]
         struct ShowTarget;
 
+        // SAFETY: ShowTarget inherits NSObject and overrides no NSObjectProtocol
+        // methods, preserving its reference-counting and runtime behavior.
         unsafe impl NSObjectProtocol for ShowTarget {}
 
         impl ShowTarget {

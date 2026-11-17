@@ -37,6 +37,8 @@ struct Segment {
 
 impl Drop for Segment {
     fn drop(&mut self) {
+        // SAFETY: This segment owns the successful mmap of exactly len bytes;
+        // presenter borrows end before drop and no Rust reference survives unmapping.
         unsafe { libc::munmap(self.ptr.cast(), self.len) };
     }
 }
@@ -137,10 +139,19 @@ impl ShmPresenter {
             self.attach(width, height)?;
         }
         let segment = self.segment.as_ref().ok_or("no segment")?;
+        // SAFETY: attach mapped len writable bytes. &mut self excludes other Rust
+        // access, and wait_idle completed the X server's previous read of the segment.
         let pixels = unsafe { std::slice::from_raw_parts_mut(segment.ptr, segment.len) };
+        // SAFETY: The HAL guard is retained below; only its locked GL context is used,
+        // without destroying or replacing the wgpu-owned device.
         let device = unsafe { device.as_hal::<Gles>() }.ok_or("not a GL device")?;
+        // SAFETY: The guard keeps the texture alive. Its handle is read, not destroyed
+        // or modified; the frame is complete before this readback on the same device.
         let texture = unsafe { texture.as_hal::<Gles>() }.ok_or("not a GL texture")?;
         let gl = device.context().lock();
+        // SAFETY: The locked context is current; handles come from that context.
+        // The mapped destination has width * height * 4 bytes, with no pack buffer
+        // bound. Temporary framebuffer state is unbound before returning to wgpu.
         unsafe {
             let fbo = match self.fbo {
                 Some(fbo) => fbo,
@@ -233,14 +244,19 @@ impl ShmPresenter {
             let _ = self.conn.shm_detach(old.id);
         }
         let len = width as usize * height as usize * 4;
+        // SAFETY: The name is NUL-terminated and MFD_CLOEXEC is a valid flag.
         let fd = unsafe { libc::memfd_create(c"terminal-frame".as_ptr(), libc::MFD_CLOEXEC) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
+        // SAFETY: memfd_create returned a fresh descriptor; ownership transfers once.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: fd is open and owned here; len is the bounded frame's byte length.
         if unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) } != 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
+        // SAFETY: fd has len bytes. The kernel chooses the address and the mapping
+        // is checked before use. Only this process writes it; X attaches read-only.
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),

@@ -10,6 +10,11 @@ What changed and why, in one to three sentences, for someone who hasn't read the
 - How it was verified: commands run, platforms, manual steps
 - Screenshot or recording for anything visible
 
+### Source documentation
+- [ ] Changed source comments follow the [canonical standard](https://github.com/amagomori/.github/blob/main/docs/rust_documentation.md).
+- [ ] API contracts, runnable examples and safety explanations match the changed behavior, or no source documentation is affected.
+- [ ] Strict public/private rustdoc, doctests and scoped Clippy checks pass (see [development](../docs/development.md#source-documentation)).
+
 ## Ticket
 KEY-n: <ticket summary>   <!-- or "None" with the reason -->
 

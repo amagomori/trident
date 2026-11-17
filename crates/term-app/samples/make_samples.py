@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Writes the `terminal show` sample files: a 48x32 image split into red, green, blue and
-white quadrants in every raster format, plus files for the failure cases. Needs Pillow."""
+"""Write the raster-format and failure-case samples for `trident show`.
+
+Create a 48x32 image split into red, green, blue and white quadrants in every
+raster format, plus files for the failure cases. Requires Pillow.
+"""
 
 import io
 import struct

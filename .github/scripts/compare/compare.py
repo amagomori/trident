@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Black-box comparison of `terminal` against other terminal emulators (Linux, X11).
+"""Compare Trident with other terminal emulators using black-box Linux X11 probes.
 
     Xvfb :99 -screen 0 1920x1080x24 & DISPLAY=:99 openbox &
     cargo build --release

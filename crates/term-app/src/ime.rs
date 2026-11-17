@@ -61,7 +61,7 @@ pub fn command_chords(bindings: &BTreeMap<Chord, Action>) -> BTreeSet<Chord> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-/// Chord modifier bits for AppKit `NSEventModifierFlags`.
+/// Chord modifier bits for `AppKit` `NSEventModifierFlags`.
 pub fn chord_modifiers(flags: usize) -> u8 {
     const SHIFT: usize = 1 << 17;
     const CONTROL: usize = 1 << 18;
@@ -127,11 +127,17 @@ pub fn set_command_chords(bindings: &BTreeMap<Chord, Action>) {
     COMMAND_CHORDS.set(command_chords(bindings));
 }
 
-/// winit's macOS view drops a key down while marked text exists unless the input method answers
-/// it with `doCommandBySelector:`, which input methods don't do for Command keys, so bound
-/// Command chords never reached the app during a composition. This `interpretKeyEvents:`
-/// override answers those chords itself, so winit delivers them as `KeyboardInput` and the
-/// marked text stays; every other key still goes to the input method.
+/// Delivers bound Command chords during marked-text composition without
+/// clearing it.
+///
+/// winit waits for the input method's `doCommandBySelector:` response, which
+/// Command keys do not produce. This `interpretKeyEvents:` override supplies
+/// that response for bound chords; other events still go to the input method.
+///
+/// # Safety
+///
+/// Must be invoked on the main thread using the `interpretKeyEvents:` ABI, with
+/// a live text-input view and a null or live `NSArray` of `NSEvent` objects.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn interpret_key_events(
     this: *mut objc2::runtime::AnyObject,
@@ -153,8 +159,12 @@ unsafe extern "C-unwind" fn interpret_key_events(
     }
 }
 
+/// Checks whether a single bound Command event should bypass marked text.
+///
 /// # Safety
-/// Must be called on the main thread with a live view and NSArray of NSEvents.
+///
+/// Must be called on the main thread with a live text-input view and `NSArray`
+/// of `NSEvent` objects.
 #[cfg(target_os = "macos")]
 unsafe fn takes_from_composition(
     view: &objc2::runtime::AnyObject,
@@ -165,6 +175,8 @@ unsafe fn takes_from_composition(
     use objc2::runtime::AnyObject;
     use objc2_foundation::NSString;
     const NS_EVENT_TYPE_KEY_DOWN: usize = 10;
+    // SAFETY: The caller guarantees the receiver types and main thread. count is
+    // checked before indexing, and each message matches the AppKit method's ABI.
     unsafe {
         let marked: bool = msg_send![view, hasMarkedText];
         let count: usize = msg_send![events, count];
@@ -192,11 +204,17 @@ const PERFORM_KEY_EQUIVALENT_TYPES: &std::ffi::CStr = c"B@:@";
 #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
 const PERFORM_KEY_EQUIVALENT_TYPES: &std::ffi::CStr = c"c@:@";
 
-/// AppKit offers a Command key to the key window's views, then to the menu bar, and only then
-/// sends it to `keyDown:`, so a Window menu item (Minimize's Command-M, which AppKit assigns
-/// even when the item has none) took bound chords away from `config.bindings`. This override
-/// keeps the order Trident had before it had a Window menu: a bound chord goes to the app menu
-/// (Quit, Hide, Close Window), else straight to the view as a key down.
+/// Gives a bound Command chord to the app menu, then the view, before the
+/// Window menu.
+///
+/// `AppKit` normally offers key equivalents to the Window menu before
+/// `keyDown:`,
+/// including implicit equivalents such as Minimize's Command-M.
+///
+/// # Safety
+///
+/// Must be invoked on the main thread with a live text-input view as `this` and
+/// a null or live `NSEvent` pointer, using the `performKeyEquivalent:` ABI.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn perform_key_equivalent(
     this: *mut objc2::runtime::AnyObject,
@@ -228,12 +246,16 @@ unsafe extern "C-unwind" fn perform_key_equivalent(
 /// The menu under the app's name, the first one in the menu bar.
 ///
 /// # Safety
+///
 /// Must be called on the main thread.
 #[cfg(target_os = "macos")]
 unsafe fn app_menu() -> Option<objc2::rc::Retained<objc2::runtime::AnyObject>> {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
+    // SAFETY: The caller is on the main thread; each receiver is the AppKit object
+    // returned by the preceding typed selector. Index zero is used only when
+    // nonempty.
     unsafe {
         let app: Option<Retained<AnyObject>> = msg_send![class!(NSApplication), sharedApplication];
         let menubar: Option<Retained<AnyObject>> = msg_send![&*app?, mainMenu];
@@ -247,27 +269,37 @@ unsafe fn app_menu() -> Option<objc2::rc::Retained<objc2::runtime::AnyObject>> {
     }
 }
 
+/// Returns whether the view belongs to the application's key window.
+///
 /// # Safety
-/// Must be called on the main thread with a live view.
+///
+/// Must be called on the main thread with a live `NSView`.
 #[cfg(target_os = "macos")]
 unsafe fn in_key_window(view: &objc2::runtime::AnyObject) -> bool {
     use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
+    // SAFETY: The caller supplies a live NSView on the main thread. window returns
+    // an optional retained NSWindow, and isKeyWindow has the declared bool result.
     unsafe {
         let window: Option<Retained<AnyObject>> = msg_send![view, window];
         window.is_some_and(|window| msg_send![&*window, isKeyWindow])
     }
 }
 
+/// Returns whether the event matches one of the configured Command chords.
+///
 /// # Safety
-/// Must be called on the main thread with a live NSEvent.
+///
+/// Must be called on the main thread with a live `NSEvent`.
 #[cfg(target_os = "macos")]
 unsafe fn is_bound_command_key(event: &objc2::runtime::AnyObject) -> bool {
     use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2_foundation::NSString;
     const NS_EVENT_TYPE_KEY_DOWN: usize = 10;
+    // SAFETY: The caller supplies a live NSEvent on the main thread. All selectors
+    // are NSEvent methods with the declared argument and return types.
     unsafe {
         let kind: usize = msg_send![event, type];
         if kind != NS_EVENT_TYPE_KEY_DOWN {

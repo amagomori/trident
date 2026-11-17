@@ -34,3 +34,6 @@ x11rb = { version = "0.13", features = ["shm"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation.workspace = true
 objc2-core-text.workspace = true
+
+[lints]
+workspace = true

@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use term_core::grapheme;
 
-/// The bundled regular face, also used by `terminal show` for SVG text.
+/// The bundled regular face, also used by `trident show` for SVG text.
 pub static REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 /// Family name of the bundled fonts.
 pub const FAMILY: &str = "JetBrains Mono";
@@ -27,10 +27,15 @@ const BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-BoldIta
 /// The bundled faces, by [`Style`].
 pub(crate) const BUNDLED: [&[u8]; 4] = [REGULAR, BOLD, ITALIC, BOLD_ITALIC];
 
+/// Font face selected by the cell's bold and italic attributes.
+///
+/// See the [crate example](crate) for rasterizing a styled character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Style {
     Regular = 0,
+    /// Bold, with synthesis if the family has no bold face.
     Bold = 1,
+    /// Italic, with synthesis if the family has no italic face.
     Italic = 2,
     BoldItalic = 3,
 }
@@ -49,22 +54,31 @@ impl Style {
 /// Pixel metrics of one terminal cell at the current size.
 #[derive(Clone, Copy, Debug)]
 pub struct CellMetrics {
+    /// Cell width in physical pixels, rounded to at least one pixel.
     pub width: f32,
+    /// Cell height in physical pixels, rounded to at least one pixel.
     pub height: f32,
     /// Distance from the top of the cell to the baseline.
     pub baseline: f32,
+    /// Underline's vertical position from the cell top, in physical pixels.
     pub underline_offset: f32,
+    /// Decoration stroke thickness in physical pixels.
     pub stroke: f32,
 }
 
+/// A raster bitmap and its placement relative to a terminal cell.
+///
+/// Returned by [`Fonts::rasterize`], as in the [crate example](crate).
 pub struct RasterizedGlyph {
     pub width: usize,
     pub height: usize,
     /// Offset of the bitmap's top-left corner from the cell's top-left corner.
     pub left: f32,
+    /// Vertical offset from the cell top, in physical pixels.
     pub top: f32,
     /// One byte of coverage per pixel, or straight-alpha RGBA when `color` is set.
     pub coverage: Vec<u8>,
+    /// True for straight-alpha RGBA8 data rather than single-channel coverage.
     pub color: bool,
 }
 
@@ -259,16 +273,21 @@ fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
     })
 }
 
+/// Loaded primary faces, cell metrics and lazily loaded system fallback fonts.
+///
+/// See the [crate example](crate) for headless glyph rasterization.
 pub struct Fonts {
     faces: FontFaces,
     system: SystemFonts,
     /// Fallback fonts by file, each loaded on first need (`None` if it failed to load).
     fallbacks: HashMap<FontFile, Option<Fallback>>,
+    /// Font size in physical pixels per em; change it with [`Self::set_size`].
     pub px: f32,
+    /// Current cell dimensions and decoration positions.
     pub metrics: CellMetrics,
 }
 
-/// ab_glyph scales by line height; convert from a font size in pixels per em.
+/// `ab_glyph` scales by line height; convert from a font size in pixels per em.
 fn scale(font: &FontArc, px: f32) -> PxScale {
     let units_per_em = font.units_per_em().unwrap_or(1000.0);
     PxScale::from(px * font.height_unscaled() / units_per_em)
@@ -323,6 +342,10 @@ fn embolden_coverage(coverage: &[u8], width: usize, strength: usize) -> Vec<u8> 
 }
 
 impl Fonts {
+    /// Loads `faces` at `px` physical pixels per em, with fallbacks discovered
+    /// lazily.
+    ///
+    /// `px` must be positive and finite, as for [`Self::set_size`].
     pub fn new(faces: &FontFaces, px: f32) -> Fonts {
         let mut fonts = Fonts {
             faces: faces.clone(),
@@ -341,11 +364,14 @@ impl Fonts {
         fonts
     }
 
-    /// The bundled JetBrains Mono.
+    /// Loads the bundled `JetBrains Mono` faces at `px` physical pixels per em.
     pub fn bundled(px: f32) -> Fonts {
         Fonts::new(&FontFaces::bundled(), px)
     }
 
+    /// Recomputes metrics for a positive, finite size in physical pixels per em.
+    ///
+    /// The caller must also clear any renderer glyph cache after changing size.
     pub fn set_size(&mut self, px: f32) {
         self.px = px;
         let font = &self.faces.face(Style::Regular).font;
@@ -738,7 +764,7 @@ mod tests {
         assert!(fonts.rasterize_sequence("\u{1f468}\u{1f600}", 2).is_none());
     }
 
-    /// Needs a font with CJK Extension B (HanaMinB, Noto Serif CJK, SimSun-ExtB); skipped
+    /// Needs CJK Extension B (`HanaMinB`, Noto Serif CJK, `SimSun-ExtB`); skipped
     /// without one.
     #[test]
     fn cjk_extension_b_comes_from_a_fallback_font() {

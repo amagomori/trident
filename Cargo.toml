@@ -46,3 +46,8 @@ yeslogic-fontconfig-sys = { version = "6", features = ["dlopen"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[workspace.lints.clippy]
+doc_markdown = "warn"
+missing_safety_doc = "warn"
+undocumented_unsafe_blocks = "warn"

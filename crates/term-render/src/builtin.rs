@@ -426,7 +426,7 @@ mod tests {
     use super::*;
     use crate::font::Fonts;
 
-    /// Cell metrics from the bundled font at sizes from tiny to HiDPI.
+    /// Cell metrics from the bundled font at sizes from tiny to high-DPI.
     fn sizes() -> Vec<CellMetrics> {
         [
             7.0, 9.0, 11.0, 13.0, 14.0, 15.5, 16.0, 19.0, 24.0, 28.0, 33.0, 48.0,
