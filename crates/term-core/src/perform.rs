@@ -316,7 +316,7 @@ impl Perform for Terminal {
 }
 
 impl Terminal {
-    /// ConEmu progress (`OSC 9 ; 4 ; state ; percent`): 0 removes it, 1 sets a
+    /// `ConEmu` progress (`OSC 9 ; 4 ; state ; percent`): 0 removes it, 1 sets a
     /// percentage, 2 marks an error, 3 is indeterminate and 4 paused. An error or pause
     /// without a percentage keeps the last one; percentages over 100 count as 100.
     #[cold]

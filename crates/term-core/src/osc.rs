@@ -18,11 +18,19 @@ const MAX_LOADS: usize = 8;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClipboardRequest {
     /// Set the clipboard (or, with `primary`, the primary selection) to `text`.
-    Store { primary: bool, text: String },
+    Store {
+        /// Uses the primary selection rather than the clipboard when true.
+        primary: bool,
+        /// Decoded UTF-8 clipboard contents.
+        text: String,
+    },
     /// Read the clipboard; answer with [`ClipboardRequest::reply`] if reading is allowed.
     Load {
+        /// Requests the primary selection rather than the clipboard when true.
         primary: bool,
+        /// Selection character to preserve in the response.
         selection: char,
+        /// Terminates the response with BEL rather than ST when true.
         bell: bool,
     },
 }

@@ -1,3 +1,6 @@
+//! Frame timing estimates from presentation feedback for Linux redraw
+//! scheduling.
+
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 

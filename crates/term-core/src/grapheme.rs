@@ -2,9 +2,10 @@
 //!
 //! A cell holds one `char`, so a cell whose character carries combining marks, joiners or
 //! variation selectors stores the whole cluster in the terminal's table and keeps its index in
-//! `Cell::c`, flagged `Flags::GRAPHEME`. Width and cursor movement come from the base
-//! character alone, as in xterm and Alacritty, so the grid stays in step with programs that
-//! measure text with `wcwidth`.
+//! `Cell::c`, flagged `Flags::GRAPHEME`. Combining marks keep the base
+//! character's
+//! width. Recognized emoji sequences can widen that cell to two columns; line
+//! editing instead preserves per-codepoint widths to match the shell's cursor.
 
 use std::collections::HashMap;
 

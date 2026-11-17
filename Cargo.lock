@@ -2658,7 +2658,6 @@ dependencies = [
  "glow",
  "harfrust",
  "libc",
- "memmap2",
  "objc2-core-foundation",
  "objc2-core-text",
  "png",

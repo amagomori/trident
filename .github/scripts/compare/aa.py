@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Per-workload tables of terminal vs each competitor with A/A bounds from two rounds.
+"""Tabulate Trident versus each competitor with two-round A/A bounds.
+
 A/A bound of a terminal on a metric = |round A - round B| (shown as % of its mean).
 'Trails beyond noise' = ours worse than theirs in both rounds AND the pooled gap exceeds
 max(our A/A, their A/A, floor). All metrics lower-is-better. vtebench uses mean ms per sample (its medians are whole ms)."""

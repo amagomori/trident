@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds assets/icons/ from the 1024x1024 full-bleed sources in assets/.
+"""Build assets/icons/ from the 1024x1024 full-bleed sources in assets/.
 
 For each icon it writes:
   <name>.icns           macOS app icon: the body scaled to 824/1024 on a transparent

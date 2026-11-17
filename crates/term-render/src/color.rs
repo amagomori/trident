@@ -483,8 +483,10 @@ impl<'a> Painter<'a> for Canvas<'_, 'a> {
         }
     }
 
-    /// COLRv1 paints fill the clip rather than the outline, possibly under a different
-    /// transform, so the outline is consumed here; COLRv0 layers paint the outline directly.
+    /// `COLRv1` paints fill the clip rather than the outline, possibly under a
+    /// different
+    /// transform, so the outline is consumed here; `COLRv0` layers paint the
+    /// outline directly.
     fn push_clip(&mut self) {
         let mask = self.mask();
         self.path.clear();

@@ -1,3 +1,6 @@
+# Report prompt/command boundaries (OSC 133) and the directory (OSC 7) for fish 3.
+# Restore the command's status before invoking the original prompt function.
+# Fish 4 supplies its own integration, so this wrapper is not installed there.
 if status is-interactive; and test (string split . -- $version)[1] -lt 4; and not set -q _terminal_integration_loaded
     set -g _terminal_integration_loaded 1
 

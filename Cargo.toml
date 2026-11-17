@@ -26,7 +26,6 @@ flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
 libc = "0.2"
 memchr = "2"
-memmap2 = "0.9"
 objc2-core-foundation = "0.3"
 objc2-core-text = "0.3"
 png = "0.18"
@@ -45,3 +44,10 @@ yeslogic-fontconfig-sys = { version = "6", features = ["dlopen"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[workspace.lints.clippy]
+doc_markdown = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+missing_safety_doc = "warn"
+undocumented_unsafe_blocks = "warn"

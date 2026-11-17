@@ -16,17 +16,22 @@ const MAX_CHARS: usize = 1024;
 const MAX_BYTES: usize = MAX_CHARS * 4;
 const MAX_ID: usize = 256;
 
+/// Requested desktop-notification priority.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Urgency {
+    /// Nonurgent information.
     Low,
+    /// Ordinary notification priority.
     #[default]
     Normal,
+    /// Urgent information; presentation remains application policy.
     Critical,
 }
 
 /// When the notification should be shown (OSC 99 `o`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Occasion {
+    /// Show regardless of window visibility or focus.
     #[default]
     Always,
     /// Only while the window does not have focus.
@@ -35,13 +40,18 @@ pub enum Occasion {
     Invisible,
 }
 
+/// A parsed notification drained with [`crate::Terminal::take_notifications`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Notification {
     /// OSC 99 `i`: a later notification with the same id replaces this one. Empty for none.
     pub id: String,
+    /// Notification heading, bounded to the parser's text limit.
     pub title: String,
+    /// Notification message, bounded to the parser's text limit.
     pub body: String,
+    /// Requested priority.
     pub urgency: Urgency,
+    /// Requested visibility/focus policy.
     pub occasion: Occasion,
 }
 
@@ -88,7 +98,8 @@ impl Notifications {
         }
     }
 
-    /// OSC 9 ; message. ConEmu's numbered OSC 9 commands (progress, tab title...) are
+    /// `OSC 9 ; message`. `ConEmu`'s numbered OSC 9 commands (progress, tab
+    /// title...) are
     /// not notifications and are ignored.
     pub(crate) fn osc9(&mut self, params: &[&[u8]]) {
         if let Some(first) = params.first()

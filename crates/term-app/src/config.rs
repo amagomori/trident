@@ -1,3 +1,5 @@
+//! TOML configuration, validated defaults and filesystem-triggered reloads.
+
 use crate::app_icon::AppIcon;
 use crate::theme;
 use notify::Watcher;

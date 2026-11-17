@@ -227,8 +227,16 @@ impl CountingAlloc {
     }
 }
 
+// SAFETY: Every operation forwards valid pointers/layouts unchanged to System.
+// Atomic bookkeeping neither allocates nor changes ownership.
 unsafe impl GlobalAlloc for CountingAlloc {
+    /// Allocates through `System` and counts successful allocations.
+    ///
+    /// # Safety
+    ///
+    /// The caller must satisfy [`GlobalAlloc::alloc`]'s layout requirements.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: GlobalAlloc's caller guarantees layout is valid and nonzero.
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
             LIVE.fetch_add(layout.size(), Ordering::Relaxed);
@@ -236,7 +244,13 @@ unsafe impl GlobalAlloc for CountingAlloc {
         p
     }
 
+    /// Allocates zeroed memory through `System` and counts successful allocations.
+    ///
+    /// # Safety
+    ///
+    /// The caller must satisfy [`GlobalAlloc::alloc_zeroed`]'s requirements.
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: GlobalAlloc's caller guarantees layout is valid and nonzero.
         let p = unsafe { System.alloc_zeroed(layout) };
         if !p.is_null() {
             LIVE.fetch_add(layout.size(), Ordering::Relaxed);
@@ -244,12 +258,26 @@ unsafe impl GlobalAlloc for CountingAlloc {
         p
     }
 
+    /// Releases a counted allocation through `System`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a live allocation from this allocator with matching `layout`,
+    /// as required by [`GlobalAlloc::dealloc`]. It must not be used afterward.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: The caller supplies the live allocation and its original layout.
         unsafe { System.dealloc(ptr, layout) };
         LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
     }
 
+    /// Resizes through `System`, changing the count only on success.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` and `layout` must identify a live allocation from this allocator.
+    /// `new_size` must satisfy [`GlobalAlloc::realloc`]'s size/layout requirements.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: The caller supplies a live System allocation and valid new size.
         let p = unsafe { System.realloc(ptr, layout, new_size) };
         if !p.is_null() {
             LIVE.fetch_sub(layout.size(), Ordering::Relaxed);

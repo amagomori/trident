@@ -1,23 +1,33 @@
 //! On-demand search over the active screen and its retained history.
+//!
+//! See [`Terminal::search`] for a complete search or [`Terminal::search_job`]
+//! for incremental work that can yield to an event loop.
 use crate::{Cell, Flags, Point, Row, Terminal};
 use regex::bytes::{Regex, RegexBuilder};
 use std::time::Instant;
 
+/// Maximum matches retained by one search, preferring the newest text.
 pub const MATCH_LIMIT: usize = 10_000;
 
+/// An inclusive cell range in absolute line coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Match {
+    /// First matched cell.
     pub start: Point,
+    /// Last matched cell, including the spacer of a wide character.
     pub end: Point,
 }
 
 impl Match {
+    /// Returns whether `point` lies between the inclusive endpoints.
     pub fn contains(&self, point: Point) -> bool {
         self.start <= point && point <= self.end
     }
 }
 
 /// A search over the screen and history that runs in slices, newest lines first.
+///
+/// See [`Terminal::search_job`] for an incremental example.
 pub struct SearchJob {
     re: Regex,
     /// Last line of the next logical line to scan; `None` once the search is done.
@@ -41,6 +51,7 @@ const SLICE_LINES: usize = 256;
 const BATCH_LINES: usize = 64;
 
 impl SearchJob {
+    /// Returns whether all retained text was scanned or [`MATCH_LIMIT`] reached.
     pub fn done(&self) -> bool {
         self.next.is_none()
     }
@@ -332,7 +343,30 @@ pub fn highlighted(matches: &[Match], point: Point, cell: &Cell) -> Option<usize
 }
 
 impl Terminal {
-    /// Start a search; `run` it to collect matches, newest first.
+    /// Starts an incremental search over retained history and the active screen.
+    ///
+    /// Uses the query and case rules of [`Self::search`]. Empty queries create
+    /// an already finished job. Keep the terminal unchanged while running a job
+    /// if consistent results are required.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # fn main() -> Result<(), String> {
+    /// use term_core::Terminal;
+    /// let mut term = Terminal::new(40, 5);
+    /// term.advance(b"build passed");
+    /// let mut job = term.search_job("passed", false)?;
+    /// while !job.run(&term, 16) {}
+    /// assert_eq!(job.take_found().len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns regex compilation errors, including invalid syntax and compiler
+    /// size limits. Regex patterns that can split UTF-8 characters are rejected.
     pub fn search_job(&self, query: &str, regex: bool) -> Result<SearchJob, String> {
         let pattern = if regex {
             query.to_owned()
@@ -367,6 +401,28 @@ impl Terminal {
         })
     }
 
+    /// Searches the active screen and retained history for `query`.
+    ///
+    /// Treats `query` as literal text unless `regex` is true. Matching ignores
+    /// case unless the query contains an uppercase character. Empty queries
+    /// return no matches. Results are in ascending cell order and limited to
+    /// the newest [`MATCH_LIMIT`] matches; zero-length regex matches are omitted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # fn main() -> Result<(), String> {
+    /// use term_core::Terminal;
+    /// let mut term = Terminal::new(40, 5);
+    /// term.advance(b"build passed");
+    /// assert_eq!(term.search("passed", false)?.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns the compilation errors described by [`Self::search_job`].
     pub fn search(&self, query: &str, regex: bool) -> Result<Vec<Match>, String> {
         if query.is_empty() {
             return Ok(Vec::new());

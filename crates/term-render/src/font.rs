@@ -1,6 +1,7 @@
-//! Font loading, cell metrics and glyph rasterization (via ab_glyph), with system fallback
-//! fonts for characters the primary font lacks. Fallback fonts are memory-mapped and parsed
-//! lazily, so even large CJK and emoji fonts cost little memory beyond the pages touched.
+//! Font loading, cell metrics and glyph rasterization through `ab_glyph`.
+//!
+//! System fallback fonts are loaded on first use into immutable process-owned
+//! snapshots. Later file changes cannot invalidate a parser's borrowed bytes.
 
 use crate::builtin;
 use crate::color;
@@ -15,7 +16,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use term_core::grapheme;
 
-/// The bundled regular face, also used by `terminal show` for SVG text.
+/// The bundled regular face, also used by `trident show` for SVG text.
 pub static REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 /// Family name of the bundled fonts.
 pub const FAMILY: &str = "JetBrains Mono";
@@ -25,15 +26,23 @@ const BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-BoldIta
 /// The bundled faces, by [`Style`].
 pub(crate) const BUNDLED: [&[u8]; 4] = [REGULAR, BOLD, ITALIC, BOLD_ITALIC];
 
+/// Font face selected by the cell's bold and italic attributes.
+///
+/// See the [crate example](crate) for rasterizing a styled character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Style {
+    /// Neither bold nor italic.
     Regular = 0,
+    /// Bold, with synthesis if the family has no bold face.
     Bold = 1,
+    /// Italic, with synthesis if the family has no italic face.
     Italic = 2,
+    /// Both bold and italic.
     BoldItalic = 3,
 }
 
 impl Style {
+    /// Selects the face corresponding to the two rendition attributes.
     pub fn new(bold: bool, italic: bool) -> Style {
         match (bold, italic) {
             (false, false) => Style::Regular,
@@ -47,22 +56,33 @@ impl Style {
 /// Pixel metrics of one terminal cell at the current size.
 #[derive(Clone, Copy, Debug)]
 pub struct CellMetrics {
+    /// Cell width in physical pixels, rounded to at least one pixel.
     pub width: f32,
+    /// Cell height in physical pixels, rounded to at least one pixel.
     pub height: f32,
     /// Distance from the top of the cell to the baseline.
     pub baseline: f32,
+    /// Underline's vertical position from the cell top, in physical pixels.
     pub underline_offset: f32,
+    /// Decoration stroke thickness in physical pixels.
     pub stroke: f32,
 }
 
+/// A raster bitmap and its placement relative to a terminal cell.
+///
+/// Returned by [`Fonts::rasterize`], as in the [crate example](crate).
 pub struct RasterizedGlyph {
+    /// Bitmap width in pixels.
     pub width: usize,
+    /// Bitmap height in pixels.
     pub height: usize,
     /// Offset of the bitmap's top-left corner from the cell's top-left corner.
     pub left: f32,
+    /// Vertical offset from the cell top, in physical pixels.
     pub top: f32,
     /// One byte of coverage per pixel, or straight-alpha RGBA when `color` is set.
     pub coverage: Vec<u8>,
+    /// True for straight-alpha RGBA8 data rather than single-channel coverage.
     pub color: bool,
 }
 
@@ -74,21 +94,22 @@ struct Fallback {
     index: u32,
 }
 
-/// Memory-maps a font file for the rest of the program, once per path.
-pub(crate) fn map(path: &Path) -> std::io::Result<&'static [u8]> {
-    static MAPS: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
-    let mut maps = MAPS
+/// Caches an immutable font snapshot for the process lifetime, once per path.
+///
+/// File-backed mappings cannot guarantee immutable bytes during font updates.
+/// Owned bytes keep borrowed font parsers valid even after truncation or
+/// replacement.
+pub(crate) fn read_cached(path: &Path) -> std::io::Result<&'static [u8]> {
+    static FILES: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
+    let mut files = FILES
         .get_or_init(Default::default)
         .lock()
-        .expect("font maps");
-    if let Some(data) = maps.get(path) {
+        .expect("font snapshots");
+    if let Some(data) = files.get(path) {
         return Ok(data);
     }
-    let file = std::fs::File::open(path)?;
-    // Font files are not modified while in use; a truncated file would only fail to parse.
-    let map = unsafe { memmap2::Mmap::map(&file)? };
-    let data: &'static [u8] = Box::leak(Box::new(map));
-    maps.insert(path.to_owned(), data);
+    let data: &'static [u8] = Box::leak(std::fs::read(path)?.into_boxed_slice());
+    files.insert(path.to_owned(), data);
     Ok(data)
 }
 
@@ -105,7 +126,7 @@ impl Fallback {
 }
 
 fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
-    let data = map(path).ok()?;
+    let data = read_cached(path).ok()?;
     let font = FontArc::new(FontRef::try_from_slice_and_index(data, *index).ok()?);
     let face = ttf_parser::Face::parse(data, *index)
         .ok()
@@ -118,16 +139,21 @@ fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
     })
 }
 
+/// Loaded primary faces, cell metrics and lazily loaded system fallback fonts.
+///
+/// See the [crate example](crate) for headless glyph rasterization.
 pub struct Fonts {
     faces: FontFaces,
     system: SystemFonts,
     /// Fallback fonts by file, each loaded on first need (`None` if it failed to load).
     fallbacks: HashMap<FontFile, Option<Fallback>>,
+    /// Font size in physical pixels per em; change it with [`Self::set_size`].
     pub px: f32,
+    /// Current cell dimensions and decoration positions.
     pub metrics: CellMetrics,
 }
 
-/// ab_glyph scales by line height; convert from a font size in pixels per em.
+/// `ab_glyph` scales by line height; convert from a font size in pixels per em.
 fn scale(font: &FontArc, px: f32) -> PxScale {
     let units_per_em = font.units_per_em().unwrap_or(1000.0);
     PxScale::from(px * font.height_unscaled() / units_per_em)
@@ -182,6 +208,10 @@ fn embolden_coverage(coverage: &[u8], width: usize, strength: usize) -> Vec<u8> 
 }
 
 impl Fonts {
+    /// Loads `faces` at `px` physical pixels per em, with fallbacks discovered
+    /// lazily.
+    ///
+    /// `px` must be positive and finite, as for [`Self::set_size`].
     pub fn new(faces: &FontFaces, px: f32) -> Fonts {
         let mut fonts = Fonts {
             faces: faces.clone(),
@@ -200,11 +230,14 @@ impl Fonts {
         fonts
     }
 
-    /// The bundled JetBrains Mono.
+    /// Loads the bundled `JetBrains Mono` faces at `px` physical pixels per em.
     pub fn bundled(px: f32) -> Fonts {
         Fonts::new(&FontFaces::bundled(), px)
     }
 
+    /// Recomputes metrics for a positive, finite size in physical pixels per em.
+    ///
+    /// The caller must also clear any renderer glyph cache after changing size.
     pub fn set_size(&mut self, px: f32) {
         self.px = px;
         let font = &self.faces.face(Style::Regular).font;
@@ -396,6 +429,38 @@ fn shape_sequence(
 mod tests {
     use super::*;
 
+    #[test]
+    fn cached_font_bytes_survive_truncation_and_replacement() {
+        let dir =
+            std::env::temp_dir().join(format!("trident-font-snapshot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("font.ttf");
+        std::fs::write(&path, REGULAR).unwrap();
+        let data = read_cached(&path).unwrap();
+        let face = FontRef::try_from_slice(data).unwrap();
+        let a = face.glyph_id('A');
+        std::fs::write(&path, []).unwrap();
+        assert_eq!(data, REGULAR);
+        assert_eq!(face.glyph_id('A'), a);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, BOLD).unwrap();
+        assert!(std::ptr::eq(data, read_cached(&path).unwrap()));
+        assert_eq!(data, REGULAR);
+        assert!(face.outline_glyph(a.with_scale(16.0)).is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_font_reads_are_not_cached() {
+        let path =
+            std::env::temp_dir().join(format!("trident-font-retry-{}.ttf", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(read_cached(&path).is_err());
+        std::fs::write(&path, BOLD).unwrap();
+        assert_eq!(read_cached(&path).unwrap(), BOLD);
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn fonts() -> Fonts {
         Fonts::bundled(16.0)
     }
@@ -516,7 +581,7 @@ mod tests {
         assert!(fonts.rasterize_sequence("\u{1f468}\u{1f600}", 2).is_none());
     }
 
-    /// Needs a font with CJK Extension B (HanaMinB, Noto Serif CJK, SimSun-ExtB); skipped
+    /// Needs CJK Extension B (`HanaMinB`, Noto Serif CJK, `SimSun-ExtB`); skipped
     /// without one.
     #[test]
     fn cjk_extension_b_comes_from_a_fallback_font() {

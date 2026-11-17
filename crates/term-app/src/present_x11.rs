@@ -21,10 +21,12 @@ pub fn start(
     connection.flush()?;
     let mut clock = std::mem::MaybeUninit::<libc::timespec>::uninit();
     // X Present UST uses the same CLOCK_MONOTONIC epoch.
+    // SAFETY: clock points to writable storage for one timespec.
     if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, clock.as_mut_ptr()) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     let sampled = Instant::now();
+    // SAFETY: clock_gettime succeeded and initialized every field of clock.
     let clock = unsafe { clock.assume_init() };
     let epoch = i128::from(clock.tv_sec) * 1_000_000 + i128::from(clock.tv_nsec) / 1_000
         - sampled.duration_since(start).as_micros() as i128;

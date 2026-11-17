@@ -1,22 +1,42 @@
-/// A terminal color as the application specified it; resolved to RGB at render time.
+//! Cell attributes and physical rows, including cells hidden by narrowing.
+
+/// A terminal color as specified by the program; see [`crate::colors`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Color {
+    /// The palette's default text color.
     DefaultFg,
+    /// The palette's default background color.
     DefaultBg,
+    /// An xterm 256-color palette index.
     Indexed(u8),
+    /// Explicit red, green and blue channels in `0..=255`.
     Rgb(u8, u8, u8),
 }
 
+/// Cell rendition and storage flags, combined with `|` or [`Self::union`].
+///
+/// ```rust
+/// use term_core::Flags;
+/// let flags = Flags::BOLD | Flags::ITALIC;
+/// assert!(flags.contains(Flags::BOLD));
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Flags(u16);
 
 impl Flags {
+    /// Bold text (SGR 1).
     pub const BOLD: Flags = Flags(1);
+    /// Dim text (SGR 2).
     pub const DIM: Flags = Flags(1 << 1);
+    /// Italic text (SGR 3).
     pub const ITALIC: Flags = Flags(1 << 2);
+    /// Underlined text; use [`Self::underline`] to read its style.
     pub const UNDERLINE: Flags = Flags(1 << 3);
+    /// Foreground and background are exchanged (SGR 7).
     pub const INVERSE: Flags = Flags(1 << 4);
+    /// Text is concealed without changing its background (SGR 8).
     pub const HIDDEN: Flags = Flags(1 << 5);
+    /// Struck-through text (SGR 9).
     pub const STRIKE: Flags = Flags(1 << 6);
     /// First half of a double-width character.
     pub const WIDE: Flags = Flags(1 << 7);
@@ -28,11 +48,12 @@ impl Flags {
     pub const WIDE_WRAP: Flags = Flags(1 << 10);
     /// SGR 5/6 blink; the renderer toggles the cell's text on a timer.
     pub const BLINK: Flags = Flags(1 << 11);
-    /// `c` indexes a grapheme cluster; read it with `Terminal::grapheme`.
+    /// `c` indexes a grapheme cluster; read it with [`crate::Terminal::grapheme`].
     pub const GRAPHEME: Flags = Flags(1 << 12);
     /// The `UnderlineStyle` of an `UNDERLINE` cell other than a single line (SGR 4:x, 21).
     pub const UNDERLINE_STYLE: Flags = Flags(0b111 << 13);
 
+    /// Returns all bits set in either operand.
     pub const fn union(self, other: Flags) -> Flags {
         Flags(self.0 | other.0)
     }
@@ -46,14 +67,17 @@ impl Flags {
         self.0 & other.0 != 0
     }
 
+    /// Returns whether every bit of `other` is set.
     pub fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
     }
 
+    /// Sets every bit present in `other`.
     pub fn insert(&mut self, other: Flags) {
         self.0 |= other.0;
     }
 
+    /// Clears every bit present in `other`.
     pub fn remove(&mut self, other: Flags) {
         self.0 &= !other.0;
     }
@@ -62,10 +86,15 @@ impl Flags {
 /// How SGR 4:x draws an underline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnderlineStyle {
+    /// One continuous line.
     Single,
+    /// Two parallel lines.
     Double,
+    /// A wavy line.
     Curly,
+    /// A row of dots.
     Dotted,
+    /// A row of dashes.
     Dashed,
 }
 
@@ -84,6 +113,7 @@ impl Flags {
         })
     }
 
+    /// Replaces the underline style, or removes underlining for `None`.
     pub fn set_underline(&mut self, style: Option<UnderlineStyle>) {
         self.remove(Flags::UNDERLINE | Flags::UNDERLINE_STYLE);
         let Some(style) = style else { return };
@@ -105,12 +135,22 @@ impl std::ops::BitOr for Flags {
     }
 }
 
+/// One screen cell, including its character, rendition and link-table index.
+///
+/// Read cells from [`crate::Terminal::viewport_row`], as in the [crate
+/// example](crate).
+/// Use [`crate::Terminal::push_cell_text`] to decode grapheme-table entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
+    /// Character, or a table index when [`Flags::GRAPHEME`] is set.
     pub c: char,
+    /// Text color before inverse and selection effects.
     pub fg: Color,
+    /// Background color before inverse and selection effects.
     pub bg: Color,
+    /// Rendition attributes and wide/grapheme storage markers.
     pub flags: Flags,
+    /// Terminal-owned link/underline-color index; zero means no entry.
     pub hyperlink: u16,
 }
 
@@ -183,9 +223,23 @@ impl Cell {
     }
 }
 
+/// A physical row and any cells temporarily hidden by a narrower grid.
+///
+/// See the [crate example](crate) for reading terminal rows. A row can also be
+/// built without a parser, with dimensions in cells:
+///
+/// ```rust
+/// use term_core::{Cell, Row};
+/// let mut row = Row::new(4, &Cell::default());
+/// row.resize(8);
+/// assert_eq!(row.cells.len(), 8);
+/// assert!(!row.wrapped());
+/// ```
 #[derive(Clone, Debug)]
 pub struct Row {
+    /// Visible cells, indexed by zero-based cell column.
     pub cells: Vec<Cell>,
+    /// Shell integration and soft-wrap metadata.
     pub flags: RowFlags,
     pub(crate) prompt_col: u32,
     pub(crate) output_col: u16,
@@ -256,6 +310,7 @@ impl Row {
         self.flags.contains(RowFlags::WRAPPED)
     }
 
+    /// Sets whether the logical line continues onto the next physical row.
     pub fn set_wrapped(&mut self, wrapped: bool) {
         if wrapped {
             self.flags.insert(RowFlags::WRAPPED);
@@ -289,6 +344,7 @@ impl Row {
         self.occupied = u8::try_from(from).unwrap_or(u8::MAX);
     }
 
+    /// Creates `cols` blank cells using only the background of `template`.
     pub fn new(cols: usize, template: &Cell) -> Row {
         Row {
             cells: vec![Cell::blank(template); cols],
@@ -335,6 +391,13 @@ impl Row {
         cells
     }
 
+    /// Resizes the row, retaining cut-off text for a later widening.
+    ///
+    /// Unlike terminal resizing this does not reflow text onto other rows.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a nonempty row is narrowed to zero columns.
     pub fn resize(&mut self, cols: usize) {
         let mut cells = self.take_cells();
         if cells.len() > cols {
@@ -421,6 +484,11 @@ impl Row {
         })
     }
 
+    /// Makes soft-wrap padding from column `from` onward ordinary spaces.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the row is wrapped and `from` exceeds its visible cell count.
     pub fn materialize_wrap_padding(&mut self, from: usize) {
         if self.wrapped() {
             for cell in &mut self.cells[from..] {
@@ -465,6 +533,7 @@ impl Row {
                 .is_none_or(|h| h.cells.iter().all(|c| *c == Cell::default()))
     }
 
+    /// Returns visible test text without wide-character spacer cells.
     #[cfg(test)]
     pub fn text(&self) -> String {
         let mut s: String = self
@@ -478,23 +547,31 @@ impl Row {
     }
 }
 
+/// Row-level shell integration metadata; see [`Row::flags`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RowFlags(u8);
 
 impl RowFlags {
+    /// The row contains part of a shell prompt.
     pub const PROMPT: Self = Self(1);
+    /// The row contains an OSC 133 prompt-start mark.
     pub const PROMPT_START: Self = Self(2);
+    /// The row contains an OSC 133 command-output-start mark.
     pub const OUTPUT_START: Self = Self(4);
+    /// The command associated with the prompt exited unsuccessfully.
     pub const FAILED: Self = Self(8);
+    /// The command associated with the prompt exited successfully.
     pub const SUCCEEDED: Self = Self(16);
     pub(crate) const OUTPUT_BEFORE_PROMPT: Self = Self(32);
     pub(crate) const OUTPUT_END: Self = Self(64);
     pub(crate) const WRAPPED: Self = Self(128);
 
+    /// Returns whether all bits of `other` are set.
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
+    /// Sets all bits present in `other`.
     pub fn insert(&mut self, other: Self) {
         self.0 |= other.0;
     }

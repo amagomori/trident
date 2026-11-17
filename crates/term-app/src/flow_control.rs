@@ -1,3 +1,5 @@
+//! Software flow-control state for stop/start input and bounded output parsing.
+
 #[derive(Clone, Copy, Default)]
 pub struct FlowSettings {
     pub ixon: bool,

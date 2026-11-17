@@ -1,6 +1,20 @@
-//! GPU rendering for terminal: the wgpu renderer, the glyph atlas, font loading and
-//! rasterization with fallback fonts, and image textures. Draws a [`term_core::Terminal`]
-//! into any window that provides raw window and display handles.
+//! GPU rendering, font rasterization and overlay layout for Trident.
+//!
+//! [`Renderer`] draws a [`term_core::Terminal`] into a window with raw display
+//! and window handles. Font metrics and layout helpers also work without a GPU.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use term_render::{Fonts, Style, tab_layout};
+//! let mut fonts = Fonts::bundled(16.0);
+//! let metrics = fonts.metrics;
+//! assert!(fonts.rasterize('A', Style::Regular, 1).is_some());
+//! let tabs = tab_layout(2, 800.0, metrics.width, metrics.height);
+//! assert_eq!(tabs.tabs.len(), 2);
+//! ```
+
+#![warn(missing_docs)]
 
 mod atlas;
 mod banner;
@@ -25,25 +39,49 @@ pub use preedit::{Preedit, PreeditLayout};
 pub use renderer::{FloatingImage, PADDING, Renderer};
 pub use tabs::{TabBar, TabHit, TabLayout, TabRect, fit_title, tab_bar_height, tab_layout};
 
+/// Search-bar text and match highlighting for [`Renderer::render`].
+///
+/// All text positions below are display-cell columns, not UTF-8 byte offsets.
 pub struct SearchOverlay<'a> {
+    /// Matches sorted by ascending absolute cell position.
     pub matches: &'a [term_core::search::Match],
+    /// Active index into `matches`, or `None` when none is selected.
     pub current: Option<usize>,
+    /// Query text, including any IME composition already inserted for display.
     pub input: &'a str,
+    /// Match count, mode or error text for the fixed right-hand region.
     pub status: &'a str,
+    /// Half-open composition column range within `input`.
     pub preedit: std::ops::Range<usize>,
+    /// Insertion column within `input`, including any composition prefix.
     pub cursor: usize,
 }
 
+/// Shared search-bar drawing and IME candidate geometry from [`search_layout`].
 pub struct SearchLayout {
+    /// Number of columns reserved for the search prefix.
     pub prefix_columns: usize,
+    /// Half-open visible column range within the query text.
     pub input: std::ops::Range<usize>,
+    /// Zero-based bar column where the fixed status region begins.
     pub status_column: usize,
+    /// Number of status columns that fit after clipping.
     pub status_columns: usize,
+    /// IME caret rectangle `[x, y, width, height]` in physical pixels.
     pub cursor_area: [f32; 4],
 }
 
-/// Reserve a fixed status region and scroll only the input. The renderer and
-/// IME candidate placement share this layout (in physical pixels).
+/// Reserves fixed search status space and scrolls only the query input.
+///
+/// `cursor`, `preedit` and `status_columns` use display-cell columns. `width`,
+/// `height` and positive cell dimensions `cw`/`ch` use physical pixels.
+///
+/// # Examples
+///
+/// ```rust
+/// let layout = term_render::search_layout(0, 0..0, 20, 800.0, 600.0, 10.0, 20.0);
+/// assert_eq!(layout.cursor_area, [60.0, 580.0, 10.0, 20.0]);
+/// ```
 pub fn search_layout(
     cursor: usize,
     preedit: std::ops::Range<usize>,

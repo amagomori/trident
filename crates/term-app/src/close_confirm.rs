@@ -164,6 +164,7 @@ fn macos_args(pid: i32) -> Option<Vec<String>> {
 /// another user, such as the setuid-root `top`.
 #[cfg(target_os = "macos")]
 fn short_name(pid: i32) -> Option<String> {
+    // SAFETY: proc_bsdshortinfo contains integer fields/arrays, valid when zeroed.
     let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
     // SAFETY: info is a writable proc_bsdshortinfo of the size passed.
@@ -190,7 +191,7 @@ pub static QUIT_CONFIRMS: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 #[cfg(target_os = "macos")]
 thread_local! {
     static QUIT_HOOK: std::cell::RefCell<Option<QuitHook>> = const { std::cell::RefCell::new(None) };
-    /// AppKit waits for `answer_quit` on a quit that `should_terminate` deferred.
+    /// `AppKit` waits for `answer_quit` on a quit that `should_terminate` deferred.
     static QUIT_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The window close `should_terminate` or Close Window sent closes more than its tab.
     static WIDE_CLOSE: std::cell::Cell<Option<WideClose>> = const { std::cell::Cell::new(None) };
@@ -275,7 +276,13 @@ struct QuitHook {
 /// asks: with a program running it closes the window instead, so the close banner asks first.
 /// A quit of the app alone is cancelled, so a second one confirms like a second close; a
 /// logout or shutdown is deferred until `answer_quit` lets it go on or cancels it, since
-/// AppKit sends it only once.
+/// `AppKit` sends it only once.
+///
+/// # Safety
+///
+/// Must be invoked on the main thread using the `applicationShouldTerminate:`
+/// ABI
+/// after installing the quit hook. The arguments are unused.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn should_terminate(
     _this: *mut objc2::runtime::AnyObject,
@@ -321,6 +328,7 @@ unsafe extern "C-unwind" fn should_terminate(
 /// app quit was asked for, so each asks first while one of its programs runs.
 ///
 /// # Safety
+///
 /// Must be called on the main thread.
 #[cfg(target_os = "macos")]
 unsafe fn relay_quit() {
@@ -352,6 +360,11 @@ unsafe fn relay_quit() {
 
 /// `terminalQuitRelayed:`, another window's quit from `relay_quit`: quits this process the way
 /// its own app quit would.
+///
+/// # Safety
+///
+/// Must be invoked on the main thread using the `terminalQuitRelayed:` ABI.
+/// `notification` must be null or a live `NSNotification` with a string object.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn quit_relayed(
     _this: *mut objc2::runtime::AnyObject,
@@ -384,9 +397,15 @@ unsafe extern "C-unwind" fn quit_relayed(
     }
 }
 
-/// `terminalCloseWindow:`, the app menu's Close Window: each native tab is its own NSWindow,
+/// `terminalCloseWindow:`, the app menu's Close Window: each native tab is its
+/// own `NSWindow`,
 /// so a plain `performClose:` would close only the key one; this marks the close as one of
 /// every tab in the key window's group first.
+///
+/// # Safety
+///
+/// Must be invoked on the main thread using the `closeWindow:` action ABI.
+/// The arguments are unused; the key window is obtained from `NSApplication`.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn close_window(
     _this: *mut objc2::runtime::AnyObject,
@@ -417,6 +436,7 @@ unsafe extern "C-unwind" fn close_window(
 /// reason (`keyAEQuitReason`), which a Dock or menu Quit lacks.
 ///
 /// # Safety
+///
 /// Must be called on the main thread.
 #[cfg(target_os = "macos")]
 unsafe fn quit_ends_session() -> bool {
@@ -486,6 +506,12 @@ pub fn answer_quit(_quit: bool) -> bool {
 }
 
 /// `terminalAnswerQuit:`, replying to the deferred quit: a non-nil `quit` lets it go on.
+///
+/// # Safety
+///
+/// Must be invoked on the main thread using the `terminalAnswerQuit:` ABI after
+/// installing that selector on the application delegate. `quit` is not
+/// dereferenced.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn reply_to_quit(
     _this: *mut objc2::runtime::AnyObject,

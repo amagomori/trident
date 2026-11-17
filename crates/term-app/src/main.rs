@@ -1,3 +1,10 @@
+//! Desktop entry point, per-window terminal sessions and event-loop
+//! coordination.
+//!
+//! The core owns parsed terminal state; this layer owns PTYs, input, platform
+//! integration and redraw scheduling. Linux presentation uses X11 or Wayland;
+//! macOS integrates native window tabs and Metal presentation feedback.
+
 macro_rules! diag {
     ($($arg:tt)*) => {{
         use std::io::Write as _;
@@ -206,7 +213,7 @@ enum UserEvent {
     /// The native tab bar's + button was clicked.
     #[cfg(target_os = "macos")]
     NewTab,
-    /// The pointer moved with Cmd held; its position is read back from AppKit.
+    /// The pointer moved with Cmd held; its position is read back from `AppKit`.
     #[cfg(target_os = "macos")]
     PointerMoved,
 }
@@ -491,7 +498,8 @@ impl Pane {
     }
 }
 
-/// Whether Trident draws its own tab bar; macOS shows native AppKit tabs instead.
+/// Whether Trident draws its own tab bar; macOS shows native `AppKit` tabs
+/// instead.
 fn tab_bar_drawn(shown: bool) -> bool {
     shown && !cfg!(target_os = "macos")
 }
@@ -2066,7 +2074,8 @@ impl App {
         self.tabs[index] = Some(pane);
     }
 
-    /// Events for a background tab's window: AppKit selecting or closing its tab, or the
+    /// Events for a background tab's window: `AppKit` selecting or closing its tab,
+    /// or the
     /// window resizing or redrawing while torn out of the tab group.
     #[cfg(target_os = "macos")]
     fn background_window_event(
@@ -2208,7 +2217,8 @@ impl App {
         self.remove_tab(index);
     }
 
-    /// Drops a pending paste or close prompt as Escape would, since AppKit moved to another
+    /// Drops a pending paste or close prompt as Escape would, since `AppKit` moved
+    /// to another
     /// tab and the prompt belongs to the one it left.
     #[cfg(target_os = "macos")]
     fn cancel_prompts(&mut self) {
@@ -3967,8 +3977,6 @@ impl App {
     }
 }
 
-/// Hand memory from dropped rows or recycled buffers back to the OS: glibc keeps
-/// freed heap pages otherwise.
 /// Applies the config settings every tab's terminal shares, at startup, in new tabs and on reload.
 fn configure_term(term: &mut Terminal, config: &config::Config, scrollback: usize) {
     term.set_scrollback_limit(scrollback);
@@ -3977,6 +3985,11 @@ fn configure_term(term: &mut Terminal, config: &config::Config, scrollback: usiz
     term.set_compare_ignore(&config.compare_ignore);
 }
 
+/// Hands freed heap pages back to glibc's OS allocator after buffers shrink.
+///
+/// Returns whether retained history shrank, so the application can refresh its
+/// view.
+/// Other platforms keep their allocator's default release behavior.
 fn release_freed_memory(term: &mut Terminal) -> bool {
     let shrunk = term.take_shrunk();
     let recycled = term.take_recycled_memory_freed();
@@ -4156,7 +4169,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    /// A macOS app quit ends the process from AppKit without returning from the event loop,
+    /// A macOS app quit ends the process from `AppKit` without returning from the
+    /// event loop,
     /// so the latency log, every tab's shell, and the pager file are cleaned up here
     /// instead of when the session drops.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

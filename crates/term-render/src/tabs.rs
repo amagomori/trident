@@ -1,28 +1,38 @@
 //! The tab bar drawn above the grid: one clickable tab per terminal, each with a close
 //! button, and a `+` button that opens a new tab.
+//!
+//! See [`tab_layout`] for shared drawing and hit-testing geometry.
 
 /// What the tab bar shows this frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabBar {
+    /// Titles in display order, one per tab.
     pub titles: Vec<String>,
     /// Tabs that rang the bell while in the background, marked until shown.
     pub bells: Vec<bool>,
+    /// Zero-based active tab index.
     pub active: usize,
+    /// Control under the pointer, or `None` outside the bar.
     pub hover: Option<TabHit>,
 }
 
 /// The part of the tab bar under the pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabHit {
+    /// A tab body, by zero-based index.
     Tab(usize),
+    /// A tab's close button, by zero-based index.
     Close(usize),
+    /// The new-tab button.
     New,
 }
 
 /// One tab's place in the bar, in physical pixels from the bar's left edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabRect {
+    /// Left edge in physical pixels.
     pub x: f32,
+    /// Width in physical pixels.
     pub width: f32,
     /// The close button: `[x, y, width, height]`.
     pub close: [f32; 4],
@@ -30,9 +40,12 @@ pub struct TabRect {
     pub title_columns: usize,
 }
 
+/// Tab-bar drawing and hit-test geometry; see [`tab_layout`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabLayout {
+    /// Bar height in physical pixels.
     pub height: f32,
+    /// Tab rectangles in display order.
     pub tabs: Vec<TabRect>,
     /// The new-tab button: `[x, y, width, height]`.
     pub new: [f32; 4],
@@ -45,8 +58,19 @@ pub fn tab_bar_height(cell_height: f32) -> u32 {
 
 const MAX_TAB_COLUMNS: f32 = 28.0;
 
-/// Splits `width` among `count` tabs of at most `MAX_TAB_COLUMNS` cells, leaving room
-/// for the `+` button after the last tab.
+/// Splits a physical-pixel width among tabs capped at 28 cell columns each.
+///
+/// Leaves room for the new-tab button. `cw` and `ch` are positive cell width
+/// and
+/// height in physical pixels.
+///
+/// # Examples
+///
+/// ```rust
+/// use term_render::{tab_layout, TabHit};
+/// let layout = tab_layout(2, 600.0, 10.0, 20.0);
+/// assert_eq!(layout.hit(5.0, 10.0), Some(TabHit::Tab(0)));
+/// ```
 pub fn tab_layout(count: usize, width: f32, cw: f32, ch: f32) -> TabLayout {
     let height = tab_bar_height(ch) as f32;
     let button = height;

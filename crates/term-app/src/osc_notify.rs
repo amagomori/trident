@@ -112,7 +112,8 @@ fn uncovered(frame: Frame, cover: Frame) -> Vec<Frame> {
 }
 
 /// Whether other apps' windows hide all of `window`, or it is off screen (another Space).
-/// AppKit's occlusion state, which winit reports, can stay visible under opaque windows.
+/// `AppKit`'s occlusion state, which winit reports, can stay visible under
+/// opaque windows.
 #[cfg(target_os = "macos")]
 pub fn covered(window: &winit::window::Window) -> bool {
     use objc2::rc::Retained;
@@ -135,6 +136,8 @@ pub fn covered(window: &winit::window::Window) -> bool {
     const EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
 
     type Info = NSDictionary<NSString, AnyObject>;
+    // SAFETY: Every caller below passes a CoreGraphics constant CFString key,
+    // which is a process-lifetime NSString through toll-free bridging.
     let key = |key: *const c_void| unsafe { &*(key as *const NSString) };
     let number = |info: &Info, name: *const c_void| {
         info.objectForKey(key(name))
@@ -143,6 +146,7 @@ pub fn covered(window: &winit::window::Window) -> bool {
     };
     let frame = |info: &Info| {
         let bounds = info
+            // SAFETY: This immutable extern is a framework-defined CFString key.
             .objectForKey(key(unsafe { kCGWindowBounds }))?
             .downcast::<NSDictionary>()
             .ok()?;
@@ -186,6 +190,7 @@ pub fn covered(window: &winit::window::Window) -> bool {
     else {
         return false;
     };
+    // SAFETY: This immutable extern is a framework-defined CFString key.
     if number(&own, unsafe { kCGWindowIsOnscreen }) == Some(0.0) {
         return true;
     }
@@ -202,6 +207,7 @@ pub fn covered(window: &winit::window::Window) -> bool {
     let covers: Vec<Frame> = (0..above.count())
         .map(|i| above.objectAtIndex(i))
         .filter(|info| {
+            // SAFETY: These immutable externs are framework-defined CFString keys.
             number(info, unsafe { kCGWindowLayer }) == Some(0.0)
                 && number(info, unsafe { kCGWindowAlpha }).is_some_and(|alpha| alpha > 0.99)
                 && number(info, unsafe { kCGWindowOwnerPID }) != Some(pid)

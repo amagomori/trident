@@ -61,13 +61,19 @@ struct Uniforms {
 /// terminal's own image placements. Bump `version` when `image` changes.
 #[derive(Clone, Debug)]
 pub struct FloatingImage {
+    /// Decoded straight-alpha RGBA8 pixels.
     pub image: Arc<term_core::images::Image>,
+    /// Cache generation; change whenever the image pixels change.
     pub version: u64,
+    /// Window-relative top-left position in physical pixels.
     pub pos: [f32; 2],
     /// Underlined like a hovered link while no link is hovered.
     pub underline: Option<term_core::Link>,
 }
 
+/// Window-bound GPU resources and cached grid/overlay drawing state.
+///
+/// Construct with [`Self::new`], then draw with [`Self::render`].
 pub struct Renderer {
     /// The blink phase of a focused cursor; false hides it until the next frame.
     pub cursor_visible: bool,
@@ -94,6 +100,7 @@ pub struct Renderer {
     /// The grid area images are clipped to: x, y, width, height in physical pixels.
     image_clip: [u32; 4],
     srgb: bool,
+    /// Human-readable adapter name and backend, for diagnostics.
     pub adapter_info: String,
     /// False when the surface only offers FIFO, so `vsync = false` cannot take effect.
     pub vsync_optional: bool,
@@ -139,6 +146,7 @@ fn present_mode(vsync: bool) -> wgpu::PresentMode {
 pub const PADDING: f32 = 6.0;
 
 impl Renderer {
+    /// Returns the device for native macOS presentation coordination.
     #[cfg(target_os = "macos")]
     pub fn gpu_device(&self) -> &wgpu::Device {
         &self.device
@@ -146,6 +154,26 @@ impl Renderer {
 
     /// Creates a renderer drawing into `window`, whose drawable area is `width` x `height`
     /// physical pixels. `vsync` false presents without waiting for vblank (may tear).
+    ///
+    /// Dimensions must be nonzero. The window is retained for the surface's
+    /// lifetime. This example needs a real window and GPU, so it only compiles.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn create<W>(window: std::sync::Arc<W>) -> Result<(), String>
+    /// # where W: wgpu::rwh::HasWindowHandle + wgpu::rwh::HasDisplayHandle
+    /// #     + std::fmt::Debug + Send + Sync + 'static {
+    /// let mut renderer = term_render::Renderer::new(window, 800, 600, true)?;
+    /// renderer.resize(1024, 768);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if surface creation, adapter discovery or device creation
+    /// fails, or the surface offers no texture format.
     pub fn new<W>(window: Arc<W>, width: u32, height: u32, vsync: bool) -> Result<Renderer, String>
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + 'static,
@@ -363,6 +391,7 @@ impl Renderer {
         self.floating_image = floating;
     }
 
+    /// Reconfigures the surface for physical-pixel dimensions, ignoring zeros.
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -372,6 +401,7 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// Selects synchronized presentation, falling back to a supported mode.
     pub fn set_vsync(&mut self, vsync: bool) {
         let mode = present_mode(vsync);
         if self.config.present_mode != mode {
@@ -487,6 +517,13 @@ impl Renderer {
         }
     }
 
+    /// Draws the grid and optional overlays, returning whether a frame presented.
+    ///
+    /// `padding` and `pixel_offset` use physical pixels within the area below the
+    /// tab bar. `focused` controls cursor appearance; `banner`, `search`,
+    /// `preedit` and `hover` supply transient overlays. `pre_present` runs just
+    /// before presentation for window-system coordination. Returns false when
+    /// no surface frame is available; the event loop can retry later.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1272,6 +1309,7 @@ impl Renderer {
         true
     }
 
+    /// Allows two final macOS drawables in flight during exit presentation.
     #[cfg(target_os = "macos")]
     pub fn prepare_exit(&mut self) {
         // Keep the two final drawables in flight together without changing vsync.

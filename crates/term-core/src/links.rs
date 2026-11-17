@@ -1,9 +1,15 @@
+//! OSC 8 links and plain-text URL/file references in retained output.
+
 use crate::{Cell, Color, Flags, Point, Terminal};
 
+/// A link and its inclusive cell ranges; obtained with [`Terminal::link_at`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
+    /// Target URI as reported by OSC 8 or recognized in text.
     pub uri: String,
+    /// First cell of the primary range.
     pub start: Point,
+    /// Last cell of the primary range.
     pub end: Point,
     /// Other visible runs of the same OSC 8 link, which share its explicit `id`, in order.
     pub pieces: Vec<(Point, Point)>,
@@ -13,10 +19,15 @@ pub struct Link {
 /// tracebacks print it. The path is as printed: relative paths are left to the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileLink {
+    /// Printed path, not resolved against the shell's working directory.
     pub path: String,
+    /// One-based source line number as printed.
     pub line: u32,
+    /// Printed one-based column, or `None` when omitted.
     pub column: Option<u32>,
+    /// First cell of the printed reference.
     pub start: Point,
+    /// Last cell of the printed reference, inclusive.
     pub end: Point,
 }
 
@@ -89,6 +100,7 @@ fn file_references(text: &str) -> Vec<Reference<'_>> {
 }
 
 impl Link {
+    /// Returns whether `point` belongs to the main range or any linked piece.
     pub fn contains(&self, point: Point) -> bool {
         let after = self.pieces.partition_point(|(start, _)| *start <= point);
         (self.start <= point && point <= self.end) || after > 0 && point <= self.pieces[after - 1].1
@@ -417,6 +429,20 @@ impl Terminal {
         });
     }
 
+    /// Finds an OSC 8 link or plain-text URL at a retained cell position.
+    ///
+    /// Returns `None` outside retained history, outside the grid's columns or when
+    /// no link contains the cell.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use term_core::Terminal;
+    /// let mut term = Terminal::new(80, 24);
+    /// term.advance(b"https://example.com");
+    /// let link = term.link_at(term.viewport_to_point(0, 2));
+    /// assert_eq!(link.map(|link| link.uri), Some("https://example.com".into()));
+    /// ```
     pub fn link_at(&self, point: Point) -> Option<Link> {
         if !self.on_screen_or_history(point) {
             return None;

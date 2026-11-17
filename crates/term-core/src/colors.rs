@@ -1,12 +1,23 @@
 //! The color scheme (Tokyo Night) and resolution of terminal colors to RGB.
+//!
+//! ```rust
+//! use term_core::{Color, colors::Palette};
+//! let palette = Palette::default();
+//! assert_eq!(palette.resolve(Color::DefaultFg), palette.foreground);
+//! ```
 
 use crate::Color;
 
+/// Red, green and blue channels, each in `0..=255`.
 pub type Rgb = (u8, u8, u8);
 
+/// Default text color.
 pub const FOREGROUND: Rgb = (0xc0, 0xca, 0xf5);
+/// Default window background color.
 pub const BACKGROUND: Rgb = (0x1a, 0x1b, 0x26);
+/// Default cursor color.
 pub const CURSOR: Rgb = (0xc0, 0xca, 0xf5);
+/// Default selected-cell background color.
 pub const SELECTION: Rgb = (0x33, 0x46, 0x7c);
 
 const ANSI: [Rgb; 16] = [
@@ -28,12 +39,18 @@ const ANSI: [Rgb; 16] = [
     (0xc0, 0xca, 0xf5),
 ];
 
+/// Configurable default and ANSI colors; see the [module example](self).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Palette {
+    /// Text color for [`Color::DefaultFg`].
     pub foreground: Rgb,
+    /// Background color for [`Color::DefaultBg`].
     pub background: Rgb,
+    /// Cursor color before per-cell inversion.
     pub cursor: Rgb,
+    /// Selected-cell background color.
     pub selection: Rgb,
+    /// Normal ANSI colors followed by their eight bright counterparts.
     pub ansi: [Rgb; 16],
 }
 
@@ -56,6 +73,7 @@ impl Palette {
         2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b) < 128 * 10000
     }
 
+    /// Resolves defaults and ANSI indices using this palette.
     pub fn resolve(&self, color: Color) -> Rgb {
         match color {
             Color::DefaultFg => self.foreground,
@@ -66,6 +84,7 @@ impl Palette {
     }
 }
 
+/// Resolves an xterm 256-color index using the built-in ANSI colors.
 pub fn indexed(i: u8) -> Rgb {
     match i {
         0..=15 => ANSI[i as usize],
@@ -81,6 +100,7 @@ pub fn indexed(i: u8) -> Rgb {
     }
 }
 
+/// Resolves a terminal color using the built-in defaults, not a custom palette.
 pub fn resolve(color: Color) -> Rgb {
     match color {
         Color::DefaultFg => FOREGROUND,

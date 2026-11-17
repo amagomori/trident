@@ -1,6 +1,6 @@
 // Black-box startup and key-to-composited-frame latency for macOS terminals.
 // ScreenCaptureKit display stream (frame PTS = WindowServer composite time) + CGEvent key injection.
-// usage: mlat <startup|latency> <runs> <probes> <out.json> <hog 0|1> -- cmd args...
+// Usage: mlat <startup|latency> <runs> <probes> <out.json> <hog 0|1> -- cmd args...
 import AppKit
 import ScreenCaptureKit
 import CoreMedia
@@ -10,7 +10,8 @@ let mode = argv[1], runs = Int(argv[2])!, probes = Int(argv[3])!, outPath = argv
 let cmd = Array(argv[(argv.firstIndex(of: "--")! + 1)...])
 
 let trace = ProcessInfo.processInfo.environment["MLAT_TRACE"] != nil
-// tiles: red pixels per T x T tile of the capture rect's frame, so red can be counted inside a window found later.
+// Tiles hold red pixels per T x T capture tile, so a window found later can be
+// measured against the same frame. Frame timestamps use the display stream PTS.
 let T = 32
 struct Frame { var pts: Double; var arrival: Double; var red: Int; var sum: UInt64; var tiles: [Int32]; var tw: Int }
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {

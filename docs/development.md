@@ -22,6 +22,32 @@ cargo fmt
 
 CI runs the same checks on Linux and macOS for every pull request.
 
+## Source documentation
+
+Follow the [canonical source-documentation standard](https://github.com/amagomori/.github/blob/main/docs/rust_documentation.md)
+when writing or reviewing Rust comments, rustdoc, Python docstrings and other first-party
+source comments. The standard is maintained in `amagomori/.github`; do not copy it here.
+For the repository-wide review and exclusions, see the [audit checklist](source_documentation_audit.md).
+
+Run the documentation gates locally before opening a PR:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p term-core -p term-render
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items -p term-core -p term-render -p term-app
+cargo test --doc -p term-core -p term-render
+```
+
+Both CI platforms run these checks. `term-core` and `term-render` warn on missing public
+documentation; the three first-party crates opt into the workspace's documentation and
+unsafe-comment Clippy lints. Vendored code does not inherit those lints. A green Linux
+run does not check macOS-only code; run the same commands on macOS as well.
+
+Linters check structure, links and examples, not whether prose is correct. Review comments
+against the implementation, including ownership, units, bounds, errors, panics and unsafe
+invariants. The PR checklist records that review.
+
 ## Release
 
 Pushing a `v*` tag that matches the workspace version in `Cargo.toml` runs

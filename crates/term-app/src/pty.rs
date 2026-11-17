@@ -74,7 +74,7 @@ struct Probe {
     /// `argv[0]` of the default launch's login shell (`-bash`), which stays idle even when
     /// its name is not a known shell. Whatever holds the foreground counts as a running
     /// program unless its argv is that shell or another idle shell, so an explicit command
-    /// (`terminal -e vim`) or a program the shell exec'd into (`exec vim`) prompts.
+    /// (`trident -e vim`) or a program the shell exec'd into (`exec vim`) prompts.
     login: Option<String>,
 }
 
@@ -338,6 +338,7 @@ fn set_nonblocking(fd: BorrowedFd) -> std::io::Result<()> {
     // SAFETY: fcntl only reads and sets the status flags of a live descriptor.
     let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
+        // SAFETY: fd remains borrowed and live; flags came from F_GETFL above.
         || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
     {
         return Err(std::io::Error::last_os_error());
@@ -601,6 +602,7 @@ impl Pty {
         let foreground_fd = pair
             .master
             .as_raw_fd()
+            // SAFETY: pair.master owns fd until after this immediate duplication.
             .map(|fd| unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned())
             .transpose()
             .map_err(|e| format!("cannot clone pty: {e}"))?;
@@ -794,6 +796,7 @@ impl Pty {
                     self.child.as_ref().and_then(|child| child.process_id()),
                 )
             {
+                // SAFETY: self.master owns this live fd throughout the duplication.
                 let fd = unsafe { BorrowedFd::borrow_raw(fd) }
                     .try_clone_to_owned()
                     .map_err(|e| format!("cannot clone pty: {e}"))?;
@@ -1005,7 +1008,8 @@ impl Drop for Pty {
 }
 
 /// Hangs up on the shell of every one of `ptys` at once, killing one that lingers, and waits
-/// for them: an app quit on macOS ends the process from AppKit, which never drops the PTYs.
+/// for them: an app quit on macOS ends the process from `AppKit`, which never
+/// drops the PTYs.
 pub fn hang_up_all<'a>(ptys: impl IntoIterator<Item = &'a mut Pty>) {
     fn hang_up(mut child: Box<dyn Child + Send + Sync>) {
         match child.kill() {
@@ -1369,6 +1373,8 @@ mod tests {
         drop(pty);
         // A zombie still answers signal 0; only a reaped pid is gone.
         let deadline = Instant::now() + Duration::from_secs(5);
+        // SAFETY: Signal 0 only probes the PID; it cannot deliver a signal to a reused
+        // PID.
         while unsafe { libc::kill(pid, 0) } == 0 {
             assert!(Instant::now() < deadline, "shell {pid} was not reaped");
             std::thread::sleep(Duration::from_millis(20));
@@ -1420,6 +1426,7 @@ mod tests {
         // A zombie still answers signal 0; only a reaped pid is gone.
         for pid in pids {
             assert_ne!(
+                // SAFETY: Signal 0 probes existence without sending a signal.
                 unsafe { libc::kill(pid, 0) },
                 0,
                 "shell {pid} was not reaped"
@@ -1428,8 +1435,9 @@ mod tests {
         assert!(ptys.iter().all(|pty| pty.child.is_none()));
     }
 
-    /// Every argv form QA tried on #71 and #60 (as the shell sees it after `env` or a path),
-    /// plus the option forms the parser models.
+    /// Login, path-qualified, `env`-wrapped and option-bearing shell arguments are
+    /// idle only at an interactive prompt, never while executing a command or
+    /// script.
     #[test]
     fn shell_argv_is_idle_only_at_a_prompt() {
         #[rustfmt::skip]

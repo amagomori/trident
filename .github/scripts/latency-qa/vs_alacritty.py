@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""KAN-89 acceptance / KAN-64 gap: black-box keypress-to-pixel latency, terminal vs Alacritty,
-on a real display (not Xvfb). Same method for every build, so it compares terminals that
+"""Compare real-display keypress-to-pixel latency with Alacritty.
+
+Use a real display, not Xvfb. The method is the same for every build, including terminals that
 cannot carry our instrumentation.
 
 Linux: XTEST key -> XGetImage poll of the glyph region (method of KAN-62/KAN-91 compare.py),

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""griddiff.py --main WORKTREE --head WORKTREE [--fixtures DIR] [--vtebench-dir DIR] [--seeds 200] [--out DIR]
+"""Compare headless terminal state after identical unevenly chunked input streams.
+
+Usage: griddiff.py --main WORKTREE --head WORKTREE [--fixtures DIR]
+    [--vtebench-dir DIR] [--seeds 200] [--out DIR]
 
 Headless differential for KAN-90: builds a tiny dumper against each worktree's term-core, feeds
 the same byte streams through `Terminal::advance` in uneven chunks and compares the full state

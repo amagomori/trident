@@ -63,6 +63,22 @@ impl PartialEq for Ignore {
 impl Ignore {
     /// Compiles `patterns` (regular expressions, matched per logical line); an empty list
     /// ignores nothing. The error names the first invalid pattern.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # fn main() -> Result<(), String> {
+    /// let ignore = term_core::Ignore::new(&[r"pid=[0-9]+"])?;
+    /// let mut term = term_core::Terminal::new(80, 24);
+    /// term.set_compare_ignore(&ignore);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid regex syntax or individual/combined patterns
+    /// exceeding regex compiler limits.
     pub fn new<S: AsRef<str>>(patterns: &[S]) -> Result<Self, String> {
         Self::compile(patterns).map(Ignore)
     }
@@ -274,10 +290,12 @@ impl Terminal {
         }
     }
 
+    /// Returns whether completed commands are compared with their previous run.
     pub fn compare_runs(&self) -> bool {
         self.shell.runs.enabled
     }
 
+    /// Returns the patterns currently masked before comparing command output.
     pub fn compare_ignore(&self) -> &Ignore {
         &self.shell.runs.ignore
     }

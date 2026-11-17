@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""fixtures.py [--dir DIR]
-Write the KAN-87 PTY A/B fixtures (about 60 MB each) and print their absolute paths."""
+"""Write dense ASCII, mixed-script and CJK fixtures for release PTY benchmarks.
+
+Usage: fixtures.py [--dir DIR]
+Print each fixture's absolute path. Files are approximately 10-60 MB each.
+"""
 import argparse
 import os
 import random

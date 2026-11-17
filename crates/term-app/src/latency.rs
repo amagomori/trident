@@ -1,3 +1,6 @@
+//! Opt-in input/echo/frame timing and presentation-feedback logs for
+//! benchmarks.
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

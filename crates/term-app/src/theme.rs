@@ -1,3 +1,6 @@
+//! Bundled and user palettes, selected by configuration and light/dark
+//! appearance.
+
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
