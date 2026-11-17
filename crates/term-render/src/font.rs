@@ -1,8 +1,8 @@
 //! Font loading, cell metrics and glyph rasterization through `ab_glyph`.
 //!
-//! System fallback fonts are copied on first use into private, immutable file
-//! snapshots. Mapping those snapshots keeps unused font-collection pages out of
-//! the resident set; later source-file changes cannot invalidate borrowed bytes.
+//! System fonts use immutable file snapshots. Mapping them keeps unused font
+//! collection pages out of the resident set; later source-file changes cannot
+//! invalidate borrowed bytes.
 
 use crate::builtin;
 use crate::color;
@@ -78,8 +78,8 @@ struct Fallback {
 
 /// Caches an immutable font snapshot for the process lifetime, once per path.
 ///
-/// A private, unlinked copy keeps borrowed parsers valid through source-file
-/// updates without retaining entire large font collections in heap memory.
+/// Mutable sources get private, unlinked copies. Files already on immutable
+/// APFS snapshots need no second copy. Neither retains entire collections in RAM.
 pub(crate) fn read_cached(path: &Path) -> std::io::Result<&'static [u8]> {
     static FILES: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
     let mut files = FILES
@@ -89,9 +89,23 @@ pub(crate) fn read_cached(path: &Path) -> std::io::Result<&'static [u8]> {
     if let Some(data) = files.get(path) {
         return Ok(data);
     }
+    let map = snapshot_font(path)?;
+    let data: &'static [u8] = Box::leak(Box::new(map));
+    files.insert(path.to_owned(), data);
+    Ok(data)
+}
+
+fn snapshot_font(path: &Path) -> std::io::Result<memmap2::Mmap> {
     let mut source = std::fs::File::open(path)?;
-    let mut snapshot = tempfile::tempfile()?;
-    std::io::copy(&mut source, &mut snapshot)?;
+    #[cfg(target_os = "macos")]
+    if is_apfs_snapshot(&source) {
+        // SAFETY: fstatfs checks the opened descriptor, not its replaceable path.
+        // APFS snapshots are immutable, including through writes to the live
+        // volume. Unlike a merely read-only mount, they cannot be made writable
+        // by remounting. The mapping holds the snapshot vnode after source closes.
+        return unsafe { memmap2::Mmap::map(&source) };
+    }
+    let snapshot = private_snapshot(&mut source)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -103,11 +117,120 @@ pub(crate) fn read_cached(path: &Path) -> std::io::Result<&'static [u8]> {
     // is complete, and no writes or truncations occur after mapping. Dropping the
     // sole file handle below leaves only the read-only mapping, so modifications
     // to the source font cannot change these bytes or invalidate the mapping.
-    let map = unsafe { memmap2::Mmap::map(&snapshot)? };
-    drop(snapshot);
-    let data: &'static [u8] = Box::leak(Box::new(map));
-    files.insert(path.to_owned(), data);
-    Ok(data)
+    unsafe { memmap2::Mmap::map(&snapshot) }
+}
+
+#[cfg(target_os = "macos")]
+fn is_apfs_snapshot(source: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+
+    let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: info has room for statfs, and source owns a live descriptor.
+    if unsafe { libc::fstatfs(source.as_raw_fd(), info.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: A successful fstatfs initialized info.
+    let info = unsafe { info.assume_init() };
+    immutable_apfs(info.f_flags, &info.f_fstypename)
+}
+
+#[cfg(target_os = "macos")]
+fn immutable_apfs(flags: u32, filesystem: &[libc::c_char]) -> bool {
+    let required = (libc::MNT_RDONLY | libc::MNT_SNAPSHOT) as u32;
+    flags & required == required
+        && filesystem.starts_with(&[b'a' as _, b'p' as _, b'f' as _, b's' as _, 0])
+}
+
+fn private_snapshot(source: &mut std::fs::File) -> std::io::Result<std::fs::File> {
+    #[cfg(target_os = "macos")]
+    if let Ok(snapshot) = clone_font(source) {
+        return Ok(snapshot);
+    }
+    let mut snapshot = tempfile::tempfile()?;
+    #[cfg(target_os = "linux")]
+    if copy_sparse(source, &mut snapshot)? {
+        return Ok(snapshot);
+    }
+    std::io::copy(source, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+/// APFS clones share blocks until either file changes, not a mutable mapping.
+/// Other volumes and filesystems fall back to a completed private copy.
+#[cfg(target_os = "macos")]
+fn clone_font(source: &std::fs::File) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+
+    let directory = tempfile::tempdir()?;
+    let parent = std::fs::File::open(directory.path())?;
+    // SAFETY: Both descriptors are live and "font" is a terminated filename in
+    // our private temporary directory. The syscall creates an independent inode.
+    let result =
+        unsafe { libc::fclonefileat(source.as_raw_fd(), parent.as_raw_fd(), c"font".as_ptr(), 0) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let path = directory.path().join("font");
+    let snapshot = std::fs::File::open(&path)?;
+    std::fs::remove_file(path)?;
+    Ok(snapshot)
+}
+
+/// Copies data extents without materializing holes. Unsupported filesystems use
+/// the ordinary copy path; either path finishes before the snapshot is mapped.
+#[cfg(target_os = "linux")]
+fn copy_sparse(source: &mut std::fs::File, snapshot: &mut std::fs::File) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::fd::AsRawFd;
+
+    fn extent(file: &std::fs::File, offset: u64, whence: libc::c_int) -> std::io::Result<u64> {
+        let offset = libc::off_t::try_from(offset)
+            .map_err(|_| std::io::Error::other("font snapshot is too large"))?;
+        // SAFETY: The descriptor is live and lseek does not access userspace memory.
+        let result = unsafe { libc::lseek(file.as_raw_fd(), offset, whence) };
+        if result < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(result as u64)
+        }
+    }
+
+    let len = source.metadata()?.len();
+    let mut offset = 0;
+    let result = (|| {
+        while offset < len {
+            let start = match extent(source, offset, libc::SEEK_DATA) {
+                Ok(start) => start,
+                Err(error) if error.raw_os_error() == Some(libc::ENXIO) => break,
+                Err(error) => return Err(error),
+            };
+            if start >= len {
+                break;
+            }
+            let end = extent(source, start, libc::SEEK_HOLE)?.min(len);
+            if end <= start {
+                return Err(std::io::Error::other("invalid font data extent"));
+            }
+            source.seek(SeekFrom::Start(start))?;
+            snapshot.seek(SeekFrom::Start(start))?;
+            let count = end - start;
+            if std::io::copy(&mut source.take(count), snapshot)? != count {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            offset = end;
+        }
+        snapshot.set_len(len)
+    })();
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP)) => {
+            snapshot.set_len(0)?;
+            snapshot.rewind()?;
+            source.rewind()?;
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 impl Fallback {
@@ -444,6 +567,55 @@ mod tests {
         std::fs::write(&path, BOLD).unwrap();
         assert_eq!(read_cached(&path).unwrap(), BOLD);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_readonly_apfs_snapshots_can_be_mapped_without_copying() {
+        let apfs = [b'a' as _, b'p' as _, b'f' as _, b's' as _, 0];
+        let readonly = libc::MNT_RDONLY as u32;
+        let snapshot = libc::MNT_SNAPSHOT as u32;
+        assert!(immutable_apfs(readonly | snapshot, &apfs));
+        assert!(!immutable_apfs(readonly, &apfs));
+        assert!(!immutable_apfs(snapshot, &apfs));
+        assert!(!immutable_apfs(0, &apfs));
+        assert!(!immutable_apfs(readonly | snapshot, &[0; 16]));
+        assert!(!is_apfs_snapshot(&tempfile::tempfile().unwrap()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sparse_snapshot_preserves_holes_and_survives_source_changes() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::unix::fs::MetadataExt;
+
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(REGULAR).unwrap();
+        let tail = 192 * 1024 * 1024;
+        source.seek(SeekFrom::Start(tail)).unwrap();
+        source.write_all(b"last extent").unwrap();
+        source.set_len(tail * 2).unwrap();
+        source.rewind().unwrap();
+        let mut snapshot = tempfile::tempfile().unwrap();
+        if !copy_sparse(&mut source, &mut snapshot).unwrap() {
+            return; // This filesystem does not expose sparse extents.
+        }
+        assert_eq!(snapshot.metadata().unwrap().len(), tail * 2);
+        assert!(snapshot.metadata().unwrap().blocks() * 512 < tail);
+        source.set_len(0).unwrap();
+        snapshot.rewind().unwrap();
+        let mut font = vec![0; REGULAR.len()];
+        snapshot.read_exact(&mut font).unwrap();
+        assert_eq!(font, REGULAR);
+        snapshot.seek(SeekFrom::Start(tail - 16)).unwrap();
+        let mut crossing = [0; 27];
+        snapshot.read_exact(&mut crossing).unwrap();
+        assert_eq!(&crossing[..16], &[0; 16]);
+        assert_eq!(&crossing[16..], b"last extent");
+        snapshot.seek(SeekFrom::End(-16)).unwrap();
+        let mut hole = [1; 16];
+        snapshot.read_exact(&mut hole).unwrap();
+        assert_eq!(hole, [0; 16]);
     }
 
     fn fonts() -> Fonts {
