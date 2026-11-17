@@ -1,2 +1,3 @@
 /target
+/vendor/winit/target
 __pycache__/
