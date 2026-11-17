@@ -22,7 +22,8 @@ the page tells you to select the text manually.
 - Recognition targets Cargo's default `test NAME ... FAILED` and `---- NAME stdout ----`
   format, with optional suite boundaries and summary counts. ANSI colors are removed
   and CRLF is normalized; original line numbers and text context remain visible.
-- Identical test names in different `Running` suites stay separate. Partial logs may
+- Identical test names in different `Running` suites stay separate; completed summaries
+  also separate stdout-only suites whose names were not captured. Partial logs may
   have a status line but no details, or details but no status line.
 - Counts come from completed `test result:` summaries. A partial or unrecognized log
   is never declared successful. Compiler errors, nextest, doctest-specific output,

@@ -135,7 +135,7 @@
           .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').split('\n');
         if (lines.length > MAX_LINES) throw new Error('Log has more than 20,000 lines. Open a smaller transcript.');
         const failures = [];
-        let suite = 'Test output', suiteId = 0, active = null;
+        let suite = 'Test suite 1 (name not reported)', suiteId = 0, active = null;
         let passed = 0, failed = 0, ignored = 0, summaries = 0;
         const finish = end => {
           if (active) active.ranges[active.ranges.length - 1].end = end;
@@ -151,6 +151,8 @@
           if (result) {
             passed += Number(result[1]); failed += Number(result[2]);
             ignored += Number(result[3]); summaries++;
+            // Running announcements are on stderr and can be absent from saved logs.
+            suiteId++; suite = `Test suite ${summaries + 1} (name not reported)`;
           }
           const status = line.match(/^test (.+) \.\.\. FAILED$/);
           if (status || detail) {

@@ -101,3 +101,14 @@ test('keeps captured Running text inside diagnostics rather than a new suite', (
   assert.equal(result.failures[0].location, 'src/db.rs:9:2');
   assert.deepEqual(result.failures[0].ranges, [{ start: 1, end: 6 }]);
 });
+
+test('completed summaries separate stdout-only suites with identical test names', () => {
+  const suite = message => `running 1 test\ntest tests::same ... FAILED\nfailures:\n---- tests::same stdout ----\n${message}\nfailures:\n    tests::same\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured;`;
+  const result = parse(suite('first crate failure') + '\n' + suite('second crate failure'));
+  assert.equal(result.failures.length, 2);
+  assert.equal(result.summaries, 2);
+  assert.equal(result.failed, 2);
+  assert.notEqual(result.failures[0].suiteId, result.failures[1].suiteId);
+  assert.deepEqual(result.failures[0].ranges, [{ start: 3, end: 5 }]);
+  assert.deepEqual(result.failures[1].ranges, [{ start: 11, end: 13 }]);
+});
