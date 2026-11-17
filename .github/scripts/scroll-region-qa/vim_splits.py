@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""vim_splits.py --bin main=BIN --bin head=BIN [--out DIR]
+"""Compare Vim's incremental split-window redraws with full repaints.
+
+Usage: vim_splits.py --bin main=BIN --bin head=BIN [--out DIR]
 
 Visual check of vim split windows, Linux (X11: xdotool + ImageMagick `import`) and macOS
 (System Events + screencapture). Each build runs `vim -u NONE` as the terminal's own command on a
@@ -206,8 +208,11 @@ def window(pid):
 
 
 def capture(win, path):
-    """Captures the cell grid: the window's content area inside the configured padding. Vim always
-    draws text, so a single-color capture is a frame the window had not presented yet: retried, then exit 2."""
+    """Capture the cell grid inside the window's configured padding.
+
+    Vim always draws text. Retry single-color captures as unpresented frames,
+    then exit 2 if they persist.
+    """
     for _ in range(5):
         if not blank(grab(win, path)):
             return

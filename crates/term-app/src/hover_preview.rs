@@ -43,8 +43,10 @@ pub struct Candidate {
     pub line: Option<usize>,
 }
 
-/// The row's characters, each with the column it starts at and its width in cells.
-/// Appends `row`'s characters with their cells, columns counted from `offset`.
+/// Appends `row`'s characters as `(character, column, width)` in cells.
+///
+/// Columns are counted from `offset`; wide-character spacers and wrap padding
+/// are omitted. Grapheme clusters are expanded through the terminal's table.
 pub fn row_text(term: &Terminal, row: &Row, offset: usize, out: &mut Vec<(char, usize, usize)>) {
     for (col, cell) in row.cells.iter().enumerate() {
         if cell.flags.intersects(Flags::WIDE_SPACER) || cell.flags.intersects(Flags::WIDE_WRAP) {

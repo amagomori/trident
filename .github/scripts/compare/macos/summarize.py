@@ -1,4 +1,5 @@
-"""Markdown tables for run.sh results: Trident vs each competitor, with A/A (Trident run again as its own arm).
+"""Render run.sh results as Markdown tables with a repeated-Trident A/A arm.
+
 Lower is better everywhere. Trail flag: Trident worse than a competitor by more than max(2*|A/A|, 3%) (CPU: 1 pt).
     python3 .github/scripts/compare/macos/summarize.py [results dir]"""
 import json, glob, os, sys, statistics as st

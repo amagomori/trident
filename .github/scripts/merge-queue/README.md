@@ -1,8 +1,8 @@
 # Merge queue
 
-`mq.py` merges ready Trident PRs in order and rebases each one only once. It is for the session
-that merges PRs. It needs Python 3.9 or later, git and an authenticated `gh`, run from a checkout
-of the repository. `--repo` defaults to `amagomori/terminal`, which GitHub redirects to
+`mq.py` merges ready Trident PRs in order and rebases them on entry or when their base changes.
+Run it from a repository checkout with Python 3.9 or later, git and an authenticated `gh`.
+The `--repo` option defaults to `amagomori/terminal`, which GitHub redirects to
 `amagomori/trident`.
 
 ## How it works
@@ -11,8 +11,8 @@ of the repository. `--repo` defaults to `amagomori/terminal`, which GitHub redir
   it) and pushes the branch. Its head tree is then what main holds after its squash merge.
 - QA passes are recorded against that tree. Merging the front PR leaves main at the tree the next PR
   was rebased onto, so the next PR merges without another rebase and keeps its QA pass.
-- A PR is rebased again only when its base moves: main changed outside the queue, a PR ahead was
-  dropped or rebased, or someone pushed to a queued branch.
+- A PR is rebased again only when its base changes. This happens if main changed outside the
+  queue, a PR ahead was dropped or rebased, or someone pushed to a queued branch.
 - After such a rebase, `status` says which re-QA the PR needs. It's "full" if the base change
   touched any file the PR touches or any build config (Cargo manifests and lockfile, `.cargo/`,
   toolchain, `build.rs`, workflows). Otherwise it's "quick", a release PTY A/B of the merged tree.

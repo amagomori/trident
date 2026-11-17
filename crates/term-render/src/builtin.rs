@@ -426,13 +426,13 @@ mod tests {
     use super::*;
     use crate::font::Fonts;
 
-    /// Cell metrics from the bundled font at sizes from tiny to HiDPI.
+    /// Cell metrics from the bundled font at sizes from tiny to high-DPI.
     fn sizes() -> Vec<CellMetrics> {
         [
             7.0, 9.0, 11.0, 13.0, 14.0, 15.5, 16.0, 19.0, 24.0, 28.0, 33.0, 48.0,
         ]
         .into_iter()
-        .map(|px| Fonts::new(None, px).expect("bundled font").metrics)
+        .map(|px| Fonts::bundled(px).metrics)
         .collect()
     }
 
@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn fonts_draw_built_ins_at_cell_size() {
-        let mut fonts = Fonts::new(None, 16.0).expect("bundled font");
+        let mut fonts = Fonts::bundled(16.0);
         let m = fonts.metrics;
         let g = fonts
             .rasterize('│', crate::font::Style::Bold, 1)

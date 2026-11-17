@@ -4,7 +4,7 @@
 
 <h1 align="center">Trident</h1>
 
-<p align="center">A fast, GPU-rendered terminal emulator for macOS and Linux, written in Rust.</p>
+<p align="center">Trident is a GPU-rendered terminal emulator for macOS and Linux, written in Rust.</p>
 
 <p align="center">
   <img src="docs/images/screenshot.png" alt="Trident showing git log, an inline image, CJK, emoji, text styles and 256 colors" width="600">
@@ -16,14 +16,14 @@
 
 Trident runs on macOS 11 or later, on Apple silicon and Intel.
 
-- With [Homebrew](https://brew.sh): `brew install --cask amagomori/tap/trident`. To update, run
+- With [Homebrew](https://brew.sh), run `brew install --cask amagomori/tap/trident`. To update, run
   `brew upgrade`.
-- From [Releases](https://github.com/amagomori/trident/releases): download
+- From [Releases](https://github.com/amagomori/trident/releases), download
   `Trident-<version>-macos-universal.dmg` and `SHA256SUMS` into `~/Downloads`.
 
 Builds are unsigned and not notarized. For a browser download, replace `<version>` below and
 compare `shasum -a 256 "$HOME/Downloads/Trident-<version>-macos-universal.dmg"` with the DMG's
-entry in `SHA256SUMS`. Only if they match, run this in Terminal **before opening the DMG**:
+entry in `SHA256SUMS`. If they match, run this in Terminal before opening the DMG:
 
 ```sh
 xattr -d com.apple.quarantine "$HOME/Downloads/Trident-<version>-macos-universal.dmg"
@@ -31,18 +31,18 @@ xattr -d com.apple.quarantine "$HOME/Downloads/Trident-<version>-macos-universal
 
 Then open the DMG and drag Trident to Applications. Before opening Trident the first time, run
 `xattr -dr com.apple.quarantine /Applications/Trident.app`. These steps apply only to this
-download and app; the Homebrew cask handles quarantine for you.
+download and app. The Homebrew cask handles quarantine for you.
 
 ### Linux
 
 Download the package for your distribution from
 [Releases](https://github.com/amagomori/trident/releases):
 
-- **Arch Linux**: install [`trident-bin`](https://aur.archlinux.org/packages/trident-bin) from the
+- On Arch Linux, install [`trident-bin`](https://aur.archlinux.org/packages/trident-bin) from the
   AUR, for example `yay -S trident-bin`.
-- **Debian and Ubuntu**: `sudo apt install ./Trident-<version>-linux-amd64.deb`. To upgrade,
+- On Debian and Ubuntu, run `sudo apt install ./Trident-<version>-linux-amd64.deb`. To upgrade,
   install a newer .deb the same way.
-- **Other distributions** (glibc 2.35 or later): run `Trident-<version>-x86_64.AppImage` after
+- On other distributions with glibc 2.35 or later, run `Trident-<version>-x86_64.AppImage` after
   `chmod +x`, or unpack the tarball into `~/.local`:
   `tar xzf Trident-<version>-linux-x86_64.tar.gz -C ~/.local --strip-components=1`.
   The app menu entry runs `trident` from your login `PATH`, so if `~/.local/bin` wasn't on it,
@@ -74,17 +74,18 @@ trident --install-terminfo     # optional: install the xterm-trident terminfo en
 
 ## Features
 
-- **GPU rendering** with [wgpu](https://wgpu.rs): Metal on macOS, Vulkan or OpenGL on Linux. It
-  prefers the integrated GPU and uses no CPU or GPU while idle.
-- **xterm-compatible**: truecolor, mouse reporting, alternate screen, bracketed paste and wide
-  characters. Runs vim, tmux, htop and less.
-- **Tabs, scrollback search and selection**, including rectangular selection and the Linux primary
+- Trident renders with [wgpu](https://wgpu.rs) through Metal on macOS or Vulkan or OpenGL on Linux.
+  It prefers the integrated GPU and uses no CPU or GPU while idle.
+- It supports xterm features including truecolor, mouse reporting, alternate screen, bracketed paste
+  and wide characters. It runs vim, tmux, htop and less.
+- Tabs support scrollback search and selection, including rectangular selection and the Linux primary
   selection.
-- **Shell integration** (OSC 133) with prompt jumps and marks on output that changed since the
-  last run.
-- **Inline images** (kitty graphics protocol), desktop notifications and file drops.
-- **Color emoji and font fallback**, with JetBrains Mono bundled.
-- **Live-reloaded config** with bundled themes that can follow the OS appearance.
+- Shell integration through OSC 133 lets you jump between prompts and marks output that changed
+  since the last run.
+- You can display inline images through the kitty graphics protocol, receive desktop notifications
+  and drop files.
+- Trident bundles JetBrains Mono and supports color emoji and font fallback.
+- Configuration reloads when you save, and bundled themes can follow the OS appearance.
 
 ## Configuration
 
@@ -93,13 +94,13 @@ entry is optional. For all settings, see [Configuration](docs/configuration.md).
 
 ## Documentation
 
-- [Usage](docs/usage.md): command line, terminfo, shortcuts, search, selection, pasting, notifications
-- [Configuration](docs/configuration.md): settings, key bindings, shell integration, themes
-- [Development](docs/development.md): crate layout, tests, releases, latency and comparison harnesses
-- [Conformance](docs/conformance.md): vttest and esctest results
-- [Benchmarks](docs/benchmarks.md): Trident against Alacritty, kitty, WezTerm and Ghostty on macOS and Linux
+- [Usage](docs/usage.md) covers commands, shortcuts and everyday tasks.
+- [Configuration](docs/configuration.md) describes settings, key bindings, shell integration and themes.
+- [Development](docs/development.md) covers building, testing, releases and performance measurement.
+- [Conformance](docs/conformance.md) lists vttest and esctest results.
+- [Benchmarks](docs/benchmarks.md) compares Trident with other terminals on macOS and Linux.
 
 ## License
 
-MIT. The bundled JetBrains Mono fonts are under the SIL Open Font License 1.1
+Trident uses the MIT license. The bundled JetBrains Mono fonts use the SIL Open Font License 1.1
 (`crates/term-render/assets/fonts/OFL.txt`).

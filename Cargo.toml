@@ -35,6 +35,7 @@ pollster = "0.4"
 portable-pty = "0.9"
 resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "svgz", "raster-images"] }
 shlex = "2"
+tempfile = "3"
 ttf-parser = "0.25"
 harfrust = "0.15"
 unicode-width = "0.2"
@@ -46,3 +47,8 @@ yeslogic-fontconfig-sys = { version = "6", features = ["dlopen"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[workspace.lints.clippy]
+doc_markdown = "warn"
+missing_safety_doc = "warn"
+undocumented_unsafe_blocks = "warn"

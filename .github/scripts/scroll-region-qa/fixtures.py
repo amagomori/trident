@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""fixtures.py [--dir DIR] [--lines 30]
-Write the KAN-90 scroll-region PTY A/B fixtures and print their absolute paths.
+"""Write scroll-region PTY benchmark fixtures and print their absolute paths.
+
+Usage: fixtures.py [--dir DIR] [--lines 30]
 
 `--lines` is the window height the fixtures assume (the app opens 100x30 by default); the
 regions mirror vtebench `scrolling_bottom_small_region` / `scrolling_top_small_region`."""

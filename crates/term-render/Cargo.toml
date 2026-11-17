@@ -15,19 +15,25 @@ memmap2.workspace = true
 png.workspace = true
 pollster.workspace = true
 term-core.workspace = true
+tempfile.workspace = true
 unicode-width.workspace = true
 ttf-parser.workspace = true
 harfrust.workspace = true
 wgpu.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc.workspace = true
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 yeslogic-fontconfig-sys.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 glow = "0.17"
-libc.workspace = true
 x11rb = { version = "0.13", features = ["shm"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation.workspace = true
 objc2-core-text.workspace = true
+
+[lints]
+workspace = true

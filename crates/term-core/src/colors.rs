@@ -28,12 +28,15 @@ const ANSI: [Rgb; 16] = [
     (0xc0, 0xca, 0xf5),
 ];
 
+/// Configurable default and ANSI colors.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Palette {
     pub foreground: Rgb,
     pub background: Rgb,
+    /// Cursor color before per-cell inversion.
     pub cursor: Rgb,
     pub selection: Rgb,
+    /// Normal ANSI colors followed by their eight bright counterparts.
     pub ansi: [Rgb; 16],
 }
 
@@ -56,6 +59,7 @@ impl Palette {
         2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b) < 128 * 10000
     }
 
+    /// Resolves defaults and ANSI indices using this palette.
     pub fn resolve(&self, color: Color) -> Rgb {
         match color {
             Color::DefaultFg => self.foreground,
@@ -66,6 +70,7 @@ impl Palette {
     }
 }
 
+/// Resolves an xterm 256-color index using the built-in ANSI colors.
 pub fn indexed(i: u8) -> Rgb {
     match i {
         0..=15 => ANSI[i as usize],
@@ -81,6 +86,7 @@ pub fn indexed(i: u8) -> Rgb {
     }
 }
 
+/// Resolves a terminal color using the built-in defaults, not a custom palette.
 pub fn resolve(color: Color) -> Rgb {
     match color {
         Color::DefaultFg => FOREGROUND,

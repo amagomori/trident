@@ -16,9 +16,9 @@ struct VertexOut {
     @location(2) @interpolate(flat) textured: u32,
 };
 
-// One instance is one rectangle: a solid fill when uv size is zero, a glyph whose alpha
-// comes from the atlas when it is positive, or a color glyph drawn as is when the uv
-// width is negative.
+// One instance is one rectangle, with position and size in physical screen pixels.
+// uv.xy is an atlas-pixel origin and abs(uv.zw) its extent: zero width selects a
+// solid fill, positive width a coverage glyph, and negative width a color glyph.
 @vertex
 fn vs_main(
     @builtin(vertex_index) vertex: u32,

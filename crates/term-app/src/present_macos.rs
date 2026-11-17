@@ -63,6 +63,13 @@ fn record_skip(skipped: &mut [usize; 2], sequence: usize) {
     }
 }
 
+/// Records feedback while forwarding Metal's `presentDrawable:` method.
+///
+/// # Safety
+///
+/// Must be invoked with the `MTLCommandBuffer` method ABI after installing
+/// SINK;
+/// `buffer` is live and `drawable` is null or live for the call.
 unsafe extern "C-unwind" fn present_drawable(
     buffer: *mut AnyObject,
     selector: Sel,
@@ -71,9 +78,11 @@ unsafe extern "C-unwind" fn present_drawable(
     let sink = SINK
         .get()
         .expect("presentation hook installed without sink");
+    // SAFETY: The installed method's caller supplies a null or live drawable.
     if let Some(drawable) = unsafe { drawable.as_ref() } {
         let sequence = SEQUENCE.fetch_add(1, Ordering::AcqRel);
         let handler = RcBlock::new(move |drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
+            // SAFETY: Metal invokes the handler with the live presented drawable.
             let time = unsafe { drawable.as_ref() }.presentedTime();
             if time == 0.0 {
                 let mut skipped = SKIPPED.lock().unwrap();
@@ -97,14 +106,17 @@ unsafe extern "C-unwind" fn present_drawable(
                 let _ = sink.proxy.send_event(crate::UserEvent::Presented);
             }
         });
-        // Metal copies the block and invokes it after the drawable is presented.
+        // SAFETY: Metal copies this block before returning and invokes it with a
+        // live drawable; its captures are owned or process-lifetime shared state.
         unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&handler)) };
     }
+    // SAFETY: install saved the IMP of presentDrawable:, with this exact ABI.
     let original: unsafe extern "C-unwind" fn(
         *mut AnyObject,
         Sel,
         *mut ProtocolObject<dyn MTLDrawable>,
     ) = unsafe { std::mem::transmute(sink.original) };
+    // SAFETY: The original receives the same live receiver, selector and drawable.
     unsafe { original(buffer, selector, drawable) };
 }
 
@@ -117,6 +129,8 @@ pub fn install(
     if SINK.get().is_some() {
         return Err("Metal feedback already installed");
     }
+    // SAFETY: The HAL guard is kept alive while querying the raw device. The wgpu
+    // device is neither destroyed nor changed; a separate Metal queue is created.
     let device = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.ok_or("not a Metal device")?;
     let queue = device
         .raw_device()
@@ -125,6 +139,8 @@ pub fn install(
     let buffer = queue.commandBuffer().ok_or("no Metal command buffer")?;
     let object: &AnyObject = (*buffer).as_ref();
     let selector = sel!(presentDrawable:);
+    // SAFETY: The class belongs to a live command buffer. Runtime method metadata
+    // lives with the class; a missing method is checked before dereferencing.
     let method = unsafe { ffi::class_getInstanceMethod(object.class(), selector).as_ref() }
         .ok_or("presentDrawable: unavailable")?;
     let sampled = CACurrentMediaTime();
@@ -137,7 +153,9 @@ pub fn install(
         proxy,
     })
     .map_err(|_| "Metal feedback already installed")?;
-    // The replacement preserves the Objective-C method's ABI and calls its original IMP.
+    // SAFETY: This presentDrawable: replacement has the method's exact Objective-C
+    // ABI. SINK already contains the original IMP, which the replacement forwards
+    // to.
     unsafe {
         ffi::method_setImplementation(
             method,

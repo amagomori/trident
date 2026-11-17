@@ -2663,6 +2663,7 @@ dependencies = [
  "objc2-core-text",
  "png",
  "pollster",
+ "tempfile",
  "term-core",
  "ttf-parser",
  "unicode-width",

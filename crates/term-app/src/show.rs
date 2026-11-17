@@ -1,4 +1,5 @@
-//! `terminal show`: prints files in the terminal. Images (detected from their bytes) are
+//! `trident show`: prints files in the terminal. Images (detected from their
+//! bytes) are
 //! scaled to the window and sent as kitty graphics escapes, so any terminal that speaks the
 //! protocol shows them; text is printed as text and other files get a one-line summary.
 
@@ -124,7 +125,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Options, String>
     Ok(options)
 }
 
-/// Runs `terminal show` with the arguments after `show`; returns the exit code.
+/// Runs `trident show` with the arguments after `show`; returns the exit code.
 pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
     let options = match parse_args(args) {
         Ok(o) => o,
@@ -908,8 +909,9 @@ mod unix {
     }
 
     fn winsize(fd: i32) -> Option<libc::winsize> {
-        // SAFETY: TIOCGWINSZ writes a winsize into the pointed-to struct.
+        // SAFETY: winsize contains only integer fields, all valid when zeroed.
         let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: TIOCGWINSZ writes one winsize to the supplied writable pointer.
         let ok = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } == 0;
         (ok && ws.ws_col > 0 && ws.ws_row > 0).then_some(ws)
     }
@@ -931,8 +933,9 @@ mod unix {
     /// Writes `request` to the tty and reads the reply until `done` or the timeout.
     fn query(mut tty: File, request: &[u8], done: fn(&[u8]) -> bool) -> Vec<u8> {
         let fd = tty.as_raw_fd();
-        // SAFETY: tcgetattr/tcsetattr read and write a termios struct for an open fd.
+        // SAFETY: termios contains integer fields/arrays, all valid when zeroed.
         let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: tty owns fd; saved is writable for one termios.
         if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
             return Vec::new();
         }
@@ -942,6 +945,7 @@ mod unix {
         // poll() doesn't support ttys and reports POLLNVAL at once.
         raw.c_cc[libc::VMIN] = 0;
         raw.c_cc[libc::VTIME] = 1;
+        // SAFETY: raw came from tcgetattr, and tty still owns the open descriptor.
         unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) };
         let mut reply = Vec::new();
         if tty.write_all(request).is_ok() {
@@ -959,6 +963,7 @@ mod unix {
                 }
             }
         }
+        // SAFETY: saved is the initialized original termios and tty is still open.
         unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
         reply
     }

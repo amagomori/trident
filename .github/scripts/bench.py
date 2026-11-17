@@ -5,12 +5,12 @@
     bench.py --base ../main --head .       # compare, exit 1 on a regression
 
 The gate is the instruction count of each workload's measured region under callgrind,
-which is deterministic, so it doesn't flake on noisy CI runners. Wall-clock medians are
+which avoids wall-clock scheduling noise on CI runners. Wall-clock medians are
 reported alongside but never fail the check. The workloads are the `bench` module in
-`src/term/tests.rs` (`term-core` once the crates are split), run as the ignored
+`crates/term-core/src/tests.rs`, run as the ignored
 `bench_workloads` test.
 
-The same check measures the real `terminal` app (see `app_bench.py`, Linux with Xvfb and
+The same check measures the real Trident app (see `app_bench.py`, Linux with Xvfb and
 Mesa): RSS with the window open, peak and settled RSS after a scrollback burst, and idle
 CPU in both states. It fails when RSS grows more than `--mem-threshold` percent or idle
 CPU rises more than `--cpu-threshold` points of one core; `--no-app` skips it.

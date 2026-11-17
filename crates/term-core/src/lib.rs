@@ -1,5 +1,19 @@
-//! Terminal state: the screen grid, scrollback and the VT/xterm control sequence handling
-//! that mutates them. Bytes from the shell go in through [`Terminal::advance`].
+//! Headless terminal state, scrollback and VT/xterm control-sequence handling.
+//!
+//! Feed shell output to [`Terminal::advance`], read the grid with
+//! [`Terminal::viewport_row`], and send [`Terminal::take_responses`] back to
+//! the shell. Windowing, input encoding and rendering belong to the application.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use term_core::Terminal;
+//!
+//! let mut terminal = Terminal::new(80, 24);
+//! terminal.advance(b"hello\r\nworld");
+//! assert_eq!(terminal.viewport_row(0).cells[0].c, 'h');
+//! assert_eq!(terminal.viewport_row(1).cells[0].c, 'w');
+//! ```
 
 pub mod colors;
 pub mod images;
@@ -67,7 +81,7 @@ struct ShellState {
     clipboard: Vec<ClipboardRequest>,
 }
 
-/// Progress a program reports with ConEmu's `OSC 9 ; 4 ; state ; percent`.
+/// Progress a program reports with `ConEmu`'s `OSC 9 ; 4 ; state ; percent`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Progress {
     /// State 1: running, at this percentage.
@@ -98,8 +112,9 @@ const MAX_COMMANDS: usize = 1024;
 pub struct Command {
     /// Line of the prompt start mark (`A`).
     pub prompt_line: u64,
-    /// Line and column where the command text begins (`B`).
+    /// Absolute line where the command text begins (`B`).
     pub input_line: u64,
+    /// Zero-based cell column where the command text begins.
     pub input_col: usize,
     /// The input row as it was when the command started, up to its last used cell.
     pub cells: Vec<Cell>,
@@ -107,8 +122,11 @@ pub struct Command {
     pub continued: bool,
     /// Line of the next prompt start, once one is drawn.
     pub next_prompt: Option<u64>,
+    /// Time the command start mark arrived.
     pub started: Instant,
+    /// Time the completion mark arrived, or `None` while running.
     pub finished: Option<Instant>,
+    /// Reported exit status, or `None` when the shell did not supply one.
     pub exit_code: Option<i32>,
     /// Line of the command start mark (`C`); its output runs from here to `next_prompt`.
     pub(crate) output_line: u64,
@@ -119,6 +137,7 @@ pub struct Command {
 }
 
 impl Command {
+    /// Returns elapsed execution time, or `None` until completion is reported.
     pub fn duration(&self) -> Option<std::time::Duration> {
         Some(self.finished?.saturating_duration_since(self.started))
     }
@@ -127,6 +146,7 @@ impl Command {
 /// The command pinned over the top of a scrolled-back viewport.
 #[derive(Clone, Copy, Debug)]
 pub struct PinnedCommand<'a> {
+    /// Command whose output contains the viewport's top row.
     pub command: &'a Command,
     /// Viewport row of the next prompt when it is on screen; it pushes the header off.
     pub next_prompt_row: Option<isize>,
@@ -148,11 +168,14 @@ pub enum PromptClick {
     Report { row: usize, col: usize },
 }
 
+/// A shell completion event drained with [`Terminal::take_command_finished`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommandFinished {
+    /// Reported exit status, or `None` if omitted by the shell.
     pub exit_code: Option<i32>,
 }
 
+/// Cursor geometry selected by DECSCUSR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
     Block,
@@ -206,6 +229,7 @@ impl Screen {
     }
 }
 
+/// Mouse events the application should report to the running program.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MouseMode {
     #[default]
@@ -220,46 +244,70 @@ pub enum MouseMode {
     Motion,
 }
 
+/// VT modes updated by escape sequences during [`Terminal::advance`].
+///
+/// Applications use these flags when encoding input and scheduling redraws.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Modes {
+    /// Cursor keys use application sequences rather than normal CSI sequences.
     pub app_cursor: bool,
+    /// Numeric keypad keys use application sequences.
     pub app_keypad: bool,
+    /// Paste input is enclosed in bracketed-paste markers.
     pub bracketed_paste: bool,
     pub show_cursor: bool,
+    /// Printing past the last column wraps to the next row.
     pub autowrap: bool,
+    /// Cursor addressing is relative to the scrolling region.
     pub origin: bool,
+    /// Printing inserts cells rather than overwriting them.
     pub insert: bool,
+    /// Line feed also returns the cursor to column zero.
     pub linefeed_newline: bool,
     pub mouse: MouseMode,
+    /// Mouse coordinates use SGR encoding.
     pub sgr_mouse: bool,
+    /// Window focus changes should be reported.
     pub focus_events: bool,
+    /// Wheel events on the alternate screen become cursor keys.
     pub alt_scroll: bool,
+    /// Redraws should wait until synchronized output ends or times out.
     pub synchronized_output: bool,
     /// Mode 2031: report color-scheme changes with `CSI ? 997 ; 1|2 n`.
     pub color_scheme_updates: bool,
 }
 
-/// A point in the terminal's history: `line` counts every line ever scrolled into
-/// scrollback, so it stays stable while new output arrives.
+/// A cell position in terminal history.
+///
+/// Lines stay stable as output arrives, but may move during reflow or history
+/// compaction. Use [`Terminal::resize_tracking`] when keeping positions on
+/// resize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Point {
+    /// Absolute line number, including discarded history.
     pub line: u64,
+    /// Zero-based cell column, not a byte or character offset.
     pub col: usize,
 }
 
+/// How selection endpoints expand into selected cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionKind {
     Simple,
     Word,
     Line,
+    /// Output delimited by shell integration marks.
     CommandOutput,
     /// A rectangle in screen columns, keeping each physical row separate.
     Block,
 }
 
+/// Inclusive selection endpoints, in either drag direction.
 #[derive(Clone, Copy, Debug)]
 pub struct Selection {
+    /// Endpoint where the drag began.
     pub anchor: Point,
+    /// Endpoint where the drag currently ends.
     pub head: Point,
     pub kind: SelectionKind,
 }
@@ -311,9 +359,32 @@ impl PrintState {
     }
 }
 
+/// A VT parser and its active screen, retained history and protocol state.
+///
+/// See the [crate example](crate) for feeding output and reading cells, and
+/// [`Self::search`] for searching retained text without a window or renderer.
+///
+/// # Examples
+///
+/// Selection endpoints are cells, not UTF-8 offsets. Resize tracking moves saved
+/// points along with reflowed text; a resize clears the active selection.
+///
+/// ```rust
+/// use term_core::{Point, SelectionKind, Terminal};
+/// let mut term = Terminal::new(8, 3);
+/// term.advance(b"hello world");
+/// term.start_selection(Point { line: 0, col: 0 }, SelectionKind::Simple);
+/// term.update_selection(Point { line: 0, col: 4 });
+/// assert_eq!(term.selection_text().as_deref(), Some("hello"));
+/// let mut points = [Point { line: 1, col: 2 }];
+/// term.resize_tracking(16, 3, &mut points);
+/// assert_eq!(points[0], Point { line: 0, col: 10 });
+/// assert!(term.selection.is_none());
+/// ```
 pub struct Terminal {
     links: links::LinkTable,
     graphemes: grapheme::Graphemes,
+    /// Current colors, including overrides received through OSC sequences.
     pub palette: colors::Palette,
     cols: usize,
     rows: usize,
@@ -326,7 +397,9 @@ pub struct Terminal {
     tabs: Vec<bool>,
     charsets: [Charset; 2],
     active_charset: usize,
+    /// Current input, display and protocol modes.
     pub modes: Modes,
+    /// Current cursor geometry, independent of blink state.
     pub cursor_shape: CursorShape,
     /// DECSCUSR odd styles and mode 12: the cursor blinks.
     pub cursor_blink: bool,
@@ -341,6 +414,7 @@ pub struct Terminal {
     print_state: PrintState,
     /// How many lines the view is scrolled back from the bottom.
     display_offset: usize,
+    /// Active selection, or `None` when no cells are selected.
     pub selection: Option<Selection>,
     /// Positions [`Self::resize_tracking`] moves along with the lines while it runs.
     tracked: Vec<Point>,
@@ -350,6 +424,7 @@ pub struct Terminal {
     responses: Vec<u8>,
     synchronized_output_started: bool,
     synchronized_output_ended: bool,
+    /// Set by BEL; the application clears it after handling the bell.
     pub bell: bool,
     images: images::ImageStore,
     /// Set by a resize while a line editor owns the cursor's line, until the next line feed:
@@ -413,10 +488,12 @@ impl Terminal {
         }
     }
 
+    /// Returns whether OSC 133 shell integration marks have been received.
     pub fn has_shell_marks(&self) -> bool {
         self.shell.marks_seen
     }
 
+    /// Drains shell completion events received since the last call.
     pub fn take_command_finished(&mut self) -> Vec<CommandFinished> {
         std::mem::take(&mut self.shell.command_finished)
     }
@@ -1050,6 +1127,10 @@ impl Terminal {
         }
     }
 
+    /// Creates a blank terminal with the default palette and scrollback limit.
+    ///
+    /// Dimensions are in cells and clamp to at least two columns and one row.
+    /// See the [crate example](crate) for a headless session.
     pub fn new(cols: usize, rows: usize) -> Terminal {
         let cols = cols.max(2);
         let rows = rows.max(1);
@@ -1137,6 +1218,10 @@ impl Terminal {
     }
 
     /// Feed bytes from the shell.
+    ///
+    /// See the [crate example](crate) for reading output and
+    /// [`Self::take_responses`]
+    /// for returning protocol replies to the PTY.
     pub fn advance(&mut self, bytes: &[u8]) {
         if let Some(n) = self.shell.editor_after {
             if bytes.len() <= n {
@@ -1181,6 +1266,7 @@ impl Terminal {
         self.print_state.disarm_clear();
     }
 
+    /// Returns the screen width in cells.
     pub fn cols(&self) -> usize {
         self.cols
     }
@@ -1223,6 +1309,7 @@ impl Terminal {
         bytes.len()
     }
 
+    /// Returns the screen height in physical rows, excluding scrollback.
     pub fn rows(&self) -> usize {
         self.rows
     }
@@ -1236,6 +1323,14 @@ impl Terminal {
         }
     }
 
+    /// Drains protocol replies for the application to write back to the PTY.
+    ///
+    /// ```rust
+    /// let mut term = term_core::Terminal::new(80, 24);
+    /// term.advance(b"\x1b[6n");
+    /// assert_eq!(term.take_responses(), b"\x1b[1;1R");
+    /// assert!(term.take_responses().is_empty());
+    /// ```
     pub fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.responses)
     }
@@ -1262,13 +1357,28 @@ impl Terminal {
         std::mem::take(&mut self.recycled_memory_freed)
     }
 
-    /// Change how many lines of scrollback are kept, dropping the oldest ones past it.
-    /// Answer DECRQCRA (`CSI Pid ; Pp ; Pt ; Pl ; Pb ; Pr * y`) with the DEC rectangle
-    /// checksum, as conformance suites such as esctest need.
+    /// Enables DEC rectangle checksum replies for conformance testing.
+    ///
+    /// Disabled by default because a program can use them to read screen contents.
     pub fn set_checksum_reports(&mut self, enabled: bool) {
         self.reports.checksums = enabled;
     }
 
+    /// Sets the retained physical-row limit, dropping oldest excess rows.
+    ///
+    /// Zero disables scrollback. Reducing the limit clears the selection if rows
+    /// are dropped; it does not reset absolute line numbering.
+    ///
+    /// ```rust
+    /// let mut term = term_core::Terminal::new(80, 2);
+    /// term.set_scrollback_limit(2);
+    /// term.advance(b"one\r\ntwo\r\nthree\r\nfour");
+    /// assert_eq!(term.scrollback_len(), 2);
+    /// term.scroll_display(1);
+    /// assert_eq!(term.display_offset(), 1);
+    /// term.scroll_to_bottom();
+    /// assert_eq!(term.display_offset(), 0);
+    /// ```
     pub fn set_scrollback_limit(&mut self, lines: usize) {
         if lines < self.max_scrollback {
             self.shrunk = true;
@@ -1291,6 +1401,9 @@ impl Terminal {
         self.selection = None;
     }
 
+    /// Returns the latest changed title, or `None` if unchanged since last call.
+    ///
+    /// An empty string represents a cleared title.
     pub fn take_title(&mut self) -> Option<String> {
         if std::mem::take(&mut self.title_changed) {
             Some(self.title.clone().unwrap_or_default())
@@ -1309,6 +1422,9 @@ impl Terminal {
         self.alt_active
     }
 
+    /// Clears mouse, focus and bracketed-paste modes on the primary screen.
+    ///
+    /// Returns whether a mode changed. Does nothing on the alternate screen.
     pub fn reset_input_modes(&mut self) -> bool {
         if self.alt_active {
             return false;
@@ -1324,22 +1440,26 @@ impl Terminal {
         changed
     }
 
-    /// Cursor position in viewport coordinates, if it is visible.
+    /// Returns the zero-based viewport `(row, column)` if the cursor is visible.
     pub fn cursor_position(&self) -> Option<(usize, usize)> {
         self.input_cursor_position()
             .filter(|_| self.modes.show_cursor)
     }
 
-    /// Input position in viewport coordinates, even when an application hides the cursor.
+    /// Returns the input's zero-based viewport `(row, column)`, even if hidden.
+    ///
+    /// Returns `None` when scrolling has moved the input row off screen.
     pub fn input_cursor_position(&self) -> Option<(usize, usize)> {
         let row = self.cursor.row + self.display_offset;
         (row < self.rows).then_some((row, self.cursor.col))
     }
 
+    /// Returns how many physical rows the viewport is scrolled above the bottom.
     pub fn display_offset(&self) -> usize {
         self.display_offset
     }
 
+    /// Returns the active screen's retained history length in physical rows.
     pub fn scrollback_len(&self) -> usize {
         self.screen().scrollback.len()
     }
@@ -1354,11 +1474,18 @@ impl Terminal {
         self.display_offset = 0;
     }
 
-    /// The row shown at viewport row `row`.
+    /// Returns the row shown at zero-based viewport row `row`.
+    ///
+    /// # Panics
+    ///
+    /// May panic if `row` is outside `0..self.rows()`.
     pub fn viewport_row(&self, row: usize) -> &Row {
         self.line(self.viewport_to_point(row, 0).line)
     }
 
+    /// Converts a zero-based viewport cell to an absolute position.
+    ///
+    /// `row` must be within the viewport. The column is passed through unchanged.
     pub fn viewport_to_point(&self, row: usize, col: usize) -> Point {
         Point {
             line: self.history + row as u64 - self.display_offset as u64,
@@ -1366,6 +1493,9 @@ impl Terminal {
         }
     }
 
+    /// Converts a signed viewport row, clamping it to retained history and screen.
+    ///
+    /// The zero-based cell column is passed through unchanged.
     pub fn viewport_to_point_signed(&self, row: isize, col: usize) -> Point {
         let line = (self.history - self.display_offset as u64)
             .saturating_add_signed(row as i64)
@@ -1373,6 +1503,7 @@ impl Terminal {
         Point { line, col }
     }
 
+    /// Returns a signed viewport row, clamped to retained history and screen.
     pub fn viewport_row_signed(&self, row: isize) -> &Row {
         self.line(self.viewport_to_point_signed(row, 0).line)
     }
@@ -1411,6 +1542,10 @@ impl Terminal {
         &mut self.screen_mut().lines
     }
 
+    /// Resizes in cells, reflowing primary-screen text and clearing selection.
+    ///
+    /// Dimensions clamp as in [`Self::new`]. Use [`Self::resize_tracking`] to
+    /// update stored points with the text.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.resize_tracking(cols, rows, &mut []);
     }
@@ -1554,8 +1689,11 @@ impl Terminal {
         self.prompt_redraw = !self.alt_active && (editing || self.shell.zone == Zone::Input);
     }
 
-    // ---- Selection ----
+    // Selection
 
+    /// Starts a selection anchored at a retained cell position.
+    ///
+    /// Obtain valid endpoints with [`Self::viewport_to_point_signed`].
     pub fn start_selection(&mut self, point: Point, kind: SelectionKind) {
         self.selection = Some(Selection {
             anchor: point,
@@ -1564,6 +1702,7 @@ impl Terminal {
         });
     }
 
+    /// Moves the active selection head, leaving its anchor and kind unchanged.
     pub fn update_selection(&mut self, point: Point) {
         if let Some(sel) = &mut self.selection {
             sel.head = point;
@@ -1611,6 +1750,7 @@ impl Terminal {
         Some((start, end))
     }
 
+    /// Tests a cell against [`Self::selection_range`], including wide-cell halves.
     pub fn is_selected(&self, range: Option<(Point, Point)>, point: Point) -> bool {
         range
             .and_then(|range| self.selection_columns(range, point.line))
@@ -1679,6 +1819,9 @@ impl Terminal {
         point
     }
 
+    /// Copies selected text, joining soft wraps except for block selections.
+    ///
+    /// Returns `None` when no nonempty selection remains in retained history.
     pub fn selection_text(&self) -> Option<String> {
         let (start, end) = self.selection_range()?;
         let block = self.selection?.kind == SelectionKind::Block;

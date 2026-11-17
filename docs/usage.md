@@ -1,7 +1,6 @@
 # Usage
 
-This page shows how to run Trident and use it day to day: the command line, keys and mouse,
-tabs, search, selection, pasting and the built-in file viewer. For settings, see
+Use Trident's commands, shortcuts, tabs, search, selection and built-in file viewer. For settings, see
 [Configuration](configuration.md).
 
 ## Command line
@@ -10,7 +9,7 @@ tabs, search, selection, pasting and the built-in file viewer. For settings, see
 trident [OPTIONS] [-e COMMAND [ARGS...]]
 
   --config <PATH>     Override the TOML config file location
-  --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)
+  --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)
   --font-size <SIZE>  Font size in points (default: 14)
   --scrollback <LINES> History lines (default: 10000; 0 disables; maximum: 1000000)
   --option-as-alt     On macOS, make Option act as Alt/Meta
@@ -25,7 +24,7 @@ Trident starts your login shell (`$SHELL`) with `TERM=xterm-256color`. It also s
 `xterm-trident` terminfo entry, which adds truecolor, styled underlines, bracketed paste,
 synchronized output and the window title, and drops xterm features Trident lacks. To use it:
 
-1. Install the entry: `trident --install-terminfo`. On macOS, this uses `/usr/bin/tic`; an entry
+1. Run `trident --install-terminfo`. On macOS, this uses `/usr/bin/tic` because an entry
    compiled by Homebrew's ncurses can't be read by the system tools.
 2. Set `term = "xterm-trident"` in the config.
 
@@ -65,9 +64,8 @@ For the full capability list, see
 
 ## Tabs
 
-Every tab runs its own shell. Background tabs keep running and update their titles, and closing
-one never stops the others. A new tab starts in the active tab's directory when the shell reports
-it with OSC 7.
+Every tab runs its own shell, which keeps running in the background. A new tab starts in the
+active tab's directory when the shell reports it with OSC 7.
 
 - To switch tabs, click a tab. To close one, click its **×** or middle-click it. To open one,
   click **+**.
@@ -93,9 +91,9 @@ compilers, linters, test runners and grep, such as `src/main.rs:10:5`, `--> src/
 - Clicking a file reference opens it at that line in `editor` from the config file, filling in its
   `{file}`, `{line}` and `{column}` arguments. If no argument names the file, it's appended.
 - Without `editor`, Trident uses `$VISUAL` or `$EDITOR` (from `[env]` first) with that editor's
-  own line syntax. It knows vim and nvim, nano, emacs, helix, micro, kakoune, VS Code, Cursor,
-  Sublime Text, Zed and TextMate, and opens `ed` at the top of the file (`red`, which only edits
-  files in its working directory, starts in the file's directory); any other editor gets
+  own line syntax. Supported editors include vim, nvim, nano, emacs, helix, micro, kakoune, VS Code,
+  Cursor, Sublime Text, Zed and TextMate. Trident opens `ed` at the top of the file and starts
+  `red` in the file's directory because it restricts editing to that directory. Any other editor gets
   `+line file`. Quoted words in the variable, such as an editor path with spaces, stay one argument.
 - Terminal editors such as vim, nano and `emacs -nw` open in a new Trident window. GUI editors run
   directly.
@@ -135,9 +133,9 @@ waiting for that interval.
 
 ## Paste
 
-If the running program hasn't enabled bracketed paste, a pasted line break runs the command at
-once. So before Trident pastes text with a line break or another control character (except tab),
-it shows a banner: Enter pastes and Escape cancels. With bracketed paste on, text pastes directly
+Without bracketed paste, a pasted line break runs the command at once. Trident therefore asks for
+confirmation before pasting a line break or another control character other than tab.
+Press Enter to paste or Escape to cancel. With bracketed paste on, text pastes directly
 with every ESC removed. To always paste immediately, set `paste_protection = false`.
 
 A single-line paste loses its trailing whitespace, so a copied command ending in a newline pastes
@@ -159,11 +157,13 @@ could then read what you copied.
 
 ## Close confirmation
 
-Closing a window at an idle shell prompt closes it at once. If a program such as vim, ssh or a
-build is running, a banner names it and asks first: Enter or a second close closes the window,
-and Escape keeps it. A command started with `-e` counts as a running program, unless it's a shell
-at its prompt. On macOS, Close Window and quitting the app ask the same way, and quitting closes
-every window opened with New Window, each asking for its own running program. To always close
+If a program such as vim, ssh or a build is running, closing the window shows a confirmation banner
+with the program's name. Press Enter or close again to confirm, or Escape to keep the window open.
+Commands started with `-e` also require confirmation unless the command is a shell at its prompt.
+At an idle shell prompt, the window closes without confirmation.
+
+On macOS, **Close Window** and quitting the app ask the same way. Quitting closes every window
+opened with **New Window**, with a separate confirmation for each running program. To always close
 immediately, set `confirm_close = false`.
 
 ## Secure Keyboard Entry
@@ -188,11 +188,10 @@ To ignore them, set `desktop_notifications = false`.
 
 ## Bell
 
-A BEL (`printf '\a'`) in an unfocused window asks for attention (the taskbar or Dock icon).
-A bell in a background tab marks that tab until it is shown: a `●` before its title in the
-Linux tab bar, a `🔔` prefix on the macOS tab title. Set `visual_bell = true` to also flash
-the active tab's grid for about 120 ms; a stream of bells (`yes $'\a'`) flashes once until
-it pauses for a quarter second.
+A BEL (`printf '\a'`) in an unfocused window requests attention through the taskbar or Dock icon.
+A bell in a background tab adds a `●` before its title on Linux or a `🔔` on macOS until you view it.
+Set `visual_bell = true` to also flash the active tab's grid for about 120 ms.
+A stream of bells (`yes $'\a'`) flashes once until it pauses for a quarter second.
 
 ## App icons
 
@@ -215,22 +214,22 @@ doesn't run.
   the command. Your typed text and the path are kept.
 
 On Linux, drops work from X11 apps. On a Wayland desktop, run `env -u WAYLAND_DISPLAY trident` to
-accept drops from X11 apps; drops from native Wayland apps aren't supported.
+accept drops from X11 apps. Drops from native Wayland apps aren't supported.
 
 ## Hover previews
 
 With `hover_preview = true` in the config, hold Ctrl (Cmd on macOS) with the pointer over a file
 path in the output to see a small card next to it:
 
-- Images get a thumbnail and PDFs their first page.
+- Images show a thumbnail, and PDFs show their first page.
 - Text files show their first lines, or the lines around `path:line` when a line is given.
 - Directories list their entries.
 
 Paths are found in `ls` columns, `git status` and `git diff` output, compiler and traceback
-locations, and quoted names. Ctrl-click or Cmd-click still opens links. Relative paths start at the
-directory the shell last reported with OSC 7, else the working directory of the foreground program
-or the shell. While the shell reports a directory on another host (as over ssh), nothing is
-previewed. PDF pages come from `pdftoppm` (poppler-utils) on Linux and Quick Look on macOS.
+locations, and quoted names. Ctrl-click or Cmd-click opens links. Relative paths use the directory
+the shell last reported with OSC 7, falling back to the foreground program's or shell's working
+directory. Trident skips previews while the shell reports a directory on another host, as over ssh.
+PDF previews require `pdftoppm` from poppler-utils on Linux and use Quick Look on macOS.
 
 ## View files
 
@@ -242,7 +241,7 @@ trident show [--width N] [--height N] [--fit] FILE...
   --fit        Scale images up or down to fill the window
 ```
 
-`trident show` displays a file in the terminal; it also works in kitty, Ghostty and WezTerm. It
+`trident show` displays a file in Trident, kitty, Ghostty or WezTerm. It
 picks the type from the file's contents, not its name:
 
 - Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG) are drawn shrunk to fit

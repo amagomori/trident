@@ -1,3 +1,5 @@
+# Fish 3 needs OSC 133/7 boundaries; fish 4 supplies native marks.
+# Both versions use the prompt wrapper for on-demand editor snapshots.
 if status is-interactive; and not set -q _terminal_integration_loaded
     set -g _terminal_integration_loaded 1
     set -g _terminal_native_marks 0

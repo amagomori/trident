@@ -1,18 +1,33 @@
+//! IME composition layout, separate from committed terminal text.
+
 use unicode_width::UnicodeWidthChar;
 
 /// IME text is an overlay, never part of the terminal grid. Cursor offsets are UTF-8 bytes.
+///
+/// ```rust
+/// use term_render::Preedit;
+/// let layout = Preedit { text: "a日", cursor: Some((1, 4)) }.layout(0, 80);
+/// assert_eq!(layout.selection, (1, 3));
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Preedit<'a> {
     pub text: &'a str,
+    /// UTF-8 byte offsets of the caret and selection end, or `None` to hide it.
     pub cursor: Option<(usize, usize)>,
 }
 
+/// Composition geometry in display-cell columns, from [`Preedit::layout`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct PreeditLayout {
+    /// Viewport column where the visible composition begins.
     pub column: usize,
+    /// First visible column within the full composition.
     pub start: usize,
+    /// Number of occupied visible columns, including caret space.
     pub width: usize,
+    /// Viewport caret column, or `None` when hidden.
     pub caret: Option<usize>,
+    /// Ordered half-open selected column range within the full composition.
     pub selection: (usize, usize),
 }
 
@@ -96,7 +111,7 @@ mod tests {
             [(0, 0, 1), (1, 0, 0), (1, 0, 0), (1, 1, 2), (3, 1, 0)]
         );
 
-        let mut fonts = crate::font::Fonts::new(None, 16.0).expect("bundled font");
+        let mut fonts = crate::font::Fonts::bundled(16.0);
         let accent = fonts
             .rasterize('\u{301}', crate::font::Style::Regular, 1)
             .expect("combining acute");

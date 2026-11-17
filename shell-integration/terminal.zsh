@@ -1,3 +1,6 @@
+# Report prompt/command boundaries (OSC 133) and the working directory (OSC 7).
+# PROMPT_EOL_MARK reports status before zsh draws its partial-line marker; precmd
+# reports it again for ordinary prompts. Both preserve the command's exit status.
 [[ -o interactive ]] || return
 (( ${+_terminal_integration_loaded} )) && return
 typeset -g _terminal_integration_loaded=1

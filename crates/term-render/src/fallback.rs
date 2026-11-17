@@ -1,6 +1,7 @@
 //! System font discovery for characters the primary font lacks: fontconfig on Linux and
 //! other Unixes (loaded at runtime, so it is optional), Core Text on macOS. Nothing is
-//! queried until the first character that needs a fallback.
+//! queried until the first character that needs a fallback. Also finds the faces of a
+//! configured font family.
 
 use std::path::PathBuf;
 
@@ -8,9 +9,9 @@ use std::path::PathBuf;
 pub type FontFile = (PathBuf, u32);
 
 #[cfg(target_os = "macos")]
-pub use coretext::SystemFonts;
+pub use coretext::{SystemFonts, family_faces, named_face};
 #[cfg(not(target_os = "macos"))]
-pub use fontconfig::SystemFonts;
+pub use fontconfig::{SystemFonts, family_faces, named_face};
 
 /// The face in a font file or collection whose PostScript name is `postscript`, reading
 /// only each face's `name` table; 0 if none matches.
@@ -46,10 +47,12 @@ pub fn prefers_emoji(c: char, cells: usize) -> bool {
 #[cfg(not(target_os = "macos"))]
 mod fontconfig {
     use super::FontFile;
-    use fontconfig_sys::constants::{FC_CHARSET, FC_COLOR, FC_FILE, FC_INDEX};
+    use fontconfig_sys::constants::{
+        FC_CHARSET, FC_COLOR, FC_FAMILY, FC_FILE, FC_FULLNAME, FC_INDEX, FC_POSTSCRIPT_NAME,
+    };
     use fontconfig_sys::statics::{LIB, LIB_RESULT};
     use fontconfig_sys::*;
-    use std::ffi::{CStr, OsStr};
+    use std::ffi::{CStr, CString, OsStr};
     use std::os::unix::ffi::OsStrExt;
     use std::path::PathBuf;
     use std::ptr;
@@ -89,6 +92,8 @@ mod fontconfig {
             }
             let mut sets = Vec::new();
             if LIB_RESULT.is_ok() {
+                // SAFETY: The library loaded successfully. Config/pattern/set handles are
+                // checked for null, retained while borrowed, and destroyed exactly once.
                 unsafe {
                     let config = (LIB.FcInitLoadConfigAndFonts)();
                     if !config.is_null() {
@@ -116,6 +121,7 @@ mod fontconfig {
             mut accept: impl FnMut(&FontFile) -> bool,
         ) -> Option<FontFile> {
             self.init();
+            // SAFETY: Candidate charsets borrow the live font sets owned by self.sets.
             let covers =
                 |f: &&Candidate| unsafe { (LIB.FcCharSetHasChar)(f.charset, c as FcChar32) != 0 };
             let emoji_fonts = self.emoji.iter().filter(|f| emoji && f.color);
@@ -131,12 +137,96 @@ mod fontconfig {
     impl Drop for SystemFonts {
         fn drop(&mut self) {
             for set in self.sets.take().into_iter().flatten() {
+                // SAFETY: Each non-null set was returned by sort and is owned only here;
+                // no charset is accessed after these sets are destroyed.
                 unsafe { (LIB.FcFontSetDestroy)(set) };
             }
         }
     }
 
+    /// The installed faces of family `name` (matched case-insensitively), sorted by file.
+    pub fn family_faces(name: &str) -> Vec<FontFile> {
+        list(FC_FAMILY, name)
+    }
+
+    /// The installed face whose full or PostScript name is `name`.
+    pub fn named_face(name: &str) -> Option<FontFile> {
+        list(FC_FULLNAME, name)
+            .into_iter()
+            .next()
+            .or_else(|| list(FC_POSTSCRIPT_NAME, name).into_iter().next())
+    }
+
+    fn list(object: &CStr, value: &str) -> Vec<FontFile> {
+        let Ok(value) = CString::new(value) else {
+            return Vec::new();
+        };
+        if LIB_RESULT.is_err() {
+            return Vec::new();
+        }
+        let mut files = Vec::new();
+        // SAFETY: LIB_RESULT was checked. Handles are checked before use and destroyed
+        // once after copying results; property strings remain owned by the live set.
+        unsafe {
+            let config = (LIB.FcInitLoadConfigAndFonts)();
+            if config.is_null() {
+                return files;
+            }
+            let pattern = (LIB.FcPatternCreate)();
+            let objects = (LIB.FcObjectSetCreate)();
+            if !pattern.is_null() && !objects.is_null() {
+                (LIB.FcPatternAddString)(pattern, object.as_ptr(), value.as_ptr().cast());
+                (LIB.FcObjectSetAdd)(objects, FC_FILE.as_ptr());
+                (LIB.FcObjectSetAdd)(objects, FC_INDEX.as_ptr());
+                let set = (LIB.FcFontList)(config, pattern, objects);
+                if !set.is_null() {
+                    let fonts = &*set;
+                    let fonts = match fonts.nfont {
+                        n if n > 0 && !fonts.fonts.is_null() => {
+                            std::slice::from_raw_parts(fonts.fonts, n as usize)
+                        }
+                        _ => &[],
+                    };
+                    for &font in fonts {
+                        let mut file: *mut FcChar8 = ptr::null_mut();
+                        let mut index = 0;
+                        if (LIB.FcPatternGetString)(font, FC_FILE.as_ptr(), 0, &mut file)
+                            != FcResultMatch
+                        {
+                            continue;
+                        }
+                        (LIB.FcPatternGetInteger)(font, FC_INDEX.as_ptr(), 0, &mut index);
+                        let path = PathBuf::from(OsStr::from_bytes(
+                            CStr::from_ptr(file.cast()).to_bytes(),
+                        ));
+                        // The high bits number a variable font's named instances.
+                        files.push((path, (index.max(0) & 0xffff) as u32));
+                    }
+                    (LIB.FcFontSetDestroy)(set);
+                }
+            }
+            if !objects.is_null() {
+                (LIB.FcObjectSetDestroy)(objects);
+            }
+            if !pattern.is_null() {
+                (LIB.FcPatternDestroy)(pattern);
+            }
+            (LIB.FcConfigDestroy)(config);
+        }
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    /// Builds an owned sorted set, or returns `None` if allocation fails.
+    ///
+    /// # Safety
+    ///
+    /// Fontconfig must be loaded and `config` must be a live initialized config.
+    /// The caller must destroy a returned set with `FcFontSetDestroy`.
     unsafe fn sort(config: *mut FcConfig, name: &CStr) -> Option<*mut FcFontSet> {
+        // SAFETY: The caller supplies the live config and loaded library. The C string
+        // is terminated; the temporary pattern is checked and destroyed after sorting.
         unsafe {
             let pattern = (LIB.FcNameParse)(name.as_ptr().cast());
             if pattern.is_null() {
@@ -151,11 +241,26 @@ mod fontconfig {
         }
     }
 
+    /// Copies file names while borrowing the set's character coverage.
+    ///
+    /// # Safety
+    ///
+    /// `set` must point to an initialized `FcFontSet`. For a nonempty set,
+    /// fontconfig must be loaded and its patterns and charsets must stay alive
+    /// while any returned candidate's charset is used.
     unsafe fn candidates(set: *mut FcFontSet) -> Vec<Candidate> {
+        // SAFETY: The caller guarantees a live, non-null fontconfig set.
         let set = unsafe { &*set };
-        let fonts = unsafe { std::slice::from_raw_parts(set.fonts, set.nfont.max(0) as usize) };
+        if set.nfont <= 0 || set.fonts.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: A nonempty fontconfig set has nfont initialized pattern pointers.
+        // The array is non-null and remains owned by the caller's live set.
+        let fonts = unsafe { std::slice::from_raw_parts(set.fonts, set.nfont as usize) };
         fonts
             .iter()
+            // SAFETY: Patterns and matched property pointers belong to the live set.
+            // Paths are copied; charset pointers retain the caller's lifetime contract.
             .filter_map(|&pattern| unsafe {
                 let mut file: *mut FcChar8 = ptr::null_mut();
                 let mut index = 0;
@@ -179,13 +284,27 @@ mod fontconfig {
             })
             .collect()
     }
+
+    #[test]
+    fn empty_font_sets_have_no_candidates() {
+        let mut set = FcFontSet {
+            nfont: 0,
+            sfont: 0,
+            fonts: ptr::null_mut(),
+        };
+        // SAFETY: set is initialized and live; an empty set borrows no font data
+        // and makes no fontconfig calls. A null empty array must not form a slice.
+        assert!(unsafe { candidates(&mut set) }.is_empty());
+    }
 }
 
 #[cfg(target_os = "macos")]
 mod coretext {
     use super::FontFile;
     use objc2_core_foundation::{CFArray, CFRange, CFRetained, CFString, CFType, CFURL};
-    use objc2_core_text::{CTFont, CTFontDescriptor, kCTFontNameAttribute, kCTFontURLAttribute};
+    use objc2_core_text::{
+        CTFont, CTFontCollection, CTFontDescriptor, kCTFontNameAttribute, kCTFontURLAttribute,
+    };
 
     /// Core Text's cascade list for Menlo, the system monospace font.
     #[derive(Default)]
@@ -208,22 +327,32 @@ mod coretext {
             _emoji: bool,
             mut accept: impl FnMut(&FontFile) -> bool,
         ) -> Option<FontFile> {
+            // SAFETY: The name is a live CFString, size is positive, and a null matrix
+            // selects the default transform. The returned font is retained by self.
             let base = self.base.get_or_insert_with(|| unsafe {
                 CTFont::with_name(&CFString::from_str("Menlo"), 14.0, std::ptr::null())
             });
             let mut buf = [0u8; 4];
             let string = CFString::from_str(c.encode_utf8(&mut buf));
             let range = CFRange::new(0, c.len_utf16() as isize);
+            // SAFETY: The range covers exactly the live string's UTF-16 code units.
             let font = unsafe { base.for_string(&string, range) };
+            // SAFETY: The font and framework-provided attribute key are live CF objects.
             let url = unsafe { font.attribute(kCTFontURLAttribute) };
+            // SAFETY: Core Text returns a retained name for this live font.
             let picked = file(url, Some(unsafe { font.post_script_name() }.to_string()));
             if picked.as_ref().is_some_and(&mut accept) {
                 return picked;
             }
+            // SAFETY: The font is live; None requests the system language preferences.
             let list = unsafe { base.default_cascade_list_for_languages(None) }?;
+            // SAFETY: Core Text's cascade-list API returns CTFontDescriptor elements.
+            // This changes only CFArray's element type, retaining the original owner.
             let list: &CFArray<CTFontDescriptor> = unsafe { &*(&*list as *const CFArray).cast() };
             list.iter().find_map(|descriptor| {
+                // SAFETY: The list retains each descriptor; this is a framework CF key.
                 let url = unsafe { descriptor.attribute(kCTFontURLAttribute) };
+                // SAFETY: The descriptor is live; the result is downcast before use.
                 let name = unsafe { descriptor.attribute(kCTFontNameAttribute) }
                     .and_then(|n| n.downcast::<CFString>().ok())
                     .map(|n| n.to_string());
@@ -233,10 +362,63 @@ mod coretext {
         }
     }
 
+    /// The installed faces of family `name`, sorted by file.
+    pub fn family_faces(name: &str) -> Vec<FontFile> {
+        // SAFETY: None selects default options; the returned collection is retained.
+        let collection = unsafe { CTFontCollection::from_available_fonts(None) };
+        // SAFETY: The collection and family CFString are live throughout the call;
+        // None selects default matching options.
+        let Some(list) = (unsafe {
+            collection.matching_font_descriptors_for_family(&CFString::from_str(name), None)
+        }) else {
+            return Vec::new();
+        };
+        // SAFETY: The matching API returns descriptors. Only the CFArray element type
+        // changes, and the original retained list outlives this borrowed view.
+        let list: &CFArray<CTFontDescriptor> = unsafe { &*(&*list as *const CFArray).cast() };
+        let mut files: Vec<FontFile> = list
+            .iter()
+            .filter_map(|descriptor| {
+                // SAFETY: The list retains the descriptor; the attribute key is live.
+                let url = unsafe { descriptor.attribute(kCTFontURLAttribute) };
+                // SAFETY: The descriptor is live; the result is downcast before use.
+                let name = unsafe { descriptor.attribute(kCTFontNameAttribute) }
+                    .and_then(|n| n.downcast::<CFString>().ok())
+                    .map(|n| n.to_string());
+                file(url, name)
+            })
+            .collect();
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    /// The installed face whose full or PostScript name is `name`; Core Text substitutes
+    /// another font for unknown names, so the found font's names are checked.
+    pub fn named_face(name: &str) -> Option<FontFile> {
+        // SAFETY: The name is live, size is positive, and null selects the default
+        // matrix.
+        let font = unsafe { CTFont::with_name(&CFString::from_str(name), 12.0, std::ptr::null()) };
+        // SAFETY: Core Text returns a retained PostScript name for a live font.
+        let postscript = unsafe { font.post_script_name() }.to_string();
+        // SAFETY: Core Text returns a retained full name for a live font.
+        let full = unsafe { font.full_name() }.to_string();
+        if !(postscript.eq_ignore_ascii_case(name) || full.eq_ignore_ascii_case(name)) {
+            return None;
+        }
+        file(
+            // SAFETY: The font and framework attribute key are live CF objects.
+            unsafe { font.attribute(kCTFontURLAttribute) },
+            Some(postscript),
+        )
+    }
+
     fn file(url: Option<CFRetained<CFType>>, postscript: Option<String>) -> Option<FontFile> {
         let path = url?.downcast::<CFURL>().ok()?.to_file_path()?;
         let index = match postscript {
-            Some(name) => crate::font::map(&path).map_or(0, |data| super::face_index(data, &name)),
+            Some(name) => {
+                crate::font::read_cached(&path).map_or(0, |data| super::face_index(data, &name))
+            }
             None => 0,
         };
         Some((path, index))
@@ -244,12 +426,12 @@ mod coretext {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::face_index;
     use crate::font::{BOLD, REGULAR};
 
     /// A font collection holding `fonts` in order.
-    fn collection(fonts: &[&[u8]]) -> Vec<u8> {
+    pub(crate) fn collection(fonts: &[&[u8]]) -> Vec<u8> {
         let mut data = b"ttcf\x00\x01\x00\x00".to_vec();
         data.extend((fonts.len() as u32).to_be_bytes());
         let mut offset = data.len() + 4 * fonts.len();

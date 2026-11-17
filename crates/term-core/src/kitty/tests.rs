@@ -479,6 +479,7 @@ fn file_transmission() {
     assert!(send(&mut t, "f", &dir, 5).contains("EBADF"));
     let fifo = dir.join(format!("kan54-fifo-{pid}"));
     let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: c is a live NUL-terminated path; mkfifo does not retain its pointer.
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
     assert!(send(&mut t, "f", &fifo, 5).contains("EBADF"));
     std::fs::remove_file(&fifo).unwrap();
@@ -551,6 +552,7 @@ fn shm_temp_file_transmission() {
     // A marked FIFO in /dev/shm is not read.
     let fifo = shm.join(format!("kan63-tty-graphics-protocol-fifo-{pid}"));
     let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: c is a live NUL-terminated path; mkfifo does not retain its pointer.
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
     assert!(send(&mut t, "t", &fifo, 2).contains("EBADF"));
     std::fs::remove_file(&fifo).unwrap();

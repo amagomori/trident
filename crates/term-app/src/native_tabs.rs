@@ -1,4 +1,5 @@
-//! Native AppKit window tabs: on macOS every tab is its own `NSWindow`, grouped by a
+//! Native `AppKit` window tabs: on macOS every tab is its own `NSWindow`,
+//! grouped by a
 //! shared tabbing identifier, so the system draws the tab bar and handles dragging tabs
 //! between windows.
 
@@ -8,10 +9,10 @@ use std::ptr::NonNull;
 use block2::RcBlock;
 use objc2::rc::Allocated;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-use objc2::{class, msg_send, sel};
+use objc2::runtime::{AnyClass, AnyObject, Imp, NSObject, Sel};
+use objc2::{MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel};
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{NSArray, NSObjectProtocol, NSString};
 use winit::dpi::PhysicalPosition;
 use winit::event_loop::EventLoopProxy;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -24,6 +25,16 @@ pub const TABBING_IDENTIFIER: &str = "trident";
 
 thread_local! {
     static PROXY: RefCell<Option<EventLoopProxy<UserEvent>>> = const { RefCell::new(None) };
+    static FULLSCREEN_EXIT: RefCell<Option<Retained<FullscreenExitObserver>>> =
+        const { RefCell::new(None) };
+}
+
+fn send(event: UserEvent) {
+    PROXY.with(|slot| {
+        if let Some(proxy) = &*slot.borrow() {
+            let _ = proxy.send_event(event);
+        }
+    });
 }
 
 fn ns_window(window: &Window) -> Option<Retained<AnyObject>> {
@@ -89,7 +100,7 @@ pub fn tab_order(window: &Window) -> Vec<usize> {
     }
 }
 
-/// Makes the tab bar's + button, which AppKit shows once a window answers
+/// Makes the tab bar's + button, which `AppKit` shows once a window answers
 /// `newWindowForTab:`, open a tab through the event loop.
 pub fn handle_new_tab_button(window: &Window, proxy: EventLoopProxy<UserEvent>) {
     PROXY.with(|slot| *slot.borrow_mut() = Some(proxy));
@@ -118,15 +129,76 @@ pub fn handle_new_tab_button(window: &Window, proxy: EventLoopProxy<UserEvent>) 
     }
 }
 
+/// Requests a new tab through the event loop from `newWindowForTab:`.
+///
+/// # Safety
+///
+/// Must be invoked on the main thread using the Objective-C `v@:@` method ABI.
+/// Arguments are unused; the event-loop proxy must have been installed first.
 unsafe extern "C-unwind" fn new_window_for_tab(_: *mut AnyObject, _: Sel, _: *mut AnyObject) {
-    PROXY.with(|slot| {
-        if let Some(proxy) = &*slot.borrow() {
-            let _ = proxy.send_event(UserEvent::NewTab);
+    send(UserEvent::NewTab);
+}
+
+define_class!(
+    /// Hears every window leave native fullscreen.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TridentFullscreenExitObserver"]
+    struct FullscreenExitObserver;
+
+    unsafe impl NSObjectProtocol for FullscreenExitObserver {}
+
+    impl FullscreenExitObserver {
+        #[unsafe(method(windowDidExitFullScreen:))]
+        fn did_exit(&self, notification: Option<&AnyObject>) {
+            let Some(notification) = notification else {
+                return;
+            };
+            // SAFETY: an NSNotification, whose object is the NSWindow that left fullscreen.
+            let window: Option<Retained<AnyObject>> = unsafe { msg_send![notification, object] };
+            if let Some(window) = window {
+                send(UserEvent::ExitedFullScreen(key_of(&window)));
+            }
         }
+    }
+);
+
+/// Sends `UserEvent::ExitedFullScreen` with the window's `key` whenever a window has left native fullscreen. The
+/// event arrives after `AppKit` and winit have finished setting the window's frame. Needs
+/// `handle_new_tab_button` first, which hands over the event loop proxy.
+pub fn observe_fullscreen_exit() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    FULLSCREEN_EXIT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return;
+        }
+        // SAFETY: NSObject's `init` on a fresh allocation.
+        let observer: Retained<FullscreenExitObserver> =
+            unsafe { msg_send![FullscreenExitObserver::alloc(mtm), init] };
+        let name = NSString::from_str("NSWindowDidExitFullScreenNotification");
+        // SAFETY: on the main thread; the observer answers the selector, which takes the
+        // notification, and stays alive in `slot`, since the center does not retain it. A nil
+        // object observes every window.
+        unsafe {
+            let center: Retained<AnyObject> =
+                msg_send![class!(NSNotificationCenter), defaultCenter];
+            let _: () = msg_send![
+                &*center,
+                addObserver: &*observer,
+                selector: sel!(windowDidExitFullScreen:),
+                name: &*name,
+                object: std::ptr::null::<AnyObject>()
+            ];
+        }
+        *slot = Some(observer);
     });
 }
 
-/// Enters or leaves native (Spaces) fullscreen, as the green button does: AppKit takes the
+/// Enters or leaves native (Spaces) fullscreen, as the green button does:
+/// `AppKit` takes the
 /// whole tab group along, so the tabs stay attached.
 pub fn toggle_fullscreen(window: &Window) {
     let Some(window) = ns_window(window) else {
@@ -138,7 +210,8 @@ pub fn toggle_fullscreen(window: &Window) {
     }
 }
 
-/// The pointer over `window`'s view in physical pixels from its top left, read from AppKit
+/// The pointer over `window`'s view in physical pixels from its top left, read
+/// from `AppKit`
 /// rather than from the last motion event; `None` outside the view.
 pub fn pointer_position(window: &Window) -> Option<PhysicalPosition<f64>> {
     let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) else {
@@ -200,11 +273,25 @@ pub fn watch_command_moves() {
     });
 }
 
+/// Whether `window` is in native fullscreen, as `AppKit` reports it: unlike winit's own
+/// state, this also holds for a tab added to a group that is already fullscreen.
+pub fn is_fullscreen(window: &Window) -> bool {
+    const FULL_SCREEN: usize = 1 << 14;
+    let Some(window) = ns_window(window) else {
+        return false;
+    };
+    // SAFETY: a live NSWindow on the main thread; styleMask is an NSWindowStyleMask.
+    let mask: usize = unsafe { msg_send![&*window, styleMask] };
+    mask & FULL_SCREEN != 0
+}
+
 /// The Window menu's items as (title, action), `None` for a separator. None has a key
 /// equivalent, so every chord stays with `config.bindings`. The tab items are the
-/// standard NSWindow tab actions, so AppKit validates them, retitles Show/Hide Tab Bar
+/// standard `NSWindow` tab actions, so `AppKit` validates them, retitles
+/// Show/Hide Tab Bar
 /// and sends them to the key window; it only adds the window list to the menu itself.
-/// AppKit also retitles Enter/Exit Full Screen and adds no second full screen item.
+/// `AppKit` also retitles Enter/Exit Full Screen and adds no second full screen
+/// item.
 const WINDOW_MENU: [Option<(&str, &std::ffi::CStr)>; 13] = [
     Some(("Minimize", c"performMiniaturize:")),
     Some(("Zoom", c"performZoom:")),
@@ -267,7 +354,8 @@ pub fn step_in(order: &[usize], current: usize, step: isize) -> Option<usize> {
     order.get((at + step).rem_euclid(len) as usize).copied()
 }
 
-/// The tab AppKit shows once `closing` leaves tab bar `order`: the next one, else the
+/// The tab `AppKit` shows once `closing` leaves tab bar `order`: the next one,
+/// else the
 /// previous one.
 pub fn neighbor_in(order: &[usize], closing: usize) -> Option<usize> {
     let at = order.iter().position(|&tab| tab == closing)?;

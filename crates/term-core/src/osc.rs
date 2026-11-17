@@ -22,7 +22,9 @@ pub enum ClipboardRequest {
     /// Read the clipboard; answer with [`ClipboardRequest::reply`] if reading is allowed.
     Load {
         primary: bool,
+        /// Selection character to preserve in the response.
         selection: char,
+        /// Terminates the response with BEL rather than ST when true.
         bell: bool,
     },
 }

@@ -1,28 +1,41 @@
-//! Font loading, cell metrics and glyph rasterization (via ab_glyph), with system fallback
-//! fonts for characters the primary font lacks. Fallback fonts are memory-mapped and parsed
-//! lazily, so even large CJK and emoji fonts cost little memory beyond the pages touched.
+//! Font loading, cell metrics and glyph rasterization through `ab_glyph`.
+//!
+//! System fonts use immutable file snapshots. Mapping them keeps unused font
+//! collection pages out of the resident set; later source-file changes cannot
+//! invalidate borrowed bytes.
 
 use crate::builtin;
 use crate::color;
 use crate::fallback::{self, FontFile, SystemFonts};
-use ab_glyph::{Font, FontArc, FontRef, GlyphId, PxScale, ScaleFont, point};
+use crate::family::FontFaces;
+use ab_glyph::{
+    Font, FontArc, FontRef, GlyphId, Outline, OutlineCurve, OutlinedGlyph, Point, PxScale,
+    ScaleFont, point,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use term_core::grapheme;
 
-/// The bundled regular face, also used by `terminal show` for SVG text.
+/// The bundled regular face, also used by `trident show` for SVG text.
 pub static REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 /// Family name of the bundled fonts.
 pub const FAMILY: &str = "JetBrains Mono";
 pub(crate) const BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
 const ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf");
 const BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf");
+/// The bundled faces, by [`Style`].
+pub(crate) const BUNDLED: [&[u8]; 4] = [REGULAR, BOLD, ITALIC, BOLD_ITALIC];
 
+/// Font face selected by the cell's bold and italic attributes.
+///
+/// See the [crate example](crate) for rasterizing a styled character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Style {
     Regular = 0,
+    /// Bold, with synthesis if the family has no bold face.
     Bold = 1,
+    /// Italic, with synthesis if the family has no italic face.
     Italic = 2,
     BoldItalic = 3,
 }
@@ -41,22 +54,31 @@ impl Style {
 /// Pixel metrics of one terminal cell at the current size.
 #[derive(Clone, Copy, Debug)]
 pub struct CellMetrics {
+    /// Cell width in physical pixels, rounded to at least one pixel.
     pub width: f32,
+    /// Cell height in physical pixels, rounded to at least one pixel.
     pub height: f32,
     /// Distance from the top of the cell to the baseline.
     pub baseline: f32,
+    /// Underline's vertical position from the cell top, in physical pixels.
     pub underline_offset: f32,
+    /// Decoration stroke thickness in physical pixels.
     pub stroke: f32,
 }
 
+/// A raster bitmap and its placement relative to a terminal cell.
+///
+/// Returned by [`Fonts::rasterize`], as in the [crate example](crate).
 pub struct RasterizedGlyph {
     pub width: usize,
     pub height: usize,
     /// Offset of the bitmap's top-left corner from the cell's top-left corner.
     pub left: f32,
+    /// Vertical offset from the cell top, in physical pixels.
     pub top: f32,
     /// One byte of coverage per pixel, or straight-alpha RGBA when `color` is set.
     pub coverage: Vec<u8>,
+    /// True for straight-alpha RGBA8 data rather than single-channel coverage.
     pub color: bool,
 }
 
@@ -68,22 +90,161 @@ struct Fallback {
     index: u32,
 }
 
-/// Memory-maps a font file for the rest of the program, once per path.
-pub(crate) fn map(path: &Path) -> std::io::Result<&'static [u8]> {
-    static MAPS: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
-    let mut maps = MAPS
+/// Caches an immutable font snapshot for the process lifetime, once per path.
+///
+/// Mutable sources get private, unlinked copies. Files already on immutable
+/// APFS snapshots need no second copy. Neither retains entire collections in RAM.
+pub(crate) fn read_cached(path: &Path) -> std::io::Result<&'static [u8]> {
+    static FILES: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
+    let mut files = FILES
         .get_or_init(Default::default)
         .lock()
-        .expect("font maps");
-    if let Some(data) = maps.get(path) {
+        .expect("font snapshots");
+    if let Some(data) = files.get(path) {
         return Ok(data);
     }
-    let file = std::fs::File::open(path)?;
-    // Font files are not modified while in use; a truncated file would only fail to parse.
-    let map = unsafe { memmap2::Mmap::map(&file)? };
+    let map = snapshot_font(path)?;
     let data: &'static [u8] = Box::leak(Box::new(map));
-    maps.insert(path.to_owned(), data);
+    files.insert(path.to_owned(), data);
     Ok(data)
+}
+
+fn snapshot_font(path: &Path) -> std::io::Result<memmap2::Mmap> {
+    let mut source = std::fs::File::open(path)?;
+    #[cfg(target_os = "macos")]
+    if is_apfs_snapshot(&source) {
+        // SAFETY: fstatfs checks the opened descriptor, not its replaceable path.
+        // APFS snapshots are immutable, including through writes to the live
+        // volume. Unlike a merely read-only mount, they cannot be made writable
+        // by remounting. The mapping holds the snapshot vnode after source closes.
+        return unsafe { memmap2::Mmap::map(&source) };
+    }
+    let snapshot = private_snapshot(&mut source)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if snapshot.metadata()?.nlink() != 0 {
+            return Err(std::io::Error::other("font snapshot is still linked"));
+        }
+    }
+    // SAFETY: Only this function has a handle to the unlinked snapshot. Copying
+    // is complete, and no writes or truncations occur after mapping. Dropping the
+    // sole file handle below leaves only the read-only mapping, so modifications
+    // to the source font cannot change these bytes or invalidate the mapping.
+    unsafe { memmap2::Mmap::map(&snapshot) }
+}
+
+#[cfg(target_os = "macos")]
+fn is_apfs_snapshot(source: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+
+    let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: info has room for statfs, and source owns a live descriptor.
+    if unsafe { libc::fstatfs(source.as_raw_fd(), info.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: A successful fstatfs initialized info.
+    let info = unsafe { info.assume_init() };
+    immutable_apfs(info.f_flags, &info.f_fstypename)
+}
+
+#[cfg(target_os = "macos")]
+fn immutable_apfs(flags: u32, filesystem: &[libc::c_char]) -> bool {
+    let required = (libc::MNT_RDONLY | libc::MNT_SNAPSHOT) as u32;
+    flags & required == required
+        && filesystem.starts_with(&[b'a' as _, b'p' as _, b'f' as _, b's' as _, 0])
+}
+
+fn private_snapshot(source: &mut std::fs::File) -> std::io::Result<std::fs::File> {
+    #[cfg(target_os = "macos")]
+    if let Ok(snapshot) = clone_font(source) {
+        return Ok(snapshot);
+    }
+    let mut snapshot = tempfile::tempfile()?;
+    #[cfg(target_os = "linux")]
+    if copy_sparse(source, &mut snapshot)? {
+        return Ok(snapshot);
+    }
+    std::io::copy(source, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+/// APFS clones share blocks until either file changes, not a mutable mapping.
+/// Other volumes and filesystems fall back to a completed private copy.
+#[cfg(target_os = "macos")]
+fn clone_font(source: &std::fs::File) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+
+    let directory = tempfile::tempdir()?;
+    let parent = std::fs::File::open(directory.path())?;
+    // SAFETY: Both descriptors are live and "font" is a terminated filename in
+    // our private temporary directory. The syscall creates an independent inode.
+    let result =
+        unsafe { libc::fclonefileat(source.as_raw_fd(), parent.as_raw_fd(), c"font".as_ptr(), 0) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let path = directory.path().join("font");
+    let snapshot = std::fs::File::open(&path)?;
+    std::fs::remove_file(path)?;
+    Ok(snapshot)
+}
+
+/// Copies data extents without materializing holes. Unsupported filesystems use
+/// the ordinary copy path; either path finishes before the snapshot is mapped.
+#[cfg(target_os = "linux")]
+fn copy_sparse(source: &mut std::fs::File, snapshot: &mut std::fs::File) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::fd::AsRawFd;
+
+    fn extent(file: &std::fs::File, offset: u64, whence: libc::c_int) -> std::io::Result<u64> {
+        let offset = libc::off_t::try_from(offset)
+            .map_err(|_| std::io::Error::other("font snapshot is too large"))?;
+        // SAFETY: The descriptor is live and lseek does not access userspace memory.
+        let result = unsafe { libc::lseek(file.as_raw_fd(), offset, whence) };
+        if result < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(result as u64)
+        }
+    }
+
+    let len = source.metadata()?.len();
+    let mut offset = 0;
+    let result = (|| {
+        while offset < len {
+            let start = match extent(source, offset, libc::SEEK_DATA) {
+                Ok(start) => start,
+                Err(error) if error.raw_os_error() == Some(libc::ENXIO) => break,
+                Err(error) => return Err(error),
+            };
+            if start >= len {
+                break;
+            }
+            let end = extent(source, start, libc::SEEK_HOLE)?.min(len);
+            if end <= start {
+                return Err(std::io::Error::other("invalid font data extent"));
+            }
+            source.seek(SeekFrom::Start(start))?;
+            snapshot.seek(SeekFrom::Start(start))?;
+            let count = end - start;
+            if std::io::copy(&mut source.take(count), snapshot)? != count {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            offset = end;
+        }
+        snapshot.set_len(len)
+    })();
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP)) => {
+            snapshot.set_len(0)?;
+            snapshot.rewind()?;
+            source.rewind()?;
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 impl Fallback {
@@ -99,7 +260,7 @@ impl Fallback {
 }
 
 fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
-    let data = map(path).ok()?;
+    let data = read_cached(path).ok()?;
     let font = FontArc::new(FontRef::try_from_slice_and_index(data, *index).ok()?);
     let face = ttf_parser::Face::parse(data, *index)
         .ok()
@@ -112,43 +273,82 @@ fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
     })
 }
 
+/// Loaded primary faces, cell metrics and lazily loaded system fallback fonts.
+///
+/// See the [crate example](crate) for headless glyph rasterization.
 pub struct Fonts {
-    faces: [FontArc; 4],
+    faces: FontFaces,
     system: SystemFonts,
     /// Fallback fonts by file, each loaded on first need (`None` if it failed to load).
     fallbacks: HashMap<FontFile, Option<Fallback>>,
+    /// Font size in physical pixels per em; change it with [`Self::set_size`].
     pub px: f32,
+    /// Current cell dimensions and decoration positions.
     pub metrics: CellMetrics,
 }
 
-fn load(bytes: Vec<u8>) -> Option<FontArc> {
-    ab_glyph::FontVec::try_from_vec_and_index(bytes, 0)
-        .ok()
-        .map(FontArc::new)
-}
-
-/// ab_glyph scales by line height; convert from a font size in pixels per em.
+/// `ab_glyph` scales by line height; convert from a font size in pixels per em.
 fn scale(font: &FontArc, px: f32) -> PxScale {
     let units_per_em = font.units_per_em().unwrap_or(1000.0);
     PxScale::from(px * font.height_unscaled() / units_per_em)
 }
 
-impl Fonts {
-    /// Uses the bundled JetBrains Mono unless `custom` points to a font file.
-    pub fn new(custom: Option<&Path>, px: f32) -> Result<Fonts, String> {
-        let faces = match custom {
-            Some(path) => {
-                let bytes = std::fs::read(path)
-                    .map_err(|e| format!("cannot read font {}: {e}", path.display()))?;
-                let font =
-                    load(bytes).ok_or_else(|| format!("cannot parse font {}", path.display()))?;
-                [font.clone(), font.clone(), font.clone(), font]
-            }
-            None => [REGULAR, BOLD, ITALIC, BOLD_ITALIC]
-                .map(|b| FontArc::try_from_slice(b).expect("bundled font")),
+/// Horizontal shear of synthesized italics, about 11 degrees.
+const SLANT: f32 = 0.2;
+
+/// Shears `outline` (in font units, y up) to the right around height `pivot`, so glyphs
+/// lean without drifting out of their cells.
+fn slant_outline(outline: &mut Outline, pivot: f32) {
+    let shear = |p: &mut Point| p.x += (p.y - pivot) * SLANT;
+    let mut min = point(f32::MAX, f32::MAX);
+    let mut max = point(f32::MIN, f32::MIN);
+    for curve in &mut outline.curves {
+        let points: Vec<&mut Point> = match curve {
+            OutlineCurve::Line(a, b) => vec![a, b],
+            OutlineCurve::Quad(a, b, c) => vec![a, b, c],
+            OutlineCurve::Cubic(a, b, c, d) => vec![a, b, c, d],
         };
+        for p in points {
+            shear(p);
+            min = point(min.x.min(p.x), min.y.min(p.y));
+            max = point(max.x.max(p.x), max.y.max(p.y));
+        }
+    }
+    if min.x <= max.x {
+        // ab_glyph keeps the top (largest y) in `min`, as pixel rows grow downwards.
+        outline.bounds = ab_glyph::Rect {
+            min: point(min.x, max.y),
+            max: point(max.x, min.y),
+        };
+    }
+}
+
+/// Widens each row of a `width`-wide coverage map `strength` pixels to the right, taking
+/// the strongest coverage in reach: a synthesized bold.
+fn embolden_coverage(coverage: &[u8], width: usize, strength: usize) -> Vec<u8> {
+    let wide = width + strength;
+    let mut out = vec![0u8; wide * (coverage.len() / width)];
+    for (row, out) in coverage.chunks_exact(width).zip(out.chunks_exact_mut(wide)) {
+        for (x, v) in out.iter_mut().enumerate() {
+            let from = x.saturating_sub(strength);
+            *v = row[from..(x + 1).min(width)]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+        }
+    }
+    out
+}
+
+impl Fonts {
+    /// Loads `faces` at `px` physical pixels per em, with fallbacks discovered
+    /// lazily.
+    ///
+    /// `px` must be positive and finite, as for [`Self::set_size`].
+    pub fn new(faces: &FontFaces, px: f32) -> Fonts {
         let mut fonts = Fonts {
-            faces,
+            faces: faces.clone(),
             system: SystemFonts::new(),
             fallbacks: HashMap::new(),
             px,
@@ -161,12 +361,20 @@ impl Fonts {
             },
         };
         fonts.set_size(px);
-        Ok(fonts)
+        fonts
     }
 
+    /// Loads the bundled `JetBrains Mono` faces at `px` physical pixels per em.
+    pub fn bundled(px: f32) -> Fonts {
+        Fonts::new(&FontFaces::bundled(), px)
+    }
+
+    /// Recomputes metrics for a positive, finite size in physical pixels per em.
+    ///
+    /// The caller must also clear any renderer glyph cache after changing size.
     pub fn set_size(&mut self, px: f32) {
         self.px = px;
-        let font = &self.faces[0];
+        let font = &self.faces.face(Style::Regular).font;
         let scaled = font.as_scaled(scale(font, px));
         let width = scaled.h_advance(font.glyph_id('M')).round().max(1.0);
         let height = (scaled.ascent() - scaled.descent()).ceil().max(1.0);
@@ -205,11 +413,13 @@ impl Fonts {
         let px = self.px;
         let mark = cells == 0;
         let cells = cells.max(1);
-        let face = &self.faces[style as usize];
+        let face = self.faces.face(style);
+        let (mut embolden, mut slant) = (face.embolden, face.slant);
         let emoji = !mark && fallback::prefers_emoji(c, cells);
-        let font = if face.glyph_id(c) != GlyphId(0) && !emoji {
-            face.clone()
+        let font = if face.font.glyph_id(c) != GlyphId(0) && !emoji {
+            face.font.clone()
         } else {
+            (embolden, slant) = (false, false);
             match self.fallback_for(c, emoji, mark) {
                 Some(Fallback {
                     face: Some(color_face),
@@ -229,7 +439,11 @@ impl Fonts {
                 }
                 Some(f) => f.font.clone(),
                 None if mark => return None,
-                None => self.faces[style as usize].clone(),
+                None => {
+                    let face = self.faces.face(style);
+                    (embolden, slant) = (face.embolden, face.slant);
+                    face.font.clone()
+                }
             }
         };
         let id = font.glyph_id(c);
@@ -241,9 +455,16 @@ impl Fonts {
             px_scale.x *= available / advance;
             px_scale.y *= available / advance;
         }
-        let outlined = font.outline_glyph(id.with_scale_and_position(px_scale, point(0.0, 0.0)))?;
+        let glyph = id.with_scale_and_position(px_scale, point(0.0, 0.0));
+        let outlined = if slant {
+            let mut outline = font.outline(id)?;
+            slant_outline(&mut outline, font.ascent_unscaled() / 3.0);
+            OutlinedGlyph::new(glyph, outline, font.as_scaled(px_scale).scale_factor())
+        } else {
+            font.outline_glyph(glyph)?
+        };
         let bounds = outlined.px_bounds();
-        let width = bounds.width() as usize;
+        let mut width = bounds.width() as usize;
         let height = bounds.height() as usize;
         if width == 0 || height == 0 {
             return None;
@@ -254,6 +475,11 @@ impl Fonts {
                 *v = (c.clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         });
+        if embolden {
+            let strength = (px / 20.0).round().max(1.0) as usize;
+            coverage = embolden_coverage(&coverage, width, strength);
+            width += strength;
+        }
         Some(RasterizedGlyph {
             width,
             height,
@@ -337,8 +563,89 @@ fn shape_sequence(
 mod tests {
     use super::*;
 
+    #[test]
+    fn cached_font_bytes_survive_truncation_and_replacement() {
+        let dir =
+            std::env::temp_dir().join(format!("trident-font-snapshot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("font.ttf");
+        std::fs::write(&path, REGULAR).unwrap();
+        let data = read_cached(&path).unwrap();
+        let face = FontRef::try_from_slice(data).unwrap();
+        let a = face.glyph_id('A');
+        std::fs::write(&path, []).unwrap();
+        assert_eq!(data, REGULAR);
+        assert_eq!(face.glyph_id('A'), a);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, BOLD).unwrap();
+        assert!(std::ptr::eq(data, read_cached(&path).unwrap()));
+        assert_eq!(data, REGULAR);
+        assert!(face.outline_glyph(a.with_scale(16.0)).is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_font_reads_are_not_cached() {
+        let path =
+            std::env::temp_dir().join(format!("trident-font-retry-{}.ttf", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(read_cached(&path).is_err());
+        std::fs::write(&path, BOLD).unwrap();
+        assert_eq!(read_cached(&path).unwrap(), BOLD);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_readonly_apfs_snapshots_can_be_mapped_without_copying() {
+        let apfs = [b'a' as _, b'p' as _, b'f' as _, b's' as _, 0];
+        let readonly = libc::MNT_RDONLY as u32;
+        let snapshot = libc::MNT_SNAPSHOT as u32;
+        assert!(immutable_apfs(readonly | snapshot, &apfs));
+        assert!(!immutable_apfs(readonly, &apfs));
+        assert!(!immutable_apfs(snapshot, &apfs));
+        assert!(!immutable_apfs(0, &apfs));
+        assert!(!immutable_apfs(readonly | snapshot, &[0; 16]));
+        assert!(!is_apfs_snapshot(&tempfile::tempfile().unwrap()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sparse_snapshot_preserves_holes_and_survives_source_changes() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::unix::fs::MetadataExt;
+
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(REGULAR).unwrap();
+        let tail = 192 * 1024 * 1024;
+        source.seek(SeekFrom::Start(tail)).unwrap();
+        source.write_all(b"last extent").unwrap();
+        source.set_len(tail * 2).unwrap();
+        source.rewind().unwrap();
+        let mut snapshot = tempfile::tempfile().unwrap();
+        if !copy_sparse(&mut source, &mut snapshot).unwrap() {
+            return; // This filesystem does not expose sparse extents.
+        }
+        assert_eq!(snapshot.metadata().unwrap().len(), tail * 2);
+        assert!(snapshot.metadata().unwrap().blocks() * 512 < tail);
+        source.set_len(0).unwrap();
+        snapshot.rewind().unwrap();
+        let mut font = vec![0; REGULAR.len()];
+        snapshot.read_exact(&mut font).unwrap();
+        assert_eq!(font, REGULAR);
+        snapshot.seek(SeekFrom::Start(tail - 16)).unwrap();
+        let mut crossing = [0; 27];
+        snapshot.read_exact(&mut crossing).unwrap();
+        assert_eq!(&crossing[..16], &[0; 16]);
+        assert_eq!(&crossing[16..], b"last extent");
+        snapshot.seek(SeekFrom::End(-16)).unwrap();
+        let mut hole = [1; 16];
+        snapshot.read_exact(&mut hole).unwrap();
+        assert_eq!(hole, [0; 16]);
+    }
+
     fn fonts() -> Fonts {
-        Fonts::new(None, 16.0).expect("bundled font")
+        Fonts::bundled(16.0)
     }
 
     #[test]
@@ -457,7 +764,7 @@ mod tests {
         assert!(fonts.rasterize_sequence("\u{1f468}\u{1f600}", 2).is_none());
     }
 
-    /// Needs a font with CJK Extension B (HanaMinB, Noto Serif CJK, SimSun-ExtB); skipped
+    /// Needs CJK Extension B (`HanaMinB`, Noto Serif CJK, `SimSun-ExtB`); skipped
     /// without one.
     #[test]
     fn cjk_extension_b_comes_from_a_fallback_font() {

@@ -101,8 +101,10 @@ mod unix {
                 events: libc::POLLIN,
                 revents: 0,
             }];
+            // SAFETY: fds contains one initialized pollfd, writable for this call.
             let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, 20) };
             if ready > 0 {
+                // SAFETY: buf is writable for its full length; read retains no pointer.
                 let n = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
                 if n <= 0 {
                     break;
@@ -126,6 +128,8 @@ mod unix {
             }
         }
         dump(&t, step);
+        // SAFETY: child is this example's unreaped child PID, and null wait status
+        // requests no output. The master descriptor is no longer used after close.
         unsafe {
             libc::kill(child, libc::SIGHUP);
             let deadline = Instant::now() + Duration::from_millis(500);
@@ -142,6 +146,7 @@ mod unix {
 
     fn write_all(fd: i32, mut bytes: &[u8]) {
         while !bytes.is_empty() {
+            // SAFETY: bytes is readable for the supplied length during the call.
             let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
             if n <= 0 {
                 return;
@@ -164,6 +169,10 @@ mod unix {
             .collect();
         let mut ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
         ptrs.push(std::ptr::null());
+        // SAFETY: openpty receives initialized writable outputs and a winsize; the
+        // descriptors stay open until duplicated/closed. argv owns NUL-terminated
+        // strings and ptrs has a null sentinel for execvp. The single-threaded child
+        // calls libc only after fork and uses _exit if exec fails.
         unsafe {
             if libc::openpty(
                 &mut master,

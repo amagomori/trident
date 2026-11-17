@@ -1,3 +1,10 @@
+//! Desktop entry point, per-window terminal sessions and event-loop
+//! coordination.
+//!
+//! The core owns parsed terminal state; this layer owns PTYs, input, platform
+//! integration and redraw scheduling. Linux presentation uses X11 or Wayland;
+//! macOS integrates native window tabs and Metal presentation feedback.
+
 macro_rules! diag {
     ($($arg:tt)*) => {{
         use std::io::Write as _;
@@ -56,7 +63,7 @@ use std::time::{Duration, Instant};
 use term_core::{ClipboardRequest, MouseMode, Point, SelectionKind, Terminal};
 #[cfg(test)]
 use term_render::PADDING;
-use term_render::{Fonts, Renderer};
+use term_render::{FontFaces, FontSpec, Fonts, Renderer};
 mod links;
 #[cfg(target_os = "macos")]
 mod native_tabs;
@@ -207,16 +214,20 @@ enum UserEvent {
     /// The native tab bar's + button was clicked.
     #[cfg(target_os = "macos")]
     NewTab,
-    /// The pointer moved with Cmd held; its position is read back from AppKit.
+    /// The pointer moved with Cmd held; its position is read back from `AppKit`.
     #[cfg(target_os = "macos")]
     PointerMoved,
+    /// The window with this `native_tabs::key` left native fullscreen, and `AppKit` has set
+    /// its frame.
+    #[cfg(target_os = "macos")]
+    ExitedFullScreen(usize),
 }
 
 struct Options {
     config_path: PathBuf,
     font_size_override: bool,
     scrollback: Option<usize>,
-    font: Option<PathBuf>,
+    font: Option<String>,
     font_size: f32,
     option_as_alt: bool,
     copy_on_select: bool,
@@ -231,8 +242,20 @@ impl Options {
         self.scrollback.unwrap_or(config.scrollback)
     }
 
-    fn font<'a>(&'a self, config: &'a config::Config) -> Option<&'a std::path::Path> {
-        self.font.as_deref().or(config.font.as_deref())
+    /// The config's fonts, or only `--font`'s when given.
+    fn font(&self, config: &config::Config) -> FontSpec {
+        match &self.font {
+            Some(font) => FontSpec {
+                regular: Some(font.clone()),
+                ..FontSpec::default()
+            },
+            None => FontSpec {
+                regular: config.font.clone(),
+                bold: config.font_bold.clone(),
+                italic: config.font_italic.clone(),
+                bold_italic: config.font_bold_italic.clone(),
+            },
+        }
     }
 
     fn size(&self, config: &config::Config) -> f32 {
@@ -281,7 +304,7 @@ fn usage() -> ! {
          {bin} show [--width N] [--height N] [--fit] FILE...\n\n\
          OPTIONS:\n  \
            --config <PATH>     Override the TOML config file location\n  \
-           --font <PATH>       TrueType/OpenType font file (default: bundled JetBrains Mono)\n  \
+           --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)\n  \
            --font-size <SIZE>  Font size in points (default: {DEFAULT_FONT_SIZE})\n  \
            --option-as-alt     On macOS, make Option act as Alt/Meta\n  \
            --scrollback <LINES> History lines (default: 10000; 0 disables; max: 1000000)\n  \
@@ -327,7 +350,9 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
                         .ok_or("--scrollback needs an integer between 0 and 1000000")?,
                 );
             }
-            "--font" => options.font = Some(args.next().ok_or("--font needs a path")?.into()),
+            "--font" => {
+                options.font = Some(args.next().ok_or("--font needs a family name or path")?)
+            }
             "--font-size" => {
                 options.font_size_override = true;
                 options.font_size = args
@@ -448,6 +473,8 @@ struct TabWindow {
     drawable_wait: Option<Instant>,
     occluded: bool,
     normal_cells: (usize, usize),
+    normal_frame: Option<Frame>,
+    fullscreen_exit: FullscreenExit,
 }
 
 impl Pane {
@@ -481,7 +508,8 @@ impl Pane {
     }
 }
 
-/// Whether Trident draws its own tab bar; macOS shows native AppKit tabs instead.
+/// Whether Trident draws its own tab bar; macOS shows native `AppKit` tabs
+/// instead.
 fn tab_bar_drawn(shown: bool) -> bool {
     shown && !cfg!(target_os = "macos")
 }
@@ -902,6 +930,74 @@ fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) 
                 | Action::ToggleFullscreen
                 | Action::ShowLastCommandOutput
         )
+}
+
+/// A window's outer position and inner size.
+#[cfg(any(target_os = "macos", test))]
+type Frame = (PhysicalPosition<i32>, PhysicalSize<u32>);
+
+/// Whether `window` is fullscreen. On macOS this includes a native tab opened while its
+/// group was fullscreen, which `AppKit` takes into fullscreen without telling winit.
+fn is_fullscreen(window: &Window) -> bool {
+    #[cfg(target_os = "macos")]
+    if native_tabs::is_fullscreen(window) {
+        return true;
+    }
+    window.fullscreen().is_some()
+}
+
+/// The frame a new native tab's window opens at: the active window's, or while it is
+/// fullscreen the one it had before, which `AppKit` restores the whole tab group to.
+#[cfg(any(target_os = "macos", test))]
+fn new_tab_frame(fullscreen: bool, current: Option<Frame>, normal: Option<Frame>) -> Option<Frame> {
+    if fullscreen {
+        normal.or(current)
+    } else {
+        current
+    }
+}
+
+/// Puts the window back at its pre-fullscreen frame once `AppKit` has left fullscreen: with a
+/// tab opened while fullscreen active, `AppKit` restores the tab group screen-sized.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct FullscreenExit {
+    was_fullscreen: bool,
+    restore: Option<Frame>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl FullscreenExit {
+    /// The state of a window opened `fullscreen` or not.
+    fn entered(fullscreen: bool) -> Self {
+        FullscreenExit {
+            was_fullscreen: fullscreen,
+            restore: None,
+        }
+    }
+
+    /// Called on each frame change with the frame from before fullscreen; whether the
+    /// current frame is a normal one to remember, not fullscreen or on the way out of it.
+    fn observe(&mut self, fullscreen: bool, normal: Option<Frame>) -> bool {
+        if fullscreen {
+            self.was_fullscreen = true;
+            self.restore = None;
+            return false;
+        }
+        if std::mem::take(&mut self.was_fullscreen) {
+            self.restore = normal;
+        }
+        self.restore.is_none()
+    }
+
+    /// Once `AppKit` has left fullscreen: the frame to move the window from `current` to.
+    fn finish(&mut self, current: Option<Frame>, normal: Option<Frame>) -> Option<Frame> {
+        let was_fullscreen = std::mem::take(&mut self.was_fullscreen);
+        self.restore
+            .take()
+            .or(if was_fullscreen { normal } else { None })
+            .filter(|&frame| Some(frame) != current)
+    }
 }
 
 /// The fullscreen state `toggle_fullscreen` asks for: borderless on the current monitor,
@@ -1405,6 +1501,13 @@ struct App {
     /// The window's latest size in cells while neither maximized nor fullscreen; on macOS,
     /// each native tab's window keeps its own, swapped in with the tab.
     normal_cells: (usize, usize),
+    /// The window's frame while not fullscreen, swapped in with the tab like `normal_cells`.
+    #[cfg(target_os = "macos")]
+    normal_frame: Option<Frame>,
+    #[cfg(target_os = "macos")]
+    fullscreen_exit: FullscreenExit,
+    /// The faces `options.font(&config)` resolved to.
+    faces: FontFaces,
     /// Why the last pager window could not open, shown until the next input.
     pager_error: Option<String>,
     /// Captured before the app quit hook reaps the PTYs, for the source window's banner.
@@ -1523,6 +1626,11 @@ impl App {
             config,
             config_error,
             normal_cells: window_state::DEFAULT_CELLS,
+            #[cfg(target_os = "macos")]
+            normal_frame: None,
+            #[cfg(target_os = "macos")]
+            fullscreen_exit: FullscreenExit::default(),
+            faces: FontFaces::bundled(),
             pager_error: None,
             pager_exit_code: 0,
             icons: app_icon::Shown::default(),
@@ -1572,8 +1680,13 @@ impl App {
     }
 
     fn start(&mut self, event_loop: &ActiveEventLoop) -> Result<Session, String> {
-        let probe = match Fonts::new(self.options.font(&self.config), self.font_size) {
-            Ok(fonts) => fonts,
+        self.faces = match FontFaces::resolve(&self.options.font(&self.config)) {
+            Ok((faces, warnings)) => {
+                for warning in warnings {
+                    diag!("trident: font: {warning}");
+                }
+                faces
+            }
             Err(error) if self.options.font.is_none() => {
                 let error = format!(
                     "trident: {}:1:1: font: {error}",
@@ -1583,12 +1696,12 @@ impl App {
                 self.config_error = Some(error);
                 self.config = config::Config::default();
                 self.font_size = self.options.size(&self.config);
-                Fonts::new(None, self.font_size)?
+                FontFaces::bundled()
             }
             Err(error) => return Err(error),
         };
+        let probe = Fonts::new(&self.faces, self.font_size);
         self.watch_appearance();
-        let font = self.options.font(&self.config);
         let monitor = event_loop
             .primary_monitor()
             .or_else(|| event_loop.available_monitors().next());
@@ -1596,7 +1709,7 @@ impl App {
         let guessed_fonts = if guess == 1.0 {
             probe
         } else {
-            Fonts::new(font, self.font_size * guess as f32)?
+            Fonts::new(&self.faces, self.font_size * guess as f32)
         };
         let guessed_tab_bar = self.tab_bar_height(1, &guessed_fonts);
         let initial = window_state::initial(
@@ -1662,11 +1775,18 @@ impl App {
                 .map_err(|e| format!("cannot create window: {e}"))?,
         );
         window.set_ime_allowed(true);
+        #[cfg(target_os = "macos")]
+        {
+            self.normal_frame = window
+                .outer_position()
+                .ok()
+                .map(|position| (position, window.inner_size()));
+        }
         let scale = window.scale_factor();
         let fonts = if scale == guess {
             guessed_fonts
         } else {
-            Fonts::new(font, self.font_size * scale as f32)?
+            Fonts::new(&self.faces, self.font_size * scale as f32)
         };
         let size = window.inner_size();
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
@@ -1825,6 +1945,55 @@ impl App {
         Ok(pty)
     }
 
+    /// Remembers the active window's frame unless it is fullscreen, for `open_tab_window`.
+    #[cfg(target_os = "macos")]
+    fn note_normal_frame(&mut self) {
+        let Some(s) = &self.session else { return };
+        if !self
+            .fullscreen_exit
+            .observe(is_fullscreen(&s.window), self.normal_frame)
+        {
+            return;
+        }
+        if let Ok(position) = s.window.outer_position() {
+            self.normal_frame = Some((position, s.size));
+        }
+    }
+
+    /// Restores the frame of the window, the active one or a background tab's, that left
+    /// fullscreen.
+    #[cfg(target_os = "macos")]
+    fn exited_fullscreen(&mut self, key: usize) {
+        let Some(s) = &self.session else { return };
+        if native_tabs::key(&s.window) == Some(key) {
+            self.restore_normal_frame();
+            return;
+        }
+        let index = self.tabs.iter().position(|pane| {
+            pane.as_ref()
+                .is_some_and(|pane| native_tabs::key(&pane.window.window) == Some(key))
+        });
+        if let Some(index) = index {
+            self.with_tab_shown(index, App::restore_normal_frame);
+        }
+    }
+
+    /// Moves the active window back to the frame it had before fullscreen, if `AppKit` left
+    /// fullscreen at another one.
+    #[cfg(target_os = "macos")]
+    fn restore_normal_frame(&mut self) {
+        let Some(s) = &self.session else { return };
+        let current = s
+            .window
+            .outer_position()
+            .ok()
+            .map(|position| (position, s.window.inner_size()));
+        if let Some((position, size)) = self.fullscreen_exit.finish(current, self.normal_frame) {
+            let _ = s.window.request_inner_size(size);
+            s.window.set_outer_position(position);
+        }
+    }
+
     /// The tab bar's height with `tabs` tabs open, 0 when it is hidden.
     fn save_window_state(&self) {
         let Some(s) = self
@@ -1835,7 +2004,7 @@ impl App {
             return;
         };
         let maximized = s.window.is_maximized();
-        let cells = if maximized || s.window.fullscreen().is_some() {
+        let cells = if maximized || is_fullscreen(&s.window) {
             self.normal_cells
         } else {
             (s.term.cols(), s.term.rows())
@@ -1947,11 +2116,22 @@ impl App {
     fn open_tab_window(&self, event_loop: &ActiveEventLoop) -> Result<TabWindow, String> {
         use winit::platform::macos::WindowAttributesExtMacOS;
         let s = self.session.as_ref().ok_or("no window")?;
+        let current = s
+            .window
+            .outer_position()
+            .ok()
+            .map(|position| (position, s.size));
+        let (position, size) = new_tab_frame(is_fullscreen(&s.window), current, self.normal_frame)
+            .map_or((None, s.size), |(position, size)| (Some(position), size));
         let attrs = Window::default_attributes()
             .with_title("Trident")
-            .with_inner_size(s.size)
+            .with_inner_size(size)
             .with_visible(false)
             .with_tabbing_identifier(native_tabs::TABBING_IDENTIFIER);
+        let attrs = match position {
+            Some(position) => attrs.with_position(position),
+            None => attrs,
+        };
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -1960,10 +2140,7 @@ impl App {
         window.set_ime_allowed(true);
         native_tabs::add_tab(&s.window, &window);
         let size = window.inner_size();
-        let fonts = Fonts::new(
-            self.options.font(&self.config),
-            self.font_size * window.scale_factor() as f32,
-        )?;
+        let fonts = Fonts::new(&self.faces, self.font_size * window.scale_factor() as f32);
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
         Ok(TabWindow {
             window,
@@ -1980,6 +2157,8 @@ impl App {
             drawable_wait: None,
             occluded: false,
             normal_cells: self.normal_cells,
+            normal_frame: self.normal_frame,
+            fullscreen_exit: FullscreenExit::entered(is_fullscreen(&s.window)),
         })
     }
 
@@ -2032,6 +2211,8 @@ impl App {
         s.swap_pane(&mut pane);
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
         std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
+        std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
+        std::mem::swap(&mut self.fullscreen_exit, &mut pane.window.fullscreen_exit);
         let latency = s.latency.take();
         let search = self.search.take();
         let focused = std::mem::replace(&mut self.focused, false);
@@ -2048,6 +2229,8 @@ impl App {
         self.search = search;
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
         std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
+        std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
+        std::mem::swap(&mut self.fullscreen_exit, &mut pane.window.fullscreen_exit);
         if let Some(s) = &mut self.session {
             s.latency = latency;
             s.swap_pane(&mut pane);
@@ -2055,7 +2238,8 @@ impl App {
         self.tabs[index] = Some(pane);
     }
 
-    /// Events for a background tab's window: AppKit selecting or closing its tab, or the
+    /// Events for a background tab's window: `AppKit` selecting or closing its tab,
+    /// or the
     /// window resizing or redrawing while torn out of the tab group.
     #[cfg(target_os = "macos")]
     fn background_window_event(
@@ -2095,8 +2279,10 @@ impl App {
                     s.size = size;
                     s.renderer.resize(size.width, size.height);
                 }
+                app.note_normal_frame();
                 app.resize_grid();
             }),
+            WindowEvent::Moved(_) => self.with_tab_shown(index, App::note_normal_frame),
             WindowEvent::ScaleFactorChanged { .. } => {
                 self.with_tab_shown(index, |app| app.set_font_size(app.font_size))
             }
@@ -2135,6 +2321,8 @@ impl App {
         {
             std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
             std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
+            std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
+            std::mem::swap(&mut self.fullscreen_exit, &mut pane.window.fullscreen_exit);
             native_tabs::show(&s.window);
         }
         self.tabs[self.active_tab] = Some(pane);
@@ -2200,7 +2388,8 @@ impl App {
         self.remove_tab(index);
     }
 
-    /// Drops a pending paste or close prompt as Escape would, since AppKit moved to another
+    /// Drops a pending paste or close prompt as Escape would, since `AppKit` moved
+    /// to another
     /// tab and the prompt belongs to the one it left.
     #[cfg(target_os = "macos")]
     fn cancel_prompts(&mut self) {
@@ -2518,7 +2707,7 @@ impl App {
             }
         }
         let grid_changed = (cols, rows) != (s.term.cols(), s.term.rows());
-        if grid_changed && !s.window.is_maximized() && s.window.fullscreen().is_none() {
+        if grid_changed && !s.window.is_maximized() && !is_fullscreen(&s.window) {
             self.normal_cells = (cols, rows);
         }
         s.term
@@ -3209,7 +3398,8 @@ impl App {
 
     fn reload_config(&mut self) {
         let result = config::load(&self.options.config_path).and_then(|next| {
-            let font_changed = self.options.font.is_none() && next.font != self.config.font;
+            let spec = self.options.font(&next);
+            let font_changed = spec != self.options.font(&self.config);
             let size_changed =
                 !self.options.font_size_override && next.font_size != self.config.font_size;
             let size = if size_changed {
@@ -3217,19 +3407,17 @@ impl App {
             } else {
                 self.font_size
             };
-            let fonts = if font_changed {
-                let scale = self
-                    .session
-                    .as_ref()
-                    .map_or(1.0, |s| s.window.scale_factor());
-                Some(
-                    Fonts::new(next.font.as_deref(), size * scale as f32).map_err(|e| {
-                        format!(
-                            "trident: {}:1:1: font: {e}",
-                            self.options.config_path.display()
-                        )
-                    })?,
-                )
+            let faces = if font_changed {
+                let (faces, warnings) = FontFaces::resolve(&spec).map_err(|e| {
+                    format!(
+                        "trident: {}:1:1: font: {e}",
+                        self.options.config_path.display()
+                    )
+                })?;
+                for warning in warnings {
+                    diag!("trident: font: {warning}");
+                }
+                Some(faces)
             } else {
                 None
             };
@@ -3246,6 +3434,10 @@ impl App {
             self.config = next;
             if !self.config.hide_mouse_when_typing {
                 self.typing_pointer.show();
+            }
+            let font_changed = faces.is_some();
+            if let Some(faces) = faces {
+                self.faces = faces;
             }
             #[cfg(target_os = "macos")]
             close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
@@ -3282,20 +3474,15 @@ impl App {
                     warn_vsync_unsupported(&self.config, &s.renderer);
                 }
                 s.renderer.set_vsync(self.config.vsync);
-                if let Some(fonts) = fonts {
-                    s.fonts = fonts;
+                if font_changed {
+                    s.fonts = Fonts::new(&self.faces, size * s.window.scale_factor() as f32);
                     s.renderer.clear_glyph_cache();
                     #[cfg(target_os = "macos")]
                     for pane in self.tabs.iter_mut().flatten() {
                         let tab = &mut pane.window;
                         let px = size * tab.window.scale_factor() as f32;
-                        match Fonts::new(self.config.font.as_deref(), px) {
-                            Ok(fonts) => {
-                                tab.fonts = fonts;
-                                tab.renderer.clear_glyph_cache();
-                            }
-                            Err(error) => diag!("trident: font: {error}"),
-                        }
+                        tab.fonts = Fonts::new(&self.faces, px);
+                        tab.renderer.clear_glyph_cache();
                     }
                 }
                 #[cfg(target_os = "macos")]
@@ -4068,8 +4255,6 @@ impl App {
     }
 }
 
-/// Hand memory from dropped rows or recycled buffers back to the OS: glibc keeps
-/// freed heap pages otherwise.
 /// Applies the config settings every tab's terminal shares, at startup, in new tabs and on reload.
 fn configure_term(term: &mut Terminal, config: &config::Config, scrollback: usize) {
     term.set_scrollback_limit(scrollback);
@@ -4078,6 +4263,11 @@ fn configure_term(term: &mut Terminal, config: &config::Config, scrollback: usiz
     term.set_compare_ignore(&config.compare_ignore);
 }
 
+/// Hands freed heap pages back to glibc's OS allocator after buffers shrink.
+///
+/// Returns whether retained history shrank, so the application can refresh its
+/// view.
+/// Other platforms keep their allocator's default release behavior.
 fn release_freed_memory(term: &mut Terminal) -> bool {
     let shrunk = term.take_shrunk();
     let recycled = term.take_recycled_memory_freed();
@@ -4243,6 +4433,8 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(target_os = "macos")]
                 native_tabs::watch_command_moves();
                 #[cfg(target_os = "macos")]
+                native_tabs::observe_fullscreen_exit();
+                #[cfg(target_os = "macos")]
                 native_tabs::install_window_menu();
                 self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
@@ -4257,7 +4449,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    /// A macOS app quit ends the process from AppKit without returning from the event loop,
+    /// A macOS app quit ends the process from `AppKit` without returning from the
+    /// event loop,
     /// so the latency log, every tab's shell, and the pager file are cleaned up here
     /// instead of when the session drops.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -4284,6 +4477,8 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::NewTab => self.new_tab(event_loop),
             #[cfg(target_os = "macos")]
             UserEvent::PointerMoved => self.sync_pointer(),
+            #[cfg(target_os = "macos")]
+            UserEvent::ExitedFullScreen(key) => self.exited_fullscreen(key),
             #[cfg(target_os = "linux")]
             UserEvent::Appearance(generation, theme) => {
                 if self.appearance_watch.is_some() && generation == self.appearance_generation {
@@ -4612,8 +4807,12 @@ impl ApplicationHandler<UserEvent> for App {
                     s.resize.schedule(Instant::now());
                     s.window.request_redraw();
                 }
+                #[cfg(target_os = "macos")]
+                self.note_normal_frame();
                 self.update_ime_cursor_area();
             }
+            #[cfg(target_os = "macos")]
+            WindowEvent::Moved(_) => self.note_normal_frame(),
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
                 if !focused {
@@ -5204,6 +5403,61 @@ mod tests {
     }
 
     #[test]
+    fn new_tabs_open_at_the_frame_from_before_fullscreen() {
+        let normal = (PhysicalPosition::new(120, 80), PhysicalSize::new(1000, 600));
+        let full = (PhysicalPosition::new(0, 0), PhysicalSize::new(1980, 1200));
+        assert_eq!(new_tab_frame(true, Some(full), Some(normal)), Some(normal));
+        assert_eq!(new_tab_frame(true, Some(full), None), Some(full));
+        assert_eq!(new_tab_frame(false, Some(normal), Some(full)), Some(normal));
+        assert_eq!(new_tab_frame(false, None, Some(normal)), None);
+    }
+
+    #[test]
+    fn leaving_fullscreen_restores_the_frame_from_before_it() {
+        let normal = (PhysicalPosition::new(394, 149), PhysicalSize::new(812, 614));
+        let zoomed = (PhysicalPosition::new(0, 30), PhysicalSize::new(1600, 1088));
+        let mut exit = FullscreenExit::default();
+        assert!(exit.observe(false, Some(normal)));
+        assert_eq!(exit.finish(Some(normal), Some(normal)), None);
+        assert!(!exit.observe(true, Some(normal)));
+        assert!(!exit.observe(true, Some(normal)));
+        // AppKit's frames on the way out are not remembered, and the window goes back.
+        assert!(!exit.observe(false, Some(normal)));
+        assert!(!exit.observe(false, Some(zoomed)));
+        assert_eq!(exit.finish(Some(zoomed), Some(normal)), Some(normal));
+        assert!(exit.observe(false, Some(zoomed)));
+        assert_eq!(exit.finish(Some(normal), Some(zoomed)), None);
+        // Also when no frame change came before the exit finished.
+        assert!(!exit.observe(true, Some(normal)));
+        assert_eq!(exit.finish(Some(zoomed), Some(normal)), Some(normal));
+        // A window AppKit already put back is left alone.
+        assert!(!exit.observe(true, Some(normal)));
+        assert!(!exit.observe(false, Some(normal)));
+        assert_eq!(exit.finish(Some(normal), Some(normal)), None);
+        assert!(exit.observe(false, Some(normal)));
+    }
+
+    #[test]
+    fn each_window_restores_its_own_frame_after_fullscreen() {
+        let a = (PhysicalPosition::new(394, 149), PhysicalSize::new(812, 614));
+        let b = (PhysicalPosition::new(900, 100), PhysicalSize::new(600, 400));
+        let zoomed = (PhysicalPosition::new(0, 30), PhysicalSize::new(1600, 1088));
+        let mut exit_a = FullscreenExit::default();
+        let mut exit_b = FullscreenExit::default();
+        assert!(!exit_a.observe(true, Some(a)));
+        assert!(exit_b.observe(false, Some(b)));
+        assert_eq!(exit_b.finish(Some(b), Some(b)), None);
+        assert_eq!(exit_a.finish(Some(zoomed), Some(a)), Some(a));
+        // A tab opened into a fullscreen group restores even if it saw no fullscreen frame.
+        let mut tab = FullscreenExit::entered(true);
+        assert_eq!(tab.finish(Some(zoomed), Some(a)), Some(a));
+        assert_eq!(
+            FullscreenExit::entered(false).finish(Some(zoomed), Some(a)),
+            None
+        );
+    }
+
+    #[test]
     fn toggle_fullscreen_goes_borderless_and_back() {
         assert!(matches!(
             toggled_fullscreen(None),
@@ -5605,7 +5859,7 @@ mod tests {
     fn cli_overrides_config() {
         let config = super::config::parse(
             std::path::Path::new("test.toml"),
-            "font = '/config.ttf'\nfont_size = 22\nscrollback = 42\nshell = ['zsh', '-l']",
+            "font = '/config.ttf'\nfont_bold = 'Fira Code'\nfont_size = 22\nscrollback = 42\nshell = ['zsh', '-l']",
         )
         .unwrap();
         let mut options = super::Options {
@@ -5622,7 +5876,11 @@ mod tests {
         };
         assert_eq!(
             options.font(&config),
-            Some(std::path::Path::new("/config.ttf"))
+            FontSpec {
+                regular: Some("/config.ttf".into()),
+                bold: Some("Fira Code".into()),
+                ..FontSpec::default()
+            }
         );
         assert_eq!(options.size(&config), 22.0);
         assert_eq!(options.scrollback(&config), 42);
@@ -5635,7 +5893,10 @@ mod tests {
         options.command = vec!["bash".into()];
         assert_eq!(
             options.font(&config),
-            Some(std::path::Path::new("/cli.ttf"))
+            FontSpec {
+                regular: Some("/cli.ttf".into()),
+                ..FontSpec::default()
+            }
         );
         assert_eq!(options.size(&config), 18.0);
         assert_eq!(options.scrollback(&config), 90);
@@ -6832,13 +7093,13 @@ mod tests {
 
     #[test]
     fn guessed_grid_uses_physical_size_and_scaled_padding() {
-        let probe = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let probe = Fonts::bundled(DEFAULT_FONT_SIZE);
         let logical = LogicalSize::new(
             100.0 * probe.metrics.width + 2.0 * PADDING,
             30.0 * probe.metrics.height + 2.0 * PADDING,
         );
         for (scale, expected) in [(1.0, (100, 30)), (2.0, (94, 30))] {
-            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            let fonts = Fonts::bundled(DEFAULT_FONT_SIZE * scale as f32);
             assert_eq!(
                 grid_size_for(logical.to_physical(scale), scale, &fonts, PADDING),
                 expected
@@ -6852,7 +7113,7 @@ mod tests {
     #[test]
     fn window_size_round_trips_to_its_cells() {
         for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
-            let fonts = Fonts::new(None, DEFAULT_FONT_SIZE * scale as f32).unwrap();
+            let fonts = Fonts::bundled(DEFAULT_FONT_SIZE * scale as f32);
             for padding in [0.0, PADDING, 6.3] {
                 for tab_bar in [0, 37] {
                     for cells in [(20, 5), (80, 24), (100, 30), (317, 91)] {
@@ -6866,7 +7127,7 @@ mod tests {
                 }
             }
         }
-        let fonts = Fonts::new(None, DEFAULT_FONT_SIZE).unwrap();
+        let fonts = Fonts::bundled(DEFAULT_FONT_SIZE);
         let screen = PhysicalSize::new(1920, 1080);
         let max = grid_size_for(screen, 1.0, &fonts, PADDING);
         let size = window_size_for(

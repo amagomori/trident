@@ -122,6 +122,9 @@ impl Terminal {
         trimmed
     }
 
+    /// Returns whether per-command budgeting is enabled and its history share.
+    ///
+    /// The share is a fraction of the configured scrollback row limit.
     pub fn command_budget(&self) -> (bool, f64) {
         (self.shell.budget.enabled, self.shell.budget.share)
     }

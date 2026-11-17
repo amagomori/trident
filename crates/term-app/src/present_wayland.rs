@@ -1,3 +1,8 @@
+//! Wayland presentation feedback borrowed from winit's display and surface.
+//!
+//! A separate guest event queue correlates compositor timestamps with submitted
+//! frames without taking ownership of winit's protocol objects.
+
 use crate::frame_clock::FrameClock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,8 +53,10 @@ impl Dispatch<wp_presentation::WpPresentation, ()> for State {
     ) {
         if let wp_presentation::Event::ClockId { clk_id } = event {
             let mut clock = std::mem::MaybeUninit::<libc::timespec>::uninit();
+            // SAFETY: clock points to writable storage; invalid clock IDs fail normally.
             if unsafe { libc::clock_gettime(clk_id as libc::clockid_t, clock.as_mut_ptr()) } == 0 {
                 let now = Instant::now();
+                // SAFETY: The successful call initialized the timespec above.
                 let clock = unsafe { clock.assume_init() };
                 state.epoch = Some(
                     i128::from(clock.tv_sec) * 1_000_000 + i128::from(clock.tv_nsec) / 1_000
@@ -150,11 +157,14 @@ impl Feedback {
         let RawWindowHandle::Wayland(surface) = window.window_handle()?.as_raw() else {
             return Err("not a Wayland surface".into());
         };
-        // Guest backend owns only our proxies/queue, never winit's display or surface.
+        // SAFETY: The retained window outlives our backend/queue and keeps the foreign
+        // display alive. This guest backend never takes ownership of winit's display.
         let backend = unsafe {
             wayland_backend::client::Backend::from_foreign_display(display.display.as_ptr().cast())
         };
         let connection = Connection::from_backend(backend);
+        // SAFETY: The handle is a live wl_surface on the display above. _window
+        // retains its owner until after our surface proxy and event queue are dropped.
         let id = unsafe {
             wayland_backend::client::ObjectId::from_ptr(
                 wl_surface::WlSurface::interface(),

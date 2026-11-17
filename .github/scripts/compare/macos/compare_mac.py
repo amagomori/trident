@@ -1,6 +1,10 @@
-"""Black-box vtebench / 100 MiB cat / RSS+idle CPU on macOS for Trident (+ an A/A arm: the same
-binary again) vs other terminals. Driven by run.sh; nothing in any terminal is instrumented.
-usage: compare_mac.py <vtebench|cat|memory> <rounds> <out.json> [arms,...]. Never redirect vtebench stdout."""
+"""Compare terminal throughput, RSS and idle CPU with black-box macOS probes.
+
+Run vtebench, a 100 MiB cat and memory probes for Trident, the same binary again
+(A/A), and other terminals. Driven by run.sh; no terminal is instrumented.
+Usage: compare_mac.py <vtebench|cat|memory> <rounds> <out.json> [arms,...]
+Never redirect vtebench stdout.
+"""
 import json, os, shutil, signal, subprocess, sys, time, statistics as st
 from pathlib import Path
 HERE = Path(__file__).resolve().parent; REPO = HERE.parents[3]; C = HERE.parent / "cfg"

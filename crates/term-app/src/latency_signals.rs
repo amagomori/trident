@@ -1,3 +1,5 @@
+//! Benchmark termination flags with restoration of the previous signal actions.
+
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,6 +18,9 @@ impl Signals {
         TERMINATED.store(false, Ordering::Relaxed);
         let mut signals = Self { previous: vec![] };
         for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            // SAFETY: sigaction is initialized before installation; the C ABI handler
+            // only stores a lock-free AtomicBool and uses no signal-unsafe facilities.
+            // The previous action is read only after a successful sigaction call.
             unsafe {
                 let mut action: libc::sigaction = std::mem::zeroed();
                 let mut previous = std::mem::zeroed();
@@ -38,6 +43,8 @@ impl Signals {
 impl Drop for Signals {
     fn drop(&mut self) {
         for (signal, previous) in &self.previous {
+            // SAFETY: previous is the initialized action saved for this signal;
+            // the null output pointer requests no copy of the replaced action.
             unsafe {
                 libc::sigaction(*signal, previous, std::ptr::null_mut());
             }
@@ -60,11 +67,14 @@ mod tests {
                 .find(|(s, _)| *s == signal)
                 .unwrap()
                 .1;
+            // SAFETY: This signal has the atomic-only test handler installed above.
             unsafe {
                 assert_eq!(libc::raise(signal), 0);
             }
             assert!(signals.terminated());
             drop(signals);
+            // SAFETY: restored is writable and sigaction succeeds before it is read;
+            // a null new-action pointer queries without changing the current handler.
             unsafe {
                 let mut restored: libc::sigaction = std::mem::zeroed();
                 assert_eq!(libc::sigaction(signal, std::ptr::null(), &mut restored), 0);
