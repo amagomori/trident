@@ -1,7 +1,8 @@
 //! Font loading, cell metrics and glyph rasterization through `ab_glyph`.
 //!
-//! System fallback fonts are loaded on first use into immutable process-owned
-//! snapshots. Later file changes cannot invalidate a parser's borrowed bytes.
+//! System fallback fonts are copied on first use into private, immutable file
+//! snapshots. Mapping those snapshots keeps unused font-collection pages out of
+//! the resident set; later source-file changes cannot invalidate borrowed bytes.
 
 use crate::builtin;
 use crate::color;
@@ -77,9 +78,8 @@ struct Fallback {
 
 /// Caches an immutable font snapshot for the process lifetime, once per path.
 ///
-/// File-backed mappings cannot guarantee immutable bytes during font updates.
-/// Owned bytes keep borrowed font parsers valid even after truncation or
-/// replacement.
+/// A private, unlinked copy keeps borrowed parsers valid through source-file
+/// updates without retaining entire large font collections in heap memory.
 pub(crate) fn read_cached(path: &Path) -> std::io::Result<&'static [u8]> {
     static FILES: OnceLock<Mutex<HashMap<std::path::PathBuf, &'static [u8]>>> = OnceLock::new();
     let mut files = FILES
@@ -89,7 +89,23 @@ pub(crate) fn read_cached(path: &Path) -> std::io::Result<&'static [u8]> {
     if let Some(data) = files.get(path) {
         return Ok(data);
     }
-    let data: &'static [u8] = Box::leak(std::fs::read(path)?.into_boxed_slice());
+    let mut source = std::fs::File::open(path)?;
+    let mut snapshot = tempfile::tempfile()?;
+    std::io::copy(&mut source, &mut snapshot)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if snapshot.metadata()?.nlink() != 0 {
+            return Err(std::io::Error::other("font snapshot is still linked"));
+        }
+    }
+    // SAFETY: Only this function has a handle to the unlinked snapshot. Copying
+    // is complete, and no writes or truncations occur after mapping. Dropping the
+    // sole file handle below leaves only the read-only mapping, so modifications
+    // to the source font cannot change these bytes or invalidate the mapping.
+    let map = unsafe { memmap2::Mmap::map(&snapshot)? };
+    drop(snapshot);
+    let data: &'static [u8] = Box::leak(Box::new(map));
     files.insert(path.to_owned(), data);
     Ok(data)
 }
