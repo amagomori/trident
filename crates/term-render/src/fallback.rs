@@ -245,19 +245,18 @@ mod fontconfig {
     ///
     /// # Safety
     ///
-    /// `set` must point to an initialized `FcFontSet`. Fontconfig must be loaded
-    /// and its patterns and charsets must stay alive while any returned
-    /// candidate's charset is used.
-    #[expect(
-        clippy::undocumented_unsafe_blocks,
-        reason = "empty fontconfig arrays may be null, fixed separately before forming a slice"
-    )]
+    /// `set` must point to an initialized `FcFontSet`. For a nonempty set,
+    /// fontconfig must be loaded and its patterns and charsets must stay alive
+    /// while any returned candidate's charset is used.
     unsafe fn candidates(set: *mut FcFontSet) -> Vec<Candidate> {
         // SAFETY: The caller guarantees a live, non-null fontconfig set.
         let set = unsafe { &*set };
-        // Empty font sets may have a null array, which cannot form even an empty
-        // slice. The separate font-safety change fixes this existing violation.
-        let fonts = unsafe { std::slice::from_raw_parts(set.fonts, set.nfont.max(0) as usize) };
+        if set.nfont <= 0 || set.fonts.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: A nonempty fontconfig set has nfont initialized pattern pointers.
+        // The array is non-null and remains owned by the caller's live set.
+        let fonts = unsafe { std::slice::from_raw_parts(set.fonts, set.nfont as usize) };
         fonts
             .iter()
             // SAFETY: Patterns and matched property pointers belong to the live set.
@@ -284,6 +283,18 @@ mod fontconfig {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn empty_font_sets_have_no_candidates() {
+        let mut set = FcFontSet {
+            nfont: 0,
+            sfont: 0,
+            fonts: ptr::null_mut(),
+        };
+        // SAFETY: set is initialized and live; an empty set borrows no font data
+        // and makes no fontconfig calls. A null empty array must not form a slice.
+        assert!(unsafe { candidates(&mut set) }.is_empty());
     }
 }
 
@@ -405,7 +416,9 @@ mod coretext {
     fn file(url: Option<CFRetained<CFType>>, postscript: Option<String>) -> Option<FontFile> {
         let path = url?.downcast::<CFURL>().ok()?.to_file_path()?;
         let index = match postscript {
-            Some(name) => crate::font::map(&path).map_or(0, |data| super::face_index(data, &name)),
+            Some(name) => {
+                crate::font::read_cached(&path).map_or(0, |data| super::face_index(data, &name))
+            }
             None => 0,
         };
         Some((path, index))

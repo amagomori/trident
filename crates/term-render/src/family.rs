@@ -198,21 +198,21 @@ fn pick(faces: &[Traits]) -> Option<[Pick; 4]> {
 }
 
 enum Data {
-    Mapped(&'static [u8]),
+    Cached(&'static [u8]),
     Read(Rc<Vec<u8>>),
 }
 
 impl Data {
     fn bytes(&self) -> &[u8] {
         match self {
-            Data::Mapped(data) => data,
+            Data::Cached(data) => data,
             Data::Read(data) => data,
         }
     }
 
     fn font(&self, index: u32) -> Option<FontArc> {
         match self {
-            Data::Mapped(data) => FontRef::try_from_slice_and_index(data, index)
+            Data::Cached(data) => FontRef::try_from_slice_and_index(data, index)
                 .ok()
                 .map(FontArc::new),
             Data::Read(data) => FontVec::try_from_vec_and_index(data.to_vec(), index)
@@ -270,7 +270,9 @@ fn from_system(name: &str) -> Option<FontFaces> {
     }
     let candidates = files
         .into_iter()
-        .filter_map(|(path, index)| Some((Rc::new(Data::Mapped(font::map(&path).ok()?)), index)))
+        .filter_map(|(path, index)| {
+            Some((Rc::new(Data::Cached(font::read_cached(&path).ok()?)), index))
+        })
         .collect();
     build(candidates)
 }
