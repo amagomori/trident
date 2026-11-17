@@ -19,6 +19,7 @@ mod osc;
 pub use osc::{ClipboardRequest, WorkingDirectory};
 mod perform;
 mod prompt_input;
+pub use prompt_input::PromptInput;
 mod reflow;
 mod rerun;
 

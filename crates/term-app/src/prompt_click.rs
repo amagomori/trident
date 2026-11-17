@@ -135,6 +135,32 @@ mod tests {
     }
 
     #[test]
+    fn rejected_reply_retires_the_query_and_releases_typing_before_the_next_click() {
+        let mut term = term_core::Terminal::new(44, 5);
+        let mut query = InputQuery::default();
+        let point = Point { line: 0, col: 3 };
+        let now = Instant::now();
+        assert!(query.begin(point, now));
+        assert!(query.buffer(b"X"));
+        term.advance(b"\x1b]777;trident;prompt-input;data;bad\x07");
+        assert_eq!(
+            term.take_prompt_input(),
+            Some(term_core::PromptInput::Rejected)
+        );
+        assert_eq!(query.finish(), Some((Some(point), b"X".to_vec())));
+        assert!(query.begin(point, now));
+        assert!(query.buffer(b"Y"));
+        query.cancel();
+        term.advance(b"\x1b]777;trident;prompt-input;data;3;YWJjCg==;scalar\x07");
+        assert!(matches!(
+            term.take_prompt_input(),
+            Some(term_core::PromptInput::Snapshot { .. })
+        ));
+        assert_eq!(query.finish(), Some((None, Vec::new())));
+        assert!(query.begin(point, now));
+    }
+
+    #[test]
     fn word_and_line_selection_never_send_the_initial_click() {
         let point = Point { line: 0, col: 8 };
         for clicks in [2, 3] {

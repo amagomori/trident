@@ -13,29 +13,44 @@ use unicode_width::UnicodeWidthChar;
 #[derive(Default)]
 pub(crate) struct State {
     ready: bool,
-    snapshot: Option<(String, usize)>,
+    snapshot: Option<PromptInput>,
     scalar_moves: bool,
+}
+
+/// A complete adapter reply, including rejected replies that retire a query.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PromptInput {
+    /// Exact editor text and its zero-based Unicode scalar cursor offset.
+    Snapshot { text: String, cursor: usize },
+    /// Malformed, oversized or unavailable input; do not move the cursor.
+    Rejected,
 }
 
 impl Terminal {
     pub(crate) fn prompt_input_report(&mut self, args: &[&[u8]]) {
-        if self.alt_active {
-            return;
-        }
         match args {
-            [b"ready"] => self.shell.prompt_input.ready = true,
-            [b"data", cursor, encoded, unit @ (b"scalar" | b"glyph")] if encoded.len() <= 65536 => {
-                self.shell.prompt_input.scalar_moves = *unit == b"scalar";
-                self.shell.prompt_input.snapshot = (|| {
-                    let cursor = std::str::from_utf8(cursor).ok()?.parse().ok()?;
-                    let mut text = String::from_utf8(STANDARD.decode(encoded).ok()?).ok()?;
-                    // Both adapters append one newline, including to an empty buffer.
-                    // Do not trim: literal trailing newlines must still fail closed.
-                    if text.pop()? != '\n' {
-                        return None;
-                    }
-                    Some((text, cursor))
-                })();
+            [b"ready"] if !self.alt_active => self.shell.prompt_input.ready = true,
+            [b"data", reply @ ..] => {
+                self.shell.prompt_input.snapshot = Some(
+                    (|| {
+                        let [cursor, encoded, unit @ (b"scalar" | b"glyph")] = reply else {
+                            return None;
+                        };
+                        if self.alt_active || encoded.len() > 65536 {
+                            return None;
+                        }
+                        let cursor = std::str::from_utf8(cursor).ok()?.parse().ok()?;
+                        let mut text = String::from_utf8(STANDARD.decode(encoded).ok()?).ok()?;
+                        // Both adapters append one newline, including to an empty buffer.
+                        // Do not trim: literal trailing newlines must still fail closed.
+                        if text.pop()? != '\n' {
+                            return None;
+                        }
+                        self.shell.prompt_input.scalar_moves = *unit == b"scalar";
+                        Some(PromptInput::Snapshot { text, cursor })
+                    })()
+                    .unwrap_or(PromptInput::Rejected),
+                );
             }
             _ => {}
         }
@@ -50,13 +65,14 @@ impl Terminal {
         self.shell.prompt_input.ready && self.shell.zone == Zone::Input && !self.alt_active
     }
 
-    /// Takes the latest shell input snapshot, if a valid reply has arrived.
+    /// Takes the latest complete shell reply, including a rejected snapshot.
     ///
-    /// Returns the exact editor buffer and its zero-based Unicode scalar cursor
-    /// offset. Does not validate the snapshot against the screen; use
+    /// Valid snapshots contain the exact buffer and Unicode scalar cursor
+    /// offset. Rejected replies must also retire the pending query and release
+    /// queued typing, without moving. Does not validate against the screen; use
     /// [`Self::prompt_click_input`] for that. The app must pair replies with its
     /// pending query and ignore unsolicited replies.
-    pub fn take_prompt_input(&mut self) -> Option<(String, usize)> {
+    pub fn take_prompt_input(&mut self) -> Option<PromptInput> {
         self.shell.prompt_input.snapshot.take()
     }
 
@@ -77,13 +93,14 @@ impl Terminal {
     /// # Examples
     ///
     /// ```
-    /// use term_core::{Point, PromptClick, Terminal};
+    /// use term_core::{Point, PromptClick, PromptInput, Terminal};
     /// let mut term = Terminal::new(44, 5);
     /// term.advance(b"\x1b]133;A\x07> \x1b]777;trident;prompt-input;ready\x07\x1b]133;B\x07abc");
     /// assert!(term.has_prompt_input_adapter());
     /// // A reply to the app's on-demand query: buffer "abc", cursor at its end.
     /// term.advance(b"\x1b]777;trident;prompt-input;data;3;YWJjCg==;glyph\x07");
-    /// let (text, cursor) = term.take_prompt_input().unwrap();
+    /// let PromptInput::Snapshot { text, cursor } = term.take_prompt_input().unwrap()
+    ///     else { panic!("snapshot rejected") };
     /// assert_eq!(term.prompt_click_input(Point { line: 0, col: 3 }, &text, cursor),
     ///            Some(PromptClick::Move(-2)));
     /// ```
@@ -287,7 +304,13 @@ mod tests {
             for chunk in report.as_bytes().chunks(3) {
                 t.advance(chunk);
             }
-            assert_eq!(t.take_prompt_input(), Some((text.to_owned(), 3)));
+            assert_eq!(
+                t.take_prompt_input(),
+                Some(PromptInput::Snapshot {
+                    text: text.to_owned(),
+                    cursor: 3
+                })
+            );
             assert_eq!(t.take_prompt_input(), None);
         }
         for report in [
@@ -298,7 +321,7 @@ mod tests {
             "data;3;YWJjCg==;unknown-unit",
         ] {
             t.advance(format!("\x1b]777;trident;prompt-input;{report}\x07").as_bytes());
-            assert_eq!(t.take_prompt_input(), None);
+            assert_eq!(t.take_prompt_input(), Some(PromptInput::Rejected));
         }
         t.advance(b"\x1b]133;A\x07");
         assert!(!t.has_prompt_input_adapter());
@@ -355,7 +378,13 @@ mod tests {
             )
             .as_bytes(),
         );
-        assert_eq!(t.take_prompt_input(), Some((text.clone(), 45)));
+        assert_eq!(
+            t.take_prompt_input(),
+            Some(PromptInput::Snapshot {
+                text: text.clone(),
+                cursor: 45
+            })
+        );
         check(&t, &text, 0, 43, -4);
         check(&t, &text, 1, 0, -2);
         // Scalar editors can also have a cursor between the base and mark.
@@ -376,5 +405,23 @@ mod tests {
         check(&t, "\u{301}abc", 0, 2, -3);
         check(&t, "\u{301}abc", 0, 1, -4);
         check(&t, "\u{301}abc", 0, 8, 0);
+    }
+
+    #[test]
+    fn oversized_reply_completes_before_a_short_valid_reply() {
+        let mut t = Terminal::new(44, 5);
+        t.advance(
+            format!(
+                "\x1b]777;trident;prompt-input;data;49152;{};scalar\x07",
+                STANDARD.encode(format!("{}\n", "a".repeat(49152)))
+            )
+            .as_bytes(),
+        );
+        assert!(
+            t.take_prompt_input().is_some(),
+            "a rejected reply must still complete the pending query"
+        );
+        t.advance(b"\x1b]777;trident;prompt-input;data;3;YWJjCg==;scalar\x07");
+        assert!(t.take_prompt_input().is_some());
     }
 }

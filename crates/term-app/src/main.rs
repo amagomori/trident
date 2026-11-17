@@ -3926,7 +3926,7 @@ impl App {
     fn finish_prompt_input(&mut self) {
         let allowed = self.prompt_click_allowed();
         let Some(s) = &mut self.session else { return };
-        let Some((text, cursor)) = s.term.take_prompt_input() else {
+        let Some(reply) = s.term.take_prompt_input() else {
             return;
         };
         let Some((point, queued)) = s.input_query.finish() else {
@@ -3934,6 +3934,7 @@ impl App {
         };
         let mut bytes = Vec::new();
         if allowed
+            && let term_core::PromptInput::Snapshot { text, cursor } = reply
             && let Some(point) = point
             && let Some(click) = s.term.prompt_click_input(point, &text, cursor)
         {
