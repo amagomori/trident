@@ -708,7 +708,10 @@ impl Terminal {
                     self.shell.input_writes.clear();
                     (self.shell.prompt_line, self.shell.input_start) = (Some(line), None);
                 }
-                b"B" => self.shell.input_start = Some((line, col)),
+                b"B" => {
+                    self.erase_input_writes(self.cursor.row, 0, col);
+                    self.shell.input_start = Some((line, col));
+                }
                 _ => {}
             }
             return;
@@ -728,7 +731,10 @@ impl Terminal {
                 self.shell.prompt_line = Some(line);
                 self.shell.input_start = None;
             }
-            b"B" => self.shell.input_start = Some((line, col)),
+            b"B" => {
+                self.erase_input_writes(self.cursor.row, 0, col);
+                self.shell.input_start = Some((line, col));
+            }
             b"C" if self.shell.zone != Zone::Output => {
                 let prompt_line = self.shell.prompt_line.take().unwrap_or(line);
                 let (input_line, input_col) = self
