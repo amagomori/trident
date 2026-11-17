@@ -2808,6 +2808,131 @@ fn prompt_click_counts_wide_characters_once_and_follows_soft_wraps() {
 }
 
 #[test]
+fn prompt_click_replays_native_readline_erased_margin_and_real_space_controls() {
+    let fixtures: [(&[u8], bool, isize); 6] = [
+        (
+            include_bytes!("../tests/fixtures/readline/bash32-wide.bin"),
+            true,
+            -40,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash53-wide.bin"),
+            true,
+            -40,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash32-typed-space.bin"),
+            false,
+            -41,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash53-typed-space.bin"),
+            false,
+            -41,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash32-ascii.bin"),
+            false,
+            -41,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash53-ascii.bin"),
+            false,
+            -41,
+        ),
+    ];
+    for (bytes, padding, first_row_delta) in fixtures {
+        for scrollback in [0, 100] {
+            for chunk in [1, 7, bytes.len()] {
+                let mut t = Terminal::new(44, 34);
+                t.set_scrollback_limit(scrollback);
+                for bytes in bytes.chunks(chunk) {
+                    t.advance(bytes);
+                }
+                assert_eq!(t.shell.input_start, Some((t.history, 2)));
+                let wide = t.viewport_row(1).cells[0].c == '日';
+                assert_eq!(t.cursor_position(), Some((1, if wide { 8 } else { 5 })));
+                assert_eq!(click(&t, 0, 8), Some(PromptClick::Move(first_row_delta)));
+                assert_eq!(
+                    t.viewport_row(0).cells[43].flags.contains(Flags::WIDE_WRAP),
+                    padding
+                );
+                if wide {
+                    for (col, delta) in [(0, -5), (1, -5), (2, -4), (5, -3), (8, 0)] {
+                        assert_eq!(click(&t, 1, col), Some(PromptClick::Move(delta)));
+                    }
+                    assert_eq!(
+                        click(&t, 0, 43),
+                        Some(PromptClick::Move(if padding { -5 } else { -6 }))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn prompt_click_erased_margin_requires_pending_wide_wrap_provenance() {
+    let prefix = "\x1b]133;A\x07$ \x1b]133;B\x07abc";
+    // In six columns, a printed real space at the margin remains editable.
+    for (paint, padding, delta) in [
+        (" 日x", false, -6),
+        (" \x1b[K日x", true, -5),
+        // An erased trailing real space still holds the editable end cursor.
+        (" \x1b[K", false, -4),
+        // Reprinting the erased space restores its occupancy.
+        (" \x1b[K\r\x1b[5C 日x", false, -6),
+        // Erasing a real margin space after cursor motion is not Readline's
+        // pending-wrap placeholder, even with an otherwise identical grid.
+        (" \r\x1b[5C\x1b[K\r\n日x", false, -6),
+        // ASCII after the erased space cannot establish wide-wrap padding.
+        (" \x1b[Kxyz", false, -7),
+        // Erasing a non-space at the margin does not prove a placeholder.
+        ("Z\x1b[K日x", false, -6),
+    ] {
+        for chunk in [1, 100] {
+            let mut t = Terminal::new(6, 4);
+            for bytes in format!("{prefix}{paint}").as_bytes().chunks(chunk) {
+                t.advance(bytes);
+            }
+            assert_eq!(
+                t.viewport_row(0).cells[5].flags.contains(Flags::WIDE_WRAP),
+                padding,
+                "{paint:?}"
+            );
+            // Explicit CR/LF is not a soft wrap; it must not be guessed across.
+            let expected = if paint.contains('\n') {
+                None
+            } else {
+                Some(PromptClick::Move(delta))
+            };
+            assert_eq!(click(&t, 0, 2), expected, "{paint:?}");
+        }
+    }
+    // Erasing real spaces within the row keeps their cursor positions.
+    let t = term(
+        20,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07ab  日x  \x1b[1;5H\x1b[2X\x1b[1;12H",
+    );
+    assert_eq!(click(&t, 0, 2), Some(PromptClick::Move(-8)));
+    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-5)));
+    assert_eq!(click(&t, 0, 19), Some(PromptClick::Move(0)));
+
+    // Wide suggestions beyond the erased margin must not be accepted by Right.
+    let t = term(6, 4, &format!("{prefix} \x1b[K\x1b[90m日x\x1b[m\x1b[1;6H"));
+    assert_eq!(click(&t, 1, 5), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 0, 2), Some(PromptClick::Move(-3)));
+
+    // A later real-space repaint replaces the padding marker and its meaning.
+    let mut t = term(6, 4, &format!("{prefix} \x1b[K日x"));
+    t.advance(b"\x1b[1;6H ");
+    t.advance("日x".as_bytes());
+    assert!(!t.viewport_row(0).cells[5].flags.contains(Flags::WIDE_WRAP));
+    assert_eq!(click(&t, 0, 2), Some(PromptClick::Move(-6)));
+}
+
+#[test]
 fn prompt_click_stops_before_a_greyed_autosuggestion() {
     // zsh-autosuggestions: typed `echo hel`, suggestion `lo world` in fg=8, cursor
     // moved back to the end of the typed text.

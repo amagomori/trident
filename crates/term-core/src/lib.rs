@@ -2225,6 +2225,33 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn put_tracked_char(&mut self, c: char) {
+        // Readline prints a last-column placeholder, erases it with EL while
+        // wrap is still pending, then prints the wide glyph on the next row.
+        // Preserve that erased/unwritten provenance as ordinary wide-wrap
+        // padding. A printed space is still occupied and must remain input;
+        // blanks elsewhere, or after cursor motion cancels pending wrap, do not
+        // establish this boundary. Keep this off the untracked output path.
+        if self.shell.zone == Zone::Input
+            && !self.alt_active
+            && self.cursor.pending_wrap
+            && self.modes.autowrap
+            && self.print_state.last() == Some(' ')
+            && unicode_width::UnicodeWidthChar::width(c) == Some(2)
+        {
+            let (row, col) = (self.cursor.row, self.cursor.col);
+            let line = self.history + row as u64;
+            if self.screen().lines[row].cells[col].c == ' '
+                && !self
+                    .shell
+                    .input_writes
+                    .iter()
+                    .any(|(written, cols)| *written == line && cols.contains(&col))
+            {
+                self.lines_mut()[row].cells[col]
+                    .flags
+                    .insert(Flags::WIDE_WRAP);
+            }
+        }
         self.put_char_cells(c, true)
     }
 
