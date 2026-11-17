@@ -374,7 +374,26 @@ impl Terminal {
             return None;
         }
         let cursor_line = self.history + self.cursor.row as u64;
-        if self.shell.click_events {
+        // Some click-reporting line editors (including fish 4) index their rendered
+        // characters with the reported *cell* column. Wide/combining text then lands
+        // at the wrong character, or even inside a grapheme. Keep SGR coordinates
+        // honest; use our character-aware cursor-key path for Unicode input instead.
+        let unicode_input = self.shell.click_events
+            && self.shell.input_start.is_some_and(|(start, _)| {
+                if self.shell.zone != Zone::Input || start < self.first_line() {
+                    return false;
+                }
+                let end = self.soft_wrap_end(start);
+                (start..=end).contains(&point.line)
+                    && (start..=end).contains(&cursor_line)
+                    && (start..=end).any(|line| {
+                        self.line(line)
+                            .cells
+                            .iter()
+                            .any(|cell| !cell.c.is_ascii() || cell.flags.contains(Flags::GRAPHEME))
+                    })
+            });
+        if self.shell.click_events && !unicode_input {
             let first = self
                 .shell
                 .prompt_line

@@ -1,0 +1,106 @@
+use std::time::{Duration, Instant};
+use term_core::Point;
+
+pub const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+
+/// Do not send the first click of a word/line selection to the shell. A key typed
+/// before the multi-click deadline flushes the pending move before that key.
+#[derive(Default)]
+pub struct ClickToMove {
+    pressed: Option<Point>,
+    pending: Option<(Instant, Point)>,
+}
+
+impl ClickToMove {
+    pub fn press(&mut self, point: Option<Point>, clicks: u8) -> Option<Point> {
+        self.pressed = point.filter(|_| clicks == 1);
+        let previous = self.take();
+        previous.filter(|_| clicks == 1)
+    }
+
+    pub fn release(&mut self, deadline: Instant) {
+        self.pending = self.pressed.take().map(|point| (deadline, point));
+    }
+
+    pub fn drag(&mut self, point: Point) {
+        if self.pressed.is_some_and(|start| start != point) {
+            self.pressed = None;
+        }
+    }
+
+    pub fn cancel(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        self.pending.map(|(deadline, _)| deadline)
+    }
+
+    pub fn take_ready(&mut self, now: Instant) -> Option<Point> {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            self.take()
+        } else {
+            None
+        }
+    }
+
+    pub fn take(&mut self) -> Option<Point> {
+        self.pending.take().map(|(_, point)| point)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn word_and_line_selection_never_send_the_initial_click() {
+        let point = Point { line: 0, col: 8 };
+        for clicks in [2, 3] {
+            let mut move_click = ClickToMove::default();
+            let start = Instant::now();
+            for n in 1..=clicks {
+                let at = start + Duration::from_millis(50 * n as u64);
+                assert_eq!(move_click.press(Some(point), n), None);
+                move_click.release(at + MULTI_CLICK_INTERVAL);
+                assert_eq!(move_click.take_ready(at), None);
+            }
+            assert_eq!(move_click.take_ready(start + Duration::from_secs(1)), None);
+            assert_eq!(move_click.take(), None); // typing X cannot flush a move
+        }
+    }
+
+    #[test]
+    fn single_click_fires_at_deadline_or_before_the_next_key_once() {
+        let point = Point { line: 0, col: 8 };
+        let deadline = Instant::now() + MULTI_CLICK_INTERVAL;
+        let mut click = ClickToMove::default();
+        click.press(Some(point), 1);
+        click.release(deadline);
+        assert_eq!(click.take_ready(deadline - Duration::from_millis(1)), None);
+        assert_eq!(click.take_ready(deadline), Some(point));
+        assert_eq!(click.take(), None);
+        click.press(Some(point), 1);
+        click.release(deadline);
+        assert_eq!(click.take(), Some(point)); // flush before typing
+        assert_eq!(click.take_ready(deadline), None);
+    }
+
+    #[test]
+    fn drag_and_context_change_cancel_but_a_separate_click_flushes() {
+        let point = Point { line: 0, col: 8 };
+        let next = Point { line: 0, col: 9 };
+        let deadline = Instant::now() + MULTI_CLICK_INTERVAL;
+        let mut click = ClickToMove::default();
+        click.press(Some(point), 1);
+        click.drag(next);
+        click.release(deadline);
+        assert_eq!(click.take(), None);
+        click.press(Some(point), 1);
+        click.release(deadline);
+        assert_eq!(click.press(Some(next), 1), Some(point));
+        click.release(deadline);
+        click.cancel(); // focus/tab change
+        assert_eq!(click.take_ready(deadline), None);
+    }
+}

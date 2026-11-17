@@ -26,6 +26,7 @@ mod present_macos;
 #[cfg(target_os = "linux")]
 mod present_wayland;
 mod progress;
+mod prompt_click;
 mod pty;
 mod search;
 #[cfg(any(target_os = "macos", test))]
@@ -1110,8 +1111,7 @@ struct App {
     /// Button held while a program tracks the mouse, for drag reports.
     reported_button: Option<ReportButton>,
     last_click: Option<(Instant, Point, u8)>,
-    /// Where a plain single left press landed, until a drag moves off it.
-    click_to_move: Option<Point>,
+    click_to_move: prompt_click::ClickToMove,
     scroll_accum: f64,
     clipboard: clipboard::Clipboard,
     /// Clipboard text waiting for the user to confirm (paste protection).
@@ -1205,7 +1205,7 @@ impl App {
             ledger_click: false,
             reported_button: None,
             last_click: None,
-            click_to_move: None,
+            click_to_move: prompt_click::ClickToMove::default(),
             scroll_accum: 0.0,
             clipboard: clipboard::Clipboard::default(),
             pending_paste: None,
@@ -1722,6 +1722,7 @@ impl App {
         self.left_down = false;
         self.ledger_click = false;
         self.last_click = None;
+        self.click_to_move.cancel();
         self.reported_button = None;
         s.ime_cursor_area = None;
         s.window
@@ -2455,6 +2456,7 @@ impl App {
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
+        self.flush_prompt_click();
         let Some(s) = &mut self.session else { return };
         if let Some(log) = &mut s.latency {
             log.input(Instant::now());
@@ -3208,6 +3210,7 @@ impl App {
         let pressed = state == ElementState::Pressed;
         if button == MouseButton::Left {
             if pressed && !self.left_down && self.click_ledger() {
+                self.click_to_move.cancel();
                 self.ledger_click = true;
                 return;
             }
@@ -3222,10 +3225,12 @@ impl App {
             || self.hover_link(),
         ) {
             Some(links::MouseAction::Release) => {
+                self.click_to_move.cancel();
                 self.session.as_mut().unwrap().link_pressed = false;
                 return;
             }
             Some(links::MouseAction::Open(link)) => {
+                self.click_to_move.cancel();
                 self.session.as_mut().unwrap().link_pressed = true;
                 links::open(link.uri);
                 return;
@@ -3239,12 +3244,14 @@ impl App {
             if self.options.copy_on_select {
                 self.copy(false);
             }
-            if let Some(point) = self.click_to_move.take() {
-                self.move_cursor_to(point);
+            if let Some((at, _, _)) = self.last_click {
+                self.click_to_move
+                    .release(at + prompt_click::MULTI_CLICK_INTERVAL);
             }
             return;
         }
         if self.mouse_reporting() {
+            self.click_to_move.cancel();
             let button = match button {
                 MouseButton::Left => ReportButton::Left,
                 MouseButton::Middle => ReportButton::Middle,
@@ -3261,23 +3268,31 @@ impl App {
                     return;
                 }
                 self.left_down = true;
-                self.click_to_move = None;
                 let Some((row, col)) = self.cell_at(self.mouse_pos) else {
+                    self.click_to_move.cancel();
                     return;
                 };
-                let Some(s) = &mut self.session else { return };
+                let Some(s) = &self.session else { return };
                 let point = s.term.viewport_to_point_signed(row, col);
                 // Shift is also the local-selection override in mouse-tracking apps,
                 // where double/triple clicks must still select words/lines.
                 let modified = self.modifiers.alt_key();
                 let clicks = match self.last_click.filter(|_| !modified) {
-                    Some((at, p, n)) if p == point && at.elapsed() < Duration::from_millis(400) => {
+                    Some((at, p, n))
+                        if p == point && at.elapsed() < prompt_click::MULTI_CLICK_INTERVAL =>
+                    {
                         n % 3 + 1
                     }
                     _ => 1,
                 };
                 self.last_click = (!modified).then_some((Instant::now(), point, clicks));
-                self.click_to_move = (clicks == 1 && self.modifiers.is_empty()).then_some(point);
+                if let Some(previous) = self.click_to_move.press(
+                    (self.modifiers.is_empty() && self.prompt_click_allowed()).then_some(point),
+                    clicks,
+                ) {
+                    self.move_cursor_to(previous);
+                }
+                let Some(s) = &mut self.session else { return };
                 select_at(&mut s.term, point, self.modifiers, clicks);
                 s.request_frame();
             }
@@ -3286,15 +3301,28 @@ impl App {
         }
     }
 
+    fn flush_prompt_click(&mut self) {
+        if let Some(point) = self.click_to_move.take() {
+            self.move_cursor_to(point);
+        }
+    }
+
+    fn prompt_click_allowed(&self) -> bool {
+        self.search.is_none()
+            && self.pending_paste.is_none()
+            && self.pending_close.is_none()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.composition.preedit().is_none())
+    }
+
     /// A click without a drag in the command line being edited moves the shell's cursor.
     fn move_cursor_to(&mut self, point: Point) {
-        if self.search.is_some() || self.pending_paste.is_some() || self.pending_close.is_some() {
+        if !self.prompt_click_allowed() {
             return;
         }
         let Some(s) = &self.session else { return };
-        if s.composition.preedit().is_some() {
-            return;
-        }
         let Some(click) = s.term.prompt_click(point) else {
             return;
         };
@@ -3312,9 +3340,7 @@ impl App {
         if self.left_down {
             if let (Some((row, col)), Some(s)) = (cell, &mut self.session) {
                 let point = s.term.viewport_to_point_signed(row, col);
-                if self.click_to_move.is_some_and(|start| start != point) {
-                    self.click_to_move = None;
-                }
+                self.click_to_move.drag(point);
                 s.term.update_selection(point);
                 s.request_frame();
             }
@@ -3698,6 +3724,9 @@ impl ApplicationHandler<UserEvent> for App {
             let _ = feedback.clock();
         }
         let now = Instant::now();
+        if let Some(point) = self.click_to_move.take_ready(now) {
+            self.move_cursor_to(point);
+        }
         if exit_ready(self.exit_deadline, false, now) {
             event_loop.exit();
             return;
@@ -3792,18 +3821,21 @@ impl ApplicationHandler<UserEvent> for App {
             _ => false,
         };
         self.update_ime_cursor_area();
-        let mut deadline = None;
+        let mut deadline = self.click_to_move.deadline();
         if let Some(s) = &mut self.session {
             if sync_expired(s.synchronized_since, Instant::now()) {
                 s.term.modes.synchronized_output = false;
                 s.synchronized_since = None;
                 s.window.request_redraw();
             }
-            deadline = wake_deadline(
+            let frame_deadline = wake_deadline(
                 frame_wakeup(s.redraw_at.map(|(latch, _)| latch), s.deferred),
                 s.resize.deadline,
                 s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
             );
+            if let Some(frame) = frame_deadline {
+                deadline = Some(deadline.map_or(frame, |click| click.min(frame)));
+            }
             deadline = sync_wakeup(deadline, s.output.waiting_since, s.synchronized_since);
             if let Some(flip) = s.blink_at {
                 if now >= flip {
@@ -3890,6 +3922,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
+                if !focused {
+                    self.click_to_move.cancel();
+                }
                 let changed = std::mem::replace(&mut self.focused, focused) != focused;
                 if let Some(s) = &mut self.session {
                     s.blink_since = Instant::now();
@@ -3993,6 +4028,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Ime(event) => {
+                if matches!(&event, Ime::Preedit(text, _) if !text.is_empty()) {
+                    self.click_to_move.cancel();
+                }
                 if let Some(s) = &mut self.session {
                     s.composition.update(&event);
                     if matches!(event, Ime::Enabled | Ime::Disabled) {

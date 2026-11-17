@@ -2978,6 +2978,41 @@ fn prompt_click_reports_clicks_when_the_prompt_asks_for_them() {
 }
 
 #[test]
+fn prompt_click_reports_fall_back_to_keys_for_unicode_input() {
+    // Native fish's report handler treats a screen column as an index into its
+    // character array. Never feed wide spacers or combining boundaries to it.
+    let t = term(
+        40,
+        4,
+        "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: 日本語abc",
+    );
+    for (col, delta) in [(5, -6), (6, -5), (7, -5), (8, -4), (10, -3), (11, -2)] {
+        assert_eq!(click(&t, 0, col), Some(PromptClick::Move(delta)), "{col}");
+    }
+    let t = term(
+        40,
+        4,
+        "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: e\u{301}abc",
+    );
+    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-3)));
+    let t = term(
+        40,
+        4,
+        "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: 😀abc",
+    );
+    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-4)));
+    assert_eq!(click(&t, 0, 6), Some(PromptClick::Move(-3)));
+
+    let t = term(
+        10,
+        4,
+        "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: 日本語abc",
+    );
+    assert_eq!(click(&t, 0, 7), Some(PromptClick::Move(-5)));
+    assert_eq!(click(&t, 1, 1), Some(PromptClick::Move(-2)));
+}
+
+#[test]
 fn prompt_click_works_without_scrollback() {
     let mut t = Terminal::new(20, 4);
     t.set_scrollback_limit(0);

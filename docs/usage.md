@@ -104,7 +104,11 @@ shell's cursor there by sending Left/Right arrow keys, as in Ghostty and kitty. 
 soft-wrapped line holding the cursor counts, and a click past the end of the text moves to its
 end. Greyed autosuggestion text (zsh-autosuggestions, fish) past the input isn't part of it, so a
 click there leaves the suggestion unaccepted. A prompt that marks itself
-`OSC 133 ; A ; click_events=1` gets the click as an SGR mouse report instead.
+`OSC 133 ; A ; click_events=1` gets the click as an SGR mouse report instead for ASCII
+input; Unicode input uses cursor keys to preserve wide-character and combining boundaries.
+Single-click movement waits briefly for a possible double/triple-click, so selecting a word
+or line leaves the shell's cursor unchanged. Typing after a single click moves first, without
+waiting for that interval.
 
 ## Paste
 
