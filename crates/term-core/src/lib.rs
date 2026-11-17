@@ -448,7 +448,17 @@ impl Terminal {
                         self.line(line)
                             .cells
                             .iter()
-                            .skip(if line == start { start_col } else { 0 })
+                            .enumerate()
+                            .filter(|(col, _)| {
+                                line != start
+                                    || *col >= start_col
+                                    || self
+                                        .shell
+                                        .input_writes
+                                        .iter()
+                                        .any(|(row, cols)| *row == line && cols.contains(col))
+                            })
+                            .map(|(_, cell)| cell)
                             .any(|cell| !cell.c.is_ascii() || cell.flags.contains(Flags::GRAPHEME))
                     })
             });
@@ -694,7 +704,10 @@ impl Terminal {
         if self.max_scrollback == 0 {
             // No command history, but clicks in the prompt still need its bounds.
             match mark {
-                b"A" => (self.shell.prompt_line, self.shell.input_start) = (Some(line), None),
+                b"A" => {
+                    self.shell.input_writes.clear();
+                    (self.shell.prompt_line, self.shell.input_start) = (Some(line), None);
+                }
                 b"B" => self.shell.input_start = Some((line, col)),
                 _ => {}
             }

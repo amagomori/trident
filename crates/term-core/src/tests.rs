@@ -3018,6 +3018,33 @@ fn prompt_click_reports_ascii_input_after_a_unicode_prompt() {
 }
 
 #[test]
+fn prompt_click_reports_fall_back_for_leading_combining_input() {
+    for prompt in ["$ ", "界"] {
+        for scrollback in [0, 100] {
+            let mut t = Terminal::new(40, 4);
+            t.set_scrollback_limit(scrollback);
+            t.advance(
+                format!("\x1b]133;A;click_events=1\x07{prompt}\x1b]133;B\x07\u{301}abc").as_bytes(),
+            );
+            let (_, start_col) = t.shell.input_start.unwrap();
+            assert_eq!(click(&t, 0, start_col + 1), Some(PromptClick::Move(-2)));
+            // Once the marked cell is erased, a Unicode prompt is still excluded.
+            t.advance(
+                format!("\r\x1b[2K\x1b]133;A;click_events=1\x07{prompt}\x1b]133;B\x07abc")
+                    .as_bytes(),
+            );
+            assert_eq!(
+                click(&t, 0, start_col + 1),
+                Some(PromptClick::Report {
+                    row: 0,
+                    col: start_col + 1
+                })
+            );
+        }
+    }
+}
+
+#[test]
 fn prompt_click_reports_fall_back_to_keys_for_unicode_input() {
     // Native fish's report handler treats a screen column as an index into its
     // character array. Never feed wide spacers or combining boundaries to it.
