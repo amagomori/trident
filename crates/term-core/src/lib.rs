@@ -33,7 +33,7 @@ mod osc;
 pub use osc::{ClipboardRequest, WorkingDirectory};
 mod perform;
 mod prompt_input;
-pub use prompt_input::PromptInput;
+pub use prompt_input::{PromptInput, PromptInputContext};
 mod reflow;
 mod rerun;
 
@@ -69,6 +69,7 @@ struct ShellState {
     track_input: bool,
     input_writes: Vec<(u64, std::ops::Range<usize>)>,
     prompt_input: prompt_input::State,
+    prompt_generation: u64,
     /// The prompt asked for clicks as SGR mouse reports (`OSC 133 ; A ; click_events=1`).
     click_events: bool,
     commands: VecDeque<Command>,
@@ -512,47 +513,41 @@ impl Terminal {
             return None;
         }
         let cursor_line = self.history + self.cursor.row as u64;
-        // Some click-reporting line editors (including fish 4) index their rendered
-        // characters with the reported *cell* column. Wide/combining text then lands
-        // at the wrong character, or even inside a grapheme. Keep SGR coordinates
-        // honest; use our character-aware cursor-key path for Unicode input instead.
-        let unicode_input = self.shell.click_events
-            && self.shell.input_start.is_some_and(|(start, start_col)| {
-                if self.shell.zone != Zone::Input || start < self.first_line() {
-                    return false;
-                }
-                let end = self.soft_wrap_end(start);
-                (start..=end).contains(&point.line)
-                    && (start..=end).contains(&cursor_line)
-                    && (start..=end).any(|line| {
-                        self.line(line)
-                            .cells
-                            .iter()
-                            .enumerate()
-                            .filter(|(col, _)| {
-                                line != start
-                                    || *col >= start_col
-                                    || self
-                                        .shell
-                                        .input_writes
-                                        .iter()
-                                        .any(|(row, cols)| *row == line && cols.contains(col))
-                            })
-                            .map(|(_, cell)| cell)
-                            .any(|cell| !cell.c.is_ascii() || cell.flags.contains(Flags::GRAPHEME))
+        if self.shell.click_events {
+            // Unadapted native editors can index SGR columns as characters and
+            // omit combining scalars. Only a complete ASCII soft-wrap span is safe.
+            let (start, start_col) = self.shell.input_start?;
+            if self.shell.zone != Zone::Input || start < self.first_line() {
+                return None;
+            }
+            let end = self.soft_wrap_end(start);
+            if !(start..=end).contains(&cursor_line)
+                || self.shell.input_writes.iter().any(|(row, _)| *row > end)
+                || (start..=end).any(|line| {
+                    self.line(line).cells.iter().enumerate().any(|(col, cell)| {
+                        (line != start
+                            || col >= start_col
+                            || self
+                                .shell
+                                .input_writes
+                                .iter()
+                                .any(|(row, cols)| *row == line && cols.contains(&col)))
+                            && (!cell.c.is_ascii() || cell.flags.contains(Flags::GRAPHEME))
                     })
-            });
-        if self.shell.click_events && !unicode_input {
+                })
+            {
+                return None;
+            }
             let first = self
                 .shell
                 .prompt_line
                 .unwrap_or(cursor_line)
                 .min(cursor_line);
-            return (point.line >= first.max(self.history)
-                && point.line <= self.soft_wrap_end(cursor_line))
-            .then(|| PromptClick::Report {
-                row: (point.line - self.history) as usize,
-                col: point.col.min(self.cols - 1),
+            return (point.line >= first.max(self.history) && point.line <= end).then(|| {
+                PromptClick::Report {
+                    row: (point.line - self.history) as usize,
+                    col: point.col.min(self.cols - 1),
+                }
             });
         }
         let (start_line, start_col) = self.shell.input_start?;
@@ -1037,6 +1032,7 @@ impl Terminal {
         self.track_command(mark, args);
         let flag = match mark {
             b"A" => {
+                self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
                 self.shell.zone = Zone::Prompt;
                 self.shell.prompt_input = prompt_input::State::default();
                 self.shell.click_events = args.contains(&&b"click_events=1"[..]);
@@ -1047,6 +1043,7 @@ impl Terminal {
                 Some(RowFlags::PROMPT)
             }
             b"C" => {
+                self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
                 self.shell.input_writes.clear();
                 let current = self.history + self.cursor.row as u64;
                 self.shell.output_ends.retain(|end| end.line != current);
@@ -1054,6 +1051,7 @@ impl Terminal {
                 Some(RowFlags::OUTPUT_START)
             }
             b"D" => {
+                self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
                 let command_ran = self.shell.zone == Zone::Output;
                 self.shell.zone = Zone::None;
                 self.reset_input_modes();
@@ -1148,6 +1146,7 @@ impl Terminal {
                 track_input: false,
                 input_writes: Vec::new(),
                 prompt_input: prompt_input::State::default(),
+                prompt_generation: 0,
                 click_events: false,
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
@@ -1569,6 +1568,7 @@ impl Terminal {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
         self.invalidate_output_ends();
         self.selection = None;
         self.tracked.extend_from_slice(points);
@@ -2647,6 +2647,7 @@ impl Terminal {
         if enable == self.alt_active {
             return;
         }
+        self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
         self.invalidate_output_ends();
         self.prompt_redraw = false;
         if enable {

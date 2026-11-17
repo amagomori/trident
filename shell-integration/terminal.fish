@@ -17,12 +17,11 @@ if status is-interactive; and not set -q _terminal_integration_loaded
         bind --mode $mode \e\[1114109u _terminal_prompt_input
     end
 
-    functions -c fish_prompt _terminal_original_fish_prompt
     function _terminal_restore_status
         return $argv[1]
     end
-    function fish_prompt
-        set -l exit_code $status
+    function _terminal_render_prompt
+        set -l exit_code $argv[1]
         if test $_terminal_native_marks = 0
             printf '\e]133;A\a'
             printf '\e]7;file://%s%s\a' $hostname (string escape --style=url -- $PWD)
@@ -30,10 +29,24 @@ if status is-interactive; and not set -q _terminal_integration_loaded
         _terminal_restore_status $exit_code
         _terminal_original_fish_prompt
         printf '\e]777;trident;prompt-input;ready\a'
-        # Native fish announces A/click_events but does not mark the input origin.
-        # The adapter needs an explicit B after the complete painted prompt.
+        # Keep the adapter boundary after the entire prompt, even on native fish.
         printf '\e]133;B\a'
     end
+    function _terminal_refresh_prompt --on-event fish_prompt
+        set -l exit_code $status
+        # Themes and ordinary function definitions can replace fish_prompt.
+        set -l definition (functions fish_prompt | string collect)
+        if test "$definition" != "$_terminal_wrapped_prompt"
+            functions -e _terminal_original_fish_prompt
+            functions -c fish_prompt _terminal_original_fish_prompt
+            function fish_prompt
+                _terminal_render_prompt $status
+            end
+            set -g _terminal_wrapped_prompt (functions fish_prompt | string collect)
+        end
+        return $exit_code
+    end
+    _terminal_refresh_prompt
     function _terminal_preexec --on-event fish_preexec
         if test $_terminal_native_marks = 0
             printf '\e]133;C\a'

@@ -26,7 +26,57 @@ pub enum PromptInput {
     Rejected,
 }
 
+/// Opaque editor/grid identity for pairing a single-flight query with its reply.
+/// A changed prompt, cursor, size or painted cell invalidates a pending target.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PromptInputContext {
+    generation: u64,
+    size: (usize, usize),
+    start: (u64, usize),
+    cursor: Point,
+    rows: Vec<(crate::RowFlags, Vec<crate::Cell>)>,
+}
+
 impl Terminal {
+    /// Captures the current adapter's editor/grid identity, without its reply.
+    /// Compare again before moving; never reuse an untagged reply across contexts.
+    ///
+    /// ```
+    /// use term_core::Terminal;
+    /// let mut term = Terminal::new(44, 5);
+    /// term.advance(b"\x1b]133;A\x07> \x1b]777;trident;prompt-input;ready\x07\x1b]133;B\x07abc");
+    /// let original = term.prompt_input_context();
+    /// assert!(original.is_some());
+    /// assert_eq!(original, term.prompt_input_context());
+    /// term.resize(46, 5);
+    /// assert_ne!(original, term.prompt_input_context());
+    /// ```
+    pub fn prompt_input_context(&self) -> Option<PromptInputContext> {
+        if !self.has_prompt_input_adapter() {
+            return None;
+        }
+        let start = self.shell.input_start?;
+        let last = self.history + self.rows as u64 - 1;
+        if start.0 < self.first_line() || start.0 > last {
+            return None;
+        }
+        Some(PromptInputContext {
+            generation: self.shell.prompt_generation,
+            size: (self.cols, self.rows),
+            start,
+            cursor: Point {
+                line: self.history + self.cursor.row as u64,
+                col: self.cursor.col,
+            },
+            rows: (start.0..=last)
+                .map(|line| {
+                    let row = self.line(line);
+                    (row.flags, row.cells.clone())
+                })
+                .collect(),
+        })
+    }
+
     pub(crate) fn prompt_input_report(&mut self, args: &[&[u8]]) {
         match args {
             [b"ready"] if !self.alt_active => self.shell.prompt_input.ready = true,

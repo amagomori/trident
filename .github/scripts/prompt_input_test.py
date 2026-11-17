@@ -45,6 +45,7 @@ def exercise(shell, kind):
         pid, fd = pty.fork()
         if pid == 0:
             os.environ.update(TERM="xterm-256color", LANG="C.UTF-8", LC_ALL="C.UTF-8",
+                              TERM_PROGRAM="trident",
                               ZDOTDIR=directory, XDG_CONFIG_HOME=directory,
                               XDG_DATA_HOME=directory)
             os.execv(shell, args)
@@ -70,6 +71,23 @@ def exercise(shell, kind):
 
         try:
             until(lambda output: READY in output and b"\x1b]133;B\x07" in output)
+            if kind == "fish":
+                # Ordinary themes replace fish_prompt after integration is sourced.
+                # Each new prompt must freshly advertise the adapter after A and
+                # the complete user prompt, without losing the command's status.
+                for index, status in enumerate([1, 0, 1]):
+                    resource = f'source "{integration}"; ' if index == 1 else ""
+                    command = ("function fish_prompt; set -l saved $status; "
+                               "printf 'replacement:%s> ' $saved; end; "
+                               + resource + ("false" if status else "true"))
+                    os.write(fd, command.encode() + b"\r")
+                    prompt = f"replacement:{status}> ".encode()
+                    output = until(lambda output: prompt in output and READY in output
+                                   and b"\x1b]133;B\x07" in output)
+                    assert 0 <= output.rfind(b"\x1b]133;A") < output.rfind(prompt) < output.rfind(READY), output
+                    assert output.rfind(READY) < output.rfind(b"\x1b]133;B\x07"), output
+                    assert output.count(READY) == 1, output
+                print(f"PASS fish ({shell}): 3 prompt replacements preserve fresh readiness and status")
             cases = ["", ": abc", ": 日本😀e\u0301    ", ": " + "a" * 39 + "日本😀bc", ": a\nb"]
             for text in cases:
                 # Clear the entire editor (Ctrl-U is line-local in fish). Paste

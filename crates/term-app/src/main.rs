@@ -2533,7 +2533,7 @@ impl App {
         let responses = pane.term.take_responses();
         pane.pty.write(&responses);
         if pane.term.take_prompt_input().is_some()
-            && let Some((_, queued)) = pane.input_query.finish()
+            && let Some((_, queued)) = pane.input_query.finish(None)
         {
             pane.pty.write(&queued);
         }
@@ -3127,6 +3127,10 @@ impl App {
 
     fn write_input(&mut self, bytes: &[u8]) {
         self.flush_prompt_click();
+        self.write_input_after_click(bytes);
+    }
+
+    fn write_input_after_click(&mut self, bytes: &[u8]) {
         if self.pager_error.is_some() {
             self.clear_pager_error();
         }
@@ -4116,7 +4120,8 @@ impl App {
         let Some(reply) = s.term.take_prompt_input() else {
             return;
         };
-        let Some((point, queued)) = s.input_query.finish() else {
+        let context = s.term.prompt_input_context();
+        let Some((point, queued)) = s.input_query.finish(context.as_ref()) else {
             return;
         };
         let mut bytes = Vec::new();
@@ -4129,7 +4134,7 @@ impl App {
         }
         bytes.extend_from_slice(&queued);
         if !bytes.is_empty() {
-            self.write_input(&bytes);
+            self.write_input_after_click(&bytes);
         }
     }
 
@@ -4149,8 +4154,8 @@ impl App {
             return;
         }
         let Some(s) = &mut self.session else { return };
-        if s.term.has_prompt_input_adapter() {
-            if s.input_query.begin(point, Instant::now()) {
+        if let Some(context) = s.term.prompt_input_context() {
+            if s.input_query.begin(point, context, Instant::now()) {
                 s.term.take_prompt_input(); // ignore unsolicited/stale data
                 s.pty.write(prompt_click::INPUT_QUERY);
             }

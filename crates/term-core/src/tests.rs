@@ -3018,7 +3018,7 @@ fn prompt_click_reports_ascii_input_after_a_unicode_prompt() {
 }
 
 #[test]
-fn prompt_click_reports_fall_back_for_leading_combining_input() {
+fn prompt_click_unadapted_reports_reject_leading_combining_input() {
     for prompt in ["$ ", "界"] {
         for scrollback in [0, 100] {
             let mut t = Terminal::new(40, 4);
@@ -3027,7 +3027,7 @@ fn prompt_click_reports_fall_back_for_leading_combining_input() {
                 format!("\x1b]133;A;click_events=1\x07{prompt}\x1b]133;B\x07\u{301}abc").as_bytes(),
             );
             let (_, start_col) = t.shell.input_start.unwrap();
-            assert_eq!(click(&t, 0, start_col + 1), Some(PromptClick::Move(-2)));
+            assert_eq!(click(&t, 0, start_col + 1), None);
             // Once the marked cell is erased, a Unicode prompt is still excluded.
             t.advance(
                 format!("\r\x1b[2K\x1b]133;A;click_events=1\x07{prompt}\x1b]133;B\x07abc")
@@ -3045,7 +3045,7 @@ fn prompt_click_reports_fall_back_for_leading_combining_input() {
 }
 
 #[test]
-fn prompt_click_reports_fall_back_to_keys_for_unicode_input() {
+fn prompt_click_unadapted_reports_reject_unicode_input() {
     // Native fish's report handler treats a screen column as an index into its
     // character array. Never feed wide spacers or combining boundaries to it.
     let t = term(
@@ -3053,30 +3053,52 @@ fn prompt_click_reports_fall_back_to_keys_for_unicode_input() {
         4,
         "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: 日本語abc",
     );
-    for (col, delta) in [(5, -6), (6, -5), (7, -5), (8, -4), (10, -3), (11, -2)] {
-        assert_eq!(click(&t, 0, col), Some(PromptClick::Move(delta)), "{col}");
+    for col in [5, 6, 7, 8, 10, 11] {
+        assert_eq!(click(&t, 0, col), None, "{col}");
     }
     let t = term(
         40,
         4,
         "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: e\u{301}abc",
     );
-    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-3)));
+    assert_eq!(click(&t, 0, 5), None);
     let t = term(
         40,
         4,
         "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: 😀abc",
     );
-    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-4)));
-    assert_eq!(click(&t, 0, 6), Some(PromptClick::Move(-3)));
+    assert_eq!(click(&t, 0, 5), None);
+    assert_eq!(click(&t, 0, 6), None);
 
     let t = term(
         10,
         4,
         "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: 日本語abc",
     );
-    assert_eq!(click(&t, 0, 7), Some(PromptClick::Move(-5)));
-    assert_eq!(click(&t, 1, 1), Some(PromptClick::Move(-2)));
+    assert_eq!(click(&t, 0, 7), None);
+    assert_eq!(click(&t, 1, 1), None);
+}
+
+#[test]
+fn prompt_click_adapter_loss_rejects_explicit_redraw_rows_and_missing_origin() {
+    for scrollback in [0, 100] {
+        let mut t = Terminal::new(10, 5);
+        t.set_scrollback_limit(scrollback);
+        t.advance(b"\x1b]133;A;click_events=1\x07> \x1b]777;trident;prompt-input;ready\x07\x1b]133;B\x07abc");
+        assert!(t.has_prompt_input_adapter());
+        t.advance(
+            "\r\x1b]133;A;click_events=1\x07> \x1b]133;B\x07abcdefg\r\n日本😀e\u{301}".as_bytes(),
+        );
+        assert!(!t.has_prompt_input_adapter());
+        assert!(!t.line(0).wrapped());
+        assert_eq!(click(&t, 0, 8), None);
+        assert_eq!(click(&t, 1, 1), None);
+        // The cursor can return to the first row without removing the next row.
+        t.advance(b"\x1b[1;8H");
+        assert_eq!(click(&t, 0, 8), None);
+        t.advance(b"\r\x1b]133;A;click_events=1\x07> abc");
+        assert_eq!(click(&t, 0, 3), None);
+    }
 }
 
 #[test]
