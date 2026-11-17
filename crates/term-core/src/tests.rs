@@ -2998,6 +2998,26 @@ fn prompt_click_reports_clicks_when_the_prompt_asks_for_them() {
 }
 
 #[test]
+fn prompt_click_reports_ascii_input_after_a_unicode_prompt() {
+    for prompt in ["λ> ", "日本語> ", "e\u{301}> "] {
+        let t = term(
+            40,
+            4,
+            &format!("\x1b]133;A;click_events=1\x07{prompt}\x1b]133;B\x07abc"),
+        );
+        let (_, start_col) = t.shell.input_start.unwrap();
+        assert_eq!(
+            click(&t, 0, start_col + 1),
+            Some(PromptClick::Report {
+                row: 0,
+                col: start_col + 1
+            }),
+            "{prompt:?}"
+        );
+    }
+}
+
+#[test]
 fn prompt_click_reports_fall_back_to_keys_for_unicode_input() {
     // Native fish's report handler treats a screen column as an index into its
     // character array. Never feed wide spacers or combining boundaries to it.

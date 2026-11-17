@@ -437,7 +437,7 @@ impl Terminal {
         // at the wrong character, or even inside a grapheme. Keep SGR coordinates
         // honest; use our character-aware cursor-key path for Unicode input instead.
         let unicode_input = self.shell.click_events
-            && self.shell.input_start.is_some_and(|(start, _)| {
+            && self.shell.input_start.is_some_and(|(start, start_col)| {
                 if self.shell.zone != Zone::Input || start < self.first_line() {
                     return false;
                 }
@@ -448,6 +448,7 @@ impl Terminal {
                         self.line(line)
                             .cells
                             .iter()
+                            .skip(if line == start { start_col } else { 0 })
                             .any(|cell| !cell.c.is_ascii() || cell.flags.contains(Flags::GRAPHEME))
                     })
             });
