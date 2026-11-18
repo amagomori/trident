@@ -5202,6 +5202,9 @@ impl App {
                             input::KeyEventKind::Release,
                             kitty_flags,
                             self.options.option_as_alt,
+                            self.session
+                                .as_ref()
+                                .is_some_and(|s| s.term.modes.backarrow_sends_bs),
                         ) && let Some(s) = &mut self.session
                         {
                             s.pty.write(&bytes);
@@ -5233,6 +5236,11 @@ impl App {
                     return;
                 }
                 let Some(s) = &self.session else { return };
+                // KAM (ANSI mode 2) locks out typed input; terminal shortcuts
+                // still work so the lock is always escapable.
+                if s.term.modes.keyboard_locked {
+                    return;
+                }
                 let base = event.key_without_modifiers();
                 let kind = if event.repeat {
                     input::KeyEventKind::Repeat
@@ -5247,6 +5255,7 @@ impl App {
                         self.modifiers,
                         s.term.modes.app_cursor,
                         self.options.option_as_alt,
+                        s.term.modes.backarrow_sends_bs,
                     )
                 } else {
                     input::encode_kitty_key(
@@ -5259,6 +5268,7 @@ impl App {
                         kind,
                         kitty_flags,
                         self.options.option_as_alt,
+                        s.term.modes.backarrow_sends_bs,
                     )
                 };
                 if let Some(bytes) = bytes {
@@ -5713,255 +5723,6 @@ impl ApplicationHandler<UserEvent> for App {
         if !self.session.as_ref().is_some_and(|s| s.window.id() == id) {
             self.background_window_event(event_loop, id, event);
             return;
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = id;
-        match event {
-            WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
-            #[cfg(target_os = "macos")]
-            WindowEvent::CloseRequested => match close_confirm::take_wide_close() {
-                Some(close_confirm::WideClose::Quit) => self.close_requested(event_loop),
-                Some(close_confirm::WideClose::Window) => self.close_window(event_loop),
-                None => self.close_tab(self.active_tab, event_loop),
-            },
-            #[cfg(not(target_os = "macos"))]
-            WindowEvent::CloseRequested => self.close_requested(event_loop),
-            WindowEvent::Resized(size) => {
-                self.cancel_prompt_click();
-                if let Some(search) = &mut self.search {
-                    search.dirty = true;
-                }
-                if let Some(s) = &mut self.session {
-                    s.size = size;
-                    s.renderer.resize(size.width, size.height);
-                    s.resize.schedule(Instant::now());
-                    s.window.request_redraw();
-                }
-                #[cfg(target_os = "macos")]
-                self.note_normal_frame();
-                self.update_ime_cursor_area();
-            }
-            #[cfg(target_os = "macos")]
-            WindowEvent::Moved(_) => self.note_normal_frame(),
-            WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
-            WindowEvent::Focused(focused) => {
-                if !focused {
-                    self.cancel_prompt_click();
-                }
-                self.typing_pointer.show();
-                let changed = std::mem::replace(&mut self.focused, focused) != focused;
-                if let Some(s) = &mut self.session {
-                    s.blink_since = Instant::now();
-                    if !focused {
-                        s.composition.clear();
-                        if let Some(search) = &mut self.search {
-                            search.clear_preedit();
-                        }
-                        s.ime_cursor_area = None;
-                    }
-                    if changed && s.term.modes.focus_events {
-                        s.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
-                    }
-                    s.window.request_redraw();
-                }
-            }
-            WindowEvent::Occluded(occluded) => {
-                self.occluded = occluded;
-                // wgpu acquires no drawable while the window is occluded, which includes a new
-                // window before macOS first shows it, so draw again once it is visible.
-                if !occluded && let Some(s) = &self.session {
-                    s.window.request_redraw();
-                }
-            }
-            WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
-                #[cfg(target_os = "macos")]
-                if links::command_modifier(self.modifiers) {
-                    self.sync_pointer();
-                }
-                self.refresh_link();
-            }
-            WindowEvent::DroppedFile(path) => self.dropped_file(path),
-            WindowEvent::KeyboardInput {
-                event,
-                is_synthetic,
-                ..
-            } => {
-                let held_at_focus =
-                    self.held_at_focus
-                        .observe(event.physical_key, event.state, is_synthetic);
-                let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
-                if event.state != ElementState::Pressed {
-                    // Releases reach the PTY only where the press would: not past a
-                    // dialog or search, and without write_input's scroll reset.
-                    if kitty_flags != 0
-                        && self.pending_close.is_none()
-                        && self.pending_paste.is_none()
-                        && self.search.is_none()
-                    {
-                        let base = event.key_without_modifiers();
-                        if let Some(bytes) = input::encode_kitty_key(
-                            &input::KeyEvent {
-                                key: &event.logical_key,
-                                base: &base,
-                                text: event.text.as_deref(),
-                                mods: self.modifiers,
-                            },
-                            input::KeyEventKind::Release,
-                            kitty_flags,
-                            self.options.option_as_alt,
-                        ) && let Some(s) = &mut self.session
-                        {
-                            s.pty.write(&bytes);
-                        }
-                    }
-                    return;
-                }
-                if self.pending_close.is_some() {
-                    self.confirm_close_key(&event, event_loop);
-                    return;
-                }
-                if self.pending_paste.is_some() {
-                    self.confirm_paste_key(&event);
-                    return;
-                }
-                if self.shortcut(&event, held_at_focus, event_loop) {
-                    return;
-                }
-                let find_preedit = self.search.as_ref().map(|f| f.preedit.as_str());
-                if self
-                    .session
-                    .as_ref()
-                    .is_some_and(|s| ime::holds_keys(&s.composition, find_preedit))
-                {
-                    return;
-                }
-                if self.search.is_some() {
-                    self.search_key(&event);
-                    return;
-                }
-                let Some(s) = &self.session else { return };
-                // KAM (ANSI mode 2) locks out typed input; terminal shortcuts
-                // still work so the lock is always escapable.
-                if s.term.modes.keyboard_locked {
-                    return;
-                }
-                let base = event.key_without_modifiers();
-                let kind = if event.repeat {
-                    input::KeyEventKind::Repeat
-                } else {
-                    input::KeyEventKind::Press
-                };
-                let bytes = if kitty_flags == 0 {
-                    input::encode_key(
-                        &event.logical_key,
-                        &base,
-                        event.text.as_deref(),
-                        self.modifiers,
-                        s.term.modes.app_cursor,
-                        self.options.option_as_alt,
-                    )
-                } else {
-                    input::encode_kitty_key(
-                        &input::KeyEvent {
-                            key: &event.logical_key,
-                            base: &base,
-                            text: event.text.as_deref(),
-                            mods: self.modifiers,
-                        },
-                        kind,
-                        kitty_flags,
-                        self.options.option_as_alt,
-                    )
-                };
-                if let Some(bytes) = bytes {
-                    self.write_input(&bytes);
-                    self.hide_pointer_for_typing();
-                }
-            }
-            WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
-                if self.pending_paste.is_some() || self.pending_close.is_some() {
-                    // Like typed keys, committed text never reaches the shell past the banner.
-                } else if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
-                    search.insert(&text, &mut s.term);
-                    s.scroll.reset();
-                    s.window.request_redraw();
-                } else {
-                    self.write_input(text.as_bytes());
-                }
-                self.update_ime_cursor_area();
-            }
-            WindowEvent::Ime(event) if self.search.is_some() => {
-                if let Some(search) = &mut self.search {
-                    match event {
-                        Ime::Preedit(text, cursor) => search.set_preedit(text, cursor),
-                        Ime::Disabled => search.clear_preedit(),
-                        _ => {}
-                    }
-                }
-                self.update_ime_cursor_area();
-                if let Some(s) = &self.session {
-                    s.window.request_redraw();
-                }
-            }
-            WindowEvent::Ime(event) => {
-                // X11 can report only an empty preedit at a composition boundary.
-                // That boundary still invalidates movement queued before the IME.
-                if matches!(&event, Ime::Preedit(..)) {
-                    self.cancel_prompt_click();
-                }
-                if let Some(s) = &mut self.session {
-                    s.composition.update(&event);
-                    if matches!(event, Ime::Enabled | Ime::Disabled) {
-                        s.ime_cursor_area = None;
-                    }
-                    if matches!(&event, Ime::Preedit(text, _) if !text.is_empty()) {
-                        s.term.scroll_to_bottom();
-                        s.scroll.reset();
-                    }
-                    s.window.request_redraw();
-                }
-                if let Ime::Commit(text) = event
-                    && self.pending_paste.is_none()
-                    && self.pending_close.is_none()
-                {
-                    let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
-                    let bytes = input::encode_kitty_text(&text, kitty_flags)
-                        .unwrap_or_else(|| text.as_bytes().to_vec());
-                    self.write_input(&bytes);
-                    self.hide_pointer_for_typing();
-                }
-                self.refresh_link();
-                self.update_ime_cursor_area();
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                self.typing_pointer.show();
-                if !self.tab_mouse_input(state, button, event_loop) {
-                    self.mouse_input(state, button);
-                }
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                // Hiding the pointer can report a motion event at the same position.
-                if position != self.tab_pointer {
-                    self.typing_pointer.show();
-                }
-                self.pointer_moved(position)
-            }
-            WindowEvent::CursorLeft { .. } => {
-                if self.tab_hover.take().is_some()
-                    && let Some(s) = &self.session
-                {
-                    s.window.request_redraw();
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                self.typing_pointer.show();
-                self.mouse_wheel(delta)
-            }
-            WindowEvent::RedrawRequested => {
-                self.present_frame();
-            }
-            _ => {}
         }
         self.window_event_inner(event_loop, event);
     }
