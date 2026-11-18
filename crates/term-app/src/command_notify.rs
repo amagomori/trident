@@ -1291,8 +1291,6 @@ mod tests {
         }
         assert!(kicks > 1000);
         let samples = activity.samples.load(Ordering::Relaxed) - samples;
-        // The watcher samples every 200 ms; a loaded VM can drop an iteration or two, but
-        // kicks must never raise the rate, so the upper bound stays strict.
         assert!((2..=6).contains(&samples), "{samples} samples");
         assert_eq!(activity.wakeups.load(Ordering::Relaxed), 0);
         drop(watcher);

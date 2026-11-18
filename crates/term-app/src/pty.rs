@@ -1637,7 +1637,6 @@ mod tests {
             ("LANG".to_owned(), "C.UTF-8".to_owned()),
             ("LC_ALL".to_owned(), "C.UTF-8".to_owned()),
             ("PS1".to_owned(), "$ ".to_owned()),
-            // macOS bash 3.2 prints a zsh deprecation notice before the prompt.
             (
                 "BASH_SILENCE_DEPRECATION_WARNING".to_owned(),
                 "1".to_owned(),
