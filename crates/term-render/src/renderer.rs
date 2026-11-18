@@ -358,6 +358,12 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// The surface's current `(width, height)` in physical pixels, capped at
+    /// the device limit.
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     /// Selects synchronized presentation, falling back to a supported mode.
     pub fn set_vsync(&mut self, vsync: bool) {
         let mode = present_mode(vsync);

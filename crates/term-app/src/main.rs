@@ -2714,7 +2714,13 @@ impl App {
         } else {
             0
         };
-        let (cols, rows) = grid_size(&s.window, &s.fonts, self.config.padding, s.tab_bar);
+        // The window can outgrow the GPU surface limit; cells past it can't
+        // render, so the grid is capped at the surface the renderer applied.
+        let fit = below_tab_bar(s.window.inner_size(), s.tab_bar);
+        let surface = below_tab_bar(PhysicalSize::from(s.renderer.surface_size()), s.tab_bar);
+        let fit = PhysicalSize::new(fit.width.min(surface.width), fit.height.min(surface.height));
+        let (cols, rows) =
+            grid_size_for(fit, s.window.scale_factor(), &s.fonts, self.config.padding);
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         // Native macOS tabs each size to their own window, on their own resize or once shown.
         #[cfg(not(target_os = "macos"))]
