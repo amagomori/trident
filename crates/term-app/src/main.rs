@@ -1974,6 +1974,7 @@ impl App {
     /// Remembers the active window's frame unless it is fullscreen, for `open_tab_window`.
     #[cfg(target_os = "macos")]
     fn note_normal_frame(&mut self) {
+        self.feed_window_geometry();
         let Some(s) = &self.session else { return };
         if !self
             .fullscreen_exit
@@ -1984,6 +1985,13 @@ impl App {
         if let Ok(position) = s.window.outer_position() {
             self.normal_frame = Some((position, s.size));
         }
+    }
+
+    /// Feeds the real window's geometry for XTWINOPS reports (ops 11/13/15/19).
+    #[cfg(target_os = "macos")]
+    fn feed_window_geometry(&mut self) {
+        let Some(s) = &mut self.session else { return };
+        s.term.set_window_geometry(window_geometry(&s.window));
     }
 
     /// Restores the frame of the window, the active one or a background tab's, that left
@@ -2765,7 +2773,9 @@ impl App {
         } else {
             0
         };
-        let (cols, rows) = grid_size(&s.window, &s.fonts, self.config.padding, s.tab_bar);
+        let fit = fit_size(&s.window, &s.renderer, s.tab_bar);
+        let (cols, rows) =
+            grid_size_for(fit, s.window.scale_factor(), &s.fonts, self.config.padding);
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         // Native macOS tabs each size to their own window, on their own resize or once shown.
         #[cfg(not(target_os = "macos"))]
@@ -2790,7 +2800,7 @@ impl App {
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         let covered = find_bar_rows(
-            s.window.inner_size().height.saturating_sub(s.tab_bar) as f32,
+            fit.height as f32,
             self.config.padding * s.window.scale_factor() as f32,
             s.fonts.metrics.height,
             rows,
@@ -2813,6 +2823,7 @@ impl App {
             s.pty.resize(cols, rows, cell);
             s.pty_cell = cell;
         }
+        s.term.set_window_geometry(window_geometry(&s.window));
         s.window.request_redraw();
     }
 
@@ -2932,6 +2943,23 @@ impl App {
                     }
                 }
                 ClipboardRequest::Load { .. } => {}
+            }
+        }
+        for op in s.term.take_window_ops() {
+            let term_core::WindowOp::Resize { cols, rows } = op;
+            s.pty.resize(cols, rows, s.pty_cell);
+            // Wayland answers synchronously; the granted size drives the
+            // normal resize path so a partial grant resizes the grid back.
+            if let Some(size) = s.window.request_inner_size(window_size_for(
+                (cols, rows),
+                s.window.scale_factor(),
+                &s.fonts,
+                self.config.padding,
+                s.tab_bar,
+            )) {
+                s.size = size;
+                s.renderer.resize(size.width, size.height);
+                s.resize.schedule(Instant::now());
             }
         }
         let title = s.term.take_title();
@@ -3618,7 +3646,7 @@ impl App {
                 let search = self.search.get_or_insert_with(search::Search::default);
                 if let Some(s) = &self.session {
                     search.covered_rows = find_bar_rows(
-                        s.window.inner_size().height.saturating_sub(s.tab_bar) as f32,
+                        fit_size(&s.window, &s.renderer, s.tab_bar).height as f32,
                         self.config.padding * s.window.scale_factor() as f32,
                         s.fonts.metrics.height,
                         s.term.rows(),
@@ -4507,6 +4535,36 @@ fn cursor_area(
 
 fn below_tab_bar(size: PhysicalSize<u32>, tab_bar: u32) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width, size.height.saturating_sub(tab_bar))
+}
+
+/// Grid area below the tab bar, capped at the surface the renderer applied.
+///
+/// A window can outgrow the GPU texture limit; the renderer clamps the
+/// surface, so cells past it can't render and the Find bar is drawn inside
+/// the clamped surface, not the window bottom.
+fn fit_size(window: &Window, renderer: &Renderer, tab_bar: u32) -> PhysicalSize<u32> {
+    let fit = below_tab_bar(window.inner_size(), tab_bar);
+    let surface = below_tab_bar(PhysicalSize::from(renderer.surface_size()), tab_bar);
+    PhysicalSize::new(fit.width.min(surface.width), fit.height.min(surface.height))
+}
+
+/// Window facts XTWINOPS reports answer (iconify state, position, sizes).
+fn window_geometry(window: &Window) -> term_core::WindowGeometry {
+    let position = window
+        .outer_position()
+        .map(|p| (p.x, p.y))
+        .unwrap_or_default();
+    let size = window.outer_size();
+    let screen = window
+        .current_monitor()
+        .map(|m| (m.size().width, m.size().height))
+        .unwrap_or((size.width, size.height));
+    term_core::WindowGeometry {
+        position,
+        size: (size.width, size.height),
+        screen,
+        iconic: window.is_minimized().unwrap_or(false),
+    }
 }
 
 fn grid_size(window: &Window, fonts: &Fonts, padding: f32, tab_bar: u32) -> (usize, usize) {
