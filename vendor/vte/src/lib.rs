@@ -62,6 +62,7 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
     osc_raw: Vec<u8>,
     osc_params: [(usize, usize); MAX_OSC_PARAMS],
     osc_num_params: usize,
+    raw_osc_limit: usize,
     ignoring: bool,
     partial_utf8: [u8; 4],
     partial_utf8_len: usize,
@@ -210,6 +211,13 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             State::Escape => self.advance_esc(performer, byte),
             State::EscapeIntermediate => self.advance_esc_intermediate(performer, byte),
             State::OscString => self.advance_osc_string(performer, byte),
+            State::RawOsc => self.advance_raw_osc(performer, byte),
+            State::RawOscEsc => {
+                self.end_raw_osc(performer, byte == b'\\', false);
+                self.reset_params();
+                self.state = State::Escape;
+                self.advance_esc(performer, byte);
+            },
             State::SosPmApcString => self.anywhere(performer, byte),
             State::Ground => unreachable!(),
         }
@@ -459,10 +467,56 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                         return;
                     }
                 }
+                if self.osc_num_params == 0 {
+                    if let Some(limit) = performer.raw_osc_limit(&self.osc_raw) {
+                        self.raw_osc_limit = self.osc_raw.len().saturating_add(limit);
+                        self.state = State::RawOsc;
+                    }
+                }
                 self.action_osc_put_param()
             },
             _ => self.action_osc_put(byte),
         }
+    }
+
+    fn advance_raw_osc<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        match byte {
+            0x07 | 0x18 | 0x1a => {
+                let bell = byte == 0x07;
+                self.end_raw_osc(performer, bell, bell);
+                self.state = State::Ground;
+                if !bell {
+                    performer.execute(byte);
+                }
+            },
+            0x1b => self.state = State::RawOscEsc,
+            _ if self.raw_osc_limit == 0 => (),
+            _ => {
+                let full = self.osc_raw.len() == self.raw_osc_limit;
+                #[cfg(not(feature = "std"))]
+                let full = full || self.osc_raw.is_full();
+                if full {
+                    self.raw_osc_limit = 0;
+                    self.osc_raw.truncate(self.osc_params[0].1);
+                    #[cfg(feature = "std")]
+                    self.osc_raw.shrink_to_fit();
+                } else {
+                    self.osc_raw.push(byte);
+                }
+            },
+        }
+    }
+
+    fn end_raw_osc<P: Perform>(&mut self, performer: &mut P, valid: bool, bell: bool) {
+        let (code, body) = self.osc_raw.split_at(self.osc_params[0].1);
+        let body = if valid && self.raw_osc_limit != 0 { body } else { &[] };
+        performer.osc_dispatch(&[code, body], bell);
+        self.osc_raw.clear();
+        #[cfg(feature = "std")]
+        if self.osc_raw.capacity() > 65536 {
+            self.osc_raw.shrink_to_fit();
+        }
+        self.osc_num_params = 0;
     }
 
     #[inline(always)]
@@ -774,6 +828,8 @@ enum State {
     Escape,
     EscapeIntermediate,
     OscString,
+    RawOsc,
+    RawOscEsc,
     SosPmApcString,
     #[default]
     Ground,
@@ -818,6 +874,12 @@ pub trait Perform {
     /// The previously selected handler should be notified that the DCS has
     /// terminated.
     fn unhook(&mut self) {}
+
+    /// Opt a command into raw (not semicolon-separated) OSC bodies. Dispatches
+    /// `[code, body]`, or an empty body on cancellation or overflow.
+    fn raw_osc_limit(&self, _code: &[u8]) -> Option<usize> {
+        None
+    }
 
     /// Dispatch an operating system command.
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
@@ -888,6 +950,29 @@ mod tests {
         Print(char),
         Execute(u8),
         DcsUnhook,
+    }
+
+    #[test]
+    fn bounded_raw_osc_keeps_separators_and_discards_oversized_body() {
+        #[derive(Default)]
+        struct Raw(Vec<Vec<u8>>);
+        impl Perform for Raw {
+            fn raw_osc_limit(&self, code: &[u8]) -> Option<usize> {
+                (code == b"42").then_some(3)
+            }
+
+            fn osc_dispatch(&mut self, params: &[&[u8]], _: bool) {
+                assert_eq!(params[0], b"42");
+                self.0.push(params[1].to_vec());
+            }
+        }
+        let mut parser = Parser::new();
+        let mut raw = Raw::default();
+        for byte in b"\x1b]42;a;b\x07\x1b]42;a;bcde\x1b\\\x1b]42;ok\x07" {
+            parser.advance(&mut raw, &[*byte]);
+            assert!(parser.osc_raw.len() <= 5);
+        }
+        assert_eq!(raw.0, [b"a;b".to_vec(), Vec::new(), b"ok".to_vec()]);
     }
 
     impl Perform for Dispatcher {

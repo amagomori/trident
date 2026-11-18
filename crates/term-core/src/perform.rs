@@ -252,11 +252,16 @@ impl Perform for Terminal {
         }
     }
 
+    fn raw_osc_limit(&self, code: &[u8]) -> Option<usize> {
+        (code == b"1337").then_some(crate::iterm::MAX_OSC)
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         self.sync_cursor_row();
         self.print_state.disarm_clear();
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
+            [b"1337", body] => self.iterm_file(body),
             [b"52", targets, data] => self.osc_clipboard(targets, data, bell_terminated),
             [b"7", rest @ ..] if !rest.is_empty() => self.osc_working_directory(&rest.join(&b';')),
             [b"8", attributes, rest @ ..] if !rest.is_empty() => {
