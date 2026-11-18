@@ -2842,6 +2842,22 @@ impl Terminal {
         fresh.recycled_memory_freed = self.recycled_memory_freed;
         fresh.cell_pixels = self.cell_pixels;
         fresh.palette = self.palette.clone();
+        let palette = &mut fresh.palette;
+        palette.ansi_overrides = [None; 256];
+        palette.special = [None; 5];
+        for (index, dynamic) in palette.dynamic.iter().enumerate() {
+            if dynamic.is_none() {
+                continue;
+            }
+            match index {
+                0 => palette.foreground = palette.dynamic_base[0],
+                1 => palette.background = palette.dynamic_base[1],
+                2 => palette.cursor = palette.dynamic_base[2],
+                7 => palette.selection = palette.dynamic_base[7],
+                _ => {}
+            }
+        }
+        palette.dynamic = [None; 10];
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
         fresh.reports.checksums = self.reports.checksums;
