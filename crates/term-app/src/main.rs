@@ -2230,14 +2230,13 @@ impl App {
         self.windows[index] = g;
     }
 
-    /// Runs `f` against background window `index`, restoring the fields' window after.
-    /// The swapped-in window is not the focused one, so `f` sees `focused` false and
-    /// unfocused-only notifications still fire for it. Skips the restore when `f`
-    /// closed the shown window or swapped another one in.
+    /// Runs `f` with background window `index` shown but unfocused.
+    ///
+    /// Restores the original window even if closing the background window
+    /// brought a third window into the fields.
     #[cfg(target_os = "linux")]
     fn with_window(&mut self, index: usize, f: impl FnOnce(&mut App)) {
         self.swap_window(index);
-        let shown = self.session.as_ref().map(|s| s.window.id());
         let home = self
             .windows
             .get(index)
@@ -2246,13 +2245,6 @@ impl App {
         let focused = std::mem::replace(&mut self.focused, false);
         f(self);
         self.focused = focused;
-        if !self
-            .session
-            .as_ref()
-            .is_some_and(|s| Some(s.window.id()) == shown)
-        {
-            return;
-        }
         if let Some(pos) = self.windows.iter().position(|g| {
             g.session
                 .as_ref()
@@ -5452,17 +5444,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.output_ready()
             }
             UserEvent::Output(id) => self.output_elsewhere(id),
-            #[cfg(target_os = "linux")]
-            UserEvent::Exit(id) if self.window_of_pane(id).is_some() => {
-                let index = self.window_of_pane(id).unwrap();
-                if self.windows[index].tabs.len() <= 1 {
-                    // The window's only tab exited: close the window outright.
-                    self.windows.remove(index);
-                } else {
+            UserEvent::Exit(id) => {
+                #[cfg(target_os = "linux")]
+                if let Some(index) = self.window_of_pane(id) {
                     self.with_window(index, |app| app.pane_exited(id, event_loop));
+                    return;
                 }
+                self.pane_exited(id, event_loop);
             }
-            UserEvent::Exit(id) => self.pane_exited(id, event_loop),
             #[cfg(target_os = "macos")]
             UserEvent::Presented => {
                 if self.exit_deadline.is_none()
