@@ -1938,8 +1938,10 @@ impl App {
                 self.appearance = theme;
             }
             // The Wayland CSD frame and the X11 _GTK_THEME_VARIANT hint track the
-            // portal's theme; macOS and compositor-decorated windows don't need it.
-            window.set_theme(self.appearance);
+            // palette's theme; fixed palettes keep the platform default.
+            if self.config.themes.automatic() {
+                window.set_theme(decoration_theme(self.appearance));
+            }
         }
         term.set_palette(self.config.themes.palette(self.appearance).clone());
         configure_term(
@@ -5357,6 +5359,19 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// The decoration theme matching `palette(appearance)`: light only on an
+/// explicit Light, dark otherwise. Winit's Linux backends have no "system"
+/// value — X11 writes `dark` for `None` and Wayland falls back to light — so
+/// `None` must not reach `set_theme` or the frame splits from the palette.
+#[cfg(target_os = "linux")]
+fn decoration_theme(appearance: Option<Theme>) -> Option<Theme> {
+    Some(if appearance == Some(Theme::Light) {
+        Theme::Light
+    } else {
+        Theme::Dark
+    })
 }
 
 impl ApplicationHandler<UserEvent> for App {
