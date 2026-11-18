@@ -1032,6 +1032,16 @@ fn selection_html_joins_wrapped_lines_and_trims_tail() {
 }
 
 #[test]
+fn selection_html_keeps_a_leading_blank_line() {
+    let mut t = term(5, 2, "\r\nnext");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 3));
+    let html = t.selection_html().unwrap();
+    // The parser-stripped newline after `<pre>` leaves the empty row's newline.
+    assert!(html.starts_with("<pre>\n\n"), "{html}");
+}
+
+#[test]
 fn block_selection_is_a_rectangle_in_every_drag_direction() {
     let mut t = term(6, 3, "abcdef\r\nghijkl\r\nmnopqr");
     for (a, b) in [

@@ -1869,7 +1869,8 @@ impl Terminal {
     pub fn selection_html(&self) -> Option<String> {
         let (start, end) = self.selection_range()?;
         let block = self.selection?.kind == SelectionKind::Block;
-        let mut out = String::from("<pre>");
+        // HTML strips one newline after `<pre>`; emitting it keeps a leading blank line.
+        let mut out = String::from("<pre>\n");
         let mut style = Cell::default();
         let mut span_open = false;
         for line in start.line..=end.line {
