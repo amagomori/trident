@@ -12,7 +12,7 @@ trident [OPTIONS] [-e COMMAND [ARGS...]]
   --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)
   --font-size <SIZE>  Font size in points (default: 14)
   --scrollback <LINES> History lines (default: 10000; 0 disables; maximum: 1000000)
-  --option-as-alt     On macOS, make Option act as Alt/Meta
+  --option-as-alt     On macOS, make both Option keys act as Alt/Meta
   --copy-on-select    Copy selected text to the clipboard on mouse release
   -e, --command ...   Run this command instead of your shell
   --install-terminfo  Install the xterm-trident terminfo entry with tic

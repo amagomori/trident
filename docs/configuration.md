@@ -41,6 +41,7 @@ vsync = true                # false: present without waiting for vblank; lower l
 app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset; see App icons in usage.md
 menu_bar_icon = true        # macOS: false hides the menu bar item
 auto_secure_input = true    # macOS: false never turns on Secure Keyboard Entry at password prompts
+option_as_alt = "none"      # macOS: "left", "right" or "both" selects the Option keys that send Meta
 hide_mouse_when_typing = true # false: keep the mouse pointer shown while you type
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
 pager = ["less", "-R", "+G"] # opens the last command's output; file path appended; also accepts a string
@@ -118,6 +119,12 @@ Linux and Core Text on macOS. A full face name such as `"Fira Code Retina"` also
 - Font changes apply on [live reload](#live-reload), at the current font size.
 
 ## Key bindings
+
+On macOS, set `option_as_alt = "left"` to send Meta with Left Option and type
+accents and symbols with Right Option. Use `"right"` to swap sides, `"both"`
+for Meta on either side or `"none"` (the default) for native text on both.
+Changes apply to open tabs. The `--option-as-alt` flag overrides this setting
+with `"both"`. Linux Alt behavior is unchanged.
 
 `[keybindings]` entries are added on top of the platform defaults listed in
 [Usage](usage.md#keyboard-and-mouse).
