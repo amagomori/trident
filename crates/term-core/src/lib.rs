@@ -1950,8 +1950,16 @@ impl Terminal {
             (cell.fg, cell.bg)
         };
         let (r, g, b) = self.palette.resolve(fg);
+        let (br, bgc, bb) = self.palette.resolve(bg);
+        let (r, g, b) = if cell.flags.contains(Flags::DIM) {
+            // The renderer blends dim text 3/5 toward the background.
+            let mix = |f: u8, b: u8| ((f as u16 * 3 + b as u16 * 2) / 5) as u8;
+            (mix(r, br), mix(g, bgc), mix(b, bb))
+        } else {
+            (r, g, b)
+        };
         let _ = write!(out, "color:#{r:02x}{g:02x}{b:02x}");
-        let (r, g, b) = self.palette.resolve(bg);
+        let (r, g, b) = (br, bgc, bb);
         let _ = write!(out, ";background-color:#{r:02x}{g:02x}{b:02x}");
         if cell.flags.contains(Flags::BOLD) {
             out.push_str(";font-weight:bold");

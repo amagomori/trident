@@ -1042,6 +1042,16 @@ fn selection_html_keeps_a_leading_blank_line() {
 }
 
 #[test]
+fn selection_html_dims_toward_the_background() {
+    let mut t = term(8, 1, "\x1b[31;2mdim");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(0, 2));
+    let html = t.selection_html().unwrap();
+    // (0xf7*3+0x1a*2)/5 = 0x9e, (0x76*3+0x1b*2)/5 = 0x51, (0x8e*3+0x26*2)/5 = 0x64
+    assert!(html.contains("color:#9e5164"), "{html}");
+}
+
+#[test]
 fn block_selection_is_a_rectangle_in_every_drag_direction() {
     let mut t = term(6, 3, "abcdef\r\nghijkl\r\nmnopqr");
     for (a, b) in [
