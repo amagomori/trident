@@ -33,7 +33,7 @@ requiring build-time mutations of Cargo's registry cache.
 
 ## Wayland/X11 file drops
 
-Native Wayland seats bind a data device for copy-only local file drops. Both Linux
+The Wayland platform module exposes the URI parser to the clipboard worker. Both Linux
 backends split URI lists on LF or CRLF before decoding filename bytes. Run
 `cargo test --manifest-path vendor/winit/Cargo.toml --lib uri_list` for parser coverage.
 

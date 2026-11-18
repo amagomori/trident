@@ -7,7 +7,10 @@ use std::path::PathBuf;
 
 use percent_encoding::percent_decode;
 
-pub(crate) fn parse_uri_list(data: &[u8]) -> io::Result<Vec<PathBuf>> {
+/// Parses a file-manager drop into absolute local paths in source order.
+///
+/// Accepts LF or CRLF; rejects empty offers, non-local URIs and NUL.
+pub fn parse_uri_list(data: &[u8]) -> io::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for line in data.split(|&b| b == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);

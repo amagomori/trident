@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/term-core", "crates/term-render", "crates/term-app", "vendor/vte"]
-exclude = ["vendor/winit", "vendor/image-webp"]
+exclude = ["vendor/winit", "vendor/image-webp", "vendor/smithay-clipboard"]
 default-members = ["crates/term-app"]
 
 [patch.crates-io]

@@ -206,6 +206,8 @@ impl ResizeThrottle {
 #[derive(Debug)]
 enum UserEvent {
     #[cfg(target_os = "linux")]
+    FileDrop(Vec<PathBuf>),
+    #[cfg(target_os = "linux")]
     Appearance(u64, Option<Theme>),
     /// A long command finished in the tab with this pane id.
     CommandFinished(u64, command_notify::Finished),
@@ -5506,7 +5508,8 @@ impl ApplicationHandler<UserEvent> for App {
                 native_tabs::observe_fullscreen_exit();
                 #[cfg(target_os = "macos")]
                 native_tabs::install_window_menu();
-                self.clipboard = clipboard::Clipboard::new(session.window.clone());
+                self.clipboard =
+                    clipboard::Clipboard::new(session.window.clone(), self.proxy.clone());
                 self.session = Some(session);
                 self.tabs = vec![None];
                 self.active_tab = 0;
@@ -5560,6 +5563,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Appearance(generation, theme) => {
                 if self.appearance_watch.is_some() && generation == self.appearance_generation {
                     self.set_appearance(theme);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            UserEvent::FileDrop(paths) => {
+                for path in paths {
+                    self.dropped_file(path);
                 }
             }
             UserEvent::CommandFinished(id, finished) => {
