@@ -31,17 +31,12 @@ fn imgcat_multipart_png_and_legacy_animated_gif() {
     }
 }
 
-fn jpeg() -> Vec<u8> {
-    let mut data = vec![];
-    image::codecs::jpeg::JpegEncoder::new(&mut data)
-        .encode(&[128; 18 * 9 * 3], 18, 9, image::ExtendedColorType::Rgb8)
-        .unwrap();
-    data
-}
+// A 9×18 JPEG with EXIF orientation 6 displays as 18×9.
+const JPEG: &[u8] = include_bytes!("fixtures/portrait.jpg");
 
 #[test]
 fn jpeg_geometry_and_st_termination() {
-    let payload = STANDARD.encode(jpeg());
+    let payload = STANDARD.encode(JPEG);
     for (opts, size) in [
         ("width=auto;height=auto", (18, 9)),
         ("width=3;height=auto", (24, 12)),
@@ -60,8 +55,7 @@ fn jpeg_geometry_and_st_termination() {
 
 #[test]
 fn rejected_files_have_no_effect_and_parser_recovers() {
-    let jpeg = jpeg();
-    let encoded = STANDARD.encode(&jpeg);
+    let encoded = STANDARD.encode(JPEG);
     for (opts, payload, end) in [
         ("inline=0", encoded.as_str(), "\x07"),
         ("name=YS5qcGc=", &encoded, "\x07"),

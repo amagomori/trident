@@ -187,21 +187,20 @@ fn decode(bytes: &[u8], budget: usize) -> Option<Image> {
     limits.max_image_height = Some(MAX_IMAGE_SIDE);
     limits.max_alloc = Some(budget as u64);
     reader.limits(limits);
-    let decoder = reader.into_decoder().ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
     let (width, height) = decoder.dimensions();
     if u64::from(width) * u64::from(height) * 4 > budget as u64
         || decoder.total_bytes() > budget as u64
     {
         return None;
     }
-    let pixels = DynamicImage::from_decoder(decoder)
-        .ok()?
-        .into_rgba8()
-        .into_raw();
+    let orientation = decoder.orientation().ok()?;
+    let mut image = DynamicImage::from_decoder(decoder).ok()?;
+    image.apply_orientation(orientation);
     Some(Image {
-        width,
-        height,
-        pixels,
+        width: image.width(),
+        height: image.height(),
+        pixels: image.into_rgba8().into_raw(),
     })
 }
 
