@@ -30,8 +30,8 @@ fn load() -> Result<Pdfium, String> {
         #[cfg(target_os = "linux")]
         let candidates = [
             Some(local),
-            dir.strip_suffix("bin")
-                .ok()
+            dir.parent()
+                .filter(|_| dir.ends_with("bin"))
                 .map(|prefix| prefix.join("lib/trident").join(&name)),
         ];
         #[cfg(not(target_os = "linux"))]
