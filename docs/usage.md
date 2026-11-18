@@ -52,6 +52,7 @@ For the full capability list, see
 | Paste | Cmd+V | Ctrl+Shift+V, Shift+Insert, middle click |
 | New window | Cmd+N | Ctrl+Shift+N |
 | New tab / close tab | Cmd+T / Cmd+W | Ctrl+Shift+T / Ctrl+Shift+W |
+| Reopen the last closed tab | Cmd+Shift+T | Ctrl+Shift+Alt+T |
 | Close window (every tab in it) | Cmd+Shift+W | — |
 | Next / previous tab | Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+PageDown / Ctrl+PageUp, Ctrl+Tab / Ctrl+Shift+Tab |
 | Go to tab 1-8 / last tab | Cmd+1..8 / Cmd+9 | Alt+1..8 / Alt+9 |

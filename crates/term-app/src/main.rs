@@ -509,6 +509,13 @@ impl Pane {
     }
 }
 
+/// What `reopen_tab` needs to start a closed tab again.
+struct ClosedTab {
+    index: usize,
+    working_directory: Option<PathBuf>,
+    title: String,
+}
+
 /// Whether Trident draws its own tab bar; macOS shows native `AppKit` tabs
 /// instead.
 fn tab_bar_drawn(shown: bool) -> bool {
@@ -928,6 +935,7 @@ fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) 
             Action::NewWindow
                 | Action::NewTab
                 | Action::CloseTab
+                | Action::ReopenTab
                 | Action::ToggleFullscreen
                 | Action::ShowLastCommandOutput
         )
@@ -1539,6 +1547,8 @@ struct App {
     /// state lives in `session`.
     tabs: Vec<Option<Pane>>,
     active_tab: usize,
+    /// Closed tabs, oldest first.
+    closed_tabs: Vec<ClosedTab>,
     next_pane: u64,
     tab_hover: Option<term_render::TabHit>,
     /// The pointer in window coordinates; `mouse_pos` is relative to the grid area.
@@ -1657,6 +1667,7 @@ impl App {
             session: None,
             tabs: Vec::new(),
             active_tab: 0,
+            closed_tabs: Vec::new(),
             next_pane: 0,
             tab_hover: None,
             tab_pointer: PhysicalPosition::default(),
@@ -2065,19 +2076,48 @@ impl App {
 
     /// Opens a tab after the active one, in the active tab's OSC 7 directory, and shows it.
     fn new_tab(&mut self, event_loop: &ActiveEventLoop) {
+        let cwd = self
+            .session
+            .as_ref()
+            .and_then(|s| local_working_directory(s.term.working_directory()))
+            .or_else(|| self.options.working_directory.clone());
+        self.open_tab(event_loop, self.active_tab + 1, cwd, String::new());
+    }
+
+    /// Opens the most recently closed tab where it was, with its directory and title.
+    fn reopen_tab(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(closed) = self.closed_tabs.last() else {
+            return;
+        };
+        if self.open_tab(
+            event_loop,
+            closed.index,
+            closed.working_directory.clone(),
+            closed.title.clone(),
+        ) {
+            self.closed_tabs.pop();
+        }
+    }
+
+    /// Spawns a tab at `index` in `working_directory`, then shows it.
+    fn open_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        index: usize,
+        working_directory: Option<PathBuf>,
+        title: String,
+    ) -> bool {
         #[cfg(target_os = "macos")]
-        let window = match self.open_tab_window(event_loop) {
+        let window = match self.open_tab_window(event_loop, index) {
             Ok(window) => window,
             Err(error) => {
                 diag!("trident: new tab: {error}");
-                return;
+                return false;
             }
         };
         #[cfg(not(target_os = "macos"))]
         let _ = event_loop;
-        let Some(s) = &self.session else { return };
-        let cwd = local_working_directory(s.term.working_directory())
-            .or_else(|| self.options.working_directory.clone());
+        let Some(s) = &self.session else { return false };
         let (cols, rows) = (s.term.cols(), s.term.rows());
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         self.next_pane += 1;
@@ -2085,7 +2125,7 @@ impl App {
         let pty = match self.spawn_pty(
             id,
             self.options.command(&self.config, false),
-            cwd.as_deref(),
+            working_directory.as_deref(),
             cols,
             rows,
             cell,
@@ -2093,7 +2133,7 @@ impl App {
             Ok(pty) => pty,
             Err(error) => {
                 diag!("trident: new tab: {error}");
-                return;
+                return false;
             }
         };
         let mut term = Terminal::new(cols, rows);
@@ -2108,27 +2148,32 @@ impl App {
         self.quit_checks
             .borrow_mut()
             .push((id, Box::new(pty.running_program_check())));
-        let index = (self.active_tab + 1).min(self.tabs.len());
-        self.tabs.insert(
-            index,
-            Some(Pane::new(
-                id,
-                term,
-                pty,
-                cell,
-                #[cfg(target_os = "macos")]
-                window,
-            )),
+        let index = index.min(self.tabs.len());
+        let mut pane = Pane::new(
+            id,
+            term,
+            pty,
+            cell,
+            #[cfg(target_os = "macos")]
+            window,
         );
+        pane.title = title;
+        self.tabs.insert(index, Some(pane));
         if index <= self.active_tab {
             self.active_tab += 1;
         }
         self.select_tab(index);
+        true
     }
 
-    /// Creates the window for a new native tab and adds it to the active window's tab group.
+    /// Creates the window for a new native tab at `index` and adds it to the active
+    /// window's tab group there.
     #[cfg(target_os = "macos")]
-    fn open_tab_window(&self, event_loop: &ActiveEventLoop) -> Result<TabWindow, String> {
+    fn open_tab_window(
+        &self,
+        event_loop: &ActiveEventLoop,
+        index: usize,
+    ) -> Result<TabWindow, String> {
         use winit::platform::macos::WindowAttributesExtMacOS;
         let s = self.session.as_ref().ok_or("no window")?;
         let current = s
@@ -2153,7 +2198,13 @@ impl App {
                 .map_err(|e| format!("cannot create window: {e}"))?,
         );
         window.set_ime_allowed(true);
-        native_tabs::add_tab(&s.window, &window);
+        let index = index.min(self.tabs.len());
+        let (anchor, before) = if index == 0 {
+            (self.tab_window(0).unwrap_or(&s.window), true)
+        } else {
+            (self.tab_window(index - 1).unwrap_or(&s.window), false)
+        };
+        native_tabs::add_tab(anchor, &window, before);
         let size = window.inner_size();
         let fonts = Fonts::new(&self.faces, self.font_size * window.scale_factor() as f32);
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
@@ -2504,6 +2555,14 @@ impl App {
         let removed = self.tabs.remove(index);
         if index < self.active_tab {
             self.active_tab -= 1;
+        }
+        if let Some(pane) = &removed {
+            self.closed_tabs.push(ClosedTab {
+                index,
+                working_directory: local_working_directory(pane.term.working_directory())
+                    .or_else(|| self.options.working_directory.clone()),
+                title: pane.title.clone(),
+            });
         }
         #[cfg(target_os = "macos")]
         if let Some(pane) = &removed {
@@ -3578,6 +3637,7 @@ impl App {
             }
             Action::NewTab => self.new_tab(event_loop),
             Action::CloseTab => self.close_tab(self.active_tab, event_loop),
+            Action::ReopenTab => self.reopen_tab(event_loop),
             #[cfg(target_os = "macos")]
             Action::NextTab => self.step_native_tab(1),
             #[cfg(target_os = "macos")]
@@ -5555,6 +5615,7 @@ mod tests {
             Action::NewWindow,
             Action::NewTab,
             Action::CloseTab,
+            Action::ReopenTab,
             Action::NextTab,
             Action::SelectTab(0),
             Action::ShowLastCommandOutput,
@@ -5575,6 +5636,7 @@ mod tests {
                         Action::NewWindow
                             | Action::NewTab
                             | Action::CloseTab
+                            | Action::ReopenTab
                             | Action::ToggleFullscreen
                             | Action::ShowLastCommandOutput
                     )
