@@ -2104,7 +2104,7 @@ impl App {
         title: String,
     ) -> bool {
         #[cfg(target_os = "macos")]
-        let window = match self.open_tab_window(event_loop) {
+        let window = match self.open_tab_window(event_loop, index) {
             Ok(window) => window,
             Err(error) => {
                 diag!("trident: new tab: {error}");
@@ -2162,9 +2162,14 @@ impl App {
         true
     }
 
-    /// Creates the window for a new native tab and adds it to the active window's tab group.
+    /// Creates the window for a new native tab at `index` and adds it to the active
+    /// window's tab group there.
     #[cfg(target_os = "macos")]
-    fn open_tab_window(&self, event_loop: &ActiveEventLoop) -> Result<TabWindow, String> {
+    fn open_tab_window(
+        &self,
+        event_loop: &ActiveEventLoop,
+        index: usize,
+    ) -> Result<TabWindow, String> {
         use winit::platform::macos::WindowAttributesExtMacOS;
         let s = self.session.as_ref().ok_or("no window")?;
         let current = s
@@ -2189,7 +2194,13 @@ impl App {
                 .map_err(|e| format!("cannot create window: {e}"))?,
         );
         window.set_ime_allowed(true);
-        native_tabs::add_tab(&s.window, &window);
+        let index = index.min(self.tabs.len());
+        let (anchor, before) = if index == 0 {
+            (self.tab_window(0).unwrap_or(&s.window), true)
+        } else {
+            (self.tab_window(index - 1).unwrap_or(&s.window), false)
+        };
+        native_tabs::add_tab(anchor, &window, before);
         let size = window.inner_size();
         let fonts = Fonts::new(&self.faces, self.font_size * window.scale_factor() as f32);
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
