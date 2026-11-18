@@ -244,23 +244,43 @@ fn hls(hue: u16, lightness: u16, saturation: u16) -> Pixel {
 impl Terminal {
     pub(super) fn place_sixel(&mut self, image: Image) {
         let id = self.free_image_id();
-        if self.add_image(id, image).is_ok()
-            && let Ok(p) = self.place_image(id, PlaceOptions::default())
-        {
-            // Advance below the image unless doing so would evict its anchor.
-            let rows = if (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row) {
+        let cell = self.cell_pixels.1.max(1.);
+        let rows = crate::images::span(image.height, 0, cell);
+        if self.add_image(id, image).is_err() {
+            return;
+        }
+
+        // If the anchor would be evicted, scroll the discarded bands first and
+        // anchor only the remaining source rectangle. Keep a row for following text.
+        let capacity =
+            if self.cursor.row >= self.scroll_top && self.cursor.row <= self.scroll_bottom {
                 let history = if self.alt_active || self.scroll_top != 0 {
                     0
                 } else {
                     self.max_scrollback
                 };
-                p.rows
-                    .min((self.scroll_bottom - self.scroll_top).saturating_add(history))
+                (self.scroll_bottom - self.scroll_top).saturating_add(history)
+            } else if self.cursor.row > self.scroll_bottom {
+                self.rows - 1 - self.cursor.row
             } else {
-                p.rows
+                usize::MAX
             };
+        let skipped = rows.saturating_sub(capacity.max(1));
+        for _ in 0..skipped {
+            self.linefeed();
+        }
+        let opts = PlaceOptions {
+            source: Some(crate::images::Rect {
+                y: (skipped as f32 * cell) as u32,
+                ..Default::default()
+            }),
+            // On a single-row region the image and subsequent text must share a cell.
+            z: if capacity == 0 { -1 } else { 0 },
+            ..Default::default()
+        };
+        if self.place_image(id, opts).is_ok() {
             self.cursor.pending_wrap = false;
-            for _ in 0..rows {
+            for _ in 0..rows.min(capacity) {
                 self.linefeed();
             }
         }

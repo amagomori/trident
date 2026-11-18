@@ -199,7 +199,7 @@ impl ImageStore {
 }
 
 /// The number of `cell`-pixel cells `px` pixels after `offset` cover.
-fn span(px: u32, offset: u32, cell: f32) -> usize {
+pub(super) fn span(px: u32, offset: u32, cell: f32) -> usize {
     ((px.saturating_add(offset) as f32 / cell.max(1.0)).ceil() as usize).max(1)
 }
 

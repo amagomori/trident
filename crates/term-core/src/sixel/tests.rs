@@ -88,7 +88,7 @@ fn aborted_or_oversize_images_do_not_place_or_move_cursor() {
 }
 
 #[test]
-fn a_full_height_image_keeps_its_anchor_without_history() {
+fn a_full_height_image_keeps_its_visible_bands_without_hiding_following_text() {
     for setup in [b"".as_slice(), b"\x1b[?1049h", b"\x1b[2;4r\x1b[2H"] {
         let mut t = Terminal::new(5, 4);
         if setup.is_empty() {
@@ -97,7 +97,12 @@ fn a_full_height_image_keeps_its_anchor_without_history() {
         t.advance(setup);
         t.advance(b"\x1bPq\"1;1;1;64@\x1b\\");
         assert_eq!(image(&t).height, 64);
+        let visible = t.visible_placements()[0];
+        assert!(visible.placement.source.y >= 16);
+        assert_eq!(visible.row + visible.placement.rows as isize, 3);
         assert_eq!(t.cursor_position(), Some((3, 0)));
+        t.advance(b"X");
+        assert_eq!(t.cursor_position(), Some((3, 1)));
     }
 }
 
