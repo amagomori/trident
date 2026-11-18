@@ -2212,7 +2212,9 @@ impl App {
     }
 
     /// Runs `f` against background window `index`, restoring the fields' window after.
-    /// Skips the restore when `f` closed the shown window or swapped another one in.
+    /// The swapped-in window is not the focused one, so `f` sees `focused` false and
+    /// unfocused-only notifications still fire for it. Skips the restore when `f`
+    /// closed the shown window or swapped another one in.
     #[cfg(target_os = "linux")]
     fn with_window(&mut self, index: usize, f: impl FnOnce(&mut App)) {
         self.swap_window(index);
@@ -2222,7 +2224,9 @@ impl App {
             .get(index)
             .and_then(|g| g.session.as_ref())
             .map(|s| s.window.id());
+        let focused = std::mem::replace(&mut self.focused, false);
         f(self);
+        self.focused = focused;
         if !self
             .session
             .as_ref()
