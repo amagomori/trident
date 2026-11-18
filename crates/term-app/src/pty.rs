@@ -1638,7 +1638,10 @@ mod tests {
             ("LC_ALL".to_owned(), "C.UTF-8".to_owned()),
             ("PS1".to_owned(), "$ ".to_owned()),
             // macOS bash 3.2 prints a zsh deprecation notice before the prompt.
-            ("BASH_SILENCE_DEPRECATION_WARNING".to_owned(), "1".to_owned()),
+            (
+                "BASH_SILENCE_DEPRECATION_WARNING".to_owned(),
+                "1".to_owned(),
+            ),
             // zsh picks the vi keymap from a `vi` editor.
             ("EDITOR".to_owned(), "emacs".to_owned()),
             ("VISUAL".to_owned(), "emacs".to_owned()),
