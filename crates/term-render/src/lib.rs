@@ -30,6 +30,7 @@ mod preedit;
 #[cfg(target_os = "linux")]
 mod present_shm;
 mod renderer;
+mod shaping;
 mod tabs;
 
 pub use family::{FontFaces, FontSpec, Source as FontSource};

@@ -7,7 +7,8 @@
 use crate::builtin;
 use crate::color;
 use crate::fallback::{self, FontFile, SystemFonts};
-use crate::family::FontFaces;
+use crate::family::{Face, FontFaces};
+use crate::shaping::RunCache;
 use ab_glyph::{
     Font, FontArc, FontRef, GlyphId, Outline, OutlineCurve, OutlinedGlyph, Point, PxScale,
     ScaleFont, point,
@@ -278,6 +279,8 @@ fn load_fallback((path, index): &FontFile) -> Option<Fallback> {
 /// See the [crate example](crate) for headless glyph rasterization.
 pub struct Fonts {
     faces: FontFaces,
+    pub(crate) runs: RunCache,
+    run_fallbacks: HashMap<char, Option<Face>>,
     system: SystemFonts,
     /// Fallback fonts by file, each loaded on first need (`None` if it failed to load).
     fallbacks: HashMap<FontFile, Option<Fallback>>,
@@ -349,6 +352,8 @@ impl Fonts {
     pub fn new(faces: &FontFaces, px: f32) -> Fonts {
         let mut fonts = Fonts {
             faces: faces.clone(),
+            runs: RunCache::default(),
+            run_fallbacks: HashMap::new(),
             system: SystemFonts::new(),
             fallbacks: HashMap::new(),
             px,
@@ -373,6 +378,7 @@ impl Fonts {
     ///
     /// The caller must also clear any renderer glyph cache after changing size.
     pub fn set_size(&mut self, px: f32) {
+        self.runs.clear();
         self.px = px;
         let font = &self.faces.face(Style::Regular).font;
         let scaled = font.as_scaled(scale(font, px));
@@ -400,6 +406,30 @@ impl Fonts {
                 .is_some_and(|f| f.can_draw(c) && !(text_only && f.face.is_some()))
         })?;
         self.fallbacks.get(&file)?.as_ref()
+    }
+
+    pub(crate) fn outline_face(&mut self, base: char, style: Style) -> Option<Face> {
+        let face = self.faces.face(style);
+        if face.font.glyph_id(base) != GlyphId(0) {
+            return Some(face.clone());
+        }
+        if let Some(found) = self.run_fallbacks.get(&base) {
+            return found.clone();
+        }
+        let found = self
+            .fallback_for(base, false, false)
+            .filter(|f| f.face.is_none())
+            .map(|f| Face {
+                font: f.font.clone(),
+                index: f.index,
+                embolden: false,
+                slant: false,
+            });
+        if self.run_fallbacks.len() == 4096 {
+            self.run_fallbacks.clear();
+        }
+        self.run_fallbacks.insert(base, found.clone());
+        found
     }
 
     /// Rasterizes `c` to fit `cells` cells; `None` for blank glyphs. `cells == 0` is a mark
@@ -447,47 +477,16 @@ impl Fonts {
             }
         };
         let id = font.glyph_id(c);
-        let mut px_scale = scale(&font, px);
+        let px_scale = scale(&font, px);
         let advance = font.as_scaled(px_scale).h_advance(id);
         let available = metrics.width * cells as f32;
         // Shrink glyphs (usually from fallback fonts) that would spill out of their cells.
-        if advance > available * 1.05 {
-            px_scale.x *= available / advance;
-            px_scale.y *= available / advance;
-        }
-        let glyph = id.with_scale_and_position(px_scale, point(0.0, 0.0));
-        let outlined = if slant {
-            let mut outline = font.outline(id)?;
-            slant_outline(&mut outline, font.ascent_unscaled() / 3.0);
-            OutlinedGlyph::new(glyph, outline, font.as_scaled(px_scale).scale_factor())
+        let factor = if advance > available * 1.05 {
+            available / advance
         } else {
-            font.outline_glyph(glyph)?
+            1.0
         };
-        let bounds = outlined.px_bounds();
-        let mut width = bounds.width() as usize;
-        let height = bounds.height() as usize;
-        if width == 0 || height == 0 {
-            return None;
-        }
-        let mut coverage = vec![0u8; width * height];
-        outlined.draw(|x, y, c| {
-            if let Some(v) = coverage.get_mut(y as usize * width + x as usize) {
-                *v = (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-            }
-        });
-        if embolden {
-            let strength = (px / 20.0).round().max(1.0) as usize;
-            coverage = embolden_coverage(&coverage, width, strength);
-            width += strength;
-        }
-        Some(RasterizedGlyph {
-            width,
-            height,
-            left: bounds.min.x,
-            top: metrics.baseline + bounds.min.y,
-            coverage,
-            color: false,
-        })
+        outline(&font, id, px, factor, metrics, embolden, slant)
     }
 
     /// An emoji sequence (ZWJ sequence, flag, skin tone) shaped by a color emoji font that
@@ -519,6 +518,51 @@ impl Fonts {
         }
         None
     }
+}
+
+pub(crate) fn outline(
+    font: &FontArc,
+    id: GlyphId,
+    px: f32,
+    factor: f32,
+    metrics: CellMetrics,
+    embolden: bool,
+    slant: bool,
+) -> Option<RasterizedGlyph> {
+    let px_scale = scale(font, px * factor);
+    let glyph = id.with_scale_and_position(px_scale, point(0.0, 0.0));
+    let outlined = if slant {
+        let mut outline = font.outline(id)?;
+        slant_outline(&mut outline, font.ascent_unscaled() / 3.0);
+        OutlinedGlyph::new(glyph, outline, font.as_scaled(px_scale).scale_factor())
+    } else {
+        font.outline_glyph(glyph)?
+    };
+    let bounds = outlined.px_bounds();
+    let mut width = bounds.width() as usize;
+    let height = bounds.height() as usize;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut coverage = vec![0u8; width * height];
+    outlined.draw(|x, y, c| {
+        if let Some(v) = coverage.get_mut(y as usize * width + x as usize) {
+            *v = (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    });
+    if embolden {
+        let strength = (px / 20.0).round().max(1.0) as usize;
+        coverage = embolden_coverage(&coverage, width, strength);
+        width += strength;
+    }
+    Some(RasterizedGlyph {
+        width,
+        height,
+        left: bounds.min.x,
+        top: metrics.baseline + bounds.min.y,
+        coverage,
+        color: false,
+    })
 }
 
 /// `text` as one color glyph from `face`, if the font's shaping draws it as one.

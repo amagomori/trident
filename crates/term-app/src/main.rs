@@ -3091,6 +3091,7 @@ impl App {
         let (cursor_visible, cursor_blink_at) =
             cursor_blink(blinking, s.blink_since, Instant::now());
         s.renderer.cursor_visible = cursor_visible;
+        s.renderer.set_ligatures(self.config.ligatures);
         s.cursor_blink_at = cursor_blink_at;
         s.renderer.flash = self.flash.showing(Instant::now());
         let tab_bar = (s.tab_bar > 0).then(|| term_render::TabBar {

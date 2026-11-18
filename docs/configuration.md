@@ -22,6 +22,7 @@ This example shows every setting with its default or an example value:
 # font_italic = "Fira Code"
 # font_bold_italic = "Fira Code"
 font_size = 14.0            # 4..=200 points
+ligatures = false           # true enables programming ligatures, e.g. -> and !=
 padding = 6.0               # 0..=1000 logical pixels
 # window_columns = 100      # first window's width in cells; default: last closed window's, or 100
 # window_rows = 30          # first window's height in cells; default: last closed window's, or 30
@@ -116,6 +117,12 @@ Linux and Core Text on macOS. A full face name such as `"Fira Code Retina"` also
   JetBrains Mono; a missing style override falls back to the style from `font`. A font file that
   cannot be read is a [config error](#config-errors).
 - Font changes apply on [live reload](#live-reload), at the current font size.
+
+Compatible cells on the same row are shaped together. Set `ligatures = true` to
+enable the font's programming ligatures (the bundled JetBrains Mono supports them).
+The cursor, selection, and copied text still use the original cells. A cursor or
+highlight inside an operator breaks the ligature there. This is not bidirectional
+layout: logical terminal columns stay in their original order.
 
 ## Key bindings
 
