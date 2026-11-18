@@ -1929,12 +1929,17 @@ impl App {
         let mut term = Terminal::new(cols, rows);
         self.appearance = window.theme().or(self.appearance);
         #[cfg(target_os = "linux")]
-        if let Some(theme) = self
-            .appearance_watch
-            .as_mut()
-            .and_then(|watch| watch.initial(INITIAL_APPEARANCE_WAIT))
         {
-            self.appearance = theme;
+            if let Some(theme) = self
+                .appearance_watch
+                .as_mut()
+                .and_then(|watch| watch.initial(INITIAL_APPEARANCE_WAIT))
+            {
+                self.appearance = theme;
+            }
+            // The Wayland CSD frame and the X11 _GTK_THEME_VARIANT hint track the
+            // portal's theme; macOS and compositor-decorated windows don't need it.
+            window.set_theme(self.appearance);
         }
         term.set_palette(self.config.themes.palette(self.appearance).clone());
         configure_term(
@@ -3811,6 +3816,12 @@ impl App {
     /// Applies the automatic theme's current palette to the shown window's
     /// terminals, when automatic theming is on.
     fn apply_appearance_shown(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.config.themes.automatic()
+            && let Some(s) = &self.session
+        {
+            s.window.set_theme(decoration_theme(self.appearance));
+        }
         if self.config.themes.automatic()
             && let Some(s) = &mut self.session
         {
