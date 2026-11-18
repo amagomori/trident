@@ -2916,6 +2916,8 @@ impl Terminal {
         let (enabled, share) = self.command_budget();
         fresh.shell.notifications = self.shell.notifications.reset();
         fresh.shell.runs = self.shell.runs.forget();
+        // Queued window ops are still owed to the window and PTY.
+        fresh.window_ops = std::mem::take(&mut self.window_ops);
         *self = fresh;
         if widened {
             self.window_ops.push(WindowOp::Resize { cols, rows });
