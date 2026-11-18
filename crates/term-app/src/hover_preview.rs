@@ -117,18 +117,21 @@ pub fn candidates_at(chars: &[(char, usize, usize)], col: usize) -> Vec<Candidat
     else {
         return out;
     };
-    for q in ['\'', '"'] {
-        let mut quotes = chars.iter().enumerate().filter(|(_, c)| c.0 == q);
-        while let (Some((a, _)), Some((b, _))) = (quotes.next(), quotes.next()) {
-            if a < i && i < b && b - a - 1 <= MAX_PATH {
-                if q == '"'
-                    && let Some(line) = traceback_line(chars, a, b)
-                {
-                    push_candidate(&mut out, chars, a + 1, b, Some(line));
-                    return out;
-                }
+    for q in ['"', '\''] {
+        let open = chars[..i].iter().rposition(|c| c.0 == q);
+        let close = chars[i..].iter().position(|c| c.0 == q).map(|p| p + i);
+        if let (Some(a), Some(b)) = (open, close)
+            && i < b
+            && b - a - 1 <= MAX_PATH
+        {
+            if q == '"'
+                && let Some(line) = traceback_line(chars, a, b)
+            {
+                push_candidate(&mut out, chars, a + 1, b, Some(line));
+                return out;
+            }
+            if chars[a + 1..b].iter().any(|c| c.0 == ' ') {
                 push_variants(&mut out, chars, a + 1, b);
-                break;
             }
         }
     }
@@ -1279,6 +1282,9 @@ mod tests {
         let found = texts(line, at(line, "notes"));
         assert_eq!(found[0], "my notes.txt");
         assert!(found.contains(&"notes.txt".to_string()));
+
+        let line = "Don't delete 'my notes (copy).txt'";
+        assert_eq!(texts(line, at(line, "notes"))[0], "my notes (copy).txt");
     }
 
     #[test]
