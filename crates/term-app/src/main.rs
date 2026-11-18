@@ -3789,26 +3789,31 @@ impl App {
                 self.set_font_size(self.config.font_size);
             }
             self.resize_grid();
-            let mut group_error = None;
             #[cfg(target_os = "linux")]
-            for index in 0..self.windows.len() {
-                self.with_window(index, |app| {
-                    if let Err(e) =
-                        app.apply_config_shown(font_changed, size_changed, next_vsync_off)
-                        && group_error.is_none()
-                    {
-                        group_error = Some(e);
-                    }
-                    if size_changed {
-                        app.set_font_size(app.config.font_size);
-                    }
-                    app.resize_grid();
-                    if let Some(s) = &app.session {
-                        s.window.request_redraw();
-                    }
-                });
+            {
+                let mut group_error = None;
+                for index in 0..self.windows.len() {
+                    self.with_window(index, |app| {
+                        if let Err(e) =
+                            app.apply_config_shown(font_changed, size_changed, next_vsync_off)
+                            && group_error.is_none()
+                        {
+                            group_error = Some(e);
+                        }
+                        if size_changed {
+                            app.set_font_size(app.config.font_size);
+                        }
+                        app.resize_grid();
+                        if let Some(s) = &app.session {
+                            s.window.request_redraw();
+                        }
+                    });
+                }
+                if let Some(error) = group_error {
+                    return Err(error);
+                }
             }
-            group_error.map_or(Ok(()), Err)
+            Ok(())
         });
         self.config_error = result.err();
         if let Some(error) = &self.config_error {
