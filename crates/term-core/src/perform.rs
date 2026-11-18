@@ -24,7 +24,7 @@ impl Perform for Terminal {
             0x07 => self.bell = true,
             0x08 => {
                 self.cursor.pending_wrap = false;
-                self.cursor.col = self.cursor.col.saturating_sub(1);
+                self.cursor.col = self.cursor.col.saturating_sub(1).max(self.left_bound());
             }
             0x09 => self.tab(1),
             0x0a..=0x0c => {
@@ -32,10 +32,10 @@ impl Perform for Terminal {
                 self.feed_line();
                 self.linefeed();
                 if self.modes.linefeed_newline {
-                    self.cursor.col = 0;
+                    self.cursor.col = self.left_bound();
                 }
             }
-            0x0d => self.move_col(0),
+            0x0d => self.move_col(self.left_bound()),
             0x0e => self.active_charset = 1,
             0x0f => self.active_charset = 0,
             _ => {}
@@ -59,22 +59,22 @@ impl Perform for Terminal {
             ('A', []) => self.move_up(n(0)),
             ('B', []) | ('e', []) => self.move_down(n(0)),
             ('C', []) | ('a', []) => {
-                let col = self.cursor.col + n(0);
+                let col = (self.cursor.col + n(0)).min(self.right_bound());
                 self.move_col(col);
             }
             ('D', []) => {
-                let col = self.cursor.col.saturating_sub(n(0));
+                let col = self.cursor.col.saturating_sub(n(0)).max(self.left_bound());
                 self.move_col(col);
             }
             ('E', []) => {
                 self.move_down(n(0));
-                self.move_col(0);
+                self.move_col(self.left_bound());
             }
             ('F', []) => {
                 self.move_up(n(0));
-                self.move_col(0);
+                self.move_col(self.left_bound());
             }
-            ('G', []) | ('`', []) => self.move_col(n(0) - 1),
+            ('G', []) | ('`', []) => self.move_col(self.address_col(n(0) - 1)),
             ('H', []) | ('f', []) => self.goto(n(0) - 1, n(1) - 1),
             ('I', []) => self.tab(n(0)),
             ('J', []) | ('J', [b'?']) => self.erase_display(arg(params, 0, 0)),
@@ -82,8 +82,8 @@ impl Perform for Terminal {
             ('L', []) => self.insert_lines(n(0)),
             ('M', []) => self.delete_lines(n(0)),
             ('P', []) => self.delete_chars(n(0)),
-            ('S', []) => self.scroll_up_region(self.scroll_top, self.scroll_bottom, n(0)),
-            ('T', []) => self.scroll_down_region(self.scroll_top, self.scroll_bottom, n(0)),
+            ('S', []) => self.scroll_up(self.scroll_top, self.scroll_bottom, n(0)),
+            ('T', []) => self.scroll_down(self.scroll_top, self.scroll_bottom, n(0)),
             ('X', []) => {
                 let (row, col) = (self.cursor.row, self.cursor.col);
                 self.erase_cells(row, col, col + n(0));
@@ -121,12 +121,8 @@ impl Perform for Terminal {
             ('n', []) => match arg(params, 0, 0) {
                 5 => self.responses.extend_from_slice(b"\x1b[0n"),
                 6 => {
-                    let row = if self.modes.origin {
-                        self.cursor.row - self.scroll_top
-                    } else {
-                        self.cursor.row
-                    };
-                    let reply = format!("\x1b[{};{}R", row + 1, self.cursor.col + 1);
+                    let (row, col) = self.reported_position();
+                    let reply = format!("\x1b[{row};{col}R");
                     self.responses.extend_from_slice(reply.as_bytes());
                 }
                 _ => {}
@@ -154,13 +150,25 @@ impl Perform for Terminal {
                 self.set_scroll_region(top, bottom);
             }
             ('t', []) => self.window_report(arg(params, 0, 0)),
+            ('p', [b'"']) => {
+                self.reports.pre_vt420 = arg(params, 0, 64) < 64;
+                if self.reports.pre_vt420 {
+                    self.set_mode(69, true, false);
+                }
+            }
             ('y', [b'*']) if self.reports.checksums => self.report_rect_checksum(params),
-            ('s', []) => self.save_cursor(),
+            ('s', []) if self.lr_margin_mode => {
+                let right = arg(params, 1, 0) as usize;
+                self.set_lr_margins(n(0) - 1, if right == 0 { self.cols - 1 } else { right - 1 });
+            }
+            ('s', []) if arg(params, 0, 0) == 0 && params.len() == 1 => self.save_cursor(),
             ('u', []) => self.restore_cursor(),
             ('p', [b'!']) => {
                 // DECSTR soft reset.
                 self.modes.show_cursor = true;
                 self.modes.origin = false;
+                self.lr_margin_mode = false;
+                self.reset_lr_margins();
                 self.modes.insert = false;
                 self.modes.autowrap = true;
                 self.modes.app_cursor = false;
@@ -200,13 +208,16 @@ impl Perform for Terminal {
                 self.scroll_top = 0;
                 self.scroll_bottom = self.rows - 1;
                 self.cursor.row = 0;
+                self.reset_lr_margins();
                 self.cursor.col = 0;
                 self.cursor.pending_wrap = false;
             }
             (b'D', []) => self.linefeed(),
+            (b'6', []) => self.horizontal_index(false),
+            (b'9', []) => self.horizontal_index(true),
             (b'E', []) => {
                 self.linefeed();
-                self.cursor.col = 0;
+                self.cursor.col = self.left_bound();
             }
             (b'H', []) => {
                 let col = self.cursor.col;
@@ -368,6 +379,7 @@ impl Terminal {
         Some(match mode {
             1 => self.modes.app_cursor,
             6 => self.modes.origin,
+            69 if !self.reports.pre_vt420 => self.lr_margin_mode,
             7 => self.modes.autowrap,
             12 => self.cursor_blink,
             25 => self.modes.show_cursor,
@@ -455,12 +467,8 @@ impl Terminal {
     fn private_status_report(&mut self, params: &Params) {
         let reply = match arg(params, 0, 0) {
             6 => {
-                let row = if self.modes.origin {
-                    self.cursor.row - self.scroll_top
-                } else {
-                    self.cursor.row
-                };
-                format!("\x1b[?{};{}R", row + 1, self.cursor.col + 1)
+                let (row, col) = self.reported_position();
+                format!("\x1b[?{row};{col}R")
             }
             15 => "\x1b[?13n".into(),
             25 => "\x1b[?20n".into(),
@@ -484,6 +492,11 @@ impl Terminal {
     fn report_setting(&mut self, request: &[u8]) {
         let setting = match request {
             b"m" => Some(self.sgr_setting()),
+            b"s" => Some(format!(
+                "{};{}s",
+                self.scroll_left + 1,
+                self.scroll_right + 1
+            )),
             b"r" => Some(format!(
                 "{};{}r",
                 self.scroll_top + 1,
@@ -583,7 +596,7 @@ impl Terminal {
             (origin + (arg(params, i, (default + 1) as u16) as usize).max(1) - 1).min(last)
         };
         let col_at = |i: usize, default: usize| {
-            ((arg(params, i, (default + 1) as u16) as usize).max(1) - 1).min(self.cols - 1)
+            self.address_col((arg(params, i, (default + 1) as u16) as usize).max(1) - 1)
         };
         let (top, left) = (row_at(2, 0), col_at(3, 0));
         let (bottom, right) = (row_at(4, last - origin), col_at(5, self.cols - 1));
@@ -653,6 +666,13 @@ impl Terminal {
                 self.goto(0, 0);
             }
             7 => self.modes.autowrap = enable,
+            69 if !enable || !self.reports.pre_vt420 => {
+                self.lr_margin_mode = enable;
+                if !enable {
+                    self.reset_lr_margins();
+                    self.cursor.pending_wrap = false;
+                }
+            }
             12 => self.cursor_blink = enable,
             25 => self.modes.show_cursor = enable,
             // 1049 clears the alternate buffer on entry; 1047 clears it on exit.

@@ -45,6 +45,7 @@ impl Terminal {
             || self.kitty.scan != Scan::Ground
             || !self.modes.autowrap
             || self.modes.insert
+            || self.has_partial_width()
             || self.charsets[self.active_charset] != Charset::Ascii
             || !self.screen().placements.is_empty()
             || (self.scrolls_to_history() && self.budget_armed() && !self.budget_allows_ghost())

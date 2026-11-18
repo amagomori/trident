@@ -26,16 +26,15 @@ $VTRUN --idle 400 --key '1\r' --key '\r' --key '\r' --key '0\r' -- vttest
 
 ## esctest results
 
-With xterm expectations at VT level 4, 294 tests pass and 230 fail; the suite skips 43 tests for
+With xterm expectations at VT level 4, 354 tests pass and 170 fail; the suite skips 43 tests for
 known xterm bugs. The failures group under these tickets:
 
 | Failures | Cause | Ticket |
 | --- | --- | --- |
-| 73 | Left/right margins (DECLRMM, DECSLRM) | [KAN-136](https://jarettforzano.atlassian.net/browse/KAN-136) |
-| 46 | VT420 rectangle and column ops, character protection (DECSCA, DECSED, DECSEL) | [KAN-137](https://jarettforzano.atlassian.net/browse/KAN-137) |
+| 54 | VT420 rectangle and column ops, character protection (DECSCA, DECSED, DECSEL) | [KAN-137](https://jarettforzano.atlassian.net/browse/KAN-137) |
 | 47 | OSC 4/10-19 color spec formats, special colors (OSC 5/105) | [KAN-138](https://jarettforzano.atlassian.net/browse/KAN-138) |
 | 34 | XTWINOPS window ops, title stack, DECSLPP, DECCOLM 132 columns | [KAN-139](https://jarettforzano.atlassian.net/browse/KAN-139) |
-| 26 | Reverse wraparound (45), more(1) fix (41), DECSCL, remaining DECRQM/DECRQSS settings | [KAN-140](https://jarettforzano.atlassian.net/browse/KAN-140) |
+| 31 | Reverse wraparound (including within margins), more(1) fix (41), DECSCL, remaining DECRQM/DECRQSS settings | [KAN-140](https://jarettforzano.atlassian.net/browse/KAN-140) |
 | 4 | DA1/DA2: Trident reports a VT220 (`CSI ? 62 ; 22 c`, `CSI > 0 ; 10 ; 1 c`), not xterm's VT420 | intentional |
 
 ## vttest results (menus 1-6)

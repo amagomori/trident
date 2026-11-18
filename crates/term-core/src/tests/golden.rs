@@ -765,6 +765,18 @@ struct Case {
 fn cases() -> Vec<Case> {
     let inputs: &[(&str, usize, usize, &[u8])] = &[
         ("empty", 5, 2, b""),
+        (
+            "horizontal_region_scroll", 7, 4,
+            b"A11111a\r\nB22222b\r\nC33333c\r\nD44444d\x1b[?69h\x1b[2;6s\x1b[2;4r\x1b[?6h\x1b[3;1H123456",
+        ),
+        (
+            "horizontal_region_wide", 6, 3,
+            "L####R\r\nM####S\r\nN####T\x1b[?69h\x1b[2;5s\x1b[1;5H界ab🇨🇦".as_bytes(),
+        ),
+        (
+            "horizontal_region_edits", 7, 3,
+            b"abcdefg\r\nhijklmn\r\nopqrstu\x1b[?69h\x1b[2;6s\x1b[1;3H\x1b[2@\x1b[2;4H\x1b[2P\x1b[3;1H\x1b[M\x1b[2;2H\x1b[L",
+        ),
         ("printable_trailing_spaces", 6, 2, b"ab  "),
         ("utf8", 8, 2, "caf\u{e9}".as_bytes()),
         ("combining_mark", 6, 2, "e\u{301}x".as_bytes()),
@@ -1542,6 +1554,10 @@ fn golden_conformance_reports() {
             b"\x1b[12$p\x1b[2$p\x1b[19$p\x1b[99$p",
         ),
         ("DECRQSS SGR default", b"\x1bP$qm\x1b\\"),
+        (
+            "DECLRMM, DECSLRM and CPR",
+            b"\x1b[?69h\x1b[2;3s\x1b[4;2s\x1b[?69$p\x1bP$qs\x1b\\\x1b[?6h\x1b[9;9H\x1b[6n\x1b[?6n\x1b[?69l\x1bP$qs\x1b\\\x1b[?69$p\x1b[?6l",
+        ),
         (
             "DECRQSS SGR styled",
             b"\x1b[1;3;4:3;7;31;104m\x1bP$qm\x1b\\\x1b[38;5;200;48;2;1;2;3m\x1bP$qm\x1b\\\x1b[m",
