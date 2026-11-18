@@ -28,6 +28,7 @@ mod iterm;
 mod kitty;
 mod links;
 mod margins;
+mod rect;
 pub use links::{FileLink, Link};
 use margins::{LrMode, shift_cells};
 mod notifications;
@@ -546,11 +547,12 @@ struct Reports {
     conformance_level: u8,
     /// DECSCL's control-representation parameter, echoed back by DECRQSS.
     conformance_pc: u16,
-    /// DECRQSS-reportable settings, stored and echoed but not enacted: character
-    /// protection (`"q`), attribute-change extent (`*x`), status display (`$}`),
-    /// status-line type (`$~`) and lines per screen (`*|`).
-    decsca: u16,
+    /// DECSACE attribute-change extent (2 selects a rectangle, 0/1 a stream).
     decsace: u16,
+    /// Protection kinds seen since reset; skips row scans on ordinary erases.
+    protection_used: links::Protection,
+    /// DECRQSS-reportable settings stored but not enacted: status display,
+    /// status-line type and lines per screen.
     decsasd: u16,
     decssdt: u16,
     decsnls: u16,
@@ -564,7 +566,7 @@ impl Default for Reports {
             status_request: None,
             conformance_level: 64,
             conformance_pc: 0,
-            decsca: 0,
+            protection_used: Default::default(),
             decsace: 0,
             decsasd: 0,
             decssdt: 0,
@@ -2593,14 +2595,17 @@ impl Terminal {
         self.put_char_cells(c, true)
     }
 
+    fn map_character(&self, c: char) -> char {
+        match self.charsets[self.active_charset] {
+            Charset::DecSpecial => dec_special(c),
+            Charset::Uk if c == '#' => '£',
+            _ => c,
+        }
+    }
+
     #[inline(always)]
     fn put_char_cells(&mut self, c: char, track: bool) {
-        let c = match self.charsets[self.active_charset] {
-            Charset::DecSpecial => dec_special(c),
-            Charset::Uk if c == '#' => '\u{a3}',
-            Charset::Uk => c,
-            Charset::Ascii => c,
-        };
+        let c = self.map_character(c);
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
             self.print_state.disarm_clear();
@@ -2779,7 +2784,12 @@ impl Terminal {
         self.lines_mut()[row] = blank;
     }
 
-    fn erase_display(&mut self, mode: u16) {
+    fn erase_display(&mut self, mode: u16, protected: links::Protection) {
+        if mode <= 2 && self.has_protected_cells(0..self.rows, protected) {
+            self.print_state.disarm_clear();
+            self.selective_erase('J', mode, protected);
+            return;
+        }
         let (row, col) = (self.cursor.row, self.cursor.col);
         if mode < 2 {
             self.print_state.disarm_clear();
@@ -2867,7 +2877,11 @@ impl Terminal {
         }
     }
 
-    fn erase_line(&mut self, mode: u16) {
+    fn erase_line(&mut self, mode: u16, protected: links::Protection) {
+        if self.has_protected_cells(self.cursor.row..self.cursor.row + 1, protected) {
+            self.selective_erase('K', mode, protected);
+            return;
+        }
         let (row, col) = (self.cursor.row, self.cursor.col);
         match mode {
             0 => {

@@ -1,3 +1,4 @@
+use super::links::Protection;
 use super::{
     Charset, Color, CursorShape, Flags, LrMode, MouseMode, Progress, Terminal, TitlePair,
     UnderlineStyle, WindowOp,
@@ -5,7 +6,7 @@ use super::{
 use vte::{Params, Perform};
 
 /// The first value of each parameter, with 0 / missing replaced by `default`.
-fn arg(params: &Params, index: usize, default: u16) -> u16 {
+pub(super) fn arg(params: &Params, index: usize, default: u16) -> u16 {
     match params.iter().nth(index).and_then(|p| p.first()) {
         Some(&0) | None => default,
         Some(&v) => v,
@@ -25,6 +26,7 @@ impl Perform for Terminal {
         self.print_state.disarm_clear();
         match byte {
             0x07 => self.bell = true,
+            0x96 | 0x97 => self.set_protection(Protection::ISO, byte == 0x96),
             0x08 => self.cursor_back(),
             0x09 => self.tab(1),
             0x0a..=0x0c => {
@@ -93,8 +95,25 @@ impl Perform for Terminal {
             ('G', []) | ('`', []) => self.move_col(self.address_col(n(0) - 1)),
             ('H', []) | ('f', []) => self.goto(n(0) - 1, n(1) - 1),
             ('I', []) => self.tab(n(0)),
-            ('J', []) | ('J', [b'?']) => self.erase_display(arg(params, 0, 0)),
-            ('K', []) | ('K', [b'?']) => self.erase_line(arg(params, 0, 0)),
+            ('J' | 'K', [] | [b'?']) => {
+                // Like xterm, DEC selective erase also honors ISO protected areas.
+                let protected = if private {
+                    Protection::EITHER
+                } else {
+                    Protection::ISO
+                };
+                let mode = arg(params, 0, 0);
+                if action == 'J' {
+                    self.erase_display(mode, protected);
+                } else {
+                    self.erase_line(mode, protected);
+                }
+            }
+            ('q', [b'"']) => {
+                if let n @ 0..=2 = arg(params, 0, 0) {
+                    self.set_protection(Protection::DEC, n == 1);
+                }
+            }
             ('L', []) => self.insert_lines(n(0)),
             ('M', []) => self.delete_lines(n(0)),
             ('P', []) => self.delete_chars(n(0)),
@@ -102,7 +121,12 @@ impl Perform for Terminal {
             ('T', []) => self.scroll_down(self.scroll_top, self.scroll_bottom, n(0)),
             ('X', []) => {
                 let (row, col) = (self.cursor.row, self.cursor.col);
-                self.erase_cells(row, col, col + n(0));
+                let end = (col + n(0)).min(self.cols);
+                if self.reports.protection_used.contains(Protection::ISO) {
+                    self.erase_unprotected(row, col..end, Protection::ISO, false);
+                } else {
+                    self.erase_cells(row, col, end);
+                }
             }
             ('Z', []) => self.back_tab(n(0)),
             ('b', []) => {
@@ -167,6 +191,18 @@ impl Perform for Terminal {
             }
             ('t', []) => self.window_op(params),
             ('t', [b'>']) => self.title_modes(params),
+            ('v' | 'x' | 'z' | '{' | 'r' | 't', [b'$']) if self.reports.conformance_level >= 64 => {
+                self.edit_rectangle(params, action)
+            }
+            ('x', [b'*']) if self.reports.conformance_level >= 64 => {
+                let extent = arg(params, 0, 0);
+                if extent <= 2 {
+                    self.reports.decsace = extent;
+                }
+            }
+            ('}' | '~', [b'\'']) if self.reports.conformance_level >= 64 => {
+                self.edit_columns(n(0), action == '}')
+            }
             ('y', [b'*']) if self.reports.checksums => self.report_rect_checksum(params),
             ('s', []) if self.lr_margin_mode != LrMode::Off => {
                 let right = arg(params, 1, 0) as usize;
@@ -185,6 +221,7 @@ impl Perform for Terminal {
             ('u', [b'=']) => self.kitty_set(arg(params, 0, 0), arg(params, 1, 1)),
             ('p', [b'!']) => {
                 // DECSTR soft reset.
+                self.reports.decsace = 0;
                 self.modes.show_cursor = true;
                 self.modes.origin = false;
                 self.lr_margin_mode = LrMode::Off;
@@ -199,7 +236,6 @@ impl Perform for Terminal {
                 self.modes.more_fix = false;
                 self.modes.reverse_wrap = false;
                 self.modes.reverse_wrap_ext = false;
-                self.reports.decsca = 0;
                 self.reports.decsasd = 0;
                 self.cursor.template = Default::default();
                 self.charsets = [Charset::Ascii; 2];
@@ -212,8 +248,6 @@ impl Perform for Terminal {
             ('p', [b'"']) => self.set_conformance(params),
             // Stored-and-echoed DECRQSS settings (see `Reports`): the values are
             // kept for the request reply without being enacted.
-            ('q', [b'"']) => self.reports.decsca = arg(params, 0, 0),
-            ('x', [b'*']) => self.reports.decsace = arg(params, 0, 0),
             ('}', [b'$']) => self.reports.decsasd = arg(params, 0, 0),
             ('~', [b'$']) => self.reports.decssdt = arg(params, 0, 0),
             ('|', [b'*']) => self.reports.decsnls = arg(params, 0, 0),
@@ -225,6 +259,7 @@ impl Perform for Terminal {
         self.sync_cursor_row();
         self.print_state.disarm_clear();
         match (byte, intermediates) {
+            (b'V' | b'W', []) => self.set_protection(Protection::ISO, byte == b'V'),
             (b'7', []) => self.save_cursor(),
             (b'8', []) => self.restore_cursor(),
             (b'8', [b'#']) => {
@@ -610,6 +645,15 @@ impl Terminal {
         }
         let setting = match request {
             b"m" => Some(self.sgr_setting()),
+            b"\"q" => Some(format!(
+                "{}\"q",
+                u8::from(
+                    self.links
+                        .protection(self.cursor.template.hyperlink)
+                        .contains(Protection::DEC)
+                )
+            )),
+            b"*x" => Some(format!("{}*x", self.reports.decsace)),
             b"s" if self.reports.conformance_level >= 64 => Some(format!(
                 "{};{}s",
                 self.scroll_left + 1,
@@ -624,8 +668,6 @@ impl Terminal {
                 "{};{}\"p",
                 self.reports.conformance_level, self.reports.conformance_pc
             )),
-            b"\"q" => Some(format!("{}\"q", self.reports.decsca)),
-            b"*x" => Some(format!("{}*x", self.reports.decsace)),
             b"$}" => Some(format!("{}$}}", self.reports.decsasd)),
             b"$~" => Some(format!("{}$~", self.reports.decssdt)),
             b"*|" => Some(format!("{}*|", self.reports.decsnls)),
@@ -1016,7 +1058,7 @@ impl Terminal {
         self.reset_lr_margins();
         self.goto(0, 0);
         if !self.modes.no_clear_on_columns {
-            self.erase_display(2);
+            self.erase_display(2, Protection::default());
         }
     }
 
