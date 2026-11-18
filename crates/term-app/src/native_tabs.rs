@@ -65,7 +65,7 @@ pub fn add_tab(window: &Window, tab: &Window, before: bool) {
     // SAFETY: both are live NSWindows on the main thread; -1 and 1 are NSWindowBelow
     // and NSWindowAbove.
     unsafe {
-        let ordered = if before { -1 } else { 1 };
+        let ordered: isize = if before { -1 } else { 1 };
         let _: () = msg_send![&*window, addTabbedWindow: &*tab, ordered: ordered];
     }
 }
