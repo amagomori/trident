@@ -1108,8 +1108,8 @@ impl Renderer {
     }
 
     /// Draws `text` along the bottom-left corner, or the first of the top-left corner and the
-    /// rows next to them that keeps clear of the hovered link, the search bar and a preview
-    /// card; false if the atlas filled up.
+    /// rows next to them that keeps clear of the hovered link, the search bar, the pinned
+    /// command header and a preview card; false if the atlas filled up.
     #[allow(clippy::too_many_arguments)]
     fn draw_link_target(
         &mut self,
@@ -1143,18 +1143,27 @@ impl Renderer {
             [x, y, x + f.image.width as f32, y + f.image.height as f32]
         });
         let bottom = (height - ch).max(0.0);
-        let search_bar = searching.then_some(bottom);
+        let ledger = crate::ledger_bar(term, padding, pixel_offset, ch)
+            .map(|bar| (bar.top, bar.top + bar.height));
+        let bands = [searching.then_some((bottom, bottom + ch)), ledger];
         let free = |y: f32| {
             !covers(y)
-                && search_bar.is_none_or(|bar| (y - bar).abs() >= ch)
+                && bands.iter().flatten().all(|&(t, b)| b <= y || t >= y + ch)
                 && card.is_none_or(|[l, t, r, b]| {
                     r <= 0.0 || l >= strip_width || b <= y || t >= y + ch
                 })
         };
-        let y = [bottom, 0.0, (bottom - ch).max(0.0), ch.min(bottom)]
-            .into_iter()
-            .find(|&y| free(y))
-            .unwrap_or(bottom);
+        let below_ledger = ledger.map_or(0.0, |(_, b)| b.max(0.0)).min(bottom);
+        let y = [
+            bottom,
+            0.0,
+            below_ledger,
+            (bottom - ch).max(0.0),
+            ch.min(bottom),
+        ]
+        .into_iter()
+        .find(|&y| free(y))
+        .unwrap_or(bottom);
         out.push(self.rect(0.0, y, strip_width, ch, term.palette.foreground));
         for (i, c) in text.chars().enumerate() {
             let key = GlyphKey {
