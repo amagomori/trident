@@ -2000,7 +2000,7 @@ impl Terminal {
         let to_history = top == 0 && !self.alt_active;
         if !self.screen().placements.is_empty() {
             let keeps_lines = to_history && self.max_scrollback > 0;
-            self.scroll_placements(top, bottom, -(n as isize), keeps_lines);
+            self.scroll_placements(top, bottom, 0..usize::MAX, -(n as isize), keeps_lines);
         }
         if !to_history {
             self.rotate_region_up(top, bottom, n);
@@ -2092,7 +2092,7 @@ impl Terminal {
             self.shift_shell_lines_down(top, bottom, n);
         }
         if !self.screen().placements.is_empty() {
-            self.scroll_placements(top, bottom, n as isize, false);
+            self.scroll_placements(top, bottom, 0..usize::MAX, n as isize, false);
         }
         self.lines_mut()[top..=bottom].rotate_right(n);
         self.reset_rows(top..top + n);
@@ -2626,7 +2626,7 @@ impl Terminal {
             self.invalidate_output_ends_in_region(row, bottom, 0);
             let n = n.min(bottom - row + 1);
             if !self.screen().placements.is_empty() {
-                self.scroll_placements(row, bottom, -(n as isize), false);
+                self.scroll_placements(row, bottom, 0..usize::MAX, -(n as isize), false);
             }
             self.rotate_region_up(row, bottom, n);
             self.cursor.col = 0;

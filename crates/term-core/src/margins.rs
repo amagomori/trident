@@ -87,10 +87,12 @@ impl Terminal {
     #[cold]
     pub(super) fn scroll_rectangle(&mut self, top: usize, bottom: usize, n: usize, down: bool) {
         let (left, end) = (self.scroll_left, self.scroll_right + 1);
+        let n = n.min(bottom - top + 1);
         let blank = Cell::blank(&self.cursor.template);
         self.invalidate_output_ends_in_region(top, bottom, 0);
         if !self.screen().placements.is_empty() {
-            self.erase_placements(top, bottom, left, end);
+            let delta = if down { n as isize } else { -(n as isize) };
+            self.scroll_placements(top, bottom, left..end, delta, false);
         }
         if !self.shell.input_writes.is_empty() {
             for row in top..=bottom {
@@ -98,7 +100,6 @@ impl Terminal {
             }
         }
         let rows = &mut self.lines_mut()[top..=bottom];
-        let n = n.min(rows.len());
         for row in rows.iter_mut() {
             split_pair(row, left, blank);
             split_pair(row, end, blank);

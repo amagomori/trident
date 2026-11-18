@@ -495,7 +495,12 @@ impl Terminal {
             } else {
                 self.max_scrollback
             };
-            let rows = if history == 0 {
+            let rows = if self.has_partial_width()
+                && self.in_horizontal_margins()
+                && (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row)
+            {
+                self.scroll_bottom - self.scroll_top + 1
+            } else if history == 0 {
                 self.rows
             } else {
                 self.rows + history
@@ -504,8 +509,9 @@ impl Terminal {
                 self.linefeed();
             }
             let col = self.cursor.col.saturating_add(placement.cols);
-            self.cursor.col = col.min(self.cols - 1);
-            self.cursor.pending_wrap = col >= self.cols;
+            let right = self.right_bound();
+            self.cursor.col = col.min(right);
+            self.cursor.pending_wrap = col > right;
         }
         Ok(id)
     }

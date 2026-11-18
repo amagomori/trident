@@ -480,14 +480,15 @@ impl Terminal {
         primary.chain(alt).map(|p| p.image_id).collect()
     }
 
-    /// Moves placements anchored in screen rows `top..=bottom` by `delta` rows as those rows
-    /// scroll, dropping the ones pushed out of the region. With `to_history` the scrolled-out
+    /// Moves placements anchored in the scrolling rows and columns by `delta` rows,
+    /// dropping the ones pushed out of the region. With `to_history` the scrolled-out
     /// rows go to scrollback, so the region keeps its absolute lines and the rows below it
     /// shift instead.
     pub(crate) fn scroll_placements(
         &mut self,
         top: usize,
         bottom: usize,
+        columns: std::ops::Range<usize>,
         delta: isize,
         to_history: bool,
     ) {
@@ -501,7 +502,7 @@ impl Terminal {
                 }
                 return true;
             }
-            if !(top..=bottom).contains(&row) {
+            if !(top..=bottom).contains(&row) || !columns.contains(&p.col) {
                 return true;
             }
             let moved = row + delta;
