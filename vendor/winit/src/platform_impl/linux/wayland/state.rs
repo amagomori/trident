@@ -7,7 +7,6 @@ use ahash::AHashMap;
 use sctk::reexports::calloop::LoopHandle;
 use sctk::reexports::client::backend::ObjectId;
 use sctk::reexports::client::globals::GlobalList;
-use sctk::reexports::client::protocol::wl_data_device_manager::WlDataDeviceManager;
 use sctk::reexports::client::protocol::wl_output::WlOutput;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::{Connection, Proxy, QueueHandle};
@@ -54,8 +53,6 @@ pub struct WinitState {
 
     /// The seat state responsible for all sorts of input.
     pub seat_state: SeatState,
-
-    pub data_device_manager: Option<WlDataDeviceManager>,
 
     /// The shm for software buffers, such as cursors.
     pub shm: Shm,
@@ -146,13 +143,9 @@ impl WinitState {
 
         let seat_state = SeatState::new(globals, queue_handle);
 
-        let data_device_manager = globals.bind(queue_handle, 1..=3, ()).ok();
         let mut seats = AHashMap::default();
         for seat in seat_state.seats() {
-            seats.insert(
-                seat.id(),
-                WinitSeatState::new(data_device_manager.as_ref(), queue_handle, &seat),
-            );
+            seats.insert(seat.id(), WinitSeatState::new());
         }
 
         let (viewporter_state, fractional_scaling_manager) =
@@ -171,7 +164,6 @@ impl WinitState {
             subcompositor_state: subcompositor_state.map(Arc::new),
             output_state,
             seat_state,
-            data_device_manager,
             shm,
             custom_cursor_pool,
 

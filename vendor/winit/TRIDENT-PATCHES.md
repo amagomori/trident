@@ -29,6 +29,6 @@ guard. Vendoring keeps this narrow patch reproducible without an unpinned fork o
 requiring build-time mutations of Cargo's registry cache. Remove this copy when
 an upstream release carrying the fix is adopted.
 
-Native Wayland seats bind a data device for copy-only local file drops. Both Linux
+The Wayland platform module exposes the URI parser to the clipboard worker. Both Linux
 backends split URI lists on LF or CRLF before decoding filename bytes. Run
 `cargo test --manifest-path vendor/winit/Cargo.toml --lib uri_list` for parser coverage.

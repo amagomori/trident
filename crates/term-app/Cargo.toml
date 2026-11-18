@@ -34,7 +34,7 @@ libc.workspace = true
 zbus = { version = "6.2.1", default-features = false, features = ["proxy", "default-rt"] }
 futures-lite = "2.6"
 notify-rust = { version = "4.19", default-features = false, features = ["z"] }
-smithay-clipboard = "0.7.3"
+smithay-clipboard = { path = "../../vendor/smithay-clipboard" }
 x11rb = { version = "0.13", features = ["present", "dri3"] }
 wayland-client = "0.31.15"
 wayland-backend = { version = "0.3.17", features = ["client_system"] }

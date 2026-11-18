@@ -6,7 +6,6 @@ use ahash::AHashMap;
 use tracing::warn;
 
 use sctk::reexports::client::backend::ObjectId;
-use sctk::reexports::client::protocol::wl_data_device_manager::WlDataDeviceManager;
 use sctk::reexports::client::protocol::wl_seat::WlSeat;
 use sctk::reexports::client::protocol::wl_touch::WlTouch;
 use sctk::reexports::client::{Connection, Proxy, QueueHandle};
@@ -20,7 +19,6 @@ use crate::event::WindowEvent;
 use crate::keyboard::ModifiersState;
 use crate::platform_impl::wayland::state::WinitState;
 
-mod file_drop;
 mod keyboard;
 mod pointer;
 mod text_input;
@@ -30,15 +28,12 @@ pub use pointer::relative_pointer::RelativePointerState;
 pub use pointer::{PointerConstraintsState, WinitPointerData, WinitPointerDataExt};
 pub use text_input::{TextInputState, ZwpTextInputV3Ext};
 
-use file_drop::DropDevice;
 use keyboard::{KeyboardData, KeyboardState};
 use text_input::TextInputData;
 use touch::TouchPoint;
 
 #[derive(Debug, Default)]
 pub struct WinitSeatState {
-    drop_device: Option<DropDevice>,
-
     /// The pointer bound on the seat.
     pointer: Option<Arc<ThemedPointer<WinitPointerData>>>,
 
@@ -65,15 +60,8 @@ pub struct WinitSeatState {
 }
 
 impl WinitSeatState {
-    pub fn new(
-        manager: Option<&WlDataDeviceManager>,
-        qh: &QueueHandle<WinitState>,
-        seat: &WlSeat,
-    ) -> Self {
-        Self {
-            drop_device: manager.map(|manager| DropDevice::new(manager, qh, seat)),
-            ..Default::default()
-        }
+    pub fn new() -> Self {
+        Default::default()
     }
 }
 
@@ -214,13 +202,10 @@ impl SeatHandler for WinitState {
     fn new_seat(
         &mut self,
         _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
+        _queue_handle: &QueueHandle<Self>,
         seat: WlSeat,
     ) {
-        self.seats.insert(
-            seat.id(),
-            WinitSeatState::new(self.data_device_manager.as_ref(), queue_handle, &seat),
-        );
+        self.seats.insert(seat.id(), WinitSeatState::new());
     }
 
     fn remove_seat(

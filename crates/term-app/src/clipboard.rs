@@ -5,6 +5,8 @@
 use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
 use std::sync::Arc;
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+#[cfg(target_os = "linux")]
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 #[derive(Debug, PartialEq)]
@@ -72,7 +74,10 @@ pub struct Clipboard {
 }
 
 impl Clipboard {
-    pub fn new(window: Arc<Window>) -> Self {
+    pub fn new(
+        window: Arc<Window>,
+        _proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>,
+    ) -> Self {
         #[cfg(target_os = "linux")]
         let x11 = window.display_handle().is_ok_and(|display| {
             matches!(
@@ -91,9 +96,18 @@ impl Clipboard {
                     };
                     // SAFETY: This is the window's live wl_display; _window retains
                     // it until after the clipboard backend and its worker are dropped.
-                    Ok(Backend::Wayland(unsafe {
-                        smithay_clipboard::Clipboard::new(display.display.as_ptr())
-                    }))
+                    let clipboard =
+                        unsafe { smithay_clipboard::Clipboard::new(display.display.as_ptr()) };
+                    if let Ok(RawWindowHandle::Wayland(handle)) =
+                        window.window_handle().map(|h| h.as_raw())
+                    {
+                        clipboard.on_file_drop(handle.surface.as_ptr() as usize, move |data| {
+                            winit::platform::wayland::parse_uri_list(data).is_ok_and(|paths| {
+                                _proxy.send_event(crate::UserEvent::FileDrop(paths)).is_ok()
+                            })
+                        });
+                    }
+                    Ok(Backend::Wayland(clipboard))
                 }
                 BackendKind::Arboard => arboard::Clipboard::new()
                     .map(Backend::Arboard)
