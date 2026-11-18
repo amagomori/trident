@@ -5186,11 +5186,18 @@ impl App {
                 if event.state != ElementState::Pressed {
                     // Releases reach the PTY only where the press would: not past a
                     // dialog or search, and without write_input's scroll reset.
-                    if kitty_flags != 0
-                        && self.pending_close.is_none()
-                        && self.pending_paste.is_none()
-                        && self.search.is_none()
-                    {
+                    let locked = self
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.term.modes.keyboard_locked);
+                    if forwards_key_event(
+                        kitty_flags,
+                        true,
+                        self.pending_close.is_some()
+                            || self.pending_paste.is_some()
+                            || self.search.is_some(),
+                        locked,
+                    ) {
                         let base = event.key_without_modifiers();
                         if let Some(bytes) = input::encode_kitty_key(
                             &input::KeyEvent {
@@ -5801,6 +5808,22 @@ fn main() {
     }
 }
 
+/// Whether a key event reaches the PTY: the modal layers (close and paste
+/// confirmations, search) and KAM's keyboard lock swallow both presses and
+/// releases, and releases only go out while Kitty event-type reporting asks
+/// for them.
+fn forwards_key_event(
+    kitty_flags: u8,
+    release: bool,
+    modal_open: bool,
+    keyboard_locked: bool,
+) -> bool {
+    if modal_open || keyboard_locked {
+        return false;
+    }
+    !release || kitty_flags != 0
+}
+
 /// How long a pager window waits for its pager's exit status once its output has ended.
 const PAGER_STATUS_WAIT: Duration = Duration::from_millis(500);
 
@@ -5824,6 +5847,21 @@ mod tests {
     fn drawn_tab_bar_gives_way_to_native_tabs_on_macos() {
         assert!(!tab_bar_drawn(false));
         assert_eq!(tab_bar_drawn(true), !cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn keyboard_lock_swallows_presses_and_releases() {
+        // With Kitty event-type reporting on, an unlocked terminal forwards
+        // presses and releases alike; KAM (ANSI mode 2) swallows both.
+        let kitty_flags = 1;
+        assert!(forwards_key_event(kitty_flags, false, false, false));
+        assert!(forwards_key_event(kitty_flags, true, false, false));
+        assert!(!forwards_key_event(kitty_flags, false, false, true));
+        assert!(!forwards_key_event(kitty_flags, true, false, true));
+        // The lock and modal layers win over reporting, and without reporting
+        // an unlocked release stays local.
+        assert!(!forwards_key_event(kitty_flags, false, true, false));
+        assert!(!forwards_key_event(0, true, false, false));
     }
 
     #[test]
