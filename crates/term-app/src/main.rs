@@ -2307,13 +2307,20 @@ impl App {
     fn remove_current_window(&mut self, event_loop: &ActiveEventLoop) {
         match self.windows.pop() {
             Some(mut g) => {
+                // On X11 and Wayland the clipboard backend serves the copied text
+                // itself and keeps its window alive: read the text back before that
+                // window drops, then rebind to the window now shown and offer it
+                // again.
+                let copied = [false, true].map(|primary| self.clipboard.get(primary));
                 self.swap_group(&mut g);
                 drop(g);
-                // The clipboard keeps the window it was bound to alive; rebind it to
-                // the window now shown so the dropped group actually destroys its
-                // window.
                 if let Some(s) = &self.session {
                     self.clipboard = clipboard::Clipboard::new(s.window.clone());
+                    for (primary, text) in [false, true].into_iter().zip(copied) {
+                        if let Some(text) = text {
+                            self.clipboard.set(text, primary);
+                        }
+                    }
                 }
             }
             None => event_loop.exit(),
