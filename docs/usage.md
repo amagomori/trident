@@ -80,10 +80,12 @@ Windows**.
 
 ## Links
 
-Hold Cmd (macOS) or Ctrl (Linux) over a link to underline it, and click to open it. Links are
-OSC 8 hyperlinks, `http`, `https`, `ftp`, `file` and `mailto` URLs, and file references printed by
-compilers, linters, test runners and grep, such as `src/main.rs:10:5`, `--> src/lib.rs:7:13`,
-`main.go:5:2:`, `Makefile:12:`, `at f (/srv/app.js:12:9)` and Python's `File "app.py", line 12`.
+Hold Cmd (macOS) or Ctrl (Linux) over a link to underline it, and click to open it. Trident links:
+
+- OSC 8 hyperlinks and `http`, `https`, `ftp`, `file` and `mailto` URLs
+- File references printed by compilers, linters, test runners and grep, such as `src/main.rs:10:5`,
+  `--> src/lib.rs:7:13`, `main.go:5:2:`, `Makefile:12:`, `at f (/srv/app.js:12:9)` and Python's
+  `File "app.py", line 12`
 
 - A file reference is a link only when the file exists. Relative paths are tried against the
   shell's directory (OSC 7), then the foreground program's working directory. `~/` is your home
@@ -91,10 +93,12 @@ compilers, linters, test runners and grep, such as `src/main.rs:10:5`, `--> src/
 - Clicking a file reference opens it at that line in `editor` from the config file, filling in its
   `{file}`, `{line}` and `{column}` arguments. If no argument names the file, it's appended.
 - Without `editor`, Trident uses `$VISUAL` or `$EDITOR` (from `[env]` first) with that editor's
-  own line syntax. Supported editors include vim, nvim, nano, emacs, helix, micro, kakoune, VS Code,
-  Cursor, Sublime Text, Zed and TextMate. Trident opens `ed` at the top of the file and starts
-  `red` in the file's directory because it restricts editing to that directory. Any other editor gets
-  `+line file`. Quoted words in the variable, such as an editor path with spaces, stay one argument.
+  own line syntax:
+  - Supported editors: vim, nvim, nano, emacs, helix, micro, kakoune, VS Code, Cursor, Sublime Text,
+    Zed and TextMate.
+  - `ed` opens at the top of the file, and `red` starts in the file's directory because it
+    restricts editing to that directory. Any other editor gets `+line file`.
+  - Quoted words in the variable, such as an editor path with spaces, stay one argument.
 - Terminal editors such as vim, nano and `emacs -nw` open in a new Trident window. GUI editors run
   directly.
 - With no editor set at all, the file goes to `open` or `xdg-open`, which can't jump to the line.
@@ -124,12 +128,9 @@ With shell integration, a click without a drag in the command line you're editin
 shell's cursor there by sending Left/Right arrow keys, as in Ghostty and kitty. Only the
 soft-wrapped line holding the cursor counts, and a click past the end of the text moves to its
 end. Greyed autosuggestion text (zsh-autosuggestions, fish) past the input isn't part of it, so a
-click there leaves the suggestion unaccepted. A prompt that marks itself
-`OSC 133 ; A ; click_events=1` gets the click as an SGR mouse report instead for ASCII
-input; Unicode input uses cursor keys to preserve wide-character and combining boundaries.
-Single-click movement waits briefly for a possible double/triple-click, so selecting a word
-or line leaves the shell's cursor unchanged. Typing after a single click moves first, without
-waiting for that interval.
+click there leaves the suggestion unaccepted. Single-click movement waits briefly for a possible
+double/triple-click, so selecting a word or line leaves the shell's cursor unchanged. Typing
+after a single click moves first, without waiting for that interval.
 
 ## Paste
 

@@ -54,10 +54,11 @@ invariants. The PR checklist records that review.
 Pushing a `v*` tag that matches the workspace version in `Cargo.toml` runs
 `.github/workflows/release.yml`. Examples include `v1.0.0` for a stable release and
 `v1.0.0-rc.1` for a prerelease.
-This is the only workflow that runs on tags. It builds a universal macOS binary into `Trident.app`
-inside `Trident-<version>-macos-universal.dmg`. It also builds Linux x86_64 packages as
-`Trident-<version>-linux-x86_64.tar.gz`, `Trident-<version>-linux-amd64.deb` and
-`Trident-<version>-x86_64.AppImage`.
+This is the only workflow that runs on tags. It builds:
+
+- `Trident-<version>-macos-universal.dmg`, a universal macOS binary inside `Trident.app`
+- `Trident-<version>-linux-x86_64.tar.gz`, `Trident-<version>-linux-amd64.deb` and
+  `Trident-<version>-x86_64.AppImage` for Linux x86_64
 
 The workflow publishes these artifacts with `SHA256SUMS` and release notes listing the PRs merged
 since the previous tag. The macOS app is ad-hoc signed to run on Apple silicon but has no
@@ -65,9 +66,13 @@ Developer ID signature or notarization.
 
 The packaging lives in `.github/scripts/release/release.py`, so you can build and check the
 artifacts locally before you tag. Updating the workspace version, building artifacts and
-previewing notes do not publish anything. Do not create or push a tag, publish a release,
-update the tap/AUR, or change repository visibility until the release owner authorizes the
-publication window.
+previewing notes do not publish anything. Until the release owner authorizes the
+publication window, do not:
+
+- Create or push a tag
+- Publish a release
+- Update the tap or AUR
+- Change repository visibility
 
 Start both native builds from the same frozen commit, with a clean `dist` directory on each
 machine. Validate the intended tag without creating it:
@@ -121,30 +126,6 @@ python3 .github/scripts/release/release.py packages --version "$version" --sums 
 - `packages` writes the cask when `SHA256SUMS` lists the .dmg, and the AUR files when it lists the
   tarball, so a `dist` from either platform works.
 - `release.yml` pins appimagetool and its runtime by SHA-256.
-
-### When hosted Actions is unavailable
-
-The native steps above also prepare a release without GitHub-hosted runners. Keep the frozen
-commit ID with the artifacts and record native macOS/Linux install and upgrade results. A
-local cask or PKGBUILD can use `--base-url "file://$PWD/dist"`. Before publication, regenerate
-`packages` without that override so no local download URL reaches the tap or AUR. Do not
-substitute a Linux binary for the Mac build or label a single-architecture Mac build universal.
-
-At the authorized publication window, the release owner can tag the verified commit and
-upload the four artifacts plus `SHA256SUMS` with `gh release create --verify-tag`, using
-`notes.md`. Do not also run the automatic publisher for the same tag. Before uploading manually,
-check whether the tag-triggered Release run created a release, cancel the run and confirm it has
-stopped.
-
-Publishing to the tap and AUR is a separate step. Use the generated package files, the existing
-`push_package.sh` and the same stable/newest release checks as the workflow, with the already
-provisioned credentials. Never create new
-credentials just to rehearse a release. If credentials are unavailable locally, retain the
-prepared files for the authorized release owner rather than exporting Actions secrets.
-
-Before calling the release complete, check anonymous download access and perform real
-Homebrew/AUR installs and upgrades against the published URLs. A private source repository,
-an unpublished tag, or missing package credentials cannot be validated by offline tests.
 
 ### Homebrew and the AUR
 
@@ -209,7 +190,7 @@ No terminal is instrumented. Each one gets the matching config in `compare/cfg/`
 ```sh
 sudo apt install xvfb openbox python3-xlib xdotool fonts-jetbrains-mono
 .github/scripts/compare/run.sh           # one pass; tables in target/compare/results.md
-.github/scripts/compare/run.sh rounds    # two rounds with noise bounds, as in benchmarks.md
+.github/scripts/compare/run.sh rounds    # two rounds with noise bounds
 ```
 
 `run.sh` builds the release binary, starts Xvfb and openbox if there is no display, installs
@@ -224,5 +205,11 @@ vtebench under `target/compare` if needed, and runs every terminal found on `PAT
   latency or `cat` numbers.
 
 On macOS, `.github/scripts/compare/macos/run.sh` runs the same tests against Alacritty, Ghostty and
-WezTerm. Set `ARMS="... kitty"` to include kitty. Trident runs twice to establish noise bounds. See
-[benchmarks.md](benchmarks.md#run-it) for setup.
+WezTerm, and runs Trident twice to establish noise bounds. Set `ARMS="... kitty"` to include kitty.
+The shell running it needs **Screen Recording** and **Accessibility** permission.
+
+```sh
+brew install --cask ghostty wezterm font-jetbrains-mono
+cargo install alacritty vtebench && git clone https://github.com/alacritty/vtebench ~/vtebench
+cargo build --release && .github/scripts/compare/macos/run.sh   # writes target/compare-macos/RESULTS.md
+```
