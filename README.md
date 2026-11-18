@@ -90,12 +90,13 @@ trident --install-terminfo     # optional: install the xterm-trident terminfo en
 ## Configuration
 
 Trident reads `~/.config/trident/config.toml`, or `$XDG_CONFIG_HOME/trident/config.toml` when set. Every
-entry is optional. For all settings, see [Configuration](docs/configuration.md).
+entry is optional. See the [configuration reference](docs/config-reference.md) for types and defaults.
 
 ## Documentation
 
 - [Usage](docs/usage.md) covers commands, shortcuts and everyday tasks.
 - [Configuration](docs/configuration.md) describes settings, key bindings, shell integration and themes.
+- [FAQ](docs/faq.md) answers common setup and troubleshooting questions.
 - [Development](docs/development.md) covers building, testing, releases and performance measurement.
 - [Conformance](docs/conformance.md) lists vttest and esctest results.
 

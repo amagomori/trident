@@ -22,6 +22,18 @@ cargo fmt
 
 CI runs the same checks on Linux and macOS for every pull request.
 
+### Regenerate the configuration reference
+
+When changing the config schema, update the field descriptions in
+[`config/reference.rs`](../crates/term-app/src/config/reference.rs) and regenerate the
+[reference](config-reference.md) from the workspace root:
+
+```sh
+cargo test -p term-app write_config_reference -- --ignored
+```
+
+Commit the generated Markdown. The workspace tests compare it with fresh output.
+
 ## Source documentation
 
 Follow the [canonical source-documentation standard](https://github.com/amagomori/.github/blob/main/docs/rust_documentation.md)
