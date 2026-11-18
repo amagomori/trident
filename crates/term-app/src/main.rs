@@ -212,9 +212,9 @@ enum UserEvent {
     /// The PTY of the tab with this pane id exited.
     Exit(u64),
     /// A second `trident` run forwarded a new-window request: its working
-    /// directory and `-e` command.
+    /// directory, environment and `-e` command.
     #[cfg(target_os = "linux")]
-    OpenWindow(Option<PathBuf>, Vec<String>),
+    OpenWindow(Option<PathBuf>, Vec<(String, String)>, Vec<String>),
     PagerFailed(String),
     #[cfg(target_os = "macos")]
     Presented,
@@ -1874,9 +1874,8 @@ impl App {
             0,
             self.options.command(&self.config, true),
             self.options.working_directory.as_deref(),
-            spawn_cols,
-            spawn_rows,
-            spawn_cell,
+            &[],
+            (spawn_cols, spawn_rows, spawn_cell),
         )?;
         let attrs = Window::default_attributes()
             .with_title("Trident")
@@ -2055,13 +2054,25 @@ impl App {
         id: u64,
         command: &[String],
         cwd: Option<&std::path::Path>,
-        cols: usize,
-        rows: usize,
-        cell: (f32, f32),
+        env_overlay: &[(String, String)],
+        grid: (usize, usize, (f32, f32)),
     ) -> Result<Pty, String> {
         let proxy = self.proxy.clone();
         let command_proxy = self.proxy.clone();
         let mut env = self.config.env.clone();
+        // A forwarded request carries the requester's environment; the
+        // terminal's own variables stay Trident's.
+        env.extend(
+            env_overlay
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION"
+                    )
+                })
+                .cloned(),
+        );
         if !env.contains_key("TERM") {
             let term = terminfo::term(&self.config.term, &self.config.env);
             env.insert("TERM".into(), term.into());
@@ -2074,9 +2085,9 @@ impl App {
             command,
             &env,
             cwd,
-            cols,
-            rows,
-            cell,
+            grid.0,
+            grid.1,
+            grid.2,
             move |exited| {
                 let _ = proxy.send_event(if exited {
                     UserEvent::Exit(id)
@@ -2281,14 +2292,16 @@ impl App {
 
     /// Opens a new window inside this process instead of spawning a child: a winit
     /// window, a PTY on a fresh pane id, and a `WindowGroup` pushed to `windows`.
-    /// `cwd` and `command` come from a forwarded request when another `trident` run
-    /// asked for the window; a keyboard shortcut passes `None` and an empty command.
-    /// The window becomes the app's current one through its `Focused` event.
+    /// `cwd`, `env` and `command` come from a forwarded request when another
+    /// `trident` run asked for the window; a keyboard shortcut passes `None` and
+    /// empty values. The window becomes the app's current one through its
+    /// `Focused` event.
     #[cfg(target_os = "linux")]
     fn new_window(
         &mut self,
         event_loop: &ActiveEventLoop,
         cwd: Option<PathBuf>,
+        env: Vec<(String, String)>,
         command: Vec<String>,
     ) {
         let Some(s) = &self.session else { return };
@@ -2316,7 +2329,7 @@ impl App {
         let id = self.next_pane;
         let shell = self.options.command(&self.config, false);
         let command = if command.is_empty() { shell } else { &command };
-        let pty = match self.spawn_pty(id, command, cwd.as_deref(), cols, rows, cell) {
+        let pty = match self.spawn_pty(id, command, cwd.as_deref(), &env, (cols, rows, cell)) {
             Ok(pty) => pty,
             Err(error) => {
                 diag!("trident: new window: {error}");
@@ -2404,9 +2417,8 @@ impl App {
             id,
             self.options.command(&self.config, false),
             working_directory.as_deref(),
-            cols,
-            rows,
-            cell,
+            &[],
+            (cols, rows, cell),
         ) {
             Ok(pty) => pty,
             Err(error) => {
@@ -4056,7 +4068,7 @@ impl App {
             #[cfg(not(target_os = "macos"))]
             Action::SelectTab(index) => self.select_tab(shortcut_tab(index, self.tabs.len())),
             #[cfg(target_os = "linux")]
-            Action::NewWindow => self.new_window(event_loop, None, Vec::new()),
+            Action::NewWindow => self.new_window(event_loop, None, Vec::new(), Vec::new()),
             #[cfg(target_os = "macos")]
             Action::NewWindow => {
                 let working_directory = self
@@ -5474,7 +5486,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PagerFailed(error) => self.show_pager_error(error),
             UserEvent::HoverPreview(ready) => self.hover_preview_ready(ready),
             #[cfg(target_os = "linux")]
-            UserEvent::OpenWindow(cwd, command) => self.new_window(event_loop, cwd, command),
+            UserEvent::OpenWindow(cwd, env, command) => {
+                self.new_window(event_loop, cwd, env, command)
+            }
             UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
                 self.output_ready()
             }
@@ -5773,14 +5787,30 @@ fn main() {
     }
     #[cfg(target_os = "linux")]
     if let Some(socket) = std::env::var_os(ipc::SOCKET_ENV) {
-        // A Trident process already runs: hand it this window's working directory
-        // and `-e` command and exit, instead of spending a process per window.
-        let command = parse_args_from(std::env::args().skip(1))
-            .map(|options| options.command)
-            .unwrap_or_default();
-        let cwd = std::env::current_dir().unwrap_or_default();
-        if ipc::forward(std::path::Path::new(&socket), &cwd, &command) {
-            return;
+        // A Trident process already runs: hand it this window's working
+        // directory, environment and `-e` command, and exit. Options a forwarded
+        // window cannot honor — another config file, font, scrollback and the
+        // like — start a standalone process instead.
+        let request = parse_args_from(std::env::args().skip(1))
+            .ok()
+            .filter(|options| {
+                options.config_path == config::default_path()
+                    && !options.font_size_override
+                    && options.scrollback.is_none()
+                    && options.font.is_none()
+                    && !options.copy_on_select
+                    && options.window_cells.is_none()
+            });
+        if let Some(options) = request {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let env = std::env::vars_os()
+                .filter_map(|(key, value)| {
+                    Some((key.into_string().ok()?, value.into_string().ok()?))
+                })
+                .collect::<Vec<_>>();
+            if ipc::forward(std::path::Path::new(&socket), &cwd, &env, &options.command) {
+                return;
+            }
         }
     }
     let options = match parse_args() {
@@ -5810,11 +5840,16 @@ fn main() {
             let proxy = event_loop.create_proxy();
             std::thread::spawn(move || {
                 for mut stream in listener.incoming().flatten() {
-                    let Some((cwd, command)) = ipc::read_request(&mut stream) else {
+                    // The socket sits in a shared runtime dir: take requests
+                    // only from processes owned by this user.
+                    if !ipc::same_user(&stream) {
+                        continue;
+                    }
+                    let Some((cwd, env, command)) = ipc::read_request(&mut stream) else {
                         continue;
                     };
                     if proxy
-                        .send_event(UserEvent::OpenWindow(cwd, command))
+                        .send_event(UserEvent::OpenWindow(cwd, env, command))
                         .is_err()
                     {
                         return;
