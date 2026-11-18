@@ -69,11 +69,11 @@ pub struct Clipboard {
     x11: bool,
     #[cfg(target_os = "linux")]
     _window: Option<Arc<Window>>,
-    /// Text last stored in each selection — clipboard then primary — re-offered
-    /// when the bound window is replaced, so the transfer never touches a
-    /// selection another application owns.
+    /// Text and HTML last stored in each selection — clipboard then primary —
+    /// re-offered when the bound window is replaced, so the transfer never
+    /// touches a selection another application owns.
     #[cfg(target_os = "linux")]
-    stored: [Option<String>; 2],
+    stored: [Option<(String, Option<String>)>; 2],
 }
 
 impl Clipboard {
@@ -125,9 +125,9 @@ impl Clipboard {
         self._window.as_ref().map(|window| window.id())
     }
 
-    /// The text last stored in each selection, clipboard then primary.
+    /// The text and HTML last stored in each selection, clipboard then primary.
     #[cfg(target_os = "linux")]
-    pub fn stored(&self) -> &[Option<String>; 2] {
+    pub fn stored(&self) -> &[Option<(String, Option<String>)>; 2] {
         &self.stored
     }
 
@@ -194,7 +194,7 @@ impl Clipboard {
         };
         #[cfg(target_os = "linux")]
         {
-            self.stored[primary as usize] = Some(text.clone());
+            self.stored[primary as usize] = Some((text.clone(), html.clone()));
         }
         #[cfg(target_os = "linux")]
         let clipboard = match backend {

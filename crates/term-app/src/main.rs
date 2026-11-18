@@ -2318,9 +2318,9 @@ impl App {
                 if rebind && let Some(s) = &self.session {
                     self.clipboard = clipboard::Clipboard::new(s.window.clone());
                     if let Some(copied) = copied {
-                        for (primary, text) in [false, true].into_iter().zip(copied) {
-                            if let Some(text) = text {
-                                self.clipboard.set(text, primary);
+                        for (primary, stored) in [false, true].into_iter().zip(copied) {
+                            if let Some((text, html)) = stored {
+                                self.clipboard.set(text, html, primary);
                             }
                         }
                     }
