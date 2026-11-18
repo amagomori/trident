@@ -92,12 +92,16 @@ pub fn read_request(stream: &mut UnixStream) -> Option<Request> {
 
 /// Sends the new-window request to `path` — `cwd`, each `env` pair, an empty
 /// separator, then each `command` word — and reports whether the socket took
-/// all of it.
+/// all of it. The peer must be this user too: a stale path in a shared
+/// directory could otherwise feed the environment to a replacement listener.
 pub fn forward(path: &Path, cwd: &Path, env: &[(String, String)], command: &[String]) -> bool {
     let mut stream = match UnixStream::connect(path) {
         Ok(stream) => stream,
         Err(_) => return false,
     };
+    if !same_user(&stream) {
+        return false;
+    }
     let mut buf = cwd.as_os_str().as_encoded_bytes().to_vec();
     buf.push(0);
     for (key, value) in env {
