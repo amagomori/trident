@@ -252,26 +252,36 @@ impl Terminal {
 
         // If the anchor would be evicted, scroll the discarded bands first and
         // anchor only the remaining source rectangle. Keep a row for following text.
-        let capacity =
-            if self.cursor.row >= self.scroll_top && self.cursor.row <= self.scroll_bottom {
-                let history = if self.alt_active || self.scroll_top != 0 {
-                    0
-                } else {
-                    self.max_scrollback
-                };
-                (self.scroll_bottom - self.scroll_top).saturating_add(history)
-            } else if self.cursor.row > self.scroll_bottom {
-                self.rows - 1 - self.cursor.row
+        let inside = (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row);
+        let capacity = if inside {
+            let history = if self.alt_active || self.scroll_top != 0 {
+                0
             } else {
-                usize::MAX
+                self.max_scrollback
             };
-        let skipped = rows.saturating_sub(capacity.max(1));
+            (self.scroll_bottom - self.scroll_top).saturating_add(history)
+        } else {
+            // The anchor is fixed outside the margins. Clip the bottom at the
+            // last reachable cursor row rather than scrolling any source bands.
+            let bottom = if self.cursor.row < self.scroll_top {
+                self.scroll_bottom
+            } else {
+                self.rows - 1
+            };
+            bottom - self.cursor.row
+        };
+        let skipped = if inside {
+            rows.saturating_sub(capacity.max(1))
+        } else {
+            0
+        };
         for _ in 0..skipped {
             self.linefeed();
         }
         let opts = PlaceOptions {
             source: Some(crate::images::Rect {
-                y: (skipped as f32 * cell) as u32,
+                y: (skipped as f32 * cell).floor() as u32,
+                height: (rows.min(capacity.max(1)) as f32 * cell).floor() as u32,
                 ..Default::default()
             }),
             // On a single-row region the image and subsequent text must share a cell.

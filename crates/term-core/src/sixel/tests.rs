@@ -107,6 +107,23 @@ fn a_full_height_image_keeps_its_visible_bands_without_hiding_following_text() {
 }
 
 #[test]
+fn output_outside_scroll_margins_clips_at_the_bottom() {
+    for (start, row, height, cursor) in [(1, 0, 48, 3), (5, 4, 16, 5), (6, 5, 16, 5)] {
+        let mut t = Terminal::new(5, 6);
+        t.advance(format!("\x1b[2;4r\x1b[{start}H\x1bPq\"1;1;1;96@\x1b\\X").as_bytes());
+        let v = t.visible_placements()[0];
+        assert_eq!(
+            (v.row, v.placement.source.y, v.placement.source.height),
+            (row, 0, height)
+        );
+        assert_eq!(t.viewport_row(cursor).text(), "X");
+        if row == cursor as isize {
+            assert!(v.placement.z < 0);
+        }
+    }
+}
+
+#[test]
 fn graphics_queries_are_distinct_from_scroll_up() {
     let mut t = Terminal::new(80, 24);
     t.advance(b"hi\x1b[c\x1b[?1;1;0S\x1b[?1;4S\x1b[?2;1S\x1b[?2;4S\x1b[?3;1S\x1b[?1;3;99S");
