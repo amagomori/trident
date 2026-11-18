@@ -89,7 +89,7 @@ trident --install-terminfo     # optional: install the xterm-trident terminfo en
 
 ## Configuration
 
-Trident reads `~/.config/trident/config.toml` (or `$XDG_CONFIG_HOME/trident/config.toml`). Every
+Trident reads `~/.config/trident/config.toml`, or `$XDG_CONFIG_HOME/trident/config.toml` when set. Every
 entry is optional. For all settings, see [Configuration](docs/configuration.md).
 
 ## Documentation
@@ -98,7 +98,6 @@ entry is optional. For all settings, see [Configuration](docs/configuration.md).
 - [Configuration](docs/configuration.md) describes settings, key bindings, shell integration and themes.
 - [Development](docs/development.md) covers building, testing, releases and performance measurement.
 - [Conformance](docs/conformance.md) lists vttest and esctest results.
-- [Benchmarks](docs/benchmarks.md) compares Trident with other terminals on macOS and Linux.
 
 ## License
 

@@ -17,7 +17,7 @@ The `--repo` option defaults to `amagomori/terminal`, which GitHub redirects to
   touched any file the PR touches or any build config (Cargo manifests and lockfile, `.cargo/`,
   toolchain, `build.rs`, workflows). Otherwise it's "quick", a release PTY A/B of the merged tree.
 - A rebase conflict takes the PR out of the queue and leaves its branch unchanged.
-- The queue is stored on the remote as `refs/merge-queue/main` (`queue.json`). Every save is a
+- The queue is stored on the remote as `refs/merge-queue/main` in `queue.json`. Every save is a
   `--force-with-lease` push, so all sessions share one queue and can't overwrite each other.
 
 ## Commands

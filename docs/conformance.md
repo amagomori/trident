@@ -26,10 +26,8 @@ $VTRUN --idle 400 --key '1\r' --key '\r' --key '\r' --key '0\r' -- vttest
 
 ## esctest results
 
-With xterm expectations at VT level 4, 294 tests pass and 230 fail. The suite skips 43 tests for
-known xterm bugs.
-[esctest-pass.txt](conformance/esctest-pass.txt) lists passing tests, and
-[esctest-fail.txt](conformance/esctest-fail.txt) lists every failure under its ticket.
+With xterm expectations at VT level 4, 294 tests pass and 230 fail; the suite skips 43 tests for
+known xterm bugs. The failures group under these tickets:
 
 | Failures | Cause | Ticket |
 | --- | --- | --- |

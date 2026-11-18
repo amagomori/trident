@@ -65,8 +65,8 @@ python3 $Q/scroll-region-qa/griddiff.py --main ../t-main --head ../t-head --fixt
   It is slower beyond the bound if the lower endpoint is above the bound.
 - ptyab's last line, `A/A noise bound`, is the largest single A/A pair. It's informational, since
   one outlier pair sets it.
-- `region_full` (full-width lines) is a control with little or no expected win. `region_bg`
-  (colored erase) can also improve. Neither may regress.
+- `region_full`, full-width lines, is a control with little or no expected win. `region_bg`,
+  colored erase, can also improve. Neither may regress.
 
 `griddiff.py` is the check that catches a wrong reset bound, such as a row that leaves one occupied
 cell unblanked. `vim_splits.py` is a visual smoke test for regions and splits. Vim's redraws don't
