@@ -2599,9 +2599,7 @@ impl Terminal {
         }
         if col + width >= cols {
             self.cursor.col = cols - 1;
-            // The do-wrap position only exists while autowrap can take it;
-            // without it the next print overwrites this same cell.
-            self.cursor.pending_wrap = self.modes.autowrap;
+            self.cursor.pending_wrap = true;
         } else {
             self.cursor.col = col + width;
         }
@@ -2885,12 +2883,14 @@ impl Terminal {
     }
 
     /// One step of BS/CUB. At the do-wrap position a reverse-wraparound mode just
-    /// cancels the wrap; otherwise the step moves left, wrapping to the end of the
-    /// previous line when `reverse_wrap_row` allows it.
+    /// cancels the wrap — but only while autowrap is on, since the mode needs it
+    /// (xterm's reverse wraparound requires DECAWM); otherwise the step moves
+    /// left, wrapping to the end of the previous line when `reverse_wrap_row`
+    /// allows it.
     fn cursor_back(&mut self) {
         if self.cursor.pending_wrap {
             self.cursor.pending_wrap = false;
-            if !self.modes.reverse_wrap && !self.modes.reverse_wrap_ext {
+            if !(self.modes.autowrap && (self.modes.reverse_wrap || self.modes.reverse_wrap_ext)) {
                 self.cursor.col = self.cursor.col.saturating_sub(1);
             }
             return;

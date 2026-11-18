@@ -871,6 +871,12 @@ fn cases() -> Vec<Case> {
             3,
             b"\x1b[?7l\x1b[?1045habcd\x08X",
         ),
+        (
+            "autowrap_off_combining_last_col",
+            4,
+            3,
+            "\x1b[?7labcd\u{301}".as_bytes(),
+        ),
         ("more_fix_tab", 12, 3, b"\x1b[?41habcdefghijkl\tX"),
         ("more_fix_tab_off", 12, 3, b"abcdefghijkl\tX"),
         ("autowrap_off", 4, 2, b"\x1b[?7labcdef"),

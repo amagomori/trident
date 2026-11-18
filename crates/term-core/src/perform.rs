@@ -63,13 +63,16 @@ impl Perform for Terminal {
                 self.move_col(col);
             }
             ('D', []) => {
-                // The do-wrap position counts as one cell past the edge, so a
-                // counted CUB spends its first step canceling it — unlike BS,
-                // whose single step lands on the cell to its left.
+                // While autowrap is on the do-wrap position counts as one cell
+                // past the edge, so a counted CUB spends its first step
+                // canceling it — unlike BS, whose single step lands on the cell
+                // to its left.
                 let mut n = n(0);
                 if self.cursor.pending_wrap {
                     self.cursor.pending_wrap = false;
-                    n = n.saturating_sub(1);
+                    if self.modes.autowrap {
+                        n = n.saturating_sub(1);
+                    }
                 }
                 for _ in 0..n {
                     self.cursor_back();
