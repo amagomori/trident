@@ -28,6 +28,8 @@ mod frame_clock;
 mod hover_preview;
 mod ime;
 mod input;
+#[cfg(target_os = "linux")]
+mod ipc;
 mod latency;
 mod osc_notify;
 mod paste;
@@ -209,6 +211,10 @@ enum UserEvent {
     Output(u64),
     /// The PTY of the tab with this pane id exited.
     Exit(u64),
+    /// A second `trident` run forwarded a new-window request: its working
+    /// directory and `-e` command.
+    #[cfg(target_os = "linux")]
+    OpenWindow(Option<PathBuf>, Vec<String>),
     PagerFailed(String),
     #[cfg(target_os = "macos")]
     Presented,
@@ -1600,6 +1606,10 @@ struct App {
     /// keeps its own tabs and interaction state.
     #[cfg(target_os = "linux")]
     windows: Vec<WindowGroup>,
+    /// The socket a later `trident` run uses to ask this process for a window,
+    /// exported to shells as `TRIDENT_SOCKET`.
+    #[cfg(target_os = "linux")]
+    ipc_socket: Option<PathBuf>,
 }
 
 /// Everything `App` keeps per window on Linux: the live session and tabs plus the input
@@ -1786,6 +1796,8 @@ impl App {
             exit_presentation: ExitPresentation::default(),
             #[cfg(target_os = "linux")]
             windows: Vec::new(),
+            #[cfg(target_os = "linux")]
+            ipc_socket: None,
         }
     }
 
@@ -2054,6 +2066,10 @@ impl App {
             let term = terminfo::term(&self.config.term, &self.config.env);
             env.insert("TERM".into(), term.into());
         }
+        #[cfg(target_os = "linux")]
+        if let Some(socket) = &self.ipc_socket {
+            env.insert(ipc::SOCKET_ENV.into(), socket.display().to_string());
+        }
         let mut pty = Pty::spawn(
             command,
             &env,
@@ -2265,9 +2281,16 @@ impl App {
 
     /// Opens a new window inside this process instead of spawning a child: a winit
     /// window, a PTY on a fresh pane id, and a `WindowGroup` pushed to `windows`.
+    /// `cwd` and `command` come from a forwarded request when another `trident` run
+    /// asked for the window; a keyboard shortcut passes `None` and an empty command.
     /// The window becomes the app's current one through its `Focused` event.
     #[cfg(target_os = "linux")]
-    fn new_window(&mut self, event_loop: &ActiveEventLoop) {
+    fn new_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        cwd: Option<PathBuf>,
+        command: Vec<String>,
+    ) {
         let Some(s) = &self.session else { return };
         let attrs = Window::default_attributes()
             .with_title("Trident")
@@ -2283,20 +2306,17 @@ impl App {
             }
         });
         window.set_ime_allowed(true);
-        let cwd = local_working_directory(s.term.working_directory())
+        let cwd = cwd
+            .filter(|dir| dir.is_dir())
+            .or_else(|| local_working_directory(s.term.working_directory()))
             .or_else(|| self.options.working_directory.clone());
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         let (cols, rows) = (s.term.cols(), s.term.rows());
         self.next_pane += 1;
         let id = self.next_pane;
-        let pty = match self.spawn_pty(
-            id,
-            self.options.command(&self.config, false),
-            cwd.as_deref(),
-            cols,
-            rows,
-            cell,
-        ) {
+        let shell = self.options.command(&self.config, false);
+        let command = if command.is_empty() { shell } else { &command };
+        let pty = match self.spawn_pty(id, command, cwd.as_deref(), cols, rows, cell) {
             Ok(pty) => pty,
             Err(error) => {
                 diag!("trident: new window: {error}");
@@ -4036,7 +4056,7 @@ impl App {
             #[cfg(not(target_os = "macos"))]
             Action::SelectTab(index) => self.select_tab(shortcut_tab(index, self.tabs.len())),
             #[cfg(target_os = "linux")]
-            Action::NewWindow => self.new_window(event_loop),
+            Action::NewWindow => self.new_window(event_loop, None, Vec::new()),
             #[cfg(target_os = "macos")]
             Action::NewWindow => {
                 let working_directory = self
@@ -5453,6 +5473,8 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::PagerFailed(error) => self.show_pager_error(error),
             UserEvent::HoverPreview(ready) => self.hover_preview_ready(ready),
+            #[cfg(target_os = "linux")]
+            UserEvent::OpenWindow(cwd, command) => self.new_window(event_loop, cwd, command),
             UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
                 self.output_ready()
             }
@@ -5749,6 +5771,18 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--install-terminfo") {
         std::process::exit(terminfo::install());
     }
+    #[cfg(target_os = "linux")]
+    if let Some(socket) = std::env::var_os(ipc::SOCKET_ENV) {
+        // A Trident process already runs: hand it this window's working directory
+        // and `-e` command and exit, instead of spending a process per window.
+        let command = parse_args_from(std::env::args().skip(1))
+            .map(|options| options.command)
+            .unwrap_or_default();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        if ipc::forward(std::path::Path::new(&socket), &cwd, &command) {
+            return;
+        }
+    }
     let options = match parse_args() {
         Ok(o) => Options {
             working_directory: working_directory.filter(|dir| dir.is_dir()),
@@ -5769,12 +5803,35 @@ fn main() {
     };
     let mut app = App::new(options, event_loop.create_proxy());
     app.startup_stderr = startup_stderr;
+    #[cfg(target_os = "linux")]
+    {
+        let socket = ipc::socket_path();
+        if let Some(listener) = ipc::listen(&socket) {
+            let proxy = event_loop.create_proxy();
+            std::thread::spawn(move || {
+                for mut stream in listener.incoming().flatten() {
+                    let Some((cwd, command)) = ipc::read_request(&mut stream) else {
+                        continue;
+                    };
+                    if proxy
+                        .send_event(UserEvent::OpenWindow(cwd, command))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+            app.ipc_socket = Some(socket);
+        }
+    }
     let run = event_loop.run_app(&mut app);
     let code = app.pager_exit_code;
     let error = app.error.take();
     // Dropping the app reaps every tab's command, killing one that ignores SIGHUP.
     drop(app);
     remove_on_exit();
+    #[cfg(target_os = "linux")]
+    let _ = std::fs::remove_file(ipc::socket_path());
     if let Err(e) = run {
         diag!("trident: {e}");
         std::process::exit(1);

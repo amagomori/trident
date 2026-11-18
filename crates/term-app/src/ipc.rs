@@ -26,9 +26,11 @@ pub fn socket_path() -> PathBuf {
 
 /// Binds `path` for listening, first removing a stale socket file it finds.
 pub fn listen(path: &Path) -> Option<UnixListener> {
-    if UnixListener::bind(path).is_err() {
-        let _ = std::fs::remove_file(path);
+    if let Ok(listener) = UnixListener::bind(path) {
+        return Some(listener);
     }
+    // A stale socket file survives its process; drop it and bind again.
+    let _ = std::fs::remove_file(path);
     UnixListener::bind(path).ok()
 }
 
