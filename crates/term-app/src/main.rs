@@ -3786,10 +3786,16 @@ impl App {
                 self.set_font_size(self.config.font_size);
             }
             self.resize_grid();
+            let mut group_error = None;
             #[cfg(target_os = "linux")]
             for index in 0..self.windows.len() {
                 self.with_window(index, |app| {
-                    let _ = app.apply_config_shown(font_changed, size_changed, next_vsync_off);
+                    if let Err(e) =
+                        app.apply_config_shown(font_changed, size_changed, next_vsync_off)
+                        && group_error.is_none()
+                    {
+                        group_error = Some(e);
+                    }
                     if size_changed {
                         app.set_font_size(app.config.font_size);
                     }
@@ -3799,7 +3805,7 @@ impl App {
                     }
                 });
             }
-            Ok(())
+            group_error.map_or(Ok(()), Err)
         });
         self.config_error = result.err();
         if let Some(error) = &self.config_error {
@@ -3822,6 +3828,7 @@ impl App {
         let Some(s) = &mut self.session else {
             return Ok(());
         };
+        let mut error = None;
         let size = if size_changed {
             self.config.font_size
         } else {
@@ -3830,8 +3837,12 @@ impl App {
         self.icons_latest = None;
         self.icons
             .apply(&s.window, self.config.app_icon, self.config.menu_bar_icon);
-        s.pty
-            .set_command_notifications(self.config.notify_long_commands_after != 0)?;
+        if let Err(e) = s
+            .pty
+            .set_command_notifications(self.config.notify_long_commands_after != 0)
+        {
+            error = Some(e);
+        }
         s.term
             .set_palette(self.config.themes.palette(self.appearance).clone());
         let responses = s.term.take_responses();
@@ -3843,8 +3854,13 @@ impl App {
         }
         release_freed_memory(&mut s.term);
         for pane in self.tabs.iter_mut().flatten() {
-            pane.pty
-                .set_command_notifications(self.config.notify_long_commands_after != 0)?;
+            if let Err(e) = pane
+                .pty
+                .set_command_notifications(self.config.notify_long_commands_after != 0)
+                && error.is_none()
+            {
+                error = Some(e);
+            }
             pane.term
                 .set_palette(self.config.themes.palette(self.appearance).clone());
             let responses = pane.term.take_responses();
@@ -3871,7 +3887,7 @@ impl App {
         for pane in self.tabs.iter_mut().flatten() {
             pane.window.renderer.set_vsync(self.config.vsync);
         }
-        Ok(())
+        error.map_or(Ok(()), Err)
     }
 
     /// Handles terminal shortcuts; true if the key was consumed.
