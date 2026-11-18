@@ -31,6 +31,13 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.pdfium = self.tmp / "pdfium"
+        (self.pdfium / "lib").mkdir(parents=True)
+        (self.pdfium / "licenses").mkdir()
+        (self.pdfium / "LICENSE").write_text("upstream")
+        (self.pdfium / "licenses/icu.txt").write_text("third party")
+        for ext in ("so", "dylib"):
+            (self.pdfium / f"lib/libpdfium.{ext}").write_bytes(b"pdfium fixture")
         self.binary = self.tmp / "trident"
         self.binary.write_bytes(b"\x7fELF fake GLIBC_2.17\0GLIBC_2.35\0GLIBC_2.3.4\0")
 
@@ -62,11 +69,11 @@ class Version(Base):
 class Linux(Base):
     def test_tarball_layout_and_modes(self):
         out = self.tmp / "dist"
-        made = release.linux(self.binary, "1.2.3", "x86_64", out) if HAS_DEB else None
+        made = release.linux(self.binary, self.pdfium, "1.2.3", "x86_64", out) if HAS_DEB else None
         if not HAS_DEB:
             out.mkdir()
             stage = self.tmp / "stage"
-            release.stage(stage, self.binary, "")
+            release.stage(stage, self.binary, self.pdfium, "")
             release.tarball(stage, "Trident-1.2.3-linux-x86_64", out / "Trident-1.2.3-linux-x86_64.tar.gz")
         path = out / "Trident-1.2.3-linux-x86_64.tar.gz"
         with tarfile.open(path) as tar:
@@ -79,7 +86,8 @@ class Linux(Base):
             for size in release.ICON_SIZES:
                 icon = f"{top}/share/icons/hicolor/{size}x{size}/apps/trident.png"
                 self.assertEqual(members[icon].mode, 0o644, icon)
-            for name in ("share/applications/trident.desktop",
+            for name in ("lib/trident/libpdfium.so", "share/doc/trident/pdfium/icu.txt",
+                         "share/doc/trident/pdfium/LICENSE", "share/applications/trident.desktop",
                          "share/trident/terminfo/xterm-trident.terminfo",
                          "share/trident/shell-integration/terminal.bash",
                          "share/trident/shell-integration/terminal.zsh",
@@ -93,14 +101,14 @@ class Linux(Base):
         self.assertIn("\nStartupWMClass=trident\n", desktop)
         first = hashlib.sha256(path.read_bytes()).hexdigest()
         stage = self.tmp / "again"
-        release.stage(stage, self.binary, "")
+        release.stage(stage, self.binary, self.pdfium, "")
         release.tarball(stage, "Trident-1.2.3-linux-x86_64", self.tmp / "again.tar.gz")
         self.assertEqual(hashlib.sha256((self.tmp / "again.tar.gz").read_bytes()).hexdigest(),
                          first, "tarball is not reproducible")
 
     @unittest.skipUnless(HAS_DEB, "needs dpkg-deb and tic")
     def test_deb_control_and_contents(self):
-        made = release.linux(self.binary, "1.2.3", "x86_64", self.tmp / "dist")
+        made = release.linux(self.binary, self.pdfium, "1.2.3", "x86_64", self.tmp / "dist")
         deb = self.tmp / "dist/Trident-1.2.3-linux-amd64.deb"
         self.assertIn(deb, made)
         field = lambda name: subprocess.run(["dpkg-deb", "-f", str(deb), name], check=True,
@@ -120,7 +128,7 @@ class Linux(Base):
 
     @unittest.skipUnless(HAS_DEB, "needs dpkg-deb and tic")
     def test_deb_prerelease_sorts_before_release(self):
-        release.linux(self.binary, "1.2.3-rc.1", "x86_64", self.tmp / "dist")
+        release.linux(self.binary, self.pdfium, "1.2.3-rc.1", "x86_64", self.tmp / "dist")
         deb = self.tmp / "dist/Trident-1.2.3-rc.1-linux-amd64.deb"
         version = subprocess.run(["dpkg-deb", "-f", str(deb), "Version"], check=True,
                                  capture_output=True, text=True).stdout.strip()
@@ -129,7 +137,7 @@ class Linux(Base):
 
     def test_appdir_layout(self):
         root = self.tmp / "Trident.AppDir"
-        release.appdir(self.binary, root)
+        release.appdir(self.binary, self.pdfium, root)
         self.assertTrue(os.access(root / "AppRun", os.X_OK))
         self.assertTrue(os.access(root / "usr/bin/trident", os.X_OK))
         self.assertEqual(os.readlink(root / ".DirIcon"), "trident.png")
@@ -145,19 +153,19 @@ class Linux(Base):
         cwd = os.getcwd()
         os.chdir(self.tmp)
         self.addCleanup(os.chdir, cwd)
-        release.appimage(self.binary, "x86_64", self.tmp / "out.AppImage", Path("./appimagetool"),
+        release.appimage(self.binary, self.pdfium, "x86_64", self.tmp / "out.AppImage", Path("./appimagetool"),
                          Path("./runtime"))
         args = (self.tmp / "out.AppImage").read_text()
         self.assertIn(f"--runtime-file {self.tmp / 'runtime'} ", args)
 
     def test_unknown_arch(self):
         with self.assertRaises(release.ReleaseError):
-            release.linux(self.binary, "1.2.3", "riscv64", self.tmp / "dist")
+            release.linux(self.binary, self.pdfium, "1.2.3", "riscv64", self.tmp / "dist")
 
 
 class MacOS(Base):
     def test_app_bundle(self):
-        made = release.macos(self.binary, "1.2.3-rc.1", self.tmp / "dist", dmg=False)
+        made = release.macos(self.binary, self.pdfium, "1.2.3-rc.1", self.tmp / "dist", dmg=False)
         app = self.tmp / "dist/Trident.app"
         self.assertEqual(made, [app])
         with open(app / "Contents/Info.plist", "rb") as f:
@@ -170,6 +178,8 @@ class MacOS(Base):
         self.assertEqual(info["CFBundleIconFile"], "trident")
         self.assertTrue(os.access(app / "Contents/MacOS/trident", os.X_OK))
         resources = app / "Contents/Resources"
+        self.assertTrue((app / "Contents/MacOS/libpdfium.dylib").is_file())
+        self.assertTrue((resources / "pdfium/icu.txt").is_file())
         self.assertEqual((resources / "trident.icns").read_bytes()[:4], b"icns")
         for name in ("shell-integration/terminal.zsh", "terminfo/xterm-trident.terminfo",
                      "LICENSE", "OFL.txt"):
@@ -178,7 +188,7 @@ class MacOS(Base):
     @unittest.skipIf(shutil.which("hdiutil"), "macOS builds the .dmg")
     def test_dmg_needs_hdiutil(self):
         with self.assertRaises(release.ReleaseError):
-            release.macos(self.binary, "1.2.3", self.tmp / "dist")
+            release.macos(self.binary, self.pdfium, "1.2.3", self.tmp / "dist")
 
 
 class Desktop(unittest.TestCase):

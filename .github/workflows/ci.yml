@@ -51,3 +51,12 @@ jobs:
             exit 1
           fi
       - run: cargo build --release --workspace
+      - name: PDF viewer with the release PDFium
+        run: |
+          case "$RUNNER_OS" in
+            Linux) platform=linux-x64 ;;
+            macOS) platform=mac-universal ;;
+          esac
+          .github/scripts/release/pdfium.sh "$platform" "$RUNNER_TEMP/pdfium"
+          cp "$RUNNER_TEMP"/pdfium/lib/libpdfium.* target/release/
+          python3 .github/scripts/release/check_pdf.py target/release/trident
