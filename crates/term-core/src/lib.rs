@@ -1560,7 +1560,7 @@ impl Terminal {
         self.screen().kitty_flags
     }
 
-    /// Clears mouse, focus and bracketed-paste modes on the primary screen.
+    /// Clears mouse, focus, bracketed-paste and keyboard-lock modes on the primary screen.
     ///
     /// Returns whether a mode changed. Does nothing on the alternate screen.
     pub fn reset_input_modes(&mut self) -> bool {
@@ -1570,11 +1570,13 @@ impl Terminal {
         let changed = self.modes.mouse != MouseMode::Off
             || self.modes.sgr_mouse
             || self.modes.focus_events
-            || self.modes.bracketed_paste;
+            || self.modes.bracketed_paste
+            || self.modes.keyboard_locked;
         self.modes.mouse = MouseMode::Off;
         self.modes.sgr_mouse = false;
         self.modes.focus_events = false;
         self.modes.bracketed_paste = false;
+        self.modes.keyboard_locked = false;
         changed
     }
 

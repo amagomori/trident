@@ -3517,6 +3517,11 @@ impl App {
             self.clear_pager_error();
         }
         let Some(s) = &mut self.session else { return };
+        // KAM (ANSI mode 2) locks out typed input, so it also swallows IME
+        // commits, Send shortcuts and pastes, which arrive on the same path.
+        if s.term.modes.keyboard_locked {
+            return;
+        }
         if s.input_query.buffer(bytes) {
             return;
         }
