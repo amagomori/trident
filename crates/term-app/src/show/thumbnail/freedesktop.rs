@@ -114,7 +114,15 @@ fn command(exec: &str, input: &Path, output: &Path, side: u32) -> Option<Command
     let mut words = shlex::split(exec)?.into_iter();
     let mut cmd = Command::new(words.next()?);
     for word in words {
-        let argument: OsString = match word.as_str() {
+        // Accept GNU-style --option=%field without interpolating filenames
+        // into an arbitrary string (which could itself be a shell script).
+        let (prefix, value) = word
+            .split_once('=')
+            .filter(|(k, _)| {
+                k.starts_with('-') && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+            .map_or(("", word.as_str()), |(k, v)| (&word[..k.len() + 1], v));
+        let value: OsString = match value {
             "%i" => input.into(),
             "%o" => output.into(),
             "%u" => file_uri(input).into(),
@@ -123,7 +131,9 @@ fn command(exec: &str, input: &Path, output: &Path, side: u32) -> Option<Command
             other if !other.contains('%') => other.into(),
             _ => return None,
         };
-        cmd.arg(argument);
+        let mut arg = OsString::from(prefix);
+        arg.push(value);
+        cmd.arg(arg);
     }
     Some(cmd)
 }
@@ -147,7 +157,7 @@ mod tests {
     #[test]
     fn installed_entry_expands_paths_without_resplitting() {
         let dir = tempfile::tempdir().unwrap();
-        let descriptor = "[Thumbnailer Entry]\nTryExec=sh\nExec=helper 'one argument' %s %u %i %o %%\nMimeType=video/mp4;\n[Ignored]\nExec=ignored\n";
+        let descriptor = "[Thumbnailer Entry]\nTryExec=sh\nExec=helper 'one argument' --size=%s %u --input=%i %o %%\nMimeType=video/mp4;\n[Ignored]\nExec=ignored\n";
         fs::write(dir.path().join("valid.thumbnailer"), descriptor).unwrap();
         fs::write(
             dir.path().join("wrong.thumbnailer"),
@@ -168,9 +178,9 @@ mod tests {
             cmd.get_args().collect::<Vec<_>>(),
             [
                 "one argument",
-                "320",
+                "--size=320",
                 "file:///tmp/50%25%20%27caf%C3%A9%27.mp4",
-                path.to_str().unwrap(),
+                "--input=/tmp/50% 'café'.mp4",
                 output.to_str().unwrap(),
                 "%"
             ]
