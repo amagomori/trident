@@ -1099,6 +1099,7 @@ impl App {
             start,
             end: at(c.end - 1),
             pieces: Vec::new(),
+            osc8: false,
         });
         let (cw, ch) = (s.fonts.metrics.width, s.fonts.metrics.height);
         let pad = self.config.padding * s.window.scale_factor() as f32;
