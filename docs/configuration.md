@@ -33,10 +33,11 @@ shortcuts such as copy, tab switching and font size don't hide it.
 `window_columns` and `window_rows` accept 1 to 10,000 cells. Trident limits the window to at least
 20 by 5 cells and to what fits on the screen. Setting either value opens at that size every time,
 with 100 columns or 30 rows for the other. Otherwise, `remember_window_size = true` restores the
-last closed window's size and maximized state.
+last saved window size and maximized state.
 
-On Linux, Trident saves these to
-`$XDG_STATE_HOME/trident/window.toml`, defaulting to `~/.local/state/trident/window.toml`.
+On Linux, Trident saves this state when the process exits. Closing one window while another in
+the same process stays open does not update `$XDG_STATE_HOME/trident/window.toml`
+(default: `~/.local/state/trident/window.toml`).
 On macOS, it uses `~/Library/Application Support/Trident/window.toml`.
 A missing or unreadable file means 100 by 30. Windows opened with Ctrl+Shift+N (Cmd+N on macOS)
 take the size of the window they were opened from.

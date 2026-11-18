@@ -162,7 +162,9 @@ could then read what you copied.
 ## Close confirmation
 
 If a program such as vim, ssh or a build is running, closing the window shows a confirmation banner
-with the program's name. Press Enter or close again to confirm, or Escape to keep the window open.
+with the program's name. Press Enter to close the window or Escape to keep it open.
+Closing again also confirms for the last window in a Trident process. On Linux, if another window
+in the same process is open, closing again repeats the prompt instead.
 Commands started with `-e` also require confirmation unless the command is a shell at its prompt.
 At an idle shell prompt, the window closes without confirmation.
 
