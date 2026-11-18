@@ -276,6 +276,8 @@ pub struct Modes {
     pub alt_scroll: bool,
     /// Redraws should wait until synchronized output ends or times out.
     pub synchronized_output: bool,
+    /// Mode 2027: use emoji cluster widths even in line editors.
+    pub grapheme_clusters: bool,
     /// Mode 2031: report color-scheme changes with `CSI ? 997 ; 1|2 n`.
     pub color_scheme_updates: bool,
 }
@@ -483,12 +485,11 @@ impl Terminal {
     /// of joining into emoji sequences: in the shell's prompt or input (OSC 133), or in a line
     /// editor's output elsewhere (a REPL a command runs, or a shell without those marks). A
     /// sequence the editor moves over or erases one codepoint at a time would otherwise leave
-    /// the screen out of step with its line.
+    /// the screen out of step with its line. Mode 2027 explicitly requests cluster
+    /// widths instead.
     pub(crate) fn per_codepoint_widths(&self) -> bool {
-        match self.shell.zone {
-            Zone::Prompt | Zone::Input => true,
-            Zone::Output | Zone::None => self.shell.line_editor,
-        }
+        !self.modes.grapheme_clusters
+            && (self.shell.line_editor || matches!(self.shell.zone, Zone::Prompt | Zone::Input))
     }
 
     /// Returns whether OSC 133 shell integration marks have been received.
