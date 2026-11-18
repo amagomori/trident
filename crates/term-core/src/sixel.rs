@@ -247,8 +247,20 @@ impl Terminal {
         if self.add_image(id, image).is_ok()
             && let Ok(p) = self.place_image(id, PlaceOptions::default())
         {
-            // Leave the cursor at the original left edge, below the image.
-            for _ in 0..p.rows {
+            // Advance below the image unless doing so would evict its anchor.
+            let rows = if (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row) {
+                let history = if self.alt_active || self.scroll_top != 0 {
+                    0
+                } else {
+                    self.max_scrollback
+                };
+                p.rows
+                    .min((self.scroll_bottom - self.scroll_top).saturating_add(history))
+            } else {
+                p.rows
+            };
+            self.cursor.pending_wrap = false;
+            for _ in 0..rows {
                 self.linefeed();
             }
         }

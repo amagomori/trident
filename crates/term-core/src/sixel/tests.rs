@@ -88,6 +88,20 @@ fn aborted_or_oversize_images_do_not_place_or_move_cursor() {
 }
 
 #[test]
+fn a_full_height_image_keeps_its_anchor_without_history() {
+    for setup in [b"".as_slice(), b"\x1b[?1049h", b"\x1b[2;4r\x1b[2H"] {
+        let mut t = Terminal::new(5, 4);
+        if setup.is_empty() {
+            t.set_scrollback_limit(0);
+        }
+        t.advance(setup);
+        t.advance(b"\x1bPq\"1;1;1;64@\x1b\\");
+        assert_eq!(image(&t).height, 64);
+        assert_eq!(t.cursor_position(), Some((3, 0)));
+    }
+}
+
+#[test]
 fn graphics_queries_are_distinct_from_scroll_up() {
     let mut t = Terminal::new(80, 24);
     t.advance(b"hi\x1b[c\x1b[?1;1;0S\x1b[?1;4S\x1b[?2;1S\x1b[?2;4S\x1b[?3;1S\x1b[?1;3;99S");
