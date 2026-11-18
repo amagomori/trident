@@ -174,7 +174,7 @@ pub fn candidates_at(chars: &[(char, usize, usize)], col: usize) -> Vec<Candidat
         for from in starts {
             for to in ends.clone() {
                 if to - from <= MAX_PATH && (space || (from, to) != (a, b)) {
-                    push_candidate(&mut out, chars, from, to, None);
+                    push_path(&mut out, chars, from, to);
                 }
             }
         }
@@ -232,18 +232,32 @@ fn push_candidate(
     }
 }
 
-fn push_variants(out: &mut Vec<Candidate>, chars: &[(char, usize, usize)], a: usize, b: usize) {
-    let mut push = |from, to, line| push_candidate(out, chars, from, to, line);
-    push(a, b, None);
+/// Tries the literal path before removing punctuation or a trailing compiler location.
+fn push_path(
+    out: &mut Vec<Candidate>,
+    chars: &[(char, usize, usize)],
+    a: usize,
+    b: usize,
+) -> (usize, Option<usize>) {
+    push_candidate(out, chars, a, b, None);
     let mut trimmed = b;
     while trimmed > a && matches!(chars[trimmed - 1].0, '.' | ',' | ':' | ';' | '!' | '?') {
         trimmed -= 1;
     }
     let (path, line) = strip_location(chars, a, trimmed);
-    push(a, path, line);
-    push(a, trimmed, None);
+    if path < trimmed {
+        push_candidate(out, chars, a, path, line);
+    }
+    if trimmed < b {
+        push_candidate(out, chars, a, trimmed, None);
+    }
+    (path, line)
+}
+
+fn push_variants(out: &mut Vec<Candidate>, chars: &[(char, usize, usize)], a: usize, b: usize) {
+    let (path, line) = push_path(out, chars, a, b);
     // `path:line:text`, as grep -n prints.
-    if let Some(colon) = (a + 1..trimmed)
+    if let Some(colon) = (a + 1..b)
         .find(|&k| chars[k].0 == ':' && chars.get(k + 1).is_some_and(|c| c.0.is_ascii_digit()))
     {
         let mut end = colon + 1;
@@ -251,10 +265,10 @@ fn push_variants(out: &mut Vec<Candidate>, chars: &[(char, usize, usize)], a: us
             end += 1;
         }
         let number: String = chars[colon + 1..end].iter().map(|c| c.0).collect();
-        push(a, colon, number.parse().ok());
+        push_candidate(out, chars, a, colon, number.parse().ok());
     }
     if path > a + 2 && matches!(chars[a].0, 'a' | 'b') && chars[a + 1].0 == '/' {
-        push(a + 2, path, line);
+        push_candidate(out, chars, a + 2, path, line);
     }
 }
 
@@ -1407,15 +1421,22 @@ mod tests {
         let file = dir.join("my dir/space name.txt");
         std::fs::write(&file, "full path").unwrap();
         std::fs::write(dir.join("name.txt"), "partial match").unwrap();
-        for (line, name) in [
-            ("my dir/space name.txt", "my dir/space name.txt"),
+        for (line, name, number) in [
+            ("my dir/space name.txt", "my dir/space name.txt", None),
+            (
+                "my dir/space name.txt:25:3: error",
+                "my dir/space name.txt",
+                Some(25),
+            ),
             (
                 "open ./my dir/space name.txt here",
                 "./my dir/space name.txt",
+                None,
             ),
             (
                 "prefix  'my dir/space name.txt'  suffix",
                 "my dir/space name.txt",
+                None,
             ),
         ] {
             let start = line.find(name).unwrap();
@@ -1423,6 +1444,7 @@ mod tests {
                 let found = candidates_at(&chars(line), col);
                 let (candidate, path) = resolve_first(&found, Some(&dir), None).unwrap();
                 assert_eq!(path, file, "{line} at {col}");
+                assert_eq!(candidate.line, number);
                 assert_eq!(
                     (candidate.start, candidate.end),
                     (start, start + name.len())
