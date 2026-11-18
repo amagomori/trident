@@ -121,8 +121,11 @@ Linux and Core Text on macOS. A full face name such as `"Fira Code Retina"` also
 Compatible cells on the same row are shaped together. Set `ligatures = true` to
 enable the font's programming ligatures (the bundled JetBrains Mono supports them).
 The cursor, selection, and copied text still use the original cells. A cursor or
-highlight inside an operator breaks the ligature there. This is not bidirectional
-layout: logical terminal columns stay in their original order.
+highlight inside an operator breaks the ligature there. Within an uninterrupted
+right-to-left run, glyphs use visual order and can join in either setting.
+Spaces, neutral brackets and changes of style or highlight separate runs. This is
+not whole-line bidirectional layout: runs do not move around neighboring text,
+and cursor movement, selection and copying still address logical cells.
 
 ## Key bindings
 

@@ -1,6 +1,5 @@
-//! Shape adjacent cells without changing the terminal's logical column order.
-//! Shaping clusters carry column numbers, not UTF-8 offsets. Each cluster
-//! starts at its grid column; only glyphs within it advance proportionally.
+//! Shape compatible cells inside their allocated grid span. LTR clusters start at
+//! their logical columns. RTL runs keep the shaper's visual order and advances.
 
 use crate::family::Face;
 use crate::font::{CellMetrics, Fonts, Style};
@@ -125,29 +124,20 @@ fn layout(
     let positions = buf.glyph_positions();
     let rtl = buf.direction() == harfrust::Direction::RightToLeft;
     let mut glyphs = Vec::with_capacity(infos.len());
-    let mut i = 0;
-    while i < infos.len() {
-        let col = infos[i].cluster;
-        let n = infos[i..].iter().take_while(|g| g.cluster == col).count();
-        let end = if rtl {
-            i.checked_sub(1).map(|j| infos[j].cluster)
-        } else {
-            infos.get(i + n).map(|g| g.cluster)
-        }
-        .unwrap_or(u32::from(cols));
+    let mut place = |range: std::ops::Range<usize>, col: u32, end: u32| {
         let room = end.checked_sub(col)? as f32 * metrics.width;
-        let advance = positions[i..i + n]
+        let advance = positions[range.clone()]
             .iter()
             .map(|p| p.x_advance as f32 * units)
             .sum::<f32>();
-        let factor = if advance > room * 1.05 {
-            room / advance
-        } else {
-            1.0
-        };
+        let limit = if rtl { room } else { room * 1.05 };
+        let factor = if advance > limit { room / advance } else { 1.0 };
         let scale = units * factor;
         let mut pen = col as f32 * metrics.width;
-        for (g, p) in infos[i..i + n].iter().zip(&positions[i..i + n]) {
+        if rtl {
+            pen += (room - advance * factor).max(0.0);
+        }
+        for (g, p) in infos[range.clone()].iter().zip(&positions[range]) {
             let id = GlyphId(u16::try_from(g.glyph_id).ok()?);
             if id.0 == 0 {
                 return None;
@@ -160,7 +150,20 @@ fn layout(
             });
             pen += p.x_advance as f32 * scale;
         }
-        i += n;
+        Some(())
+    };
+    if rtl {
+        // A cell origin or scale change between cursive glyphs breaks their join.
+        place(0..infos.len(), 0, u32::from(cols))?;
+    } else {
+        let mut i = 0;
+        while i < infos.len() {
+            let col = infos[i].cluster;
+            let n = infos[i..].iter().take_while(|g| g.cluster == col).count();
+            let end = infos.get(i + n).map_or(u32::from(cols), |g| g.cluster);
+            place(i..i + n, col, end)?;
+            i += n;
+        }
     }
     Some(glyphs.into())
 }
@@ -323,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn arabic_fallback_uses_joining_forms_in_logical_cells() {
+    fn arabic_fallback_uses_joining_forms_in_visual_order() {
         let mut fonts = Fonts::bundled(16.);
         let term = row("بب");
         let Some(r) = first(&term, &mut fonts, false) else {
@@ -333,8 +336,69 @@ mod tests {
         assert_eq!(r.cols, 2);
         assert_eq!(r.glyphs.len(), 2);
         assert_ne!(r.glyphs[0].id, r.glyphs[1].id);
-        assert_eq!(r.glyphs[0].x, fonts.metrics.width);
-        assert_eq!(r.glyphs[1].x, 0.);
+        assert!(r.glyphs[0].x < r.glyphs[1].x);
+        assert_eq!(r.glyphs[0].factor, r.glyphs[1].factor);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn geeza_beh_strokes_meet_in_both_ligature_modes() {
+        use crate::family::{FontFaces, FontSpec};
+
+        let (faces, _) = FontFaces::resolve(&FontSpec {
+            regular: Some("/System/Library/Fonts/GeezaPro.ttc".into()),
+            ..FontSpec::default()
+        })
+        .unwrap();
+        let mut fonts = Fonts::new(&faces, 32.);
+        for ligatures in [false, true] {
+            let term = row("(بب)");
+            assert!(first(&term, &mut fonts, ligatures).is_none());
+            let pair = run(
+                &term,
+                &term.viewport_row(0).cells[1..],
+                &mut fonts,
+                Style::Regular,
+                ligatures,
+                |_, _| true,
+            )
+            .unwrap();
+            assert_eq!(pair.cols, 2);
+            let [left, right] = &*pair.glyphs else {
+                panic!("expected two beh glyphs")
+            };
+            assert!(left.x < right.x);
+            assert_eq!(left.factor, right.factor);
+            let mask = |p: &Positioned| {
+                let ink = crate::font::outline(
+                    &pair.face.font,
+                    p.id,
+                    fonts.px,
+                    p.factor,
+                    fonts.metrics,
+                    false,
+                    false,
+                )
+                .unwrap();
+                let mut pixels = std::collections::HashSet::new();
+                for (i, &alpha) in ink.coverage.iter().enumerate() {
+                    if alpha >= 128 {
+                        pixels.insert((
+                            (p.x + ink.left).round() as i32 + (i % ink.width) as i32,
+                            (p.y + ink.top).round() as i32 + (i / ink.width) as i32,
+                        ));
+                    }
+                }
+                pixels
+            };
+            let (a, b) = (mask(left), mask(right));
+            assert!(
+                a.iter()
+                    .any(|&(x, y)| b.contains(&(x + 1, y)) || b.contains(&(x, y))),
+                "joining strokes must touch on the same raster row"
+            );
+            assert!(first(&row("ب ب"), &mut fonts, ligatures).is_none());
+        }
     }
 
     #[test]
