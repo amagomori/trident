@@ -4891,20 +4891,13 @@ impl App {
                 {
                     old.pty.write(b"\x1b[O");
                 }
-                self.window_event_inner(event_loop, id, event);
+                self.window_event_inner(event_loop, event);
             }
-            _ => self.with_window(index, |app| app.window_event_inner(event_loop, id, event)),
+            _ => self.with_window(index, |app| app.window_event_inner(event_loop, event)),
         }
     }
 
-    fn window_event_inner(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        id: WindowId,
-        event: WindowEvent,
-    ) {
-        #[cfg(not(target_os = "macos"))]
-        let _ = id;
+    fn window_event_inner(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         match event {
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
             #[cfg(target_os = "macos")]
@@ -5511,7 +5504,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.background_window_event(event_loop, id, event);
             return;
         }
-        self.window_event_inner(event_loop, id, event);
+        self.window_event_inner(event_loop, event);
     }
 }
 
