@@ -96,9 +96,10 @@ Hold Cmd (macOS) or Ctrl (Linux) over a link to underline it, and click to open 
   own line syntax:
   - Supported editors: vim, nvim, nano, emacs, helix, micro, kakoune, VS Code, Cursor, Sublime Text,
     Zed and TextMate.
-  - `ed` opens at the top of the file, and `red` starts in the file's directory because it
-    restricts editing to that directory. Any other editor gets `+line file`.
+  - `ed` and `red` open at the top of the file. Any other editor gets `+line file`.
   - Quoted words in the variable, such as an editor path with spaces, stay one argument.
+- Whether set in the config or the environment, `red` starts in the file's directory and receives
+  only the filename because it rejects paths containing `/`.
 - Terminal editors such as vim, nano and `emacs -nw` open in a new Trident window. GUI editors run
   directly.
 - With no editor set at all, the file goes to `open` or `xdg-open`, which can't jump to the line.
