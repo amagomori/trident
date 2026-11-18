@@ -17,7 +17,7 @@ fn img2sixel_golden_at_every_split() {
         t.advance(&bytes[split..]);
         let img = image(&t);
         assert_eq!((img.width, img.height), (13, 8));
-        for (n, pixel) in img.pixels.chunks_exact(4).enumerate() {
+        for (n, &pixel) in img.pixels.as_chunks::<4>().0.iter().enumerate() {
             let blue = (2..=5).contains(&(n % 13)) && (1..=6).contains(&(n / 13));
             assert_eq!(
                 pixel,
