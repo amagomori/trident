@@ -223,11 +223,13 @@ With `hover_preview = true` in the config, hold Ctrl (Cmd on macOS) with the poi
 path in the output to see a small card next to it:
 
 - Images show a thumbnail, and PDFs show their first page.
-- Text files show their first lines, or the lines around `path:line` when a line is given.
+- Text files show their first lines, or highlight the referenced line in locations such as
+  `path:line:column` and Python's `File "notes.txt", line 25`.
 - Directories list their entries.
 
 Paths are found in `ls` columns, `git status` and `git diff` output, compiler and traceback
-locations, and quoted names. Ctrl-click or Cmd-click opens links. Relative paths use the directory
+locations, and quoted names. Unquoted paths can contain single spaces; two or more spaces
+separate columns. Ctrl-click or Cmd-click opens links. Relative paths use the directory
 the shell last reported with OSC 7, falling back to the foreground program's or shell's working
 directory. Trident skips previews while the shell reports a directory on another host, as over ssh.
 PDF previews require `pdftoppm` from poppler-utils on Linux and use Quick Look on macOS.
