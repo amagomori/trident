@@ -2886,13 +2886,20 @@ impl App {
         }
         for op in s.term.take_window_ops() {
             let term_core::WindowOp::Resize { cols, rows } = op;
-            let _ = s.window.request_inner_size(window_size_for(
+            s.pty.resize(cols, rows, s.pty_cell);
+            // Wayland answers synchronously; the granted size drives the
+            // normal resize path so a partial grant resizes the grid back.
+            if let Some(size) = s.window.request_inner_size(window_size_for(
                 (cols, rows),
                 s.window.scale_factor(),
                 &s.fonts,
                 self.config.padding,
                 s.tab_bar,
-            ));
+            )) {
+                s.size = size;
+                s.renderer.resize(size.width, size.height);
+                s.resize.schedule(Instant::now());
+            }
         }
         let title = s.term.take_title();
         let progress = s.term.take_progress();
