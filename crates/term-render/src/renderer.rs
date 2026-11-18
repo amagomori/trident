@@ -1089,6 +1089,7 @@ impl Renderer {
                 fonts,
                 &text,
                 hover,
+                search.is_some(),
                 padding,
                 pixel_offset,
                 &mut overlays,
@@ -1106,8 +1107,9 @@ impl Renderer {
         ok
     }
 
-    /// Draws `text` along the bottom-left corner, or the top-left one when the strip would
-    /// cover a row of the hovered link; false if the atlas filled up.
+    /// Draws `text` along the bottom-left corner, or the first of the top-left corner and the
+    /// rows next to them that keeps clear of the hovered link, the search bar and a preview
+    /// card; false if the atlas filled up.
     #[allow(clippy::too_many_arguments)]
     fn draw_link_target(
         &mut self,
@@ -1115,6 +1117,7 @@ impl Renderer {
         fonts: &mut Fonts,
         text: &str,
         hover: Option<&term_core::Link>,
+        searching: bool,
         padding: f32,
         pixel_offset: f32,
         out: &mut Vec<Instance>,
@@ -1135,12 +1138,23 @@ impl Renderer {
                 rows(link.start.line) < y + ch && y < rows(link.end.line) + ch
             })
         };
+        let card = self.floating_image.as_ref().map(|f| {
+            let [x, y] = f.pos;
+            [x, y, x + f.image.width as f32, y + f.image.height as f32]
+        });
         let bottom = (height - ch).max(0.0);
-        let y = if covers(bottom) && !covers(0.0) {
-            0.0
-        } else {
-            bottom
+        let search_bar = searching.then_some(bottom);
+        let free = |y: f32| {
+            !covers(y)
+                && search_bar.is_none_or(|bar| (y - bar).abs() >= ch)
+                && card.is_none_or(|[l, t, r, b]| {
+                    r <= 0.0 || l >= strip_width || b <= y || t >= y + ch
+                })
         };
+        let y = [bottom, 0.0, (bottom - ch).max(0.0), ch.min(bottom)]
+            .into_iter()
+            .find(|&y| free(y))
+            .unwrap_or(bottom);
         out.push(self.rect(0.0, y, strip_width, ch, term.palette.foreground));
         for (i, c) in text.chars().enumerate() {
             let key = GlyphKey {
