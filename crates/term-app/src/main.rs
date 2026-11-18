@@ -4966,7 +4966,31 @@ impl ApplicationHandler<UserEvent> for App {
                 let held_at_focus =
                     self.held_at_focus
                         .observe(event.physical_key, event.state, is_synthetic);
+                let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
                 if event.state != ElementState::Pressed {
+                    // Releases reach the PTY only where the press would: not past a
+                    // dialog or search, and without write_input's scroll reset.
+                    if kitty_flags != 0
+                        && self.pending_close.is_none()
+                        && self.pending_paste.is_none()
+                        && self.search.is_none()
+                    {
+                        let base = event.key_without_modifiers();
+                        if let Some(bytes) = input::encode_kitty_key(
+                            &input::KeyEvent {
+                                key: &event.logical_key,
+                                base: &base,
+                                text: event.text.as_deref(),
+                                mods: self.modifiers,
+                            },
+                            input::KeyEventKind::Release,
+                            kitty_flags,
+                            self.options.option_as_alt,
+                        ) && let Some(s) = &mut self.session
+                        {
+                            s.pty.write(&bytes);
+                        }
+                    }
                     return;
                 }
                 if self.pending_close.is_some() {
@@ -4994,14 +5018,33 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let Some(s) = &self.session else { return };
                 let base = event.key_without_modifiers();
-                let bytes = input::encode_key(
-                    &event.logical_key,
-                    &base,
-                    event.text.as_deref(),
-                    self.modifiers,
-                    s.term.modes.app_cursor,
-                    self.options.option_as_alt,
-                );
+                let kind = if event.repeat {
+                    input::KeyEventKind::Repeat
+                } else {
+                    input::KeyEventKind::Press
+                };
+                let bytes = if kitty_flags == 0 {
+                    input::encode_key(
+                        &event.logical_key,
+                        &base,
+                        event.text.as_deref(),
+                        self.modifiers,
+                        s.term.modes.app_cursor,
+                        self.options.option_as_alt,
+                    )
+                } else {
+                    input::encode_kitty_key(
+                        &input::KeyEvent {
+                            key: &event.logical_key,
+                            base: &base,
+                            text: event.text.as_deref(),
+                            mods: self.modifiers,
+                        },
+                        kind,
+                        kitty_flags,
+                        self.options.option_as_alt,
+                    )
+                };
                 if let Some(bytes) = bytes {
                     self.write_input(&bytes);
                     self.hide_pointer_for_typing();
@@ -5053,7 +5096,10 @@ impl ApplicationHandler<UserEvent> for App {
                     && self.pending_paste.is_none()
                     && self.pending_close.is_none()
                 {
-                    self.write_input(text.as_bytes());
+                    let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
+                    let bytes = input::encode_kitty_text(&text, kitty_flags)
+                        .unwrap_or_else(|| text.as_bytes().to_vec());
+                    self.write_input(&bytes);
                     self.hide_pointer_for_typing();
                 }
                 self.refresh_link();
