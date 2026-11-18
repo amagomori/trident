@@ -1902,7 +1902,7 @@ impl Terminal {
                 if cell.flags.intersects(skip) {
                     continue;
                 }
-                if !cell.same_sgr(&style) {
+                if !span_open || !cell.same_sgr(&style) {
                     if span_open {
                         out.push_str("</span>");
                     }
