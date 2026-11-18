@@ -50,6 +50,9 @@ impl Terminal {
                 cell.c = b as char;
             }
             let end = col + count;
+            if self.shell.track_input {
+                self.record_printed(row, col..end);
+            }
             self.cursor.pending_wrap = end == cols;
             self.cursor.col = end.min(cols - 1);
             bytes = &bytes[count..];

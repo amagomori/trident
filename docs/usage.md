@@ -48,6 +48,7 @@ For the full capability list, see
 | Search scrollback | Cmd+F | Ctrl+Shift+F |
 | Select a rectangle | Option-drag | Alt-drag |
 | Extend the current selection | Shift-click or Shift-drag | same |
+| Move the cursor in the command line | Click (with shell integration) | same |
 | Paste | Cmd+V | Ctrl+Shift+V, Shift+Insert, middle click |
 | New window | Cmd+N | Ctrl+Shift+N |
 | New tab / close tab | Cmd+T / Cmd+W | Ctrl+Shift+T / Ctrl+Shift+W |
@@ -116,6 +117,19 @@ lines. It ignores case unless the query has an uppercase letter.
 - Rectangular copies keep spaces and put each screen row on its own line.
 - Selecting doesn't copy to the clipboard unless you launch with `--copy-on-select`. On Linux,
   selecting always sets the primary selection.
+
+## Click to move the cursor
+
+With shell integration, a click without a drag in the command line you're editing moves the
+shell's cursor there by sending Left/Right arrow keys, as in Ghostty and kitty. Only the
+soft-wrapped line holding the cursor counts, and a click past the end of the text moves to its
+end. Greyed autosuggestion text (zsh-autosuggestions, fish) past the input isn't part of it, so a
+click there leaves the suggestion unaccepted. A prompt that marks itself
+`OSC 133 ; A ; click_events=1` gets the click as an SGR mouse report instead for ASCII
+input; Unicode input uses cursor keys to preserve wide-character and combining boundaries.
+Single-click movement waits briefly for a possible double/triple-click, so selecting a word
+or line leaves the shell's cursor unchanged. Typing after a single click moves first, without
+waiting for that interval.
 
 ## Paste
 

@@ -1,0 +1,7 @@
+[H[2J██
+
+The default interactive shell is now zsh.
+To update your account to use zsh, please run `chsh -s /bin/zsh`.
+For more details, please visit https://support.apple.com/kb/HT208050.
+]7;file://ip-172-16-4-2.us-west-2.compute.internal/Users/devin[?1034h]133;A$ ]133;Bclear
+[3J[H[2J]7;file://ip-172-16-4-2.us-west-2.compute.internal/Users/devin]133;A$ ]133;B: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaabc

@@ -188,6 +188,24 @@ pub fn encode_mouse(
 /// Whether a click or wheel event goes to the program instead of local selection and
 /// scrolling. Shift always keeps it local; like xterm, X10 mode (DECSET 9) also keeps
 /// Ctrl local and reports Alt as a plain press.
+/// The bytes that carry out a click in the shell's command line: cursor keys, or a
+/// left-button SGR press and release when the prompt asked for click reports.
+pub fn encode_prompt_click(click: term_core::PromptClick, app_cursor: bool) -> Vec<u8> {
+    match click {
+        term_core::PromptClick::Move(n) => {
+            let key = csi_letter(
+                if n < 0 { 'D' } else { 'C' },
+                ModifiersState::empty(),
+                app_cursor,
+            );
+            key.repeat(n.unsigned_abs())
+        }
+        term_core::PromptClick::Report { row, col } => {
+            format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m", x = col + 1, y = row + 1).into_bytes()
+        }
+    }
+}
+
 pub fn tracks_mouse(mode: MouseMode, mods: ModifiersState) -> bool {
     match mode {
         MouseMode::Off => false,
@@ -228,6 +246,21 @@ pub fn encode_mouse_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_clicks_become_cursor_keys_or_click_reports() {
+        use term_core::PromptClick;
+        assert_eq!(
+            encode_prompt_click(PromptClick::Move(-2), false),
+            b"\x1b[D\x1b[D"
+        );
+        assert_eq!(encode_prompt_click(PromptClick::Move(1), true), b"\x1bOC");
+        assert!(encode_prompt_click(PromptClick::Move(0), false).is_empty());
+        assert_eq!(
+            encode_prompt_click(PromptClick::Report { row: 2, col: 9 }, false),
+            b"\x1b[<0;10;3M\x1b[<0;10;3m"
+        );
+    }
 
     fn key(k: Key, text: Option<&str>, mods: ModifiersState) -> Option<Vec<u8>> {
         encode_key(&k, &k, text, mods, false, true)

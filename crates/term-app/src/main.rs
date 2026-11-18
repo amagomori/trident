@@ -36,6 +36,7 @@ mod present_macos;
 #[cfg(target_os = "linux")]
 mod present_wayland;
 mod progress;
+mod prompt_click;
 mod pty;
 mod search;
 #[cfg(any(target_os = "macos", test))]
@@ -397,6 +398,7 @@ struct Session {
     fonts: Fonts,
     term: Terminal,
     pty: Pty,
+    input_query: prompt_click::InputQuery,
     /// Output parsed since the last frame was drawn.
     since_frame: usize,
     /// When output was first held back.
@@ -440,6 +442,7 @@ struct Pane {
     pty_cell: (f32, f32),
     term: Terminal,
     pty: Pty,
+    input_query: prompt_click::InputQuery,
     since_frame: usize,
     deferred: Option<Instant>,
     synchronized_since: Option<Instant>,
@@ -491,6 +494,7 @@ impl Pane {
             pty_cell,
             term,
             pty,
+            input_query: prompt_click::InputQuery::default(),
             since_frame: 0,
             deferred: None,
             synchronized_since: None,
@@ -797,6 +801,7 @@ impl Session {
         swap(&mut self.pty_cell, &mut pane.pty_cell);
         swap(&mut self.term, &mut pane.term);
         swap(&mut self.pty, &mut pane.pty);
+        swap(&mut self.input_query, &mut pane.input_query);
         swap(&mut self.since_frame, &mut pane.since_frame);
         swap(&mut self.deferred, &mut pane.deferred);
         swap(&mut self.synchronized_since, &mut pane.synchronized_since);
@@ -1331,6 +1336,17 @@ fn sync_expired(since: Option<Instant>, now: Instant) -> bool {
     since.is_some_and(|since| now.duration_since(since) >= SYNC_TIMEOUT)
 }
 
+/// A query still pending once a later prompt started was read by a command or
+/// the shell, which will never answer it; free its slot so later clicks work.
+fn retire_lost_query(s: &mut Session, prompt: u64, now: Instant) {
+    let pending = s.input_query.is_pending();
+    let queued = s.input_query.retire_lost(prompt, now);
+    if pending && !s.input_query.is_pending() {
+        prompt_click::trace(format_args!("unanswered before a new prompt, retired"));
+    }
+    s.pty.write(&queued);
+}
+
 fn exit_ready(deadline: Option<Instant>, presented: bool, now: Instant) -> bool {
     deadline.is_some_and(|deadline| presented || now >= deadline)
 }
@@ -1557,6 +1573,7 @@ struct App {
     /// Button held while a program tracks the mouse, for drag reports.
     reported_button: Option<ReportButton>,
     last_click: Option<(Instant, Point, u8)>,
+    click_to_move: prompt_click::ClickToMove,
     scroll_accum: f64,
     clipboard: clipboard::Clipboard,
     /// Clipboard text waiting for the user to confirm (paste protection).
@@ -1661,6 +1678,7 @@ impl App {
             ledger_click: false,
             reported_button: None,
             last_click: None,
+            click_to_move: prompt_click::ClickToMove::default(),
             scroll_accum: 0.0,
             clipboard: clipboard::Clipboard::default(),
             pending_paste: None,
@@ -1874,6 +1892,7 @@ impl App {
             fonts,
             term,
             pty,
+            input_query: prompt_click::InputQuery::default(),
             since_frame: 0,
             deferred: None,
             resize: ResizeThrottle::default(),
@@ -2297,6 +2316,7 @@ impl App {
         if index == self.active_tab || index >= self.tabs.len() {
             return;
         }
+        self.cancel_prompt_click();
         let Some(s) = &mut self.session else { return };
         let Some(mut pane) = self.tabs[index].take() else {
             return;
@@ -2325,6 +2345,7 @@ impl App {
         self.left_down = false;
         self.ledger_click = false;
         self.last_click = None;
+        self.click_to_move.cancel();
         self.reported_button = None;
         s.ime_cursor_area = None;
         s.window
@@ -2339,6 +2360,7 @@ impl App {
     /// Closes tab `index`, asking first while a program other than the shell runs in it.
     /// Closing the last tab closes the window.
     fn close_tab(&mut self, index: usize, event_loop: &ActiveEventLoop) {
+        self.cancel_prompt_click();
         if self.tabs.len() <= 1 {
             self.close_requested(event_loop);
             return;
@@ -2398,6 +2420,7 @@ impl App {
     #[cfg(target_os = "macos")]
     #[cold]
     fn close_window(&mut self, event_loop: &ActiveEventLoop) {
+        self.cancel_prompt_click();
         let group = self.native_tab_order();
         if group.is_empty() || group.len() >= self.tabs.len() {
             self.close_requested(event_loop);
@@ -2520,6 +2543,11 @@ impl App {
         }
         let responses = pane.term.take_responses();
         pane.pty.write(&responses);
+        if pane.term.take_prompt_input().is_some()
+            && let Some((_, queued)) = pane.input_query.finish(None)
+        {
+            pane.pty.write(&queued);
+        }
         for request in pane.term.take_clipboard_requests() {
             match request {
                 ClipboardRequest::Store { primary, text } => self.clipboard.set(text, primary),
@@ -2661,6 +2689,7 @@ impl App {
     }
 
     fn resize_grid(&mut self) {
+        self.cancel_prompt_click();
         let tab_bar_shown = tab_bar_drawn(self.config.tab_bar.shown(self.tabs.len()));
         let Some(s) = &mut self.session else { return };
         s.scroll.reset();
@@ -2893,6 +2922,7 @@ impl App {
         if from_leftover && s.output.is_empty() && s.output.waiting_since.is_none() {
             self.process_output();
         }
+        self.finish_prompt_input();
     }
 
     fn present_frame(&mut self) {
@@ -3107,10 +3137,18 @@ impl App {
     }
 
     fn write_input(&mut self, bytes: &[u8]) {
+        self.flush_prompt_click();
+        self.write_input_after_click(bytes);
+    }
+
+    fn write_input_after_click(&mut self, bytes: &[u8]) {
         if self.pager_error.is_some() {
             self.clear_pager_error();
         }
         let Some(s) = &mut self.session else { return };
+        if s.input_query.buffer(bytes) {
+            return;
+        }
         if let Some(log) = &mut s.latency {
             log.input(Instant::now());
         }
@@ -3165,8 +3203,12 @@ impl App {
         if self.config.paste_protection
             && paste::needs_confirmation(text, s.term.modes.bracketed_paste)
         {
-            self.pending_paste = Some(text.to_owned());
-            s.window.request_redraw();
+            let text = text.to_owned();
+            self.cancel_prompt_click();
+            self.pending_paste = Some(text);
+            if let Some(s) = &self.session {
+                s.window.request_redraw();
+            }
             return;
         }
         self.send_paste(text);
@@ -3202,6 +3244,7 @@ impl App {
     /// the banner asks first, and a second close request confirms.
     #[cold]
     fn close_requested(&mut self, event_loop: &ActiveEventLoop) {
+        self.cancel_prompt_click();
         let running = self
             .session
             .as_ref()
@@ -3496,6 +3539,7 @@ impl App {
         }
         match action {
             Action::Search => {
+                self.cancel_prompt_click();
                 let search = self.search.get_or_insert_with(search::Search::default);
                 if let Some(s) = &self.session {
                     search.covered_rows = find_bar_rows(
@@ -3971,6 +4015,7 @@ impl App {
         let pressed = state == ElementState::Pressed;
         if button == MouseButton::Left {
             if pressed && !self.left_down && self.click_ledger() {
+                self.cancel_prompt_click();
                 self.ledger_click = true;
                 return;
             }
@@ -3989,10 +4034,12 @@ impl App {
             || self.hover_link(),
         ) {
             Some(links::MouseAction::Release) => {
+                self.cancel_prompt_click();
                 self.session.as_mut().unwrap().link_pressed = false;
                 return;
             }
             Some(links::MouseAction::Open(hover)) => {
+                self.cancel_prompt_click();
                 self.session.as_mut().unwrap().link_pressed = true;
                 self.open_link(hover.target);
                 return;
@@ -4006,9 +4053,14 @@ impl App {
             if self.options.copy_on_select {
                 self.copy(false);
             }
+            if let Some((at, _, _)) = self.last_click {
+                self.click_to_move
+                    .release(at + prompt_click::MULTI_CLICK_INTERVAL);
+            }
             return;
         }
         if self.mouse_reporting() {
+            self.cancel_prompt_click();
             let button = match button {
                 MouseButton::Left => ReportButton::Left,
                 MouseButton::Middle => ReportButton::Middle,
@@ -4026,25 +4078,121 @@ impl App {
                 }
                 self.left_down = true;
                 let Some((row, col)) = self.cell_at(self.mouse_pos) else {
+                    self.cancel_prompt_click();
                     return;
                 };
-                let Some(s) = &mut self.session else { return };
+                let Some(s) = &self.session else { return };
                 let point = s.term.viewport_to_point_signed(row, col);
                 // Shift is also the local-selection override in mouse-tracking apps,
                 // where double/triple clicks must still select words/lines.
                 let modified = self.modifiers.alt_key();
                 let clicks = match self.last_click.filter(|_| !modified) {
-                    Some((at, p, n)) if p == point && at.elapsed() < Duration::from_millis(400) => {
+                    Some((at, p, n))
+                        if p == point && at.elapsed() < prompt_click::MULTI_CLICK_INTERVAL =>
+                    {
                         n % 3 + 1
                     }
                     _ => 1,
                 };
                 self.last_click = (!modified).then_some((Instant::now(), point, clicks));
+                if let Some(previous) = self.click_to_move.press(
+                    (self.modifiers.is_empty() && self.prompt_click_allowed()).then_some(point),
+                    clicks,
+                ) {
+                    self.move_cursor_to(previous);
+                }
+                let Some(s) = &mut self.session else { return };
                 select_at(&mut s.term, point, self.modifiers, clicks);
                 s.request_frame();
             }
             MouseButton::Middle if pressed => self.paste(true),
             _ => {}
+        }
+    }
+
+    fn flush_prompt_click(&mut self) {
+        if let Some(point) = self.click_to_move.take() {
+            self.move_cursor_to(point);
+        }
+    }
+
+    /// Context entry is a one-way cancellation, even if the context is dismissed
+    /// before the multi-click interval expires. Never revive its old gesture.
+    #[track_caller]
+    fn cancel_prompt_click(&mut self) {
+        self.click_to_move.cancel();
+        if let Some(s) = &mut self.session {
+            if s.input_query.deadline().is_some() {
+                prompt_click::trace(format_args!(
+                    "canceled at {}",
+                    std::panic::Location::caller()
+                ));
+            }
+            s.pty.write(&s.input_query.cancel());
+        }
+    }
+
+    fn finish_prompt_input(&mut self) {
+        let allowed = self.prompt_click_allowed();
+        let Some(s) = &mut self.session else { return };
+        let Some(reply) = s.term.take_prompt_input() else {
+            return;
+        };
+        let context = s.term.prompt_input_context();
+        let Some((point, queued)) = s.input_query.finish(context.as_ref()) else {
+            return;
+        };
+        let mut bytes = Vec::new();
+        let click = allowed
+            .then(|| prompt_click::reply_click(&s.term, point, reply))
+            .flatten();
+        prompt_click::trace(format_args!(
+            "reply: target {point:?}, allowed {allowed}, mouse {:?}, click {click:?}",
+            s.term.modes.mouse
+        ));
+        if let Some(click) = click {
+            bytes = input::encode_prompt_click(click, s.term.modes.app_cursor);
+        }
+        bytes.extend_from_slice(&queued);
+        if !bytes.is_empty() {
+            self.write_input_after_click(&bytes);
+        }
+    }
+
+    fn prompt_click_allowed(&self) -> bool {
+        self.search.is_none()
+            && self.pending_paste.is_none()
+            && self.pending_close.is_none()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.composition.preedit().is_none())
+    }
+
+    /// A click without a drag in the command line being edited moves the shell's cursor.
+    fn move_cursor_to(&mut self, point: Point) {
+        if !self.prompt_click_allowed() {
+            return;
+        }
+        let Some(s) = &mut self.session else { return };
+        if let Some(context) = s.term.prompt_input_context() {
+            let now = Instant::now();
+            let prompt = s.term.prompts_started();
+            retire_lost_query(s, prompt, now);
+            let sent = s.input_query.begin(point, context, prompt, now);
+            prompt_click::trace(format_args!("click {point:?}, query sent {sent}"));
+            if sent {
+                s.term.take_prompt_input(); // ignore unsolicited/stale data
+                s.pty.write(prompt_click::INPUT_QUERY);
+            }
+            return;
+        }
+        let Some(click) = s.term.prompt_click(point) else {
+            return;
+        };
+        let bytes = input::encode_prompt_click(click, s.term.modes.app_cursor);
+        if !bytes.is_empty() {
+            self.write_input(&bytes);
         }
     }
 
@@ -4056,6 +4204,7 @@ impl App {
         if self.left_down {
             if let (Some((row, col)), Some(s)) = (cell, &mut self.session) {
                 let point = s.term.viewport_to_point_signed(row, col);
+                self.click_to_move.drag(point);
                 s.term.update_selection(point);
                 s.request_frame();
             }
@@ -4481,6 +4630,27 @@ impl ApplicationHandler<UserEvent> for App {
             let _ = feedback.clock();
         }
         let now = Instant::now();
+        if let Some(point) = self.click_to_move.take_ready(now) {
+            self.move_cursor_to(point);
+        }
+        // A reply that arrived before its deadline still pairs with its click, even when
+        // this wakeup also crossed the deadline before its deferred output was parsed.
+        if self
+            .session
+            .as_ref()
+            .and_then(|s| s.input_query.deadline())
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.process_output();
+        }
+        if let Some(s) = &mut self.session {
+            let queued = s.input_query.expire(now);
+            if s.input_query.deadline().is_none() && !queued.is_empty() {
+                prompt_click::trace(format_args!("expired, releasing {} bytes", queued.len()));
+            }
+            s.pty.write(&queued);
+            retire_lost_query(s, s.term.prompts_started(), now);
+        }
         if exit_ready(self.exit_deadline, false, now) {
             event_loop.exit();
             return;
@@ -4575,18 +4745,24 @@ impl ApplicationHandler<UserEvent> for App {
             _ => false,
         };
         self.update_ime_cursor_area();
-        let mut deadline = None;
+        let mut deadline = self.click_to_move.deadline();
         if let Some(s) = &mut self.session {
+            if let Some(at) = s.input_query.wake_at() {
+                deadline = Some(deadline.map_or(at, |deadline| deadline.min(at)));
+            }
             if sync_expired(s.synchronized_since, Instant::now()) {
                 s.term.modes.synchronized_output = false;
                 s.synchronized_since = None;
                 s.window.request_redraw();
             }
-            deadline = wake_deadline(
+            let frame_deadline = wake_deadline(
                 frame_wakeup(s.redraw_at.map(|(latch, _)| latch), s.deferred),
                 s.resize.deadline,
                 s.latency.as_ref().and_then(|l| l.wake_deadline(now)),
             );
+            if let Some(frame) = frame_deadline {
+                deadline = Some(deadline.map_or(frame, |click| click.min(frame)));
+            }
             deadline = sync_wakeup(deadline, s.output.waiting_since, s.synchronized_since);
             if let Some(flip) = s.blink_at {
                 if now >= flip {
@@ -4667,6 +4843,7 @@ impl ApplicationHandler<UserEvent> for App {
             #[cfg(not(target_os = "macos"))]
             WindowEvent::CloseRequested => self.close_requested(event_loop),
             WindowEvent::Resized(size) => {
+                self.cancel_prompt_click();
                 if let Some(search) = &mut self.search {
                     search.dirty = true;
                 }
@@ -4684,6 +4861,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Moved(_) => self.note_normal_frame(),
             WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
+                if !focused {
+                    self.cancel_prompt_click();
+                }
                 self.typing_pointer.show();
                 let changed = std::mem::replace(&mut self.focused, focused) != focused;
                 if let Some(s) = &mut self.session {
@@ -4793,6 +4973,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Ime(event) => {
+                // X11 can report only an empty preedit at a composition boundary.
+                // That boundary still invalidates movement queued before the IME.
+                if matches!(&event, Ime::Preedit(..)) {
+                    self.cancel_prompt_click();
+                }
                 if let Some(s) = &mut self.session {
                     s.composition.update(&event);
                     if matches!(event, Ime::Enabled | Ime::Disabled) {
@@ -5160,6 +5345,35 @@ mod tests {
             "{:?}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+
+    #[test]
+    fn bash_integration_keeps_the_editor_locale_after_reporting_the_directory() {
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../shell-integration/terminal.bash"
+        );
+        let bash = std::env::var_os("TERMINAL_TEST_BASH").unwrap_or_else(|| "bash".into());
+        for (lc_all, expected) in [(Some("C.UTF-8"), "2 C.UTF-8"), (None, "2 unset")] {
+            let mut command = std::process::Command::new(&bash);
+            command
+                .args([
+                    "--norc",
+                    "-ic",
+                    r#"source "$1"; _terminal_report_cwd >/dev/null; x=日本; echo "${#x} ${LC_ALL-unset}""#,
+                    "bash",
+                    script,
+                ])
+                .env_remove("LC_ALL")
+                .env("LANG", "C.UTF-8")
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Some(lc_all) = lc_all {
+                command.env("LC_ALL", lc_all);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
     }
 
     #[test]

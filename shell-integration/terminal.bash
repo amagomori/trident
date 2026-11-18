@@ -16,7 +16,10 @@ _terminal_save_status() {
 }
 
 _terminal_report_cwd() {
-    local LC_ALL=C path=$PWD encoded= c i
+    local path=$PWD encoded= c i lc_all=${LC_ALL-} lc_all_set=${LC_ALL+1}
+    # Bash before 3.2.43 keeps a function-local LC_ALL's locale after returning,
+    # which leaves Readline moving the cursor by bytes, so restore it globally.
+    LC_ALL=C
     for (( i = 0; i < ${#path}; i++ )); do
         c=${path:i:1}
         case $c in
@@ -25,6 +28,7 @@ _terminal_report_cwd() {
             *) printf -v c '%d' "'$c"; printf -v c '%%%02X' $(( c & 255 )); encoded+=$c ;;
         esac
     done
+    if [[ $lc_all_set ]]; then LC_ALL=$lc_all; else unset LC_ALL; fi
     printf '\033]7;file://%s%s\007' "${HOSTNAME-}" "$encoded"
 }
 

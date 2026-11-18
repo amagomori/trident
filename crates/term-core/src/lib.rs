@@ -32,6 +32,8 @@ pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
 pub use osc::{ClipboardRequest, WorkingDirectory};
 mod perform;
+mod prompt_input;
+pub use prompt_input::{PromptInput, PromptInputContext};
 mod reflow;
 mod rerun;
 
@@ -64,6 +66,14 @@ struct ShellState {
     output_ends: Vec<OutputEnd>,
     prompt_line: Option<u64>,
     input_start: Option<(u64, usize)>,
+    track_input: bool,
+    input_writes: Vec<(u64, std::ops::Range<usize>)>,
+    prompt_input: prompt_input::State,
+    prompt_generation: u64,
+    /// Prompts started (`OSC 133 ; A`), on either screen.
+    prompts_started: u64,
+    /// The prompt asked for clicks as SGR mouse reports (`OSC 133 ; A ; click_events=1`).
+    click_events: bool,
     commands: VecDeque<Command>,
     budget: budget::Budget,
     runs: rerun::Runs,
@@ -149,6 +159,16 @@ struct OutputEnd {
     line: u64,
     cells: Vec<Cell>,
     wrapped: bool,
+}
+
+/// What a plain click in the command line being edited should send to the shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptClick {
+    /// Cursor-key presses: right when positive, left when negative.
+    Move(isize),
+    /// A left-click SGR mouse report at this active-screen cell, for shells that asked
+    /// for clicks (kitty's `click_events`).
+    Report { row: usize, col: usize },
 }
 
 /// A shell completion event drained with [`Terminal::take_command_finished`].
@@ -486,6 +506,148 @@ impl Terminal {
         self.shell.notifications.take()
     }
 
+    /// How a click at `point` moves the cursor in the command line being edited (OSC 133
+    /// `B` seen, no `C` yet), as in Ghostty and kitty. Only the soft-wrapped line holding
+    /// the cursor counts; a click past the end of the text moves to its end, before any
+    /// greyed autosuggestion.
+    pub fn prompt_click(&self, point: Point) -> Option<PromptClick> {
+        if self.alt_active || !matches!(self.shell.zone, Zone::Prompt | Zone::Input) {
+            return None;
+        }
+        let cursor_line = self.history + self.cursor.row as u64;
+        if self.shell.click_events {
+            // Unadapted native editors can index SGR columns as characters and
+            // omit combining scalars. Only a complete ASCII soft-wrap span is safe.
+            let (start, start_col) = self.shell.input_start?;
+            if self.shell.zone != Zone::Input || start < self.first_line() {
+                return None;
+            }
+            let end = self.soft_wrap_end(start);
+            if !(start..=end).contains(&cursor_line)
+                || self.shell.input_writes.iter().any(|(row, _)| *row > end)
+                || (start..=end).any(|line| {
+                    self.line(line).cells.iter().enumerate().any(|(col, cell)| {
+                        (line != start
+                            || col >= start_col
+                            || self
+                                .shell
+                                .input_writes
+                                .iter()
+                                .any(|(row, cols)| *row == line && cols.contains(&col)))
+                            && (!cell.c.is_ascii() || cell.flags.contains(Flags::GRAPHEME))
+                    })
+                })
+            {
+                return None;
+            }
+            let first = self
+                .shell
+                .prompt_line
+                .unwrap_or(cursor_line)
+                .min(cursor_line);
+            return (point.line >= first.max(self.history) && point.line <= end).then(|| {
+                PromptClick::Report {
+                    row: (point.line - self.history) as usize,
+                    col: point.col.min(self.cols - 1),
+                }
+            });
+        }
+        let (start_line, start_col) = self.shell.input_start?;
+        if self.shell.zone != Zone::Input || start_line < self.first_line() {
+            return None;
+        }
+        let end_line = self.soft_wrap_end(start_line);
+        let span = start_line..=end_line;
+        if !span.contains(&cursor_line) || !span.contains(&point.line) {
+            return None;
+        }
+        let mut col = point.col.min(self.cols - 1);
+        if col > 0
+            && self.line(point.line).cells[col]
+                .flags
+                .contains(Flags::WIDE_SPACER)
+        {
+            col -= 1;
+        }
+        // Characters from the input start up to (line, col): spacers and wrap padding
+        // are not characters the line editor moves over.
+        let skip = Flags::WIDE_SPACER.union(Flags::WIDE_WRAP);
+        let mut text_end = 0;
+        // Where a run of suggestion-styled text starts, and its style.
+        let mut faint_run: Option<(usize, (Color, bool))> = None;
+        let mut faint_gap = false;
+        let mut suggestion_start = None;
+        let mut count = 0;
+        let mut click = None;
+        let mut cursor = None;
+        let cursor_col = self.cursor.col + usize::from(self.cursor.pending_wrap);
+        for line in start_line..=end_line {
+            let cells = &self.line(line).cells;
+            let from = if line == start_line { start_col } else { 0 };
+            for c in from..=cells.len() {
+                if line == point.line && c == col.max(from) {
+                    click.get_or_insert(count);
+                }
+                if line == cursor_line && c == cursor_col.max(from) {
+                    cursor.get_or_insert(count);
+                }
+                let Some(cell) = cells.get(c) else { break };
+                if !cell.flags.intersects(skip) {
+                    let style = (cell.fg, cell.flags.contains(Flags::DIM));
+                    if cell.c == ' ' {
+                        if suggestion_style(cell) {
+                            if faint_run.is_none_or(|run| run.1 != style) {
+                                faint_run = Some((count, style));
+                            }
+                        } else if faint_run.is_some() {
+                            faint_gap |= !self
+                                .shell
+                                .input_writes
+                                .iter()
+                                .any(|(row, cols)| *row == line && cols.contains(&c));
+                        }
+                    }
+                    if cell.c != ' ' {
+                        // Cursor-addressed right prompts leave unwritten padding;
+                        // spaces printed by the line editor remain editable input.
+                        if faint_gap
+                            && let Some((start, _)) = faint_run
+                            && cursor.is_some_and(|cursor| cursor <= start)
+                        {
+                            suggestion_start.get_or_insert(start);
+                        }
+                        faint_run = match faint_run {
+                            Some(run) if run.1 == style => Some(run),
+                            _ => suggestion_style(cell).then_some((count, style)),
+                        };
+                        faint_gap = false;
+                        text_end = count + 1;
+                    }
+                    count += 1;
+                }
+            }
+        }
+        let cursor = cursor?;
+        // An autosuggestion (zsh-autosuggestions, fish) is drawn greyed past the end of
+        // the real input, and Right at that end accepts it, so stop where it starts. The
+        // cursor never sits inside a suggestion, so a run holding it is typed input.
+        let input_end = suggestion_start.unwrap_or(match faint_run {
+            Some((start, _)) if cursor <= start => start,
+            _ => text_end,
+        });
+        let target = click?.min(input_end.max(cursor));
+        Some(PromptClick::Move(target as isize - cursor as isize))
+    }
+
+    /// The last row of the soft-wrapped line starting at or running through `line`.
+    fn soft_wrap_end(&self, mut line: u64) -> u64 {
+        let last = self.history + self.rows as u64 - 1;
+        while line < last && self.line(line).wrapped() {
+            line += 1;
+        }
+        line
+    }
+
     /// Put the nearest prompt strictly above/below the viewport top at its top.
     pub fn jump_to_prompt(&mut self, previous: bool) {
         if self.alt_active {
@@ -611,13 +773,29 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn track_command(&mut self, mark: &[u8], args: &[&[u8]]) {
-        if self.alt_active || self.max_scrollback == 0 {
+        if self.alt_active {
             return;
         }
         let line = self.history + self.cursor.row as u64;
         let col = self.cursor.col + usize::from(self.cursor.pending_wrap);
+        if self.max_scrollback == 0 {
+            // No command history, but clicks in the prompt still need its bounds.
+            match mark {
+                b"A" => {
+                    self.shell.input_writes.clear();
+                    (self.shell.prompt_line, self.shell.input_start) = (Some(line), None);
+                }
+                b"B" => {
+                    self.erase_input_writes(self.cursor.row, 0, col);
+                    self.shell.input_start = Some((line, col));
+                }
+                _ => {}
+            }
+            return;
+        }
         match mark {
             b"A" => {
+                self.shell.input_writes.clear();
                 self.drop_overwritten_commands(line);
                 if let Some(last) = self.shell.commands.back_mut()
                     && last.next_prompt.is_none()
@@ -630,7 +808,10 @@ impl Terminal {
                 self.shell.prompt_line = Some(line);
                 self.shell.input_start = None;
             }
-            b"B" => self.shell.input_start = Some((line, col)),
+            b"B" => {
+                self.erase_input_writes(self.cursor.row, 0, col);
+                self.shell.input_start = Some((line, col));
+            }
             b"C" if self.shell.zone != Zone::Output => {
                 let prompt_line = self.shell.prompt_line.take().unwrap_or(line);
                 let (input_line, input_col) = self
@@ -744,6 +925,14 @@ impl Terminal {
             .shell
             .input_start
             .and_then(|(line, col)| Some((shift(line)?, col)));
+        self.shell.input_writes.retain_mut(|(line, _)| {
+            if let Some(moved) = shift(*line) {
+                *line = moved;
+                true
+            } else {
+                false
+            }
+        });
         let commands = &mut self.shell.commands;
         let mut i = commands.partition_point(|c| c.next_prompt.is_some_and(|next| next < top));
         while i < commands.len() {
@@ -845,7 +1034,11 @@ impl Terminal {
         self.track_command(mark, args);
         let flag = match mark {
             b"A" => {
+                self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
+                self.shell.prompts_started = self.shell.prompts_started.wrapping_add(1);
                 self.shell.zone = Zone::Prompt;
+                self.shell.prompt_input = prompt_input::State::default();
+                self.shell.click_events = args.contains(&&b"click_events=1"[..]);
                 Some(RowFlags::PROMPT_START)
             }
             b"B" => {
@@ -853,12 +1046,15 @@ impl Terminal {
                 Some(RowFlags::PROMPT)
             }
             b"C" => {
+                self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
+                self.shell.input_writes.clear();
                 let current = self.history + self.cursor.row as u64;
                 self.shell.output_ends.retain(|end| end.line != current);
                 self.shell.zone = Zone::Output;
                 Some(RowFlags::OUTPUT_START)
             }
             b"D" => {
+                self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
                 let command_ran = self.shell.zone == Zone::Output;
                 self.shell.zone = Zone::None;
                 self.reset_input_modes();
@@ -950,6 +1146,12 @@ impl Terminal {
                 output_ends: Vec::new(),
                 prompt_line: None,
                 input_start: None,
+                track_input: false,
+                input_writes: Vec::new(),
+                prompt_input: prompt_input::State::default(),
+                prompt_generation: 0,
+                prompts_started: 0,
+                click_events: false,
                 commands: VecDeque::new(),
                 budget: budget::Budget::default(),
                 runs: rerun::Runs::default(),
@@ -1370,6 +1572,7 @@ impl Terminal {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
         self.invalidate_output_ends();
         self.selection = None;
         self.tracked.extend_from_slice(points);
@@ -1791,6 +1994,9 @@ impl Terminal {
             self.rotate_region_up(top, bottom, n);
             return;
         }
+        if self.max_scrollback == 0 {
+            self.shift_prompt_bounds_up(bottom, n);
+        }
         for _ in 0..n {
             let row = self.lines_mut().remove(top);
             let spare = if to_history {
@@ -1811,6 +2017,31 @@ impl Terminal {
             };
             self.lines_mut().insert(bottom, blank);
         }
+    }
+
+    /// Without scrollback lines stay screen rows, so prompt bounds in the scrolled rows
+    /// move up with their text; bounds scrolled off the top are dropped.
+    #[cold]
+    fn shift_prompt_bounds_up(&mut self, bottom: usize, n: usize) {
+        let (history, n) = (self.history, n as u64);
+        let shift = |line: u64| {
+            if line > history + bottom as u64 {
+                Some(line)
+            } else {
+                line.checked_sub(n).filter(|&l| l >= history)
+            }
+        };
+        let shell = &mut self.shell;
+        shell.prompt_line = shell.prompt_line.and_then(shift);
+        shell.input_start = shell.input_start.and_then(|(l, c)| Some((shift(l)?, c)));
+        shell.input_writes.retain_mut(|(line, _)| {
+            if let Some(moved) = shift(*line) {
+                *line = moved;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// Returns the row evicted from the far end of scrollback, if any, for reuse.
@@ -1863,6 +2094,9 @@ impl Terminal {
     }
 
     fn reset_rows(&mut self, rows: std::ops::Range<usize>) {
+        if !self.shell.input_writes.is_empty() {
+            self.erase_input_rows(rows.clone());
+        }
         let (cols, template) = (self.cols, self.cursor.template);
         let mut freed = self.recycled_memory_freed;
         for row in &mut self.lines_mut()[rows] {
@@ -1897,7 +2131,136 @@ impl Terminal {
         self.lines_mut()[row].touch(end);
     }
 
+    /// Notes printed prompt input, so padding a right prompt skips over is not mistaken
+    /// for typed spaces.
+    #[cold]
+    fn record_printed(&mut self, row: usize, cols: std::ops::Range<usize>) {
+        if !self.alt_active {
+            self.record_input_write(self.history + row as u64, cols);
+        }
+    }
+
+    #[cold]
+    fn erase_input_rows(&mut self, rows: std::ops::Range<usize>) {
+        if !self.alt_active {
+            let lines = self.history + rows.start as u64..self.history + rows.end as u64;
+            self.shell
+                .input_writes
+                .retain(|(line, _)| !lines.contains(line));
+        }
+    }
+
+    #[cold]
+    fn record_input_write(&mut self, line: u64, mut cols: std::ops::Range<usize>) {
+        self.shell.input_writes.retain(|(row, existing)| {
+            if *row == line && existing.start <= cols.end && cols.start <= existing.end {
+                cols.start = cols.start.min(existing.start);
+                cols.end = cols.end.max(existing.end);
+                false
+            } else {
+                true
+            }
+        });
+        self.shell.input_writes.push((line, cols));
+    }
+
+    #[cold]
+    fn erase_input_writes(&mut self, row: usize, from: usize, to: usize) {
+        if self.alt_active {
+            return;
+        }
+        let line = self.history + row as u64;
+        let mut tail = None;
+        self.shell.input_writes.retain_mut(|(old_line, cols)| {
+            if *old_line != line || cols.end <= from || cols.start >= to {
+                return true;
+            }
+            if cols.start < from {
+                if cols.end > to {
+                    tail = Some((line, to..cols.end));
+                }
+                cols.end = from;
+                true
+            } else if cols.end > to {
+                cols.start = to;
+                true
+            } else {
+                false
+            }
+        });
+        if let Some(tail) = tail {
+            self.shell.input_writes.push(tail);
+        }
+    }
+
+    #[cold]
+    fn shift_input_writes(&mut self, row: usize, col: usize, removed: usize, inserted: usize) {
+        if self.alt_active {
+            return;
+        }
+        let line = self.history + row as u64;
+        let cols = self.cols;
+        let shift = |c: usize| {
+            if c < col {
+                c
+            } else {
+                (col + c.saturating_sub(col + removed) + inserted).min(cols)
+            }
+        };
+        self.shell.input_writes.retain_mut(|(old_line, range)| {
+            if *old_line == line {
+                range.start = shift(range.start);
+                range.end = shift(range.end);
+            }
+            range.start < range.end
+        });
+        if inserted > 0 {
+            self.record_input_write(line, col..(col + inserted).min(cols));
+        }
+    }
+
     fn put_char(&mut self, c: char) {
+        if self.shell.track_input {
+            return self.put_tracked_char(c);
+        }
+        self.put_char_cells(c, false)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn put_tracked_char(&mut self, c: char) {
+        // Readline prints a last-column placeholder, erases it with EL while
+        // wrap is still pending, then prints the wide glyph on the next row.
+        // Preserve that erased/unwritten provenance as ordinary wide-wrap
+        // padding. A printed space is still occupied and must remain input;
+        // blanks elsewhere, or after cursor motion cancels pending wrap, do not
+        // establish this boundary. Keep this off the untracked output path.
+        if self.shell.zone == Zone::Input
+            && !self.alt_active
+            && self.cursor.pending_wrap
+            && self.modes.autowrap
+            && self.print_state.last() == Some(' ')
+            && unicode_width::UnicodeWidthChar::width(c) == Some(2)
+        {
+            let (row, col) = (self.cursor.row, self.cursor.col);
+            let line = self.history + row as u64;
+            if self.screen().lines[row].cells[col].c == ' '
+                && !self
+                    .shell
+                    .input_writes
+                    .iter()
+                    .any(|(written, cols)| *written == line && cols.contains(&col))
+            {
+                self.lines_mut()[row].cells[col]
+                    .flags
+                    .insert(Flags::WIDE_WRAP);
+            }
+        }
+        self.put_char_cells(c, true)
+    }
+
+    #[inline(always)]
+    fn put_char_cells(&mut self, c: char, track: bool) {
         let c = match self.charsets[self.active_charset] {
             Charset::DecSpecial => dec_special(c),
             Charset::Uk if c == '#' => '\u{a3}',
@@ -1925,6 +2288,7 @@ impl Terminal {
         }
         if width == 2 && self.cursor.col == self.cols - 1 {
             if self.modes.autowrap {
+                self.sync_cursor_row();
                 let (row, col) = (self.cursor.row, self.cursor.col);
                 let mut blank = Cell::blank(&self.cursor.template);
                 blank.flags.insert(Flags::WIDE_WRAP);
@@ -1944,6 +2308,9 @@ impl Terminal {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
         let template = self.cursor.template;
         let insert = self.modes.insert;
+        if insert && track {
+            self.shift_input_writes(row, col, 0, width);
+        }
         let line = &mut self.lines_mut()[row];
         if insert {
             insert_printed_cells(line, col, cols, width, &template);
@@ -1967,6 +2334,9 @@ impl Terminal {
         line.cells[col] = cell;
 
         self.print_state = PrintState(c as u32);
+        if track {
+            self.record_printed(row, col..col + width);
+        }
         if col + width >= cols {
             self.cursor.col = cols - 1;
             self.cursor.pending_wrap = true;
@@ -2044,9 +2414,15 @@ impl Terminal {
         } else if !tail_kept {
             line.set_blank_from(from);
         }
+        if !self.shell.input_writes.is_empty() {
+            self.erase_input_writes(row, from, to);
+        }
     }
 
     fn erase_row(&mut self, row: usize) {
+        if !self.shell.input_writes.is_empty() {
+            self.erase_input_writes(row, 0, usize::MAX);
+        }
         if !self.screen().placements.is_empty() {
             self.erase_placements(row, row, 0, usize::MAX);
         }
@@ -2155,6 +2531,9 @@ impl Terminal {
             }
             1 => self.erase_cells(row, 0, col + 1),
             2 => {
+                if !self.shell.input_writes.is_empty() {
+                    self.erase_input_writes(row, 0, usize::MAX);
+                }
                 if !self.screen().placements.is_empty() {
                     self.erase_placements(row, row, 0, usize::MAX);
                 }
@@ -2167,6 +2546,9 @@ impl Terminal {
 
     fn insert_blank(&mut self, n: usize) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        if self.shell.track_input {
+            self.shift_input_writes(row, col, 0, n.min(cols - col));
+        }
         if !self.screen().placements.is_empty() {
             self.erase_placements(row, row, col, usize::MAX);
         }
@@ -2190,6 +2572,9 @@ impl Terminal {
 
     fn delete_chars(&mut self, n: usize) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        if self.shell.track_input {
+            self.shift_input_writes(row, col, n.min(cols - col), 0);
+        }
         if !self.screen().placements.is_empty() {
             self.erase_placements(row, row, col, usize::MAX);
         }
@@ -2293,6 +2678,7 @@ impl Terminal {
         if enable == self.alt_active {
             return;
         }
+        self.shell.prompt_generation = self.shell.prompt_generation.wrapping_add(1);
         self.invalidate_output_ends();
         self.prompt_redraw = false;
         if enable {
@@ -2412,3 +2798,23 @@ fn dec_special(c: char) -> char {
 
 #[cfg(test)]
 mod tests;
+
+/// Whether a cell looks like shell autosuggestion text: faint, or a grey foreground
+/// (zsh-autosuggestions draws `fg=8`, fish `555`/`brblack`).
+fn suggestion_style(cell: &Cell) -> bool {
+    let grey =
+        |r: u8, g: u8, b: u8| r.max(g).max(b) - r.min(g).min(b) <= 16 && r.max(g).max(b) < 0xe0;
+    cell.flags.contains(Flags::DIM)
+        || match cell.fg {
+            Color::DefaultFg | Color::DefaultBg => false,
+            Color::Indexed(i) => match i {
+                0 | 8 | 232..=255 => true,
+                16..=231 => {
+                    let i = i - 16;
+                    i / 36 == i / 6 % 6 && i / 6 % 6 == i % 6 && i != 215
+                }
+                _ => false,
+            },
+            Color::Rgb(r, g, b) => grey(r, g, b),
+        }
+}

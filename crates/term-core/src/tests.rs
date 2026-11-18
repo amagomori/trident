@@ -2765,3 +2765,477 @@ fn rerun_marks_follow_reflow_and_can_be_turned_off() {
     t.set_compare_runs(false);
     assert!(marked_rows(&t).is_empty());
 }
+
+fn click(t: &Terminal, row: usize, col: usize) -> Option<PromptClick> {
+    t.prompt_click(t.viewport_to_point(row, col))
+}
+
+#[test]
+fn prompt_click_moves_by_characters_within_the_input() {
+    let mut t = term(20, 4, "out\r\n\x1b]133;A\x07$ \x1b]133;B\x07echo hello");
+    assert_eq!(click(&t, 1, 7), Some(PromptClick::Move(-5)));
+    assert_eq!(click(&t, 1, 12), Some(PromptClick::Move(0)));
+    // Past the end of the text, and onto the prompt itself, clamp to the input.
+    assert_eq!(click(&t, 1, 19), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 1, 0), Some(PromptClick::Move(-10)));
+    // Rows outside the command line: earlier output, blank rows below.
+    assert_eq!(click(&t, 0, 1), None);
+    assert_eq!(click(&t, 2, 1), None);
+    t.advance(b"\x1b[5D");
+    assert_eq!(click(&t, 1, 19), Some(PromptClick::Move(5)));
+    // Trailing typed spaces before the cursor stay reachable.
+    t.advance(b"\x1b[5C  ");
+    assert_eq!(click(&t, 1, 19), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 1, 2), Some(PromptClick::Move(-12)));
+}
+
+#[test]
+fn prompt_click_counts_wide_characters_once_and_follows_soft_wraps() {
+    // 10 columns: "$ " then "ab日本cdefg" wraps after "日本" + "cd".
+    let t = term(10, 4, "\x1b]133;A\x07$ \x1b]133;B\x07ab日本cdefgh");
+    assert_eq!(screen(&t)[0], "$ ab日本cd");
+    assert_eq!(click(&t, 0, 4), Some(PromptClick::Move(-8)));
+    // The right half of a wide character is that character.
+    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-8)));
+    assert_eq!(click(&t, 0, 6), Some(PromptClick::Move(-7)));
+    assert_eq!(click(&t, 1, 0), Some(PromptClick::Move(-4)));
+    assert_eq!(click(&t, 1, 9), Some(PromptClick::Move(0)));
+    // A wide character that does not fit leaves wrap padding, which is not a character.
+    let t = term(6, 4, "\x1b]133;A\x07$ \x1b]133;B\x07abc日x");
+    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-2)));
+    assert_eq!(click(&t, 1, 0), Some(PromptClick::Move(-2)));
+    assert_eq!(click(&t, 1, 2), Some(PromptClick::Move(-1)));
+}
+
+#[test]
+fn prompt_click_replays_native_readline_erased_margin_and_real_space_controls() {
+    let fixtures: [(&[u8], bool, isize); 6] = [
+        (
+            include_bytes!("../tests/fixtures/readline/bash32-wide.bin"),
+            true,
+            -40,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash53-wide.bin"),
+            true,
+            -40,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash32-typed-space.bin"),
+            false,
+            -41,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash53-typed-space.bin"),
+            false,
+            -41,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash32-ascii.bin"),
+            false,
+            -41,
+        ),
+        (
+            include_bytes!("../tests/fixtures/readline/bash53-ascii.bin"),
+            false,
+            -41,
+        ),
+    ];
+    for (bytes, padding, first_row_delta) in fixtures {
+        for scrollback in [0, 100] {
+            for chunk in [1, 7, bytes.len()] {
+                let mut t = Terminal::new(44, 34);
+                t.set_scrollback_limit(scrollback);
+                for bytes in bytes.chunks(chunk) {
+                    t.advance(bytes);
+                }
+                assert_eq!(t.shell.input_start, Some((t.history, 2)));
+                let wide = t.viewport_row(1).cells[0].c == '日';
+                assert_eq!(t.cursor_position(), Some((1, if wide { 8 } else { 5 })));
+                assert_eq!(click(&t, 0, 8), Some(PromptClick::Move(first_row_delta)));
+                assert_eq!(
+                    t.viewport_row(0).cells[43].flags.contains(Flags::WIDE_WRAP),
+                    padding
+                );
+                if wide {
+                    for (col, delta) in [(0, -5), (1, -5), (2, -4), (5, -3), (8, 0)] {
+                        assert_eq!(click(&t, 1, col), Some(PromptClick::Move(delta)));
+                    }
+                    assert_eq!(
+                        click(&t, 0, 43),
+                        Some(PromptClick::Move(if padding { -5 } else { -6 }))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn prompt_click_erased_margin_requires_pending_wide_wrap_provenance() {
+    let prefix = "\x1b]133;A\x07$ \x1b]133;B\x07abc";
+    // In six columns, a printed real space at the margin remains editable.
+    for (paint, padding, delta) in [
+        (" 日x", false, -6),
+        (" \x1b[K日x", true, -5),
+        // An erased trailing real space still holds the editable end cursor.
+        (" \x1b[K", false, -4),
+        // Reprinting the erased space restores its occupancy.
+        (" \x1b[K\r\x1b[5C 日x", false, -6),
+        // Erasing a real margin space after cursor motion is not Readline's
+        // pending-wrap placeholder, even with an otherwise identical grid.
+        (" \r\x1b[5C\x1b[K\r\n日x", false, -6),
+        // ASCII after the erased space cannot establish wide-wrap padding.
+        (" \x1b[Kxyz", false, -7),
+        // Erasing a non-space at the margin does not prove a placeholder.
+        ("Z\x1b[K日x", false, -6),
+    ] {
+        for chunk in [1, 100] {
+            let mut t = Terminal::new(6, 4);
+            for bytes in format!("{prefix}{paint}").as_bytes().chunks(chunk) {
+                t.advance(bytes);
+            }
+            assert_eq!(
+                t.viewport_row(0).cells[5].flags.contains(Flags::WIDE_WRAP),
+                padding,
+                "{paint:?}"
+            );
+            // Explicit CR/LF is not a soft wrap; it must not be guessed across.
+            let expected = if paint.contains('\n') {
+                None
+            } else {
+                Some(PromptClick::Move(delta))
+            };
+            assert_eq!(click(&t, 0, 2), expected, "{paint:?}");
+        }
+    }
+    // Erasing real spaces within the row keeps their cursor positions.
+    let t = term(
+        20,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07ab  日x  \x1b[1;5H\x1b[2X\x1b[1;12H",
+    );
+    assert_eq!(click(&t, 0, 2), Some(PromptClick::Move(-8)));
+    assert_eq!(click(&t, 0, 5), Some(PromptClick::Move(-5)));
+    assert_eq!(click(&t, 0, 19), Some(PromptClick::Move(0)));
+
+    // Wide suggestions beyond the erased margin must not be accepted by Right.
+    let t = term(6, 4, &format!("{prefix} \x1b[K\x1b[90m日x\x1b[m\x1b[1;6H"));
+    assert_eq!(click(&t, 1, 5), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 0, 2), Some(PromptClick::Move(-3)));
+
+    // A later real-space repaint replaces the padding marker and its meaning.
+    let mut t = term(6, 4, &format!("{prefix} \x1b[K日x"));
+    t.advance(b"\x1b[1;6H ");
+    t.advance("日x".as_bytes());
+    assert!(!t.viewport_row(0).cells[5].flags.contains(Flags::WIDE_WRAP));
+    assert_eq!(click(&t, 0, 2), Some(PromptClick::Move(-6)));
+}
+
+#[test]
+fn prompt_click_stops_before_a_greyed_autosuggestion() {
+    // zsh-autosuggestions: typed `echo hel`, suggestion `lo world` in fg=8, cursor
+    // moved back to the end of the typed text.
+    let zsh = "\x1b]133;A\x07% \x1b]133;B\x07echo hel\x1b[90mlo world\x1b[39m\x1b[8D";
+    let t = term(30, 4, zsh);
+    assert_eq!(click(&t, 0, 25), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 0, 14), Some(PromptClick::Move(0)));
+    assert_eq!(click(&t, 0, 4), Some(PromptClick::Move(-6)));
+    // fish: syntax-coloured input, suggestion in 256-colour or truecolor grey.
+    for grey in ["38;5;240", "38;2;85;85;85", "2"] {
+        let fish = format!(
+            "\x1b]133;A\x07> \x1b]133;B\x07\x1b[38;5;26mecho\x1b[m \x1b[38;5;39mhel\
+             \x1b[{grey}mlo world\x1b[m\x1b[8D"
+        );
+        let t = term(30, 4, &fish);
+        assert_eq!(click(&t, 0, 25), Some(PromptClick::Move(0)), "{grey}");
+        assert_eq!(click(&t, 0, 12), Some(PromptClick::Move(0)), "{grey}");
+    }
+    // With the cursor moved left, clicks still reach the end of the real input only.
+    let mut t = term(30, 4, zsh);
+    t.advance(b"\x1b[3D");
+    assert_eq!(click(&t, 0, 25), Some(PromptClick::Move(3)));
+    // Coloured text that is not grey, or grey text before more input, is typed input.
+    let t = term(
+        30,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07echo \x1b[33m'hi'\x1b[m\x1b[4D",
+    );
+    assert_eq!(click(&t, 0, 20), Some(PromptClick::Move(4)));
+    let t = term(
+        30,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[90m#x\x1b[m ab\x1b[4D",
+    );
+    assert_eq!(click(&t, 0, 20), Some(PromptClick::Move(4)));
+    // A trailing grey run holding the cursor (a typed comment) is typed input too.
+    let t = term(
+        30,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07echo \x1b[90m# hello\x1b[m\x1b[4D",
+    );
+    assert_eq!(click(&t, 0, 20), Some(PromptClick::Move(4)));
+    assert_eq!(click(&t, 0, 8), Some(PromptClick::Move(-2)));
+}
+
+#[test]
+fn prompt_click_excludes_suggestion_spaces_and_separate_right_prompts() {
+    for grey in ["90", "38;5;240", "38;2;85;85;85", "2"] {
+        for (typed, suggestion) in [("echo", " hello world"), ("echo hel", "lo world")] {
+            for right_prompt in [
+                "",
+                "\x1b[1;20H\x1b[33mRIGHT-CLOCK\x1b[m",
+                "\x1b[1;50H\x1b[33mRIGHT-CLOCK\x1b[m",
+                "\x1b[1;49H\x1b[33mRIGHT-CLOCK\x1b[m",
+                "\x1b[1;48H\x1b[33mRIGHT-CLOCK\x1b[m",
+                "\x1b[1;46H\x1b[33mRIGHT-CLOCK\x1b[m",
+                "\x1b[1;40H\x1b[33mRIGHT-CLOCK\x1b[m",
+            ] {
+                let t = term(
+                    60,
+                    4,
+                    &format!(
+                        "\x1b]133;A\x07$ \x1b]133;B\x07{typed}\x1b[{grey}m{suggestion}\x1b[m\
+                         {right_prompt}\x1b[1;{}H",
+                        typed.len() + 3
+                    ),
+                );
+                for col in [typed.len() + 2, typed.len() + 5, 35, 59] {
+                    assert_eq!(
+                        click(&t, 0, col),
+                        Some(PromptClick::Move(0)),
+                        "{grey} {typed:?} {right_prompt:?} {col}"
+                    );
+                }
+                assert_eq!(
+                    click(&t, 0, 3),
+                    Some(PromptClick::Move(1 - typed.len() as isize))
+                );
+                let mut t = t;
+                t.advance(b"\x1b[2D");
+                assert_eq!(click(&t, 0, 59), Some(PromptClick::Move(2)));
+            }
+        }
+    }
+    // Leading spaces in the same style as typed input remain navigable.
+    let t = term(30, 4, "\x1b]133;A\x07$ \x1b]133;B\x07echo  hi\x1b[4D");
+    assert_eq!(click(&t, 0, 29), Some(PromptClick::Move(4)));
+}
+
+#[test]
+fn prompt_click_keeps_syntax_coloured_input_suffixes_reachable() {
+    for spaces in [
+        " ",
+        "  ",
+        "     ",
+        "                    ",
+        "                            ",
+    ] {
+        for cols in [20, 40, 80] {
+            if 11 + spaces.len() >= cols {
+                continue;
+            }
+            let output = format!(
+                "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[90mecho\x1b[m{spaces}\x1b[33mhello\x1b[m\x1b[1;3H"
+            );
+            for chunk in [1, output.len()] {
+                let mut t = Terminal::new(cols, 4);
+                for bytes in output.as_bytes().chunks(chunk) {
+                    t.advance(bytes);
+                }
+                assert_eq!(
+                    click(&t, 0, cols - 1),
+                    Some(PromptClick::Move((9 + spaces.len()) as isize)),
+                    "{cols} {spaces:?} {chunk}"
+                );
+                t.advance(b"\x1b[4C\x1b[4D");
+                assert_eq!(
+                    click(&t, 0, cols - 1),
+                    Some(PromptClick::Move((9 + spaces.len()) as isize))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn prompt_click_forgets_erased_input_padding_before_a_right_prompt() {
+    let mut t = term(
+        60,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07\x1b[90mecho\x1b[m                            \x1b[33mhello\x1b[m\x1b[1;3H",
+    );
+    t.advance(b"echo hel\x1b[90mlo world\x1b[m\x1b[K\x1b[1;40H\x1b[33mRIGHT-CLOCK\x1b[m\x1b[1;11H");
+    assert_eq!(click(&t, 0, 59), Some(PromptClick::Move(0)));
+    t.resize(80, 4);
+    assert_eq!(click(&t, 0, 79), Some(PromptClick::Move(0)));
+}
+
+#[test]
+fn prompt_click_ignores_an_alternate_screen_line_editor_widget() {
+    let mut t = term(
+        60,
+        4,
+        "\x1b]133;A\x07$ \x1b]133;B\x07echo hel\x1b[90mlo world\x1b[m\x1b[1;40H\x1b[33mRIGHT-CLOCK\x1b[m\x1b[1;11H",
+    );
+    t.advance(b"\x1b[?1049h\x1b]2;widget\x07                                                            \x1b[1;20H\x1b[3P\x1b[4@\x1b[?1049l");
+    assert_eq!(click(&t, 0, 59), Some(PromptClick::Move(0)));
+    t.advance(b"\x1b[1;3H\x1b[90mecho\x1b[m                    \x1b[33mhello\x1b[m\x1b[K\x1b[1;3H");
+    assert_eq!(click(&t, 0, 59), Some(PromptClick::Move(29)));
+}
+
+#[test]
+fn prompt_click_needs_an_input_zone_on_the_primary_screen() {
+    assert_eq!(click(&term(20, 4, "$ echo hi"), 0, 2), None);
+    assert_eq!(click(&term(20, 4, "\x1b]133;A\x07$ "), 0, 1), None);
+    let running = "\x1b]133;A\x07$ \x1b]133;B\x07sleep 9\r\n\x1b]133;C\x07";
+    assert_eq!(click(&term(20, 4, running), 0, 3), None);
+    let done = format!("{running}\x1b]133;D;0\x07");
+    assert_eq!(click(&term(20, 4, &done), 0, 3), None);
+    let mut t = term(20, 4, "\x1b]133;A\x07$ \x1b]133;B\x07vim");
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(click(&t, 0, 2), None);
+    // A hard newline (a continuation prompt) leaves the marked line.
+    let t = term(20, 4, "\x1b]133;A\x07$ \x1b]133;B\x07echo \\\r\n> x");
+    assert_eq!(click(&t, 0, 2), None);
+    assert_eq!(click(&t, 1, 1), None);
+}
+
+#[test]
+fn prompt_click_reports_clicks_when_the_prompt_asks_for_them() {
+    let mut t = term(
+        10,
+        4,
+        "out\r\n\x1b]133;A;click_events=1\x07~\r\n$ \x1b]133;B\x07abcdefghij",
+    );
+    assert_eq!(
+        click(&t, 1, 3),
+        Some(PromptClick::Report { row: 1, col: 3 })
+    );
+    assert_eq!(
+        click(&t, 3, 0),
+        Some(PromptClick::Report { row: 3, col: 0 })
+    );
+    assert_eq!(click(&t, 0, 0), None);
+    // The next prompt without the option goes back to cursor keys.
+    t.advance(b"\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07ab");
+    assert_eq!(click(&t, 3, 2), Some(PromptClick::Move(-2)));
+}
+
+#[test]
+fn prompt_click_reports_ascii_input_after_a_unicode_prompt() {
+    for prompt in ["λ> ", "日本語> ", "e\u{301}> "] {
+        let t = term(
+            40,
+            4,
+            &format!("\x1b]133;A;click_events=1\x07{prompt}\x1b]133;B\x07abc"),
+        );
+        let (_, start_col) = t.shell.input_start.unwrap();
+        assert_eq!(
+            click(&t, 0, start_col + 1),
+            Some(PromptClick::Report {
+                row: 0,
+                col: start_col + 1
+            }),
+            "{prompt:?}"
+        );
+    }
+}
+
+#[test]
+fn prompt_click_unadapted_reports_reject_leading_combining_input() {
+    for prompt in ["$ ", "界"] {
+        for scrollback in [0, 100] {
+            let mut t = Terminal::new(40, 4);
+            t.set_scrollback_limit(scrollback);
+            t.advance(
+                format!("\x1b]133;A;click_events=1\x07{prompt}\x1b]133;B\x07\u{301}abc").as_bytes(),
+            );
+            let (_, start_col) = t.shell.input_start.unwrap();
+            assert_eq!(click(&t, 0, start_col + 1), None);
+            // Once the marked cell is erased, a Unicode prompt is still excluded.
+            t.advance(
+                format!("\r\x1b[2K\x1b]133;A;click_events=1\x07{prompt}\x1b]133;B\x07abc")
+                    .as_bytes(),
+            );
+            assert_eq!(
+                click(&t, 0, start_col + 1),
+                Some(PromptClick::Report {
+                    row: 0,
+                    col: start_col + 1
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn prompt_click_unadapted_reports_reject_unicode_input() {
+    // Native fish's report handler treats a screen column as an index into its
+    // character array. Never feed wide spacers or combining boundaries to it.
+    let t = term(
+        40,
+        4,
+        "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: 日本語abc",
+    );
+    for col in [5, 6, 7, 8, 10, 11] {
+        assert_eq!(click(&t, 0, col), None, "{col}");
+    }
+    let t = term(
+        40,
+        4,
+        "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: e\u{301}abc",
+    );
+    assert_eq!(click(&t, 0, 5), None);
+    let t = term(
+        40,
+        4,
+        "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: 😀abc",
+    );
+    assert_eq!(click(&t, 0, 5), None);
+    assert_eq!(click(&t, 0, 6), None);
+
+    let t = term(
+        10,
+        4,
+        "\x1b]133;A;click_events=1\x07$ \x1b]133;B\x07: 日本語abc",
+    );
+    assert_eq!(click(&t, 0, 7), None);
+    assert_eq!(click(&t, 1, 1), None);
+}
+
+#[test]
+fn prompt_click_adapter_loss_rejects_explicit_redraw_rows_and_missing_origin() {
+    for scrollback in [0, 100] {
+        let mut t = Terminal::new(10, 5);
+        t.set_scrollback_limit(scrollback);
+        t.advance(b"\x1b]133;A;click_events=1\x07> \x1b]777;trident;prompt-input;ready\x07\x1b]133;B\x07abc");
+        assert!(t.has_prompt_input_adapter());
+        t.advance(
+            "\r\x1b]133;A;click_events=1\x07> \x1b]133;B\x07abcdefg\r\n日本😀e\u{301}".as_bytes(),
+        );
+        assert!(!t.has_prompt_input_adapter());
+        assert!(!t.line(0).wrapped());
+        assert_eq!(click(&t, 0, 8), None);
+        assert_eq!(click(&t, 1, 1), None);
+        // The cursor can return to the first row without removing the next row.
+        t.advance(b"\x1b[1;8H");
+        assert_eq!(click(&t, 0, 8), None);
+        t.advance(b"\r\x1b]133;A;click_events=1\x07> abc");
+        assert_eq!(click(&t, 0, 3), None);
+    }
+}
+
+#[test]
+fn prompt_click_works_without_scrollback() {
+    let mut t = Terminal::new(20, 4);
+    t.set_scrollback_limit(0);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07echo hi");
+    assert_eq!(click(&t, 0, 2), Some(PromptClick::Move(-7)));
+    t.advance(b"\r\n\r\n\r\n\x1b]133;A\x07$ \x1b]133;B\x07echo hello there, wrap");
+    assert_eq!(click(&t, 2, 2), Some(PromptClick::Move(-22)));
+    assert_eq!(click(&t, 3, 0), Some(PromptClick::Move(-4)));
+    // A top-aligned region above the prompt scrolls without moving it.
+    t.advance(b"\r\n\x1b]133;A\x07$ \x1b]133;B\x07ab\x1b7\x1b[1;2r\x1b[2H\n\x1b[r\x1b8");
+    assert_eq!(click(&t, 3, 2), Some(PromptClick::Move(-2)));
+}
