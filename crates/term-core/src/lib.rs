@@ -28,7 +28,7 @@ mod kitty;
 mod links;
 mod margins;
 pub use links::{FileLink, Link};
-use margins::shift_cells;
+use margins::{LrMode, shift_cells};
 mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
@@ -401,7 +401,7 @@ pub struct Terminal {
     scroll_bottom: usize,
     scroll_left: usize,
     scroll_right: usize,
-    lr_margin_mode: bool,
+    lr_margin_mode: LrMode,
     tabs: Vec<bool>,
     charsets: [Charset; 2],
     active_charset: usize,
@@ -1187,7 +1187,7 @@ impl Terminal {
             scroll_bottom: rows - 1,
             scroll_left: 0,
             scroll_right: cols - 1,
-            lr_margin_mode: false,
+            lr_margin_mode: LrMode::Off,
             tabs: default_tabs(cols),
             charsets: [Charset::Ascii; 2],
             active_charset: 0,
@@ -1686,8 +1686,7 @@ impl Terminal {
         }
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
-        self.scroll_left = 0;
-        self.scroll_right = cols - 1;
+        self.reset_lr_margins();
         self.tabs = default_tabs(cols);
         for saved in [&mut self.primary.saved, &mut self.alternate.saved]
             .into_iter()
@@ -2299,7 +2298,8 @@ impl Terminal {
         if self.cursor.pending_wrap && self.modes.autowrap {
             self.wrap_line();
         }
-        if width == 2 && self.cursor.col == self.right_bound() {
+        let mut right = self.right_bound();
+        if width == 2 && self.cursor.col == right {
             if self.modes.autowrap {
                 self.sync_cursor_row();
                 let (row, col) = (self.cursor.row, self.cursor.col);
@@ -2312,13 +2312,14 @@ impl Terminal {
                 line.cells[col] = blank;
                 line.touch(col + 1);
                 self.wrap_line();
+                right = self.scroll_right;
             } else {
                 self.print_state.disarm_clear();
                 return;
             }
         }
 
-        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.right_bound() + 1);
+        let (row, col, cols) = (self.cursor.row, self.cursor.col, right + 1);
         let template = self.cursor.template;
         let insert = self.modes.insert;
         if insert && track {

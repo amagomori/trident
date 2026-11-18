@@ -2,9 +2,16 @@
 
 use super::{Cell, Flags, Row, Terminal};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LrMode {
+    Off,
+    Full,
+    Partial,
+}
+
 impl Terminal {
     pub(super) fn has_partial_width(&self) -> bool {
-        self.scroll_left != 0 || self.scroll_right + 1 != self.cols
+        self.lr_margin_mode == LrMode::Partial
     }
 
     pub(super) fn in_horizontal_margins(&self) -> bool {
@@ -47,6 +54,9 @@ impl Terminal {
     pub(super) fn reset_lr_margins(&mut self) {
         self.scroll_left = 0;
         self.scroll_right = self.cols - 1;
+        if self.lr_margin_mode != LrMode::Off {
+            self.lr_margin_mode = LrMode::Full;
+        }
     }
 
     pub(super) fn set_lr_margins(&mut self, left: usize, right: usize) {
@@ -54,6 +64,11 @@ impl Terminal {
         if left < right {
             self.scroll_left = left;
             self.scroll_right = right;
+            self.lr_margin_mode = if left == 0 && right + 1 == self.cols {
+                LrMode::Full
+            } else {
+                LrMode::Partial
+            };
             self.goto(0, 0);
         }
     }

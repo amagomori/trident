@@ -243,6 +243,12 @@ impl Perform for Ghost<'_> {
             if self.term.modes.linefeed_newline {
                 self.term.cursor.col = 0;
             }
+        } else if byte == b'\r' {
+            // The ghost plan excludes partial-width regions.
+            self.term.sync_cursor_row();
+            self.term.print_state.disarm_clear();
+            self.term.cursor.col = 0;
+            self.term.cursor.pending_wrap = false;
         } else {
             Perform::execute(self.term, byte);
         }

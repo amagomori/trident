@@ -1,4 +1,6 @@
-use super::{Charset, Color, CursorShape, Flags, MouseMode, Progress, Terminal, UnderlineStyle};
+use super::{
+    Charset, Color, CursorShape, Flags, LrMode, MouseMode, Progress, Terminal, UnderlineStyle,
+};
 use vte::{Params, Perform};
 
 /// The first value of each parameter, with 0 / missing replaced by `default`.
@@ -157,7 +159,7 @@ impl Perform for Terminal {
                 }
             }
             ('y', [b'*']) if self.reports.checksums => self.report_rect_checksum(params),
-            ('s', []) if self.lr_margin_mode => {
+            ('s', []) if self.lr_margin_mode != LrMode::Off => {
                 let right = arg(params, 1, 0) as usize;
                 self.set_lr_margins(n(0) - 1, if right == 0 { self.cols - 1 } else { right - 1 });
             }
@@ -167,7 +169,7 @@ impl Perform for Terminal {
                 // DECSTR soft reset.
                 self.modes.show_cursor = true;
                 self.modes.origin = false;
-                self.lr_margin_mode = false;
+                self.lr_margin_mode = LrMode::Off;
                 self.reset_lr_margins();
                 self.modes.insert = false;
                 self.modes.autowrap = true;
@@ -379,7 +381,7 @@ impl Terminal {
         Some(match mode {
             1 => self.modes.app_cursor,
             6 => self.modes.origin,
-            69 if !self.reports.pre_vt420 => self.lr_margin_mode,
+            69 if !self.reports.pre_vt420 => self.lr_margin_mode != LrMode::Off,
             7 => self.modes.autowrap,
             12 => self.cursor_blink,
             25 => self.modes.show_cursor,
@@ -667,10 +669,12 @@ impl Terminal {
             }
             7 => self.modes.autowrap = enable,
             69 if !enable || !self.reports.pre_vt420 => {
-                self.lr_margin_mode = enable;
                 if !enable {
+                    self.lr_margin_mode = LrMode::Off;
                     self.reset_lr_margins();
                     self.cursor.pending_wrap = false;
+                } else if self.lr_margin_mode == LrMode::Off {
+                    self.lr_margin_mode = LrMode::Full;
                 }
             }
             12 => self.cursor_blink = enable,
