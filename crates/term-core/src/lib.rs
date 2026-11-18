@@ -217,6 +217,10 @@ struct Screen {
     scrollback: VecDeque<Row>,
     saved: Option<SavedCursor>,
     placements: Vec<Placement>,
+    /// Kitty keyboard protocol enhancement flags (CSI u keyboard mode).
+    kitty_flags: u8,
+    /// Flag sets saved by `CSI > u` pushes, for `CSI < u` pops.
+    kitty_stack: Vec<u8>,
 }
 
 impl Screen {
@@ -228,6 +232,8 @@ impl Screen {
             scrollback: VecDeque::new(),
             saved: None,
             placements: Vec::new(),
+            kitty_flags: 0,
+            kitty_stack: Vec::new(),
         }
     }
 }
@@ -1423,6 +1429,12 @@ impl Terminal {
 
     pub fn is_alt_screen(&self) -> bool {
         self.alt_active
+    }
+
+    /// Kitty keyboard protocol flags on the active screen (`0` = legacy key
+    /// encoding). Set by `CSI =`/`>`/`< u` sequences and reported by `CSI ? u`.
+    pub fn kitty_flags(&self) -> u8 {
+        self.screen().kitty_flags
     }
 
     /// Clears mouse, focus and bracketed-paste modes on the primary screen.

@@ -4906,7 +4906,25 @@ impl ApplicationHandler<UserEvent> for App {
                 let held_at_focus =
                     self.held_at_focus
                         .observe(event.physical_key, event.state, is_synthetic);
+                let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
                 if event.state != ElementState::Pressed {
+                    if kitty_flags != 0 {
+                        let base = event.key_without_modifiers();
+                        let bytes = input::encode_kitty_key(
+                            &input::KeyEvent {
+                                key: &event.logical_key,
+                                base: &base,
+                                text: event.text.as_deref(),
+                                mods: self.modifiers,
+                            },
+                            input::KeyEventKind::Release,
+                            kitty_flags,
+                            self.options.option_as_alt,
+                        );
+                        if let Some(bytes) = bytes {
+                            self.write_input(&bytes);
+                        }
+                    }
                     return;
                 }
                 if self.pending_close.is_some() {
@@ -4934,14 +4952,33 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let Some(s) = &self.session else { return };
                 let base = event.key_without_modifiers();
-                let bytes = input::encode_key(
-                    &event.logical_key,
-                    &base,
-                    event.text.as_deref(),
-                    self.modifiers,
-                    s.term.modes.app_cursor,
-                    self.options.option_as_alt,
-                );
+                let kind = if event.repeat {
+                    input::KeyEventKind::Repeat
+                } else {
+                    input::KeyEventKind::Press
+                };
+                let bytes = if kitty_flags == 0 {
+                    input::encode_key(
+                        &event.logical_key,
+                        &base,
+                        event.text.as_deref(),
+                        self.modifiers,
+                        s.term.modes.app_cursor,
+                        self.options.option_as_alt,
+                    )
+                } else {
+                    input::encode_kitty_key(
+                        &input::KeyEvent {
+                            key: &event.logical_key,
+                            base: &base,
+                            text: event.text.as_deref(),
+                            mods: self.modifiers,
+                        },
+                        kind,
+                        kitty_flags,
+                        self.options.option_as_alt,
+                    )
+                };
                 if let Some(bytes) = bytes {
                     self.write_input(&bytes);
                     self.hide_pointer_for_typing();

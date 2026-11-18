@@ -3265,3 +3265,50 @@ fn prompt_click_works_without_scrollback() {
     t.advance(b"\r\n\x1b]133;A\x07$ \x1b]133;B\x07ab\x1b7\x1b[1;2r\x1b[2H\n\x1b[r\x1b8");
     assert_eq!(click(&t, 3, 2), Some(PromptClick::Move(-2)));
 }
+
+#[test]
+fn kitty_keyboard_flag_query_push_pop_set() {
+    let mut t = Terminal::new(10, 3);
+    t.advance(b"\x1b[?u");
+    assert_eq!(t.take_responses(), b"\x1b[?0u");
+
+    t.advance(b"\x1b[=9;1u");
+    assert_eq!(t.kitty_flags(), 0b1001);
+    t.advance(b"\x1b[=2;2u");
+    assert_eq!(t.kitty_flags(), 0b1011);
+    t.advance(b"\x1b[=1;3u");
+    assert_eq!(t.kitty_flags(), 0b1010);
+    // Unsupported bits are masked out.
+    t.advance(b"\x1b[=255;1u");
+    assert_eq!(t.kitty_flags(), 0b11111);
+
+    t.advance(b"\x1b[>5u");
+    assert_eq!(t.kitty_flags(), 5);
+    t.advance(b"\x1b[>u");
+    assert_eq!(t.kitty_flags(), 0);
+    t.advance(b"\x1b[<u");
+    assert_eq!(t.kitty_flags(), 5);
+    // Popping past the bottom resets the flags.
+    t.advance(b"\x1b[<3u");
+    assert_eq!(t.kitty_flags(), 0);
+
+    t.advance(b"\x1b[?u");
+    assert_eq!(t.take_responses(), b"\x1b[?0u");
+}
+
+#[test]
+fn kitty_keyboard_flags_are_per_screen() {
+    let mut t = Terminal::new(10, 3);
+    t.advance(b"\x1b[=5;1u");
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.kitty_flags(), 0);
+    t.advance(b"\x1b[>11u\x1b[?u");
+    assert_eq!(t.take_responses(), b"\x1b[?11u");
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.kitty_flags(), 5);
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.kitty_flags(), 11);
+    // A full reset clears both stacks.
+    t.advance(b"\x1b[?1049l\x1bc");
+    assert_eq!(t.kitty_flags(), 0);
+}
