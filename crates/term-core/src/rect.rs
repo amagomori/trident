@@ -151,6 +151,7 @@ impl Terminal {
             && self.screen().lines[rows].iter().any(|line| {
                 line.cells
                     .iter()
+                    .chain(line.hidden_cells())
                     .any(|cell| self.links.protection(cell.hyperlink).contains(protected))
             })
     }
@@ -166,18 +167,17 @@ impl Terminal {
                 self.prompt_redraw = false;
                 0..self.rows
             }
-            ('J', 3) => {
-                self.erase_saved_lines();
-                return;
-            }
             _ => return,
         };
         for r in rows {
             let cols = match (r == row, mode) {
-                (true, 0) => col..self.cols,
+                (true, 0) => col..usize::MAX,
                 (true, 1) => 0..col + 1,
-                _ => 0..self.cols,
+                _ => 0..usize::MAX,
             };
+            if cols.end == usize::MAX {
+                self.lines_mut()[r].set_wrapped(false);
+            }
             self.erase_unprotected(r, cols, protected, false);
         }
     }
@@ -189,7 +189,14 @@ impl Terminal {
         protected: Protection,
         keep_style: bool,
     ) {
-        let cols = whole_glyphs(&self.screen().lines[row].cells, cols);
+        let width = self.cols;
+        let line = &mut self.lines_mut()[row];
+        // Restore the tail so a clipped wide glyph is checked as one protected character.
+        let restore = cols.end >= width && line.has_hidden();
+        if restore {
+            line.cells = line.take_cells();
+        }
+        let cols = whole_glyphs(&line.cells, cols.start..cols.end.min(line.cells.len()));
         let mut at = cols.start;
         while at < cols.end {
             let start = at;
@@ -228,6 +235,9 @@ impl Terminal {
             }
             at += 1;
         }
+        if restore {
+            self.lines_mut()[row].resize(width);
+        }
     }
 }
 
@@ -263,6 +273,23 @@ fn change_attribute(flags: &mut Flags, param: u16, reverse: bool) {
             if flag == Flags::UNDERLINE {
                 flags.remove(Flags::UNDERLINE_STYLE);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn erase_to_end_checks_hidden_protected_wide_glyphs() {
+        for seq in [b"\x1b[?2K".as_slice(), b"\x1b[?0J", b"\x1b[?2J"] {
+            let mut t = Terminal::new(9, 2);
+            t.advance("\x1b[?1049hab\x1b[1\"q界\x1b[0\"qXY\x1b[1\"q!\x1b[0\"q\r".as_bytes());
+            t.resize(3, 2);
+            t.advance(seq);
+            t.resize(9, 2);
+            assert_eq!(t.viewport_row(0).text(), "  界  !", "{seq:?}");
         }
     }
 }

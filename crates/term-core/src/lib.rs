@@ -2745,7 +2745,6 @@ impl Terminal {
             self.erase_placements(row, row, from, to);
         }
         let blank = Cell::blank(&self.cursor.template);
-        let to = to.min(self.cols);
         let line = &mut self.lines_mut()[row];
         let mut to = to.min(line.cells.len());
         if from >= to {
