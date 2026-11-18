@@ -1001,6 +1001,37 @@ fn selection_text_skips_wide_character_wrap_blank() {
 }
 
 #[test]
+fn selection_html_carries_colors_and_styles() {
+    let mut t = term(10, 2, "\x1b[1;31mhi\x1b[0m <&>\r\n\x1b[3;4;9mend");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 2));
+    let html = t.selection_html().unwrap();
+    assert!(html.starts_with("<pre>") && html.ends_with("</pre>"));
+    assert!(html.contains("font-weight:bold"));
+    assert!(html.contains("font-style:italic"));
+    assert!(html.contains("text-decoration:underline line-through"));
+    assert!(html.contains("color:#f7768e"), "{html}");
+    assert!(html.contains("background-color:#1a1b26"), "{html}");
+    assert!(html.contains("&lt;&amp;&gt;"), "{html}");
+    assert!(html.contains("hi</span><span"), "{html}");
+    assert!(html.contains("\n</span><span"), "{html}");
+    assert_eq!(t.selection_text().as_deref(), Some("hi <&>\nend"));
+}
+
+#[test]
+fn selection_html_joins_wrapped_lines_and_trims_tail() {
+    let mut t = term(5, 4, "hello world\r\nnext");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(3, 4));
+    let html = t.selection_html().unwrap();
+    assert!(html.contains("hello world\nnext"), "{html}");
+    assert!(!html.contains("next "), "{html}");
+    assert!(t.selection_html().is_some());
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    assert!(t.selection_html().is_none());
+}
+
+#[test]
 fn block_selection_is_a_rectangle_in_every_drag_direction() {
     let mut t = term(6, 3, "abcdef\r\nghijkl\r\nmnopqr");
     for (a, b) in [

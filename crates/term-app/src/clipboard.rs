@@ -156,12 +156,17 @@ impl Clipboard {
         clipboard.get_text().ok()
     }
 
-    pub fn set(&mut self, text: String, primary: bool) {
+    /// Stores `text`, plus `html` as the `text/html` flavor when the backend can
+    /// serve more than one format (arboard; the smithay Wayland backend is
+    /// text-only, so HTML is dropped there).
+    pub fn set(&mut self, text: String, html: Option<String>, primary: bool) {
         #[cfg(target_os = "linux")]
-        if self.inner.is_some() && !self.x11_can_serve(text.len()) {
+        if self.inner.is_some()
+            && !self.x11_can_serve(text.len().max(html.as_ref().map_or(0, |h| h.len())))
+        {
             diag!(
                 "trident: {} bytes is more than the X server can transfer; clipboard left unchanged",
-                text.len()
+                text.len().max(html.as_ref().map_or(0, |h| h.len()))
             );
             return;
         }
@@ -184,14 +189,23 @@ impl Clipboard {
         let Backend::Arboard(clipboard) = backend;
         #[cfg(all(unix, not(target_os = "macos")))]
         if primary {
-            let _ = clipboard
-                .set()
-                .clipboard(LinuxClipboardKind::Primary)
-                .text(text);
+            let _ = match html {
+                Some(html) => clipboard
+                    .set()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .html(html, Some(text)),
+                None => clipboard
+                    .set()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .text(text),
+            };
             return;
         }
         if !primary {
-            let _ = clipboard.set_text(text);
+            let _ = match html {
+                Some(html) => clipboard.set_html(html, Some(text)),
+                None => clipboard.set_text(text),
+            };
         }
     }
 }

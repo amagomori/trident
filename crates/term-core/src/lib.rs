@@ -1860,6 +1860,120 @@ impl Terminal {
         Some(out)
     }
 
+    /// The selection as an HTML fragment for the clipboard's `text/html` flavor,
+    /// offered alongside [`Self::selection_text`]: a `<pre>` element whose `<span>`
+    /// runs carry the palette-resolved foreground/background colors and the
+    /// bold/italic/underline/strikethrough styles of their cells.
+    ///
+    /// Returns `None` when no nonempty selection remains in retained history.
+    pub fn selection_html(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        let block = self.selection?.kind == SelectionKind::Block;
+        let mut out = String::from("<pre>");
+        let mut style = Cell::default();
+        let mut span_open = false;
+        for line in start.line..=end.line {
+            let (from, to) = self.selection_columns((start, end), line)?;
+            let cells = self.selection_cells(line);
+            let wrapped = self
+                .output_end(line)
+                .map_or(self.line(line).wrapped(), |end| end.wrapped);
+            let skip = if block {
+                Flags::WIDE_SPACER
+            } else {
+                Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
+            };
+            let mut text = String::new();
+            for cell in &cells[from..=to] {
+                if !cell.flags.intersects(skip) {
+                    self.push_cell_text(cell, &mut text);
+                }
+            }
+            let keep = if block || (wrapped && line != end.line) {
+                text.len()
+            } else {
+                text.trim_end().len()
+            };
+            let mut left = keep;
+            for cell in &cells[from..=to] {
+                if left == 0 {
+                    break;
+                }
+                if cell.flags.intersects(skip) {
+                    continue;
+                }
+                if !cell.same_sgr(&style) {
+                    if span_open {
+                        out.push_str("</span>");
+                    }
+                    out.push_str("<span style=\"");
+                    self.push_html_style(cell, &mut out);
+                    out.push_str("\">");
+                    span_open = true;
+                    style = *cell;
+                }
+                let mut cell_text = String::new();
+                self.push_cell_text(cell, &mut cell_text);
+                for c in cell_text.chars() {
+                    let len = c.len_utf8();
+                    if len > left {
+                        break;
+                    }
+                    left -= len;
+                    match c {
+                        '&' => out.push_str("&amp;"),
+                        '<' => out.push_str("&lt;"),
+                        '>' => out.push_str("&gt;"),
+                        c => out.push(c),
+                    }
+                }
+            }
+            if line != end.line && (block || !wrapped) {
+                out.push('\n');
+            }
+        }
+        if span_open {
+            out.push_str("</span>");
+        }
+        out.push_str("</pre>");
+        Some(out)
+    }
+
+    /// CSS declarations for one span of [`Self::selection_html`]: the palette-resolved
+    /// colors (foreground/background exchanged under SGR inverse) and text styles.
+    fn push_html_style(&self, cell: &Cell, out: &mut String) {
+        use std::fmt::Write;
+        let (fg, bg) = if cell.flags.contains(Flags::INVERSE) {
+            (cell.bg, cell.fg)
+        } else {
+            (cell.fg, cell.bg)
+        };
+        let (r, g, b) = self.palette.resolve(fg);
+        let _ = write!(out, "color:#{r:02x}{g:02x}{b:02x}");
+        let (r, g, b) = self.palette.resolve(bg);
+        let _ = write!(out, ";background-color:#{r:02x}{g:02x}{b:02x}");
+        if cell.flags.contains(Flags::BOLD) {
+            out.push_str(";font-weight:bold");
+        }
+        if cell.flags.contains(Flags::ITALIC) {
+            out.push_str(";font-style:italic");
+        }
+        let mut decoration = "";
+        if cell.flags.contains(Flags::UNDERLINE) {
+            decoration = "underline";
+        }
+        if cell.flags.contains(Flags::STRIKE) {
+            decoration = if decoration.is_empty() {
+                "line-through"
+            } else {
+                "underline line-through"
+            };
+        }
+        if !decoration.is_empty() {
+            let _ = write!(out, ";text-decoration:{decoration}");
+        }
+    }
+
     fn output_end(&self, line: u64) -> Option<&OutputEnd> {
         self.output_end_of(self.selection?.kind, line)
     }
