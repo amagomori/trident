@@ -31,6 +31,29 @@ mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
 pub use osc::{ClipboardRequest, WorkingDirectory};
+
+/// Window geometry the app feeds in for the XTWINOPS reports (ops 11/13/15/19).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowGeometry {
+    /// Outer position in pixels; negative values wrap to the unsigned range.
+    pub position: (i32, i32),
+    /// Outer window size in pixels.
+    pub size: (u32, u32),
+    /// Monitor size in pixels, for the "screen size" reports.
+    pub screen: (u32, u32),
+    /// The window is iconified (minimized).
+    pub iconic: bool,
+}
+
+/// A text-area resize a program asked for with `CSI Ps ; Ps ; Ps t` (XTWINOPS
+/// op 8), DECSLPP (`Ps >= 24`) or DECCOLM. The grid change is applied already;
+/// the app mirrors it on the real window by resizing that window to match.
+/// Drained with [`Terminal::take_window_ops`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowOp {
+    /// Resize the window so its text area is `cols`×`rows` cells.
+    Resize { cols: usize, rows: usize },
+}
 mod perform;
 mod prompt_input;
 pub use prompt_input::{PromptInput, PromptInputContext};
@@ -272,6 +295,13 @@ pub struct Modes {
     pub sgr_mouse: bool,
     /// Window focus changes should be reported.
     pub focus_events: bool,
+    /// Mode 3 (DECCOLM): the grid is 132 columns wide. Honored only when
+    /// [`Modes::allow_80_132`] is set.
+    pub columns_132: bool,
+    /// Mode 40: programs may switch the 80/132-column mode with DECCOLM.
+    pub allow_80_132: bool,
+    /// Mode 95 (DECNCSM): column-mode switches do not erase the screen.
+    pub no_clear_on_columns: bool,
     /// Wheel events on the alternate screen become cursor keys.
     pub alt_scroll: bool,
     /// Redraws should wait until synchronized output ends or times out.
@@ -422,7 +452,18 @@ pub struct Terminal {
     /// Positions [`Self::resize_tracking`] moves along with the lines while it runs.
     tracked: Vec<Point>,
     title: Option<String>,
+    /// Icon label set by `OSC 1` (and `OSC 0`, which also sets `title`).
+    icon_title: Option<String>,
     title_changed: bool,
+    /// `CSI 22/23 t` title stack; entries hold the titles that push saved.
+    title_stack: Vec<TitlePair>,
+    /// XTSMTITLE (`CSI > Pm t`): titles are set / reported as hex pairs.
+    title_set_hex: bool,
+    title_query_hex: bool,
+    /// Window state the app feeds for the XTWINOPS reports.
+    window: WindowGeometry,
+    /// Window requests for the app, from supported mutating window ops.
+    window_ops: Vec<WindowOp>,
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
     synchronized_output_started: bool,
@@ -443,6 +484,14 @@ pub struct Terminal {
     parser_ground: bool,
     shell: Box<ShellState>,
     reports: Box<Reports>,
+}
+
+/// One entry of the `CSI 22/23 t` title stack; `None` fields are titles the
+/// push did not save, so the pop leaves them alone.
+#[derive(Default)]
+struct TitlePair {
+    icon: Option<String>,
+    title: Option<String>,
 }
 
 /// Rarely used state for conformance reports, boxed to keep `Terminal`'s hot fields in place.
@@ -1198,7 +1247,17 @@ impl Terminal {
             selection: None,
             tracked: Vec::new(),
             title: None,
+            icon_title: None,
             title_changed: false,
+            title_stack: Vec::new(),
+            title_set_hex: false,
+            title_query_hex: false,
+            window: WindowGeometry {
+                size: (cols as u32 * 8, rows as u32 * 16),
+                screen: (1920, 1080),
+                ..WindowGeometry::default()
+            },
+            window_ops: Vec::new(),
             responses: Vec::new(),
             synchronized_output_started: false,
             synchronized_output_ended: false,
@@ -1407,6 +1466,17 @@ impl Terminal {
     /// Returns the latest changed title, or `None` if unchanged since last call.
     ///
     /// An empty string represents a cleared title.
+    /// Feeds the app's real window geometry for the XTWINOPS reports.
+    pub fn set_window_geometry(&mut self, geometry: WindowGeometry) {
+        self.window = geometry;
+    }
+
+    /// Window requests queued by supported window ops; the app applies them
+    /// to the real window (the grid resize is already applied).
+    pub fn take_window_ops(&mut self) -> Vec<WindowOp> {
+        std::mem::take(&mut self.window_ops)
+    }
+
     pub fn take_title(&mut self) -> Option<String> {
         if std::mem::take(&mut self.title_changed) {
             Some(self.title.clone().unwrap_or_default())
@@ -2829,6 +2899,8 @@ impl Terminal {
 
     fn reset(&mut self) {
         let (cols, rows) = (self.cols, self.rows);
+        // RIS returns to 80 columns when DECCOLM widened the grid.
+        let cols = if self.modes.columns_132 { 80 } else { cols };
         let max_scrollback = self.max_scrollback;
         let mut fresh = Terminal::new(cols, rows);
         fresh.shell.progress_changed = self.shell.progress.is_some() || self.shell.progress_changed;
