@@ -412,7 +412,7 @@ fn encode_text_key(
     } = *event;
     let disambiguate = flags & 0b1 != 0;
     let report_all = flags & 0b1000 != 0;
-    let combo = mods.control_key() || (mods.alt_key() && alt_sends_esc);
+    let combo = mods.control_key() || mods.super_key() || (mods.alt_key() && alt_sends_esc);
     if !report_all && !(disambiguate && combo) {
         return match kind {
             KeyEventKind::Release => None,
@@ -451,6 +451,21 @@ fn encode_text_key(
         &field,
         text.as_deref(),
     ))
+}
+
+/// Encodes a pure text event (IME-committed text with no key event) under
+/// report-all + report-text flags as `CSI 0;;codepoints u`. `None` when either
+/// flag is off or the text holds control codes, which keep the raw encoding.
+pub fn encode_kitty_text(text: &str, flags: u8) -> Option<Vec<u8>> {
+    if flags & 0b11000 != 0b11000 || text.is_empty() || text.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let codepoints = text
+        .chars()
+        .map(|c| (c as u32).to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    Some(format!("\x1b[0;;{codepoints}u").into_bytes())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -793,6 +808,10 @@ mod tests {
         assert_eq!(
             kitty(ch("c"), ctrl | ModifiersState::ALT, KeyEventKind::Press, 1),
             Some(b"\x1b[99;7u".to_vec())
+        );
+        assert_eq!(
+            kitty(ch("a"), ModifiersState::SUPER, KeyEventKind::Press, 1),
+            Some(b"\x1b[97;9u".to_vec())
         );
         assert_eq!(k(Key::Named(NamedKey::Escape)), Some(b"\x1b[27u".to_vec()));
         // Enter, Tab and Backspace keep legacy bytes unmodified.
