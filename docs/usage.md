@@ -231,8 +231,8 @@ doesn't run.
 - With a multi-line prompt or a long command that wraps, the thumbnail can appear in the middle of
   the command. Your typed text and the path are kept.
 
-On Linux, drops work from X11 apps. On a Wayland desktop, run `env -u WAYLAND_DISPLAY trident` to
-accept drops from X11 apps. Drops from native Wayland apps aren't supported.
+On Linux, Trident accepts local file drops from native Wayland and X11 file managers.
+On Wayland, no XWayland fallback or environment change is required.
 
 ## Wayland notes
 
