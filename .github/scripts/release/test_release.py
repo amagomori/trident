@@ -114,9 +114,9 @@ class Linux(Base):
         self.assertRegex(listing, r"-rwxr-xr-x root/root .* \./usr/bin/trident\n")
         for name in ("./usr/share/terminfo/x/xterm-trident", "./usr/share/doc/trident/copyright",
                      "./usr/share/applications/trident.desktop",
-                     "./usr/share/trident/shell-integration/terminal.bash"):
+                     "./usr/share/trident/shell-integration/terminal.bash",
+                     "./usr/share/doc/trident/LICENSE", "./usr/share/doc/trident/OFL.txt"):
             self.assertIn(name, listing)
-        self.assertNotIn("./usr/share/doc/trident/LICENSE", listing)
 
     @unittest.skipUnless(HAS_DEB, "needs dpkg-deb and tic")
     def test_deb_prerelease_sorts_before_release(self):
