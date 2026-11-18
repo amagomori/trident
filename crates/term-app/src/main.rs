@@ -2714,11 +2714,7 @@ impl App {
         } else {
             0
         };
-        // The window can outgrow the GPU surface limit; cells past it can't
-        // render, so the grid is capped at the surface the renderer applied.
-        let fit = below_tab_bar(s.window.inner_size(), s.tab_bar);
-        let surface = below_tab_bar(PhysicalSize::from(s.renderer.surface_size()), s.tab_bar);
-        let fit = PhysicalSize::new(fit.width.min(surface.width), fit.height.min(surface.height));
+        let fit = fit_size(&s.window, &s.renderer, s.tab_bar);
         let (cols, rows) =
             grid_size_for(fit, s.window.scale_factor(), &s.fonts, self.config.padding);
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
@@ -2745,7 +2741,7 @@ impl App {
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         let covered = find_bar_rows(
-            s.window.inner_size().height.saturating_sub(s.tab_bar) as f32,
+            fit.height as f32,
             self.config.padding * s.window.scale_factor() as f32,
             s.fonts.metrics.height,
             rows,
@@ -3591,7 +3587,7 @@ impl App {
                 let search = self.search.get_or_insert_with(search::Search::default);
                 if let Some(s) = &self.session {
                     search.covered_rows = find_bar_rows(
-                        s.window.inner_size().height.saturating_sub(s.tab_bar) as f32,
+                        fit_size(&s.window, &s.renderer, s.tab_bar).height as f32,
                         self.config.padding * s.window.scale_factor() as f32,
                         s.fonts.metrics.height,
                         s.term.rows(),
@@ -4479,6 +4475,17 @@ fn cursor_area(
 
 fn below_tab_bar(size: PhysicalSize<u32>, tab_bar: u32) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width, size.height.saturating_sub(tab_bar))
+}
+
+/// Grid area below the tab bar, capped at the surface the renderer applied.
+///
+/// A window can outgrow the GPU texture limit; the renderer clamps the
+/// surface, so cells past it can't render and the Find bar is drawn inside
+/// the clamped surface, not the window bottom.
+fn fit_size(window: &Window, renderer: &Renderer, tab_bar: u32) -> PhysicalSize<u32> {
+    let fit = below_tab_bar(window.inner_size(), tab_bar);
+    let surface = below_tab_bar(PhysicalSize::from(renderer.surface_size()), tab_bar);
+    PhysicalSize::new(fit.width.min(surface.width), fit.height.min(surface.height))
 }
 
 /// Window facts XTWINOPS reports answer (iconify state, position, sizes).
