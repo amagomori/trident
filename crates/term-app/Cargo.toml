@@ -23,6 +23,7 @@ memchr.workspace = true
 portable-pty.workspace = true
 resvg.workspace = true
 shlex.workspace = true
+tempfile.workspace = true
 term-core.workspace = true
 term-render.workspace = true
 winit.workspace = true
@@ -31,6 +32,7 @@ winit.workspace = true
 libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+xdg-mime = "0.4"
 zbus = { version = "6.2.1", default-features = false, features = ["proxy", "default-rt"] }
 futures-lite = "2.6"
 notify-rust = { version = "4.19", default-features = false, features = ["z"] }
