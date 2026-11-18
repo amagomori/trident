@@ -520,7 +520,7 @@ impl Terminal {
     }
 
     fn report_xterm_setting(&mut self, request: &[u8]) {
-        let reply = if request == b"436F" {
+        let reply = if request.eq_ignore_ascii_case(b"436F") {
             "\x1bP1+r436F=323536\x1b\\"
         } else {
             "\x1bP0+r\x1b\\"
