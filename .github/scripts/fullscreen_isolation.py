@@ -36,9 +36,14 @@ def monitor_pty(directory):
 def until(read, accept, message):
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        value = read()
-        if accept(value):
-            return value
+        try:
+            value = read()
+        except subprocess.CalledProcessError as exc:
+            # AX windows can disappear briefly when AppKit changes Spaces.
+            value = exc.stderr or str(exc)
+        else:
+            if accept(value):
+                return value
         time.sleep(0.1)
     raise AssertionError(f"{message}: last saw {value!r}")
 
@@ -47,10 +52,15 @@ def exercise(process, directory):
     def ax(command):
         script = (f'tell application "System Events" to tell (first application process '
                   f'whose unix id is {process.pid})\n{command}\nend tell')
-        return subprocess.check_output(["osascript", "-e", script], text=True, timeout=8).strip()
+        return subprocess.check_output(["osascript", "-e", script], text=True, timeout=8,
+                                       stderr=subprocess.PIPE).strip()
 
     def menu(item):
         ax(f'click menu item "{item}" of menu 1 of menu bar item "Window" of menu bar 1')
+
+    def menu_enabled(item):
+        return ax(f'get enabled of menu item "{item}" of menu 1 of menu bar item '
+                  '"Window" of menu bar 1') == "true"
 
     def names():
         return ax("get name of every window").split(", ")
@@ -86,11 +96,13 @@ def exercise(process, directory):
         print(f"Active {active}, inactive {inactive}: {before}, {grid(inactive)} cells", flush=True)
         menu("Enter Full Screen")
         until(lambda: fullscreen(active), bool, "did not enter fullscreen")
+        until(lambda: menu_enabled("Exit Full Screen"), bool, "fullscreen transition not ready")
         created = new_tab()
         until(lambda: fullscreen(created), bool, "new tab did not join fullscreen")
         menu("Exit Full Screen")
         until(names, lambda n: set(n) == {created, inactive}, "expected two normal groups")
         until(lambda: fullscreen(created), lambda f: not f, "did not exit fullscreen")
+        until(lambda: menu_enabled("Enter Full Screen"), bool, "normal window not ready")
         after = frame(inactive)
         errors = [f"{inactive}: frame {before} -> {after}"] if before != after else []
         for name, (cells, offset) in logs.items():
