@@ -157,6 +157,15 @@ impl Perform for Terminal {
             ('y', [b'*']) if self.reports.checksums => self.report_rect_checksum(params),
             ('s', []) => self.save_cursor(),
             ('u', []) => self.restore_cursor(),
+            // Kitty keyboard protocol: query, push, pop and set the enhancement flags.
+            ('u', [b'?']) => {
+                let flags = self.screen().kitty_flags;
+                self.responses
+                    .extend_from_slice(format!("\x1b[?{flags}u").as_bytes());
+            }
+            ('u', [b'>']) => self.kitty_push(arg(params, 0, 0)),
+            ('u', [b'<']) => self.kitty_pop(arg(params, 0, 1)),
+            ('u', [b'=']) => self.kitty_set(arg(params, 0, 0), arg(params, 1, 1)),
             ('p', [b'!']) => {
                 // DECSTR soft reset.
                 self.modes.show_cursor = true;
@@ -384,6 +393,41 @@ impl Terminal {
             2031 => self.modes.color_scheme_updates,
             _ => return None,
         })
+    }
+
+    /// `CSI > u`: save the active flags and install the pushed set.
+    #[cold]
+    #[inline(never)]
+    fn kitty_push(&mut self, flags: u16) {
+        let screen = self.screen_mut();
+        if screen.kitty_stack.len() >= 16 {
+            screen.kitty_stack.remove(0);
+        }
+        screen.kitty_stack.push(screen.kitty_flags);
+        screen.kitty_flags = flags as u8 & 0x1f;
+    }
+
+    /// `CSI < u`: restore saved flag sets; emptying the stack resets the flags.
+    #[cold]
+    #[inline(never)]
+    fn kitty_pop(&mut self, count: u16) {
+        let screen = self.screen_mut();
+        for _ in 0..count.max(1) {
+            screen.kitty_flags = screen.kitty_stack.pop().unwrap_or(0);
+        }
+    }
+
+    /// `CSI = flags ; mode u`: mode 1 replaces, mode 2 sets, mode 3 clears bits.
+    #[cold]
+    #[inline(never)]
+    fn kitty_set(&mut self, flags: u16, mode: u16) {
+        let flags = flags as u8 & 0x1f;
+        let current = &mut self.screen_mut().kitty_flags;
+        *current = match mode {
+            2 => *current | flags,
+            3 => *current & !flags,
+            _ => flags,
+        };
     }
 
     #[cold]
