@@ -401,6 +401,9 @@ impl Terminal {
             if code >= 10 {
                 return;
             }
+            if spec.is_empty() {
+                continue;
+            }
             if *spec == b"?" {
                 self.report_osc_color(
                     dynamic_reply(code),
