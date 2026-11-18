@@ -63,6 +63,7 @@ mod prompt_input;
 pub use prompt_input::{PromptInput, PromptInputContext};
 mod reflow;
 mod rerun;
+mod sixel;
 mod xcolor;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
@@ -542,8 +543,8 @@ struct Reports {
     checksums: bool,
     /// DEC private modes saved with XTSAVE (`CSI ? Pm s`) for XTRESTORE (`CSI ? Pm r`).
     saved_modes: Vec<(u16, bool)>,
-    /// The body and intermediate of a DCS status request while it is being received.
-    status_request: Option<(u8, Vec<u8>)>,
+    /// Active device control string, if its payload is recognized.
+    dcs: Option<perform::Dcs>,
     /// DECSCL conformance level, 61-64. Levels below 63 silence DECRQM and DECRQSS.
     conformance_level: u8,
     /// DECSCL's control-representation parameter, echoed back by DECRQSS.
@@ -566,7 +567,7 @@ impl Default for Reports {
         Reports {
             checksums: false,
             saved_modes: Vec::new(),
-            status_request: None,
+            dcs: None,
             conformance_level: 64,
             conformance_pc: 0,
             protection_used: Default::default(),

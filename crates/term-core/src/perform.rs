@@ -13,8 +13,9 @@ pub(super) fn arg(params: &Params, index: usize, default: u16) -> u16 {
     }
 }
 
-/// DA1 reply: VT220 with ANSI color.
-const DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+/// DA1 reply: VT220 with Sixel and ANSI color.
+const DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;4;22c";
+
 const DYNAMIC_REPLIES: [&[u8]; 10] = [
     b"10", b"11", b"12", b"13", b"14", b"15", b"16", b"17", b"18", b"19",
 ];
@@ -38,6 +39,11 @@ fn reset_dynamic_code(value: &[u8]) -> Option<usize> {
 
 fn dynamic_reply(index: usize) -> &'static [u8] {
     DYNAMIC_REPLIES[index]
+}
+
+pub(super) enum Dcs {
+    Status(u8, Vec<u8>),
+    Sixel(Box<crate::sixel::Decoder>),
 }
 
 impl Perform for Terminal {
@@ -142,6 +148,7 @@ impl Perform for Terminal {
             ('M', []) => self.delete_lines(n(0)),
             ('P', []) => self.delete_chars(n(0)),
             ('S', []) => self.scroll_up(self.scroll_top, self.scroll_bottom, n(0)),
+            ('S', [b'?']) => self.report_graphics(arg(params, 0, 0), arg(params, 1, 0)),
             ('T', []) => self.scroll_down(self.scroll_top, self.scroll_bottom, n(0)),
             ('X', []) => {
                 let (row, col) = (self.cursor.row, self.cursor.col);
@@ -337,36 +344,61 @@ impl Perform for Terminal {
 
     #[cold]
     #[inline(never)]
-    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        self.reports.status_request =
-            (!ignore && matches!(intermediates, [b'$'] | [b'+']) && action == 'q')
-                .then(|| (intermediates[0], Vec::new()));
+    fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        self.reports.dcs = match (ignore, action, intermediates) {
+            (false, 'q', []) => {
+                self.sync_cursor_row();
+                self.print_state.disarm_clear();
+                Some(Dcs::Sixel(Box::new(crate::sixel::Decoder::new(
+                    self,
+                    arg(params, 0, 0),
+                    arg(params, 1, 0) == 1,
+                ))))
+            }
+            (false, 'q', [kind @ (b'$' | b'+')]) => Some(Dcs::Status(*kind, Vec::new())),
+            _ => None,
+        };
     }
 
     #[cold]
     #[inline(never)]
     fn put(&mut self, byte: u8) {
-        if let Some((_, request)) = &mut self.reports.status_request
-            && request.len() < 16
-        {
-            request.push(byte);
+        match &mut self.reports.dcs {
+            Some(Dcs::Status(_, request)) if request.len() < 16 => request.push(byte),
+            Some(Dcs::Sixel(decoder)) => {
+                if decoder.put(byte).is_none() {
+                    self.reports.dcs = None;
+                }
+            }
+            _ => {}
         }
     }
 
     #[cold]
     #[inline(never)]
     fn unhook(&mut self) {
-        if let Some((intermediate, request)) = self.reports.status_request.take() {
-            if intermediate == b'+' {
-                self.report_xterm_setting(&request);
-            } else {
-                self.report_setting(&request);
+        match self.reports.dcs.take() {
+            Some(Dcs::Status(b'+', request)) => self.report_xterm_setting(&request),
+            Some(Dcs::Status(_, request)) => self.report_setting(&request),
+            Some(Dcs::Sixel(decoder)) => {
+                if let Some(image) = decoder.finish() {
+                    self.place_sixel(image);
+                }
             }
+            None => {}
         }
     }
 
     fn raw_osc_limit(&self, code: &[u8]) -> Option<usize> {
         (code == b"1337").then_some(crate::iterm::MAX_OSC)
+    }
+
+    fn await_dcs_st(&self) -> bool {
+        matches!(self.reports.dcs, Some(Dcs::Sixel(_)))
+    }
+
+    fn cancel_dcs(&mut self) {
+        self.reports.dcs = None;
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
