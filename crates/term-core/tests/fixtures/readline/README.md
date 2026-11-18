@@ -1,6 +1,6 @@
 # Native Readline repaint fixtures
 
-Byte-identical `all.bin` captures (startup, OSC 133 prompt, then the input repaint) from native
+Byte-identical `all.bin` captures of startup, the OSC 133 prompt and the input repaint from native
 macOS 26.6.2 arm64 at 44 columns by 34 rows: Bash 3.2.57 and Bash 5.3.20, prompt `$ `, input
 `: ` + 39 `a` + `日本😀bc`. Tests replay the captured bytes on the core.
 

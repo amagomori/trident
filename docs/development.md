@@ -8,9 +8,9 @@ The Cargo workspace has three crates.
 
 | Crate | What it does |
 | --- | --- |
-| `crates/term-core` | Terminal state: grid, scrollback, cursor, modes, selection, colors, and the VT/xterm escape sequence handling (parsed with [`vte`](https://crates.io/crates/vte)). No GPU or window dependencies, so it builds and tests headless |
-| `crates/term-render` | wgpu renderer (`renderer.rs`, `shader.wgsl`) that draws a frame as one instanced pass, plus glyph rasterization ([`ab_glyph`](https://crates.io/crates/ab_glyph)), system font fallback (`fallback.rs`), color glyphs (`color.rs`) and the GPU glyph atlases. Takes any window with raw window and display handles |
-| `crates/term-app` | The `trident` binary: window and event loop ([`winit`](https://crates.io/crates/winit)), the shell on a pseudo-terminal ([`portable-pty`](https://crates.io/crates/portable-pty)), key and mouse encoding, and the clipboard |
+| `crates/term-core` | Terminal state: grid, scrollback, cursor, modes, selection, colors, and the VT/xterm escape sequence handling, parsed with [`vte`](https://crates.io/crates/vte). No GPU or window dependencies, so it builds and tests headless |
+| `crates/term-render` | wgpu renderer in `renderer.rs` and `shader.wgsl` that draws a frame as one instanced pass, plus glyph rasterization with [`ab_glyph`](https://crates.io/crates/ab_glyph), system font fallback (`fallback.rs`), color glyphs (`color.rs`) and the GPU glyph atlases. Takes any window with raw window and display handles |
+| `crates/term-app` | The `trident` binary: window and event loop with [`winit`](https://crates.io/crates/winit), the shell on a pseudo-terminal with [`portable-pty`](https://crates.io/crates/portable-pty), key and mouse encoding, and the clipboard |
 
 ## Build and test
 

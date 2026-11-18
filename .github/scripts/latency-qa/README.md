@@ -31,7 +31,7 @@ Gatekeeper can block the Homebrew cask.
 
 ## Read the result
 
-- Both scripts write `rows.json` (every run) and `summary.json` into `--out`. A run that reaches no
+- Both scripts write `rows.json` with every run and `summary.json` into `--out`. A run that reaches no
   verdict leaves no `summary.json`.
 - Report the timing source `ab.py` prints. Only `wayland-presentation` is verified presentation
   timing. The `x11-present`, `metal-presented` and `present-return` sources are labeled unverified.

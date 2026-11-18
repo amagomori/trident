@@ -89,7 +89,7 @@ trident --install-terminfo     # optional: install the xterm-trident terminfo en
 
 ## Configuration
 
-Trident reads `~/.config/trident/config.toml` (or `$XDG_CONFIG_HOME/trident/config.toml`). Every
+Trident reads `~/.config/trident/config.toml`, or `$XDG_CONFIG_HOME/trident/config.toml` when set. Every
 entry is optional. For all settings, see [Configuration](docs/configuration.md).
 
 ## Documentation

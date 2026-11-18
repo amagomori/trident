@@ -176,8 +176,8 @@ an ssh session or other full-screen programs. To turn it off, set `auto_secure_i
 
 ## Desktop notifications
 
-Programs can show a desktop notification with OSC 9, OSC 777 or the
-[kitty notification protocol](https://sw.kovidgoyal.net/kitty/desktop-notifications/) (OSC 99):
+Programs can show a desktop notification with OSC 9, OSC 777 or OSC 99, the
+[kitty notification protocol](https://sw.kovidgoyal.net/kitty/desktop-notifications/):
 
 ```sh
 printf '\e]9;Build done\a'
@@ -197,8 +197,8 @@ A stream of bells (`yes $'\a'`) flashes once until it pauses for a quarter secon
 ## App icons
 
 `app_icon` picks the Dock icon on macOS and the window icon on Linux from eight variants:
-`tide` (default), `lagoon`, `dusk`, `reef`, `kelp`, `midnight`, `golden` and `sunset`
-(case-insensitive). On macOS, the same icon also shows in the menu bar, with a menu that brings
+`tide`, the default, `lagoon`, `dusk`, `reef`, `kelp`, `midnight`, `golden` and `sunset`,
+all case-insensitive. On macOS, the same icon also shows in the menu bar, with a menu that brings
 the window forward or quits. To hide it, set `menu_bar_icon = false`. Both settings apply when the
 config reloads. An unknown name logs a warning and uses `tide`.
 

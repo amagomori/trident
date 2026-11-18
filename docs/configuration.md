@@ -26,26 +26,26 @@ padding = 6.0               # 0..=1000 logical pixels
 # window_columns = 100      # first window's width in cells; default: last closed window's, or 100
 # window_rows = 30          # first window's height in cells; default: last closed window's, or 30
 remember_window_size = true # false: always open at window_columns x window_rows
-scrollback = 10000          # retained lines; 0 disables history (or use the [scrollback] table below)
+scrollback = 10000          # retained lines; 0 disables history; see the [scrollback] table below
 drop_preview = true         # false: file drops insert only the shell-quoted path
-hover_preview = false       # true: hold Ctrl (Cmd on macOS) over a file path to preview it
+hover_preview = false       # true: hold Ctrl, or Cmd on macOS, over a file path to preview it
 paste_protection = true     # false: never confirm multi-line or control-character pastes
 trim_paste = true           # false: keep trailing whitespace and newlines on single-line pastes
 clipboard_read = false      # true: let programs read the clipboard with OSC 52
 confirm_close = true        # false: close the window at once even while a program runs
-visual_bell = false         # true: briefly flash the grid on BEL (background tabs always get a bell mark)
-compare_runs = true         # false: don't mark output that changed since the last run (or use the [compare_runs] table below)
-tab_bar = "always"          # Linux: "auto": only with two or more tabs; "never": hide it (tab shortcuts still work); macOS uses native tabs
+visual_bell = false         # true: briefly flash the grid on BEL; background tabs always get a bell mark
+compare_runs = true         # false: don't mark output that changed since the last run; see the [compare_runs] table below
+tab_bar = "always"          # Linux: "auto": only with two or more tabs; "never": hide it; tab shortcuts still work; macOS uses native tabs
 desktop_notifications = true # false: ignore OSC 9/777/99 notification requests
-vsync = true                # false: present without waiting for vblank (lower latency, may tear)
-app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset (see App icons in usage.md)
+vsync = true                # false: present without waiting for vblank; lower latency, may tear
+app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset; see App icons in usage.md
 menu_bar_icon = true        # macOS: false hides the menu bar item
 auto_secure_input = true    # macOS: false never turns on Secure Keyboard Entry at password prompts
 hide_mouse_when_typing = true # false: keep the mouse pointer shown while you type
 shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
-pager = ["less", "-R", "+G"] # opens the last command's output (file path appended); also accepts a string
-term = "xterm-256color"     # "xterm-trident" once installed (falls back if not found)
-editor = ["code", "--goto", "{file}:{line}:{column}"] # path:line links; default: $VISUAL/$EDITOR (see usage.md)
+pager = ["less", "-R", "+G"] # opens the last command's output; file path appended; also accepts a string
+term = "xterm-256color"     # "xterm-trident" once installed; falls back if not found
+editor = ["code", "--goto", "{file}:{line}:{column}"] # path:line links; default: $VISUAL/$EDITOR; see usage.md
 
 [env]                      # applied after TERM/COLORTERM; overrides inherited values
 EDITOR = "vim"
@@ -104,10 +104,10 @@ stays on and Trident logs a note.
 `font` takes a family name, such as `"Fira Code"` or `"Menlo"`, or the path to a
 TrueType/OpenType file or `.ttc` collection. A value that contains a `/` or ends in `.ttf`,
 `.otf`, `.ttc` or `.otc` is a path; anything else is a family name, looked up with fontconfig on
-Linux and Core Text on macOS (a full face name such as `"Fira Code Retina"` works too).
+Linux and Core Text on macOS. A full face name such as `"Fira Code Retina"` also works.
 
 - Bold, italic and bold-italic text use the family's own faces, picked by weight and slant
-  (the faces in a collection file count as one family).
+  counting the faces in a collection file as one family.
 - A style the font has no face for is synthesized: bold is drawn heavier and italic is slanted,
   rather than drawn as regular text.
 - `font_bold`, `font_italic` and `font_bold_italic` choose a style's face from another family or

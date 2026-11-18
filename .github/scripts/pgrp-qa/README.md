@@ -31,6 +31,6 @@ python3 .github/scripts/pgrp-qa/timing.py --main ../t-main/target/release/triden
     --head ../t-head/target/release/trident --runs 6 --out timing
 ```
 
-All three write `rows.json` (every run) into `--out`, and `cpu_ab.py` also writes `summary.json`
+All three write `rows.json` with every run into `--out`, and `cpu_ab.py` also writes `summary.json`
 with binary hashes. On Linux, run `cpu_ab.py` both unpinned and with `--taskset 2`, which pins the
 app to one core.

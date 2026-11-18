@@ -1,6 +1,6 @@
 # Fuzzing
 
-The fuzz target feeds arbitrary bytes through `term_core::Terminal` (the parser and the grid),
+The fuzz target feeds arbitrary bytes through `term_core::Terminal`, the parser and the grid,
 mixed with resizes, scrolling, selections and searches. It fails on any panic, broken grid
 invariant, or heap growth past the budget in `crates/term-core/tests/harness/mod.rs`. The target,
 its corpus and its dictionary are named `terminal` in `fuzz/Cargo.toml`.
