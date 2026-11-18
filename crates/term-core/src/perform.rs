@@ -871,7 +871,9 @@ impl Terminal {
     /// set, homes the cursor and resets the scrolling region.
     fn set_columns(&mut self, cols: usize) {
         let wide = cols != 80;
-        if !self.modes.allow_80_132 || self.modes.columns_132 == wide {
+        // A grid that no longer matches the mode — e.g. the window manager
+        // granted less than a 132-column request — still re-requests.
+        if !self.modes.allow_80_132 || (self.modes.columns_132 == wide && self.cols == cols) {
             return;
         }
         self.modes.columns_132 = wide;

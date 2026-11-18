@@ -2901,6 +2901,7 @@ impl Terminal {
         let (cols, rows) = (self.cols, self.rows);
         // RIS returns to 80 columns when DECCOLM widened the grid.
         let cols = if self.modes.columns_132 { 80 } else { cols };
+        let widened = cols != self.cols;
         let max_scrollback = self.max_scrollback;
         let mut fresh = Terminal::new(cols, rows);
         fresh.shell.progress_changed = self.shell.progress.is_some() || self.shell.progress_changed;
@@ -2916,6 +2917,9 @@ impl Terminal {
         fresh.shell.notifications = self.shell.notifications.reset();
         fresh.shell.runs = self.shell.runs.forget();
         *self = fresh;
+        if widened {
+            self.window_ops.push(WindowOp::Resize { cols, rows });
+        }
         self.set_command_budget(enabled, share);
         self.title_changed = true;
     }
