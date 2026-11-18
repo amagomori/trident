@@ -87,7 +87,7 @@ pub fn line_text(term: &Terminal, row: isize) -> (isize, Vec<(char, usize, usize
     for (i, r) in (first..=end).enumerate() {
         row_text(
             term,
-            term.viewport_row_signed(r),
+            &term.viewport_row_signed(r),
             i * term.cols(),
             &mut chars,
         );
@@ -1238,7 +1238,7 @@ mod tests {
         let mut term = term_core::Terminal::new(10, 2);
         term.advance("日a".as_bytes());
         let mut text = Vec::new();
-        row_text(&term, term.viewport_row(0), 0, &mut text);
+        row_text(&term, &term.viewport_row(0), 0, &mut text);
         assert_eq!(text[0], ('日', 0, 2));
         assert_eq!(text[1], ('a', 2, 1));
     }

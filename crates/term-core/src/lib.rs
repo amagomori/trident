@@ -41,6 +41,7 @@ pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
 pub use rerun::{DEFAULT_IGNORE, Ignore, ROW_CHANGED, ROW_REMOVED_ABOVE};
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -563,7 +564,7 @@ impl Terminal {
         }
         let mut col = point.col.min(self.cols - 1);
         if col > 0
-            && self.line(point.line).cells[col]
+            && self.padded_line(point.line).cells[col]
                 .flags
                 .contains(Flags::WIDE_SPACER)
         {
@@ -582,7 +583,7 @@ impl Terminal {
         let mut cursor = None;
         let cursor_col = self.cursor.col + usize::from(self.cursor.pending_wrap);
         for line in start_line..=end_line {
-            let cells = &self.line(line).cells;
+            let cells = &self.padded_line(line).cells;
             let from = if line == start_line { start_col } else { 0 };
             for c in from..=cells.len() {
                 if line == point.line && c == col.max(from) {
@@ -1477,13 +1478,14 @@ impl Terminal {
         self.display_offset = 0;
     }
 
-    /// Returns the row shown at zero-based viewport row `row`.
+    /// Returns all grid columns at zero-based viewport row `row`. Borrows full-width
+    /// rows and pads shorter history rows in the returned copy.
     ///
     /// # Panics
     ///
     /// May panic if `row` is outside `0..self.rows()`.
-    pub fn viewport_row(&self, row: usize) -> &Row {
-        self.line(self.viewport_to_point(row, 0).line)
+    pub fn viewport_row(&self, row: usize) -> Cow<'_, Row> {
+        self.padded_line(self.viewport_to_point(row, 0).line)
     }
 
     /// Converts a zero-based viewport cell to an absolute position.
@@ -1506,13 +1508,25 @@ impl Terminal {
         Point { line, col }
     }
 
-    /// Returns a signed viewport row, clamped to retained history and screen.
-    pub fn viewport_row_signed(&self, row: isize) -> &Row {
-        self.line(self.viewport_to_point_signed(row, 0).line)
+    /// Returns a row as in [`Self::viewport_row`], clamping its signed index to retained history and screen.
+    pub fn viewport_row_signed(&self, row: isize) -> Cow<'_, Row> {
+        self.padded_line(self.viewport_to_point_signed(row, 0).line)
     }
 
     fn first_line(&self) -> u64 {
         self.history - self.screen().scrollback.len() as u64
+    }
+
+    /// Projects a stored row to the full grid width without modifying history.
+    fn padded_line(&self, line: u64) -> Cow<'_, Row> {
+        let row = self.line(line);
+        if row.cells.len() == self.cols {
+            Cow::Borrowed(row)
+        } else {
+            let mut row = row.clone();
+            row.pad_to(self.cols);
+            Cow::Owned(row)
+        }
     }
 
     fn line(&self, line: u64) -> &Row {
@@ -1601,8 +1615,10 @@ impl Terminal {
             if !alt && reflow {
                 continue;
             }
-            for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
-                row.resize(cols);
+            if reflow {
+                for row in &mut screen.lines {
+                    row.resize(cols);
+                }
             }
             // The inactive screen's cursor is the one saved when switching away from it.
             let mut cursor_row = if is_active {
@@ -1633,7 +1649,8 @@ impl Terminal {
                 for _ in self.rows..rows {
                     let at_bottom = cursor_row == screen.lines.len() - 1;
                     if !alt && at_bottom && !screen.scrollback.is_empty() {
-                        let row = screen.scrollback.pop_back().unwrap();
+                        let mut row = screen.scrollback.pop_back().unwrap();
+                        row.pad_to(cols);
                         screen.lines.insert(0, row);
                         self.history -= 1;
                         cursor_row += 1;
@@ -1789,10 +1806,14 @@ impl Terminal {
         };
         from = from.min(self.cols - 1);
         to = to.min(self.cols - 1);
-        let cells = self.cells_of(kind, line);
-        from = from.min(cells.len().saturating_sub(1));
-        to = to.min(cells.len().saturating_sub(1));
-        if from > 0 && cells[from].flags.contains(Flags::WIDE_SPACER) {
+        let (cells, width) = self.selection_row(kind, line);
+        from = from.min(width - 1);
+        to = to.min(width - 1);
+        if from > 0
+            && cells
+                .get(from)
+                .is_some_and(|c| c.flags.contains(Flags::WIDE_SPACER))
+        {
             from -= 1;
         }
         if to + 1 < cells.len() && cells[to].flags.contains(Flags::WIDE) {
@@ -1802,7 +1823,7 @@ impl Terminal {
     }
 
     fn word_boundary(&self, mut point: Point, forward: bool) -> Point {
-        let row = self.line(point.line);
+        let row = self.padded_line(point.line);
         let is_word = |c: char| !c.is_whitespace() && !"\"'`()[]{}<>|,;".contains(c);
         let col = point.col.min(self.cols - 1);
         let is_word = |cell: &Cell| is_word(self.base_char(cell));
@@ -1833,7 +1854,7 @@ impl Terminal {
         for line in start.line..=end.line {
             let row = self.line(line);
             let (from, to) = self.selection_columns((start, end), line)?;
-            let cells = self.selection_cells(line);
+            let (cells, _) = self.selection_row(self.selection?.kind, line);
             let wrapped = self
                 .output_end(line)
                 .map_or(row.wrapped(), |end| end.wrapped);
@@ -1844,12 +1865,17 @@ impl Terminal {
                 Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
             };
             let mut text = String::new();
-            for cell in &cells[from..=to] {
+            for cell in &cells[from.min(cells.len())..(to + 1).min(cells.len())] {
                 if !cell.flags.intersects(skip) {
                     self.push_cell_text(cell, &mut text);
                 }
             }
-            if !block && !(wrapped && line != end.line) {
+            if block {
+                text.extend(std::iter::repeat_n(
+                    ' ',
+                    (to + 1).saturating_sub(from.max(cells.len())),
+                ));
+            } else if !wrapped || line == end.line {
                 text.truncate(text.trim_end().len());
             }
             out.push_str(&text);
@@ -1881,14 +1907,12 @@ impl Terminal {
         })
     }
 
-    fn selection_cells(&self, line: u64) -> &[Cell] {
-        self.output_end(line)
-            .map_or(&self.line(line).cells, |end| &end.cells)
-    }
-
-    fn cells_of(&self, kind: SelectionKind, line: u64) -> &[Cell] {
-        self.output_end_of(kind, line)
-            .map_or(&self.line(line).cells, |end| &end.cells)
+    /// Stored cells and logical width (output snapshots stop at the recorded boundary).
+    fn selection_row(&self, kind: SelectionKind, line: u64) -> (&[Cell], usize) {
+        self.output_end_of(kind, line).map_or_else(
+            || (&self.line(line).cells[..], self.cols),
+            |end| (&end.cells[..], end.cells.len()),
+        )
     }
 
     /// A line or command-output selection's text with SGR sequences for its styles;
@@ -1904,7 +1928,8 @@ impl Terminal {
             let Some((from, to)) = self.columns_of(sel.kind, (start, end), line) else {
                 continue;
             };
-            let cells = &self.cells_of(sel.kind, line)[from..=to];
+            let (cells, _) = self.selection_row(sel.kind, line);
+            let cells = &cells[from.min(cells.len())..(to + 1).min(cells.len())];
             let soft = line != end.line
                 && self
                     .output_end_of(sel.kind, line)
