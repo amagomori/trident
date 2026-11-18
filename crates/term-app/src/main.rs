@@ -3000,6 +3000,12 @@ impl App {
         let hover = self.hover_link();
         let Some(s) = &mut self.session else { return };
         s.renderer.set_floating(floating);
+        s.renderer.set_link_target(
+            hover
+                .as_ref()
+                .filter(|hover| hover.link.osc8)
+                .map(|hover| hover.link.uri.as_str()),
+        );
         if s.term.modes.synchronized_output {
             s.redraw_pending = true;
             return;

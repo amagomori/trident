@@ -87,6 +87,10 @@ Hold Cmd (macOS) or Ctrl (Linux) over a link to underline it, and click to open 
   `--> src/lib.rs:7:13`, `main.go:5:2:`, `Makefile:12:`, `at f (/srv/app.js:12:9)` and Python's
   `File "app.py", line 12`
 
+- While you hold the key over an OSC 8 hyperlink, its real target shows in the bottom-left corner
+  (the top-left one when the link is on the bottom row), so the printed text can't hide where a
+  click goes. Characters outside printable ASCII show percent-encoded, and a long target is cut
+  in the middle.
 - A file reference is a link only when the file exists. Relative paths are tried against the
   shell's directory (OSC 7), then the foreground program's working directory. `~/` is your home
   directory.

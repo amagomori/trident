@@ -95,6 +95,8 @@ pub struct Renderer {
     /// A transient card drawn over everything, such as a file preview.
     floating: ImagePipeline,
     floating_image: Option<FloatingImage>,
+    /// The hovered OSC 8 link's URI, shown in a corner of the window.
+    link_target: Option<String>,
     /// Instances in each region this frame.
     lens: [u32; 4],
     /// The grid area images are clipped to: x, y, width, height in physical pixels.
@@ -359,6 +361,7 @@ impl Renderer {
             images,
             floating,
             floating_image: None,
+            link_target: None,
             lens: [0; 4],
             image_clip: [0; 4],
             srgb: format.is_srgb(),
@@ -388,6 +391,13 @@ impl Renderer {
     /// Sets or clears the floating image drawn from the next frame on.
     pub fn set_floating(&mut self, floating: Option<FloatingImage>) {
         self.floating_image = floating;
+    }
+
+    /// Sets or clears the link target drawn from the next frame on.
+    pub fn set_link_target(&mut self, uri: Option<&str>) {
+        if self.link_target.as_deref() != uri {
+            self.link_target = uri.map(crate::link_target::sanitize);
+        }
     }
 
     /// Reconfigures the surface for physical-pixel dimensions, ignoring zeros.
@@ -1073,12 +1083,83 @@ impl Renderer {
             }
         }
 
+        if let Some(text) = self.link_target.take() {
+            if !self.draw_link_target(
+                term,
+                fonts,
+                &text,
+                hover,
+                padding,
+                pixel_offset,
+                &mut overlays,
+            ) {
+                ok = false;
+            }
+            self.link_target = Some(text);
+        }
+
         self.bar_start = overlays.len() as u32;
         if !self.draw_tab_bar(term, fonts, &mut overlays) {
             ok = false;
         }
         self.overlays = overlays;
         ok
+    }
+
+    /// Draws `text` along the bottom-left corner, or the top-left one when the strip would
+    /// cover a row of the hovered link; false if the atlas filled up.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_link_target(
+        &mut self,
+        term: &Terminal,
+        fonts: &mut Fonts,
+        text: &str,
+        hover: Option<&term_core::Link>,
+        padding: f32,
+        pixel_offset: f32,
+        out: &mut Vec<Instance>,
+    ) -> bool {
+        let CellMetrics {
+            width: cw,
+            height: ch,
+            ..
+        } = fonts.metrics;
+        let (width, height) = (self.config.width as f32, self.area_height() as f32);
+        let columns = ((width / cw).floor() as usize).saturating_sub(2);
+        let text = crate::link_target::elide(text, columns);
+        let strip_width = ((text.chars().count() + 2) as f32 * cw).min(width);
+        let top = term.viewport_to_point_signed(0, 0).line as f32;
+        let covers = |y: f32| {
+            hover.is_some_and(|link| {
+                let rows = |line: u64| padding + (line as f32 - top) * ch + pixel_offset;
+                rows(link.start.line) < y + ch && y < rows(link.end.line) + ch
+            })
+        };
+        let bottom = (height - ch).max(0.0);
+        let y = if covers(bottom) && !covers(0.0) {
+            0.0
+        } else {
+            bottom
+        };
+        out.push(self.rect(0.0, y, strip_width, ch, term.palette.foreground));
+        for (i, c) in text.chars().enumerate() {
+            let key = GlyphKey {
+                c,
+                style: Style::new(false, false),
+                cells: 1,
+            };
+            match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                Ok(Some(g)) => out.push(Instance {
+                    pos: [(i + 1) as f32 * cw + g.left, y + g.top],
+                    size: [g.width, g.height],
+                    uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
+                    color: self.color(term.palette.background, 1.0),
+                }),
+                Ok(None) => {}
+                Err(_) => return false,
+            }
+        }
+        true
     }
 
     /// Draws the tab bar above the grid; false if the atlas filled up.

@@ -385,6 +385,7 @@ mod tests {
             start: Point { line: 1, col: 0 },
             end: Point { line: 1, col: 1 },
             pieces: Vec::new(),
+            osc8: false,
         };
         let hovering = Frame {
             hover: Some(&link),
