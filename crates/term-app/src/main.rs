@@ -2309,6 +2309,12 @@ impl App {
             Some(mut g) => {
                 self.swap_group(&mut g);
                 drop(g);
+                // The clipboard keeps the window it was bound to alive; rebind it to
+                // the window now shown so the dropped group actually destroys its
+                // window.
+                if let Some(s) = &self.session {
+                    self.clipboard = clipboard::Clipboard::new(s.window.clone());
+                }
             }
             None => event_loop.exit(),
         }
