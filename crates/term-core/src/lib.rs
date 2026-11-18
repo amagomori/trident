@@ -2599,7 +2599,9 @@ impl Terminal {
         }
         if col + width >= cols {
             self.cursor.col = cols - 1;
-            self.cursor.pending_wrap = true;
+            // The do-wrap position only exists while autowrap can take it;
+            // without it the next print overwrites this same cell.
+            self.cursor.pending_wrap = self.modes.autowrap;
         } else {
             self.cursor.col = col + width;
         }

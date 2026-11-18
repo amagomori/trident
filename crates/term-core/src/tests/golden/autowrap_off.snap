@@ -1,5 +1,5 @@
 size=4x2 active=primary
-cursor row=0 col=3 visible=true shape=block pending_wrap=true
+cursor row=0 col=3 visible=true shape=block pending_wrap=false
 cursor attributes: fg=default-fg bg=default-bg flags=[]
 scroll_region=0..=1 history=0 display_offset=0
 primary:

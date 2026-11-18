@@ -63,7 +63,15 @@ impl Perform for Terminal {
                 self.move_col(col);
             }
             ('D', []) => {
-                for _ in 0..n(0) {
+                // The do-wrap position counts as one cell past the edge, so a
+                // counted CUB spends its first step canceling it — unlike BS,
+                // whose single step lands on the cell to its left.
+                let mut n = n(0);
+                if self.cursor.pending_wrap {
+                    self.cursor.pending_wrap = false;
+                    n = n.saturating_sub(1);
+                }
+                for _ in 0..n {
                     self.cursor_back();
                 }
             }
@@ -1025,7 +1033,13 @@ impl Terminal {
                 self.modes.origin = enable;
                 self.goto(0, 0);
             }
-            7 => self.modes.autowrap = enable,
+            7 => {
+                self.modes.autowrap = enable;
+                if !enable {
+                    // The do-wrap position means nothing once autowrap is off.
+                    self.cursor.pending_wrap = false;
+                }
+            }
             18 => self.modes.print_form_feed = enable,
             19 => self.modes.print_full_page = enable,
             40 => self.modes.allow_80_132 = enable,
