@@ -3085,6 +3085,32 @@ fn prompt_click_ignores_an_alternate_screen_line_editor_widget() {
 }
 
 #[test]
+fn prompt_click_reaches_a_syntax_highlighted_comment() {
+    // zsh-syntax-highlighting draws a typed comment `fg=black,bold`; after Home a click
+    // past it or inside it lands there.
+    let line = "\x1b]133;A\x07% \x1b]133;B\x07: foo \x1b[1;30m# note\x1b[m";
+    let t = term(30, 4, &format!("{line}\x1b[12D"));
+    assert_eq!(click(&t, 0, 25), Some(PromptClick::Move(12)));
+    assert_eq!(click(&t, 0, 13), Some(PromptClick::Move(11)));
+    // A comment-only line, and the same comment in bold fg=8.
+    let t = term(
+        30,
+        4,
+        "\x1b]133;A\x07% \x1b]133;B\x07\x1b[1;30m# todo later\x1b[m\x1b[12D",
+    );
+    assert_eq!(click(&t, 0, 25), Some(PromptClick::Move(12)));
+    let t = term(
+        30,
+        4,
+        "\x1b]133;A\x07% \x1b]133;B\x07: foo \x1b[1;90m# note\x1b[m\x1b[12D",
+    );
+    assert_eq!(click(&t, 0, 25), Some(PromptClick::Move(12)));
+    // A trailing autosuggestion after the comment still stops the click.
+    let t = term(30, 4, &format!("{line}\x1b[90ms more\x1b[39m\x1b[18D"));
+    assert_eq!(click(&t, 0, 28), Some(PromptClick::Move(12)));
+}
+
+#[test]
 fn prompt_click_needs_an_input_zone_on_the_primary_screen() {
     assert_eq!(click(&term(20, 4, "$ echo hi"), 0, 2), None);
     assert_eq!(click(&term(20, 4, "\x1b]133;A\x07$ "), 0, 1), None);

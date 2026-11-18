@@ -2800,15 +2800,19 @@ fn dec_special(c: char) -> char {
 mod tests;
 
 /// Whether a cell looks like shell autosuggestion text: faint, or a grey foreground
-/// (zsh-autosuggestions draws `fg=8`, fish `555`/`brblack`).
+/// (zsh-autosuggestions draws `fg=8`, fish `555`/`brblack`). Bold or black text is not:
+/// zsh-syntax-highlighting draws comments `fg=black,bold`.
 fn suggestion_style(cell: &Cell) -> bool {
     let grey =
         |r: u8, g: u8, b: u8| r.max(g).max(b) - r.min(g).min(b) <= 16 && r.max(g).max(b) < 0xe0;
+    if cell.flags.contains(Flags::BOLD) {
+        return false;
+    }
     cell.flags.contains(Flags::DIM)
         || match cell.fg {
             Color::DefaultFg | Color::DefaultBg => false,
             Color::Indexed(i) => match i {
-                0 | 8 | 232..=255 => true,
+                8 | 232..=255 => true,
                 16..=231 => {
                     let i = i - 16;
                     i / 36 == i / 6 % 6 && i / 6 % 6 == i % 6 && i != 215
