@@ -27,7 +27,7 @@ const MAX_OFFER_BYTES: usize = 1024 * 1024;
 #[derive(Debug)]
 pub(super) struct DropDevice {
     device: WlDataDevice,
-    target: Option<(Offer, WlSurface)>,
+    target: Option<(Offer, Option<WlSurface>)>,
     // A stalled source may keep its write end indefinitely. Bound reads per seat.
     pending: Option<(LoopHandle<'static, WinitState>, RegistrationToken)>,
 }
@@ -116,9 +116,12 @@ impl Dispatch<WlDataDevice, ObjectId> for WinitState {
                         if offer.0.version() >= 3 {
                             offer.0.set_actions(DndAction::Copy, DndAction::Copy);
                         }
-                        device.target = Some((offer, surface));
+                        device.target = Some((offer, Some(surface)));
                     } else {
                         offer.0.accept(serial, None);
+                        // Keep the declined offer alive until Leave; destroying it now can
+                        // cancel the source drag before it reaches another destination.
+                        device.target = Some((offer, None));
                     }
                 }
             },
@@ -129,7 +132,7 @@ impl Dispatch<WlDataDevice, ObjectId> for WinitState {
             },
             wl_data_device::Event::Drop => {
                 let Some(device) = device else { return };
-                if let Some((offer, surface)) = device.target.take() {
+                if let Some((offer, Some(surface))) = device.target.take() {
                     if offer.0.version() < 3
                         || offer.0.data::<OfferData>().unwrap().copy.load(Ordering::Relaxed)
                     {
