@@ -509,6 +509,13 @@ impl Pane {
     }
 }
 
+/// What `reopen_tab` needs to start a closed tab again.
+struct ClosedTab {
+    index: usize,
+    working_directory: Option<PathBuf>,
+    title: String,
+}
+
 /// Whether Trident draws its own tab bar; macOS shows native `AppKit` tabs
 /// instead.
 fn tab_bar_drawn(shown: bool) -> bool {
@@ -928,6 +935,7 @@ fn suppress_shortcut_repeat(action: &Action, repeat: bool, held_at_focus: bool) 
             Action::NewWindow
                 | Action::NewTab
                 | Action::CloseTab
+                | Action::ReopenTab
                 | Action::ToggleFullscreen
                 | Action::ShowLastCommandOutput
         )
@@ -1539,6 +1547,8 @@ struct App {
     /// state lives in `session`.
     tabs: Vec<Option<Pane>>,
     active_tab: usize,
+    /// Closed tabs, oldest first.
+    closed_tabs: Vec<ClosedTab>,
     next_pane: u64,
     tab_hover: Option<term_render::TabHit>,
     /// The pointer in window coordinates; `mouse_pos` is relative to the grid area.
@@ -1657,6 +1667,7 @@ impl App {
             session: None,
             tabs: Vec::new(),
             active_tab: 0,
+            closed_tabs: Vec::new(),
             next_pane: 0,
             tab_hover: None,
             tab_pointer: PhysicalPosition::default(),
@@ -1963,6 +1974,7 @@ impl App {
     /// Remembers the active window's frame unless it is fullscreen, for `open_tab_window`.
     #[cfg(target_os = "macos")]
     fn note_normal_frame(&mut self) {
+        self.feed_window_geometry();
         let Some(s) = &self.session else { return };
         if !self
             .fullscreen_exit
@@ -1973,6 +1985,13 @@ impl App {
         if let Ok(position) = s.window.outer_position() {
             self.normal_frame = Some((position, s.size));
         }
+    }
+
+    /// Feeds the real window's geometry for XTWINOPS reports (ops 11/13/15/19).
+    #[cfg(target_os = "macos")]
+    fn feed_window_geometry(&mut self) {
+        let Some(s) = &mut self.session else { return };
+        s.term.set_window_geometry(window_geometry(&s.window));
     }
 
     /// Restores the frame of the window, the active one or a background tab's, that left
@@ -2065,19 +2084,48 @@ impl App {
 
     /// Opens a tab after the active one, in the active tab's OSC 7 directory, and shows it.
     fn new_tab(&mut self, event_loop: &ActiveEventLoop) {
+        let cwd = self
+            .session
+            .as_ref()
+            .and_then(|s| local_working_directory(s.term.working_directory()))
+            .or_else(|| self.options.working_directory.clone());
+        self.open_tab(event_loop, self.active_tab + 1, cwd, String::new());
+    }
+
+    /// Opens the most recently closed tab where it was, with its directory and title.
+    fn reopen_tab(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(closed) = self.closed_tabs.last() else {
+            return;
+        };
+        if self.open_tab(
+            event_loop,
+            closed.index,
+            closed.working_directory.clone(),
+            closed.title.clone(),
+        ) {
+            self.closed_tabs.pop();
+        }
+    }
+
+    /// Spawns a tab at `index` in `working_directory`, then shows it.
+    fn open_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        index: usize,
+        working_directory: Option<PathBuf>,
+        title: String,
+    ) -> bool {
         #[cfg(target_os = "macos")]
-        let window = match self.open_tab_window(event_loop) {
+        let window = match self.open_tab_window(event_loop, index) {
             Ok(window) => window,
             Err(error) => {
                 diag!("trident: new tab: {error}");
-                return;
+                return false;
             }
         };
         #[cfg(not(target_os = "macos"))]
         let _ = event_loop;
-        let Some(s) = &self.session else { return };
-        let cwd = local_working_directory(s.term.working_directory())
-            .or_else(|| self.options.working_directory.clone());
+        let Some(s) = &self.session else { return false };
         let (cols, rows) = (s.term.cols(), s.term.rows());
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         self.next_pane += 1;
@@ -2085,7 +2133,7 @@ impl App {
         let pty = match self.spawn_pty(
             id,
             self.options.command(&self.config, false),
-            cwd.as_deref(),
+            working_directory.as_deref(),
             cols,
             rows,
             cell,
@@ -2093,7 +2141,7 @@ impl App {
             Ok(pty) => pty,
             Err(error) => {
                 diag!("trident: new tab: {error}");
-                return;
+                return false;
             }
         };
         let mut term = Terminal::new(cols, rows);
@@ -2108,27 +2156,32 @@ impl App {
         self.quit_checks
             .borrow_mut()
             .push((id, Box::new(pty.running_program_check())));
-        let index = (self.active_tab + 1).min(self.tabs.len());
-        self.tabs.insert(
-            index,
-            Some(Pane::new(
-                id,
-                term,
-                pty,
-                cell,
-                #[cfg(target_os = "macos")]
-                window,
-            )),
+        let index = index.min(self.tabs.len());
+        let mut pane = Pane::new(
+            id,
+            term,
+            pty,
+            cell,
+            #[cfg(target_os = "macos")]
+            window,
         );
+        pane.title = title;
+        self.tabs.insert(index, Some(pane));
         if index <= self.active_tab {
             self.active_tab += 1;
         }
         self.select_tab(index);
+        true
     }
 
-    /// Creates the window for a new native tab and adds it to the active window's tab group.
+    /// Creates the window for a new native tab at `index` and adds it to the active
+    /// window's tab group there.
     #[cfg(target_os = "macos")]
-    fn open_tab_window(&self, event_loop: &ActiveEventLoop) -> Result<TabWindow, String> {
+    fn open_tab_window(
+        &self,
+        event_loop: &ActiveEventLoop,
+        index: usize,
+    ) -> Result<TabWindow, String> {
         use winit::platform::macos::WindowAttributesExtMacOS;
         let s = self.session.as_ref().ok_or("no window")?;
         let current = s
@@ -2153,7 +2206,13 @@ impl App {
                 .map_err(|e| format!("cannot create window: {e}"))?,
         );
         window.set_ime_allowed(true);
-        native_tabs::add_tab(&s.window, &window);
+        let index = index.min(self.tabs.len());
+        let (anchor, before) = if index == 0 {
+            (self.tab_window(0).unwrap_or(&s.window), true)
+        } else {
+            (self.tab_window(index - 1).unwrap_or(&s.window), false)
+        };
+        native_tabs::add_tab(anchor, &window, before);
         let size = window.inner_size();
         let fonts = Fonts::new(&self.faces, self.font_size * window.scale_factor() as f32);
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
@@ -2505,6 +2564,14 @@ impl App {
         if index < self.active_tab {
             self.active_tab -= 1;
         }
+        if let Some(pane) = &removed {
+            self.closed_tabs.push(ClosedTab {
+                index,
+                working_directory: local_working_directory(pane.term.working_directory())
+                    .or_else(|| self.options.working_directory.clone()),
+                title: pane.title.clone(),
+            });
+        }
         #[cfg(target_os = "macos")]
         if let Some(pane) = &removed {
             self.quit_checks
@@ -2706,7 +2773,9 @@ impl App {
         } else {
             0
         };
-        let (cols, rows) = grid_size(&s.window, &s.fonts, self.config.padding, s.tab_bar);
+        let fit = fit_size(&s.window, &s.renderer, s.tab_bar);
+        let (cols, rows) =
+            grid_size_for(fit, s.window.scale_factor(), &s.fonts, self.config.padding);
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         // Native macOS tabs each size to their own window, on their own resize or once shown.
         #[cfg(not(target_os = "macos"))]
@@ -2731,7 +2800,7 @@ impl App {
         s.term
             .set_cell_pixel_size(s.fonts.metrics.width, s.fonts.metrics.height);
         let covered = find_bar_rows(
-            s.window.inner_size().height.saturating_sub(s.tab_bar) as f32,
+            fit.height as f32,
             self.config.padding * s.window.scale_factor() as f32,
             s.fonts.metrics.height,
             rows,
@@ -2754,6 +2823,7 @@ impl App {
             s.pty.resize(cols, rows, cell);
             s.pty_cell = cell;
         }
+        s.term.set_window_geometry(window_geometry(&s.window));
         s.window.request_redraw();
     }
 
@@ -2873,6 +2943,23 @@ impl App {
                     }
                 }
                 ClipboardRequest::Load { .. } => {}
+            }
+        }
+        for op in s.term.take_window_ops() {
+            let term_core::WindowOp::Resize { cols, rows } = op;
+            s.pty.resize(cols, rows, s.pty_cell);
+            // Wayland answers synchronously; the granted size drives the
+            // normal resize path so a partial grant resizes the grid back.
+            if let Some(size) = s.window.request_inner_size(window_size_for(
+                (cols, rows),
+                s.window.scale_factor(),
+                &s.fonts,
+                self.config.padding,
+                s.tab_bar,
+            )) {
+                s.size = size;
+                s.renderer.resize(size.width, size.height);
+                s.resize.schedule(Instant::now());
             }
         }
         let title = s.term.take_title();
@@ -3559,7 +3646,7 @@ impl App {
                 let search = self.search.get_or_insert_with(search::Search::default);
                 if let Some(s) = &self.session {
                     search.covered_rows = find_bar_rows(
-                        s.window.inner_size().height.saturating_sub(s.tab_bar) as f32,
+                        fit_size(&s.window, &s.renderer, s.tab_bar).height as f32,
                         self.config.padding * s.window.scale_factor() as f32,
                         s.fonts.metrics.height,
                         s.term.rows(),
@@ -3578,6 +3665,7 @@ impl App {
             }
             Action::NewTab => self.new_tab(event_loop),
             Action::CloseTab => self.close_tab(self.active_tab, event_loop),
+            Action::ReopenTab => self.reopen_tab(event_loop),
             #[cfg(target_os = "macos")]
             Action::NextTab => self.step_native_tab(1),
             #[cfg(target_os = "macos")]
@@ -4449,6 +4537,36 @@ fn below_tab_bar(size: PhysicalSize<u32>, tab_bar: u32) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width, size.height.saturating_sub(tab_bar))
 }
 
+/// Grid area below the tab bar, capped at the surface the renderer applied.
+///
+/// A window can outgrow the GPU texture limit; the renderer clamps the
+/// surface, so cells past it can't render and the Find bar is drawn inside
+/// the clamped surface, not the window bottom.
+fn fit_size(window: &Window, renderer: &Renderer, tab_bar: u32) -> PhysicalSize<u32> {
+    let fit = below_tab_bar(window.inner_size(), tab_bar);
+    let surface = below_tab_bar(PhysicalSize::from(renderer.surface_size()), tab_bar);
+    PhysicalSize::new(fit.width.min(surface.width), fit.height.min(surface.height))
+}
+
+/// Window facts XTWINOPS reports answer (iconify state, position, sizes).
+fn window_geometry(window: &Window) -> term_core::WindowGeometry {
+    let position = window
+        .outer_position()
+        .map(|p| (p.x, p.y))
+        .unwrap_or_default();
+    let size = window.outer_size();
+    let screen = window
+        .current_monitor()
+        .map(|m| (m.size().width, m.size().height))
+        .unwrap_or((size.width, size.height));
+    term_core::WindowGeometry {
+        position,
+        size: (size.width, size.height),
+        screen,
+        iconic: window.is_minimized().unwrap_or(false),
+    }
+}
+
 fn grid_size(window: &Window, fonts: &Fonts, padding: f32, tab_bar: u32) -> (usize, usize) {
     grid_size_for(
         below_tab_bar(window.inner_size(), tab_bar),
@@ -4966,7 +5084,31 @@ impl ApplicationHandler<UserEvent> for App {
                 let held_at_focus =
                     self.held_at_focus
                         .observe(event.physical_key, event.state, is_synthetic);
+                let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
                 if event.state != ElementState::Pressed {
+                    // Releases reach the PTY only where the press would: not past a
+                    // dialog or search, and without write_input's scroll reset.
+                    if kitty_flags != 0
+                        && self.pending_close.is_none()
+                        && self.pending_paste.is_none()
+                        && self.search.is_none()
+                    {
+                        let base = event.key_without_modifiers();
+                        if let Some(bytes) = input::encode_kitty_key(
+                            &input::KeyEvent {
+                                key: &event.logical_key,
+                                base: &base,
+                                text: event.text.as_deref(),
+                                mods: self.modifiers,
+                            },
+                            input::KeyEventKind::Release,
+                            kitty_flags,
+                            self.options.option_as_alt,
+                        ) && let Some(s) = &mut self.session
+                        {
+                            s.pty.write(&bytes);
+                        }
+                    }
                     return;
                 }
                 if self.pending_close.is_some() {
@@ -4994,14 +5136,33 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let Some(s) = &self.session else { return };
                 let base = event.key_without_modifiers();
-                let bytes = input::encode_key(
-                    &event.logical_key,
-                    &base,
-                    event.text.as_deref(),
-                    self.modifiers,
-                    s.term.modes.app_cursor,
-                    self.options.option_as_alt,
-                );
+                let kind = if event.repeat {
+                    input::KeyEventKind::Repeat
+                } else {
+                    input::KeyEventKind::Press
+                };
+                let bytes = if kitty_flags == 0 {
+                    input::encode_key(
+                        &event.logical_key,
+                        &base,
+                        event.text.as_deref(),
+                        self.modifiers,
+                        s.term.modes.app_cursor,
+                        self.options.option_as_alt,
+                    )
+                } else {
+                    input::encode_kitty_key(
+                        &input::KeyEvent {
+                            key: &event.logical_key,
+                            base: &base,
+                            text: event.text.as_deref(),
+                            mods: self.modifiers,
+                        },
+                        kind,
+                        kitty_flags,
+                        self.options.option_as_alt,
+                    )
+                };
                 if let Some(bytes) = bytes {
                     self.write_input(&bytes);
                     self.hide_pointer_for_typing();
@@ -5053,7 +5214,10 @@ impl ApplicationHandler<UserEvent> for App {
                     && self.pending_paste.is_none()
                     && self.pending_close.is_none()
                 {
-                    self.write_input(text.as_bytes());
+                    let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
+                    let bytes = input::encode_kitty_text(&text, kitty_flags)
+                        .unwrap_or_else(|| text.as_bytes().to_vec());
+                    self.write_input(&bytes);
                     self.hide_pointer_for_typing();
                 }
                 self.refresh_link();
@@ -5509,6 +5673,7 @@ mod tests {
             Action::NewWindow,
             Action::NewTab,
             Action::CloseTab,
+            Action::ReopenTab,
             Action::NextTab,
             Action::SelectTab(0),
             Action::ShowLastCommandOutput,
@@ -5529,6 +5694,7 @@ mod tests {
                         Action::NewWindow
                             | Action::NewTab
                             | Action::CloseTab
+                            | Action::ReopenTab
                             | Action::ToggleFullscreen
                             | Action::ShowLastCommandOutput
                     )

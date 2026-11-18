@@ -130,7 +130,7 @@ A chord maps to one of the following actions.
 
 | Kind | Actions |
 | --- | --- |
-| Windows and tabs | `new_window`, `new_tab`, `close_tab`, `next_tab`, `previous_tab`, `select_tab_1` through `select_tab_9`, `toggle_fullscreen` |
+| Windows and tabs | `new_window`, `new_tab`, `close_tab`, `reopen_tab`, `next_tab`, `previous_tab`, `select_tab_1` through `select_tab_9`, `toggle_fullscreen` |
 | Clipboard and search | `copy`, `paste`, `paste_primary` (primary selection, where supported), `search` |
 | Font size | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
 | Scrolling | `scroll_line_up`, `scroll_line_down`, `scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `clear_scrollback` |

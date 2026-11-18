@@ -57,14 +57,16 @@ pub fn key(window: &Window) -> Option<usize> {
     ns_window(window).map(|window| key_of(&window))
 }
 
-/// Adds `tab` to `window`'s tab group, right after it.
-pub fn add_tab(window: &Window, tab: &Window) {
+/// Adds `tab` to `window`'s tab group, right before it when `before` is set.
+pub fn add_tab(window: &Window, tab: &Window, before: bool) {
     let (Some(window), Some(tab)) = (ns_window(window), ns_window(tab)) else {
         return;
     };
-    // SAFETY: both are live NSWindows on the main thread; 1 is NSWindowAbove.
+    // SAFETY: both are live NSWindows on the main thread; -1 and 1 are NSWindowBelow
+    // and NSWindowAbove.
     unsafe {
-        let _: () = msg_send![&*window, addTabbedWindow: &*tab, ordered: 1isize];
+        let ordered: isize = if before { -1 } else { 1 };
+        let _: () = msg_send![&*window, addTabbedWindow: &*tab, ordered: ordered];
     }
 }
 
