@@ -274,7 +274,7 @@ fn osc_colors_accept_xterm_specs_and_reset() {
         ("CIEXYZ:0.5/0.5/0.5", "dddd/b5b5/a0a0"),
         ("CIEuvY:1/1/1", "ffff/ffff/ffff"),
         ("CIEuvY:0.5/0.5/0.5", "ffff/a3a3/aeae"),
-        ("CIExyY:1/1/1", "f7f7/b3b3/0e0e"),
+        ("CIExyY:1/1/1", "ffff/ffff/ffff"),
         ("CIExyY:0.5/0.5/0.5", "f7f7/b3b3/0e0e"),
         ("CIELab:1/1/1", "6c6c/6767/6767"),
         ("CIELab:0.5/0.5/0.5", "5252/4f4f/4f4f"),

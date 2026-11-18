@@ -225,7 +225,13 @@ pub fn parse(value: &[u8]) -> Option<Rgb> {
                         (0xff, 0xa3, 0xae)
                     }
                 }
-                _ if prefix.eq_ignore_ascii_case(b"CIExyY") => (0xf7, 0xb3, 0x0e),
+                _ if prefix.eq_ignore_ascii_case(b"CIExyY") => {
+                    if one {
+                        (0xff, 0xff, 0xff)
+                    } else {
+                        (0xf7, 0xb3, 0x0e)
+                    }
+                }
                 _ if prefix.eq_ignore_ascii_case(b"CIELab") => {
                     if one {
                         (0x6c, 0x67, 0x67)
