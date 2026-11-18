@@ -1629,6 +1629,8 @@ impl WindowGroup {
         let normal_cells = (session.term.cols(), session.term.rows());
         WindowGroup {
             session: Some(session),
+            // The window starts with one tab, whose state lives in `session`.
+            tabs: vec![None],
             normal_cells,
             ..WindowGroup::default()
         }
