@@ -1,0 +1,27 @@
+# Maintainer: Trident developers <noreply@github.com>
+
+pkgname=trident-bin
+_tag=1.0.0
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Fast, GPU-rendered terminal emulator'
+arch=('x86_64')
+url='https://github.com/amagomori/trident'
+license=('MIT' 'OFL-1.1')
+depends=('glibc' 'gcc-libs' 'fontconfig' 'libxkbcommon' 'hicolor-icon-theme')
+makedepends=('ncurses')
+optdepends=('wayland: Wayland support' 'libxkbcommon-x11: X11 support' 'libxcursor: X11 cursors' 'libxi: X11 input' 'libglvnd: OpenGL' 'vulkan-icd-loader: Vulkan')
+provides=('trident')
+conflicts=('trident')
+options=('!debug')
+source=("Trident-${_tag}-linux-x86_64.tar.gz::https://github.com/amagomori/trident/releases/download/v${_tag}/Trident-${_tag}-linux-x86_64.tar.gz")
+sha256sums=('5a9ed94f592e03670871582c87923e61981b910aad27ad81c1bb19aa5450c556')
+
+package() {
+  cd "Trident-${_tag}-linux-x86_64"
+  install -Dm755 bin/trident "$pkgdir/usr/bin/trident"
+  cp -r --no-preserve=ownership share "$pkgdir/usr/"
+  install -dm755 "$pkgdir/usr/share/terminfo" "$pkgdir/usr/share/licenses/$pkgname"
+  tic -x -o "$pkgdir/usr/share/terminfo" share/trident/terminfo/xterm-trident.terminfo
+  mv "$pkgdir"/usr/share/doc/trident/{LICENSE,OFL.txt} "$pkgdir/usr/share/licenses/$pkgname/"
+}

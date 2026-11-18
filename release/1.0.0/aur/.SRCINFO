@@ -1,0 +1,27 @@
+pkgbase = trident-bin
+	pkgdesc = Fast, GPU-rendered terminal emulator
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/amagomori/trident
+	arch = x86_64
+	license = MIT
+	license = OFL-1.1
+	makedepends = ncurses
+	depends = glibc
+	depends = gcc-libs
+	depends = fontconfig
+	depends = libxkbcommon
+	depends = hicolor-icon-theme
+	optdepends = wayland: Wayland support
+	optdepends = libxkbcommon-x11: X11 support
+	optdepends = libxcursor: X11 cursors
+	optdepends = libxi: X11 input
+	optdepends = libglvnd: OpenGL
+	optdepends = vulkan-icd-loader: Vulkan
+	provides = trident
+	conflicts = trident
+	options = !debug
+	source = Trident-1.0.0-linux-x86_64.tar.gz::https://github.com/amagomori/trident/releases/download/v1.0.0/Trident-1.0.0-linux-x86_64.tar.gz
+	sha256sums = 5a9ed94f592e03670871582c87923e61981b910aad27ad81c1bb19aa5450c556
+
+pkgname = trident-bin
