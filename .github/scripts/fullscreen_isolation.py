@@ -80,12 +80,10 @@ def exercise(process, directory):
     def fullscreen(name):
         return ax(f'get value of attribute "AXFullScreen" of window "{name}"') == "true"
 
-    def cycle(active, inactive):
+    def cycle(active, inactive, group):
         before = frame(inactive)
-        cells = grid(inactive)
-        log = directory / inactive
-        offset = log.stat().st_size
-        print(f"Active {active}, inactive {inactive}: {before}, {cells} cells", flush=True)
+        logs = {name: (grid(name), (directory / name).stat().st_size) for name in group}
+        print(f"Active {active}, inactive {inactive}: {before}, {grid(inactive)} cells", flush=True)
         menu("Enter Full Screen")
         until(lambda: fullscreen(active), bool, "did not enter fullscreen")
         created = new_tab()
@@ -94,11 +92,14 @@ def exercise(process, directory):
         until(names, lambda n: set(n) == {created, inactive}, "expected two normal groups")
         until(lambda: fullscreen(created), lambda f: not f, "did not exit fullscreen")
         after = frame(inactive)
-        with log.open() as out:
-            out.seek(offset)
-            changes = out.read().splitlines()
-        changed = after != before or any(size != cells for size in changes) or grid(inactive) != cells
-        return created, f"{inactive}: {before} -> {after}, grid {cells} -> {changes}" if changed else None
+        errors = [f"{inactive}: frame {before} -> {after}"] if before != after else []
+        for name, (cells, offset) in logs.items():
+            with (directory / name).open() as out:
+                out.seek(offset)
+                changes = out.read().splitlines()
+            if any(size != cells for size in changes):
+                errors.append(f"{name}: grid {cells} -> {changes}")
+        return created, errors
 
     a = until(lambda: list(directory.glob("geometry-*")), bool, "first PTY")[0].name
     until(names, lambda n: n == [a], "expected one normal group")
@@ -109,12 +110,12 @@ def exercise(process, directory):
     place(b, 480, 260, 600, 400)
     place(a, 80, 100, 812, 554)
     until(lambda: grid(a) != grid(b), bool, "precondition: distinct PTY sizes")
-    new_a, forward_error = cycle(a, b)
+    new_a, errors = cycle(a, b, [b])
     place(new_a, 80, 100, 812, 590)
     place(b, 480, 260, 600, 400)
     until(lambda: grid(new_a) != grid(b), bool, "reverse precondition: distinct PTY sizes")
-    _, reverse_error = cycle(b, new_a)
-    errors = [error for error in (forward_error, reverse_error) if error]
+    _, reverse_errors = cycle(b, new_a, [a, new_a])
+    errors.extend(reverse_errors)
     if errors:
         raise AssertionError("\n".join(errors))
 
