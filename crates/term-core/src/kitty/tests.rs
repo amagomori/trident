@@ -171,17 +171,19 @@ fn old_kitten_shm_frame_is_read_and_deleted() {
 #[test]
 fn kitten_gif_frame_files_are_deleted() {
     let mut t = term();
-    // Detection, the first frame, and a second frame (a=f) that is refused but still deleted.
+    // Detection, the root and a second frame, each sent in its own temporary file.
     let files = create_temp_files(KITTEN_GIF);
     assert_eq!(files.len(), 3);
     t.advance(KITTEN_GIF);
-    // Animation control (a=a) is not supported, but must not leave error replies behind.
+    // Successful animation controls must not leave replies in the PTY.
     let replies = replies(&mut t);
     assert!(!replies.contains("I="), "{replies:?}");
     let placed = placements(&t);
     assert_eq!(placed.len(), 1);
     let image = t.image(placed[0].0).unwrap();
     assert_eq!((image.width, image.height), (4, 3));
+    assert_eq!(t.image_bytes(), 2 * 4 * 3 * 4);
+    assert!(t.advance_animations(std::time::Instant::now(), 0).is_some());
     assert!(files.iter().all(|f| !f.exists()), "{files:?}");
 }
 
@@ -202,6 +204,91 @@ fn chafa_chunked_rgba_is_stored_and_placed() {
         assert_eq!(replies(&mut t), "");
         assert_eq!(t.cursor_position(), Some((3, 0)));
     }
+}
+
+#[test]
+fn animation_composes_frames_edits_and_chunked_patches() {
+    let mut t = term();
+    t.advance(&apc("a=T,i=7,s=3,v=1,q=2", &[255; 12]));
+    t.advance(b"\x1b_Ga=f,i=7,s=1,v=1,x=1,c=1,m=1;AA\x1b\\\x1b_Ga=f,m=0;AAgA==\x1b\\");
+    assert!(replies(&mut t).contains("OK"));
+    t.advance(&apc("a=a,i=7,c=2", &[]));
+    assert_eq!(
+        t.image(7).unwrap().pixels,
+        [255, 255, 255, 255, 127, 127, 127, 255, 255, 255, 255, 255]
+    );
+    let before = t.image_with_version(7).unwrap().1;
+    t.advance(&apc("a=f,i=7,r=2,s=1,v=1,X=1", &[5, 6, 7, 8]));
+    assert_ne!(t.image_with_version(7).unwrap().1, before);
+    t.advance(&apc("a=c,i=7,r=2,c=1,w=1,h=1,x=2,C=1", &[]));
+    t.advance(&apc("a=a,i=7,c=1", &[]));
+    assert_eq!(&t.image(7).unwrap().pixels[8..], &[5, 6, 7, 8]);
+    replies(&mut t);
+    for control in ["a=c,i=7,r=1,c=1", "a=c,i=7,r=1,c=2,x=4294967295"] {
+        t.advance(&apc(control, &[]));
+        assert!(replies(&mut t).contains("EINVAL"));
+    }
+    t.advance(&apc("a=a,i=7,c=3", &[]));
+    assert!(replies(&mut t).contains("ENOENT"));
+    t.advance(&apc("a=c,i=7,r=1,c=1,X=2,x=0,w=1,h=1,C=1", &[]));
+    assert_eq!(&t.image(7).unwrap().pixels[..4], &[5, 6, 7, 8]);
+}
+
+#[test]
+fn frame_budget_survives_rejection_retransmission_and_delete() {
+    let mut t = term();
+    t.set_image_quota(12);
+    t.advance(&apc("a=T,i=1,s=1,v=1", &[1; 4]));
+    t.advance(&apc("a=t,i=2,s=1,v=1", &[2; 4]));
+    for _ in 0..2 {
+        t.advance(&apc("a=f,i=1,s=1,v=1", &[3; 4]));
+    }
+    assert!(t.image(2).is_none(), "evicted offscreen image");
+    assert_eq!(t.image_bytes(), 12);
+    t.advance(&apc("a=f,i=1,s=1,v=1", &[4; 4]));
+    assert!(replies(&mut t).contains("ENOSPC"));
+    assert_eq!(placements(&t).len(), 1);
+    t.advance(&apc("a=t,i=1,s=1,v=1", &[5; 4]));
+    assert_eq!(t.image_bytes(), 4);
+    assert!(placements(&t).is_empty());
+    t.delete_image(1);
+    assert_eq!(t.image_bytes(), 0);
+}
+
+#[test]
+fn animation_timer_respects_visibility_loading_stop_and_finite_loops() {
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let at = |ms| start + Duration::from_millis(ms);
+    let mut t = term();
+    t.advance(&apc("a=T,i=4,s=1,v=1", &[1; 4]));
+    t.advance(&apc("a=f,i=4,s=1,v=1,X=1,z=20", &[2; 4]));
+    assert_eq!(t.advance_animations(start, 0), None);
+    t.advance(&apc("a=a,i=4,s=2,r=1,z=10", &[]));
+    assert_eq!(t.advance_animations(start, 0), Some(at(10)));
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.advance_animations(at(10), 0), None);
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.advance_animations(at(10), 0), Some(at(30)));
+    assert_eq!(t.image(4).unwrap().pixels, [2; 4]);
+    assert_eq!(t.advance_animations(at(30), 0), None);
+    t.advance(&apc("a=f,i=4,s=1,v=1,X=1,z=-1", &[3; 4]));
+    t.advance(&apc("a=f,i=4,s=1,v=1,X=1,z=40", &[4; 4]));
+    assert_eq!(t.advance_animations(at(35), 0), Some(at(75)));
+    assert_eq!(t.image(4).unwrap().pixels, [4; 4]);
+    t.advance(&apc("a=a,i=4,s=3,v=2", &[]));
+    assert_eq!(t.advance_animations(at(75), 0), None);
+    t.advance(&apc("a=a,i=4,s=3,c=1,v=1", &[]));
+    assert!(t.advance_animations(at(80), 0).is_some());
+    t.advance(&apc("a=a,i=4,s=1", &[]));
+    assert_eq!(t.advance_animations(at(90), 0), None);
+    t.advance(&apc("a=a,i=4,s=3", &[]));
+    for _ in 0..25 {
+        t.advance(b"\r\n");
+    }
+    assert_eq!(t.advance_animations(at(100), 0), None);
+    t.scroll_display(25);
+    assert!(t.advance_animations(at(110), 0).is_some());
 }
 
 #[test]
@@ -512,17 +599,17 @@ fn shm_temp_file_transmission() {
     assert!(send(&mut t, "t", &unmarked, 2).contains("EBADF"));
     assert!(unmarked.exists());
 
-    // Unsupported a=f frames delete their temp file, but leave other files alone.
+    // Frame uploads have exactly the same temp-file rules as root images.
     let frame = |t: &mut Terminal, path: &std::path::Path| {
         let control = "a=f,f=24,s=2,v=2,t=t,i=1";
         t.advance(&apc(control, path.as_os_str().as_encoded_bytes()));
         replies(t)
     };
-    assert!(frame(&mut t, &unmarked).contains("EINVAL:unsupported action"));
+    assert!(frame(&mut t, &unmarked).contains("EBADF"));
     assert!(unmarked.exists());
     std::fs::remove_file(&unmarked).unwrap();
     std::fs::write(&temp, &rgb).unwrap();
-    assert!(frame(&mut t, &temp).contains("EINVAL:unsupported action"));
+    assert!(frame(&mut t, &temp).contains("OK"));
     assert!(!temp.exists());
 
     // kitten 0.39's unmarked kitty-icat-* frames are taken from /dev/shm only.

@@ -103,8 +103,7 @@ struct Instance {
 struct GpuImage {
     version: u64,
     bind_group: wgpu::BindGroup,
-    // Kept alive for the bind group.
-    _texture: wgpu::Texture,
+    texture: wgpu::Texture,
 }
 
 pub(crate) struct ImagePipeline {
@@ -188,8 +187,15 @@ impl ImagePipeline {
             let Some((image, version)) = term.image_with_version(q.image_id) else {
                 continue;
             };
-            if self.textures.get(&q.image_id).map(|g| g.version) == Some(version) {
-                continue;
+            if let Some(gpu) = self.textures.get_mut(&q.image_id) {
+                if gpu.version == version {
+                    continue;
+                }
+                if (gpu.texture.width(), gpu.texture.height()) == (image.width, image.height) {
+                    write_pixels(queue, &gpu.texture, image);
+                    gpu.version = version;
+                    continue;
+                }
             }
             let gpu = self.upload(device, queue, uniforms, image, version);
             self.textures.insert(q.image_id, gpu);
@@ -278,21 +284,7 @@ impl ImagePipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &image.pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(image.width * 4),
-                rows_per_image: Some(image.height),
-            },
-            size,
-        );
+        write_pixels(queue, &texture, image);
         let view = texture.create_view(&Default::default());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("image bind group"),
@@ -315,7 +307,7 @@ impl ImagePipeline {
         GpuImage {
             version,
             bind_group,
-            _texture: texture,
+            texture,
         }
     }
 
@@ -351,6 +343,19 @@ impl ImagePipeline {
     pub fn is_empty(&self) -> bool {
         self.quads.is_empty()
     }
+}
+
+fn write_pixels(queue: &wgpu::Queue, texture: &wgpu::Texture, image: &Image) {
+    queue.write_texture(
+        texture.as_image_copy(),
+        &image.pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width * 4),
+            rows_per_image: Some(image.height),
+        },
+        texture.size(),
+    );
 }
 
 /// Scales `image` down (nearest neighbor) so neither side exceeds `max` pixels.

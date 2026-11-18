@@ -249,7 +249,9 @@ trident show [--width N] [--height N] [--fit] FILE...
 picks the type from the file's contents, not its name:
 
 - Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG) are drawn shrunk to fit
-  the window. GIFs show their first frame.
+  the window. Animated GIF and WebP files play in place in Trident and other terminals
+  that support kitty animation. Trident only schedules animation redraws while the image
+  is visible and playing; drop and hover previews remain still.
 - Text files are printed with control characters made visible.
 - Other files get a one-line summary, such as `ELF executable, 16.2 KiB`.
 

@@ -172,6 +172,9 @@ fn show(
     let bytes = std::fs::read(path).map_err(|e| io_message(&e))?;
     let write_err = |e: io::Error| format!("cannot write output: {}", io_message(&e));
     match detect(&bytes) {
+        Kind::Raster(format @ (ImageFormat::Gif | ImageFormat::WebP)) => {
+            animation::show(&bytes, format, options, window, out)
+        }
         Kind::Raster(format) => {
             let image = decode_raster(&bytes, format, options, window)?;
             write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
@@ -561,6 +564,10 @@ fn decode_raster(
     };
     let image =
         decode().map_err(|e| format!("cannot decode {} image: {e}", format_name(format)))?;
+    Ok(scale_raster(image, options, window))
+}
+
+fn scale_raster(image: image::DynamicImage, options: &Options, window: Window) -> Rgba {
     let (w, h) = target_size(
         (image.width() as f32, image.height() as f32),
         options,
@@ -576,11 +583,11 @@ fn decode_raster(
             image::imageops::FilterType::Triangle,
         )
     };
-    Ok(Rgba {
+    Rgba {
         width: w,
         height: h,
         pixels: image.into_raw(),
-    })
+    }
 }
 
 fn render_svg(
@@ -661,6 +668,23 @@ fn write_kitty(
     out: &mut impl Write,
     image: &Rgba,
     window: Window,
+    wait: impl FnMut(TmuxWait),
+) -> io::Result<()> {
+    write_transfer(out, image, window, Transfer::Place(None), wait)
+}
+
+mod animation;
+
+enum Transfer {
+    Place(Option<u32>),
+    Frame { id: u32, gap: u32 },
+}
+
+fn write_transfer(
+    out: &mut impl Write,
+    image: &Rgba,
+    window: Window,
+    transfer: Transfer,
     mut wait: impl FnMut(TmuxWait),
 ) -> io::Result<()> {
     let mut zlib = ZlibEncoder::new(Vec::new(), Compression::fast());
@@ -669,7 +693,8 @@ fn write_kitty(
     let chunks: Vec<&[u8]> = payload.as_bytes().chunks(CHUNK).collect();
     let keep_cursor = if window.tmux { ",C=1" } else { "" };
     let rows = (image.height as f32 / window.cell_h).ceil().max(1.0) as usize;
-    if window.tmux {
+    let place = matches!(transfer, Transfer::Place(_));
+    if window.tmux && place {
         out.write_all(&b"\n".repeat(rows))?;
         write!(out, "\x1b[{rows}A")?;
         out.flush()?;
@@ -679,7 +704,7 @@ fn write_kitty(
     for (i, chunk) in chunks.iter().enumerate() {
         let more = u8::from(i + 1 < chunks.len());
         escape.clear();
-        if window.tmux && chunks.len() > 1 {
+        if window.tmux && place && chunks.len() > 1 {
             if i == 0 {
                 escape.extend_from_slice(b"\x1b7");
             } else if more == 0 {
@@ -687,11 +712,19 @@ fn write_kitty(
             }
         }
         if i == 0 {
+            match transfer {
+                Transfer::Place(None) => escape.extend_from_slice(b"\x1b_Ga=T"),
+                Transfer::Place(Some(id)) => write!(escape, "\x1b_Ga=T,i={id}")?,
+                Transfer::Frame { id, gap } => write!(escape, "\x1b_Ga=f,i={id},z={gap},X=1")?,
+            }
+            let keep_cursor = if place { keep_cursor } else { "" };
             write!(
                 escape,
-                "\x1b_Ga=T,f=32,o=z,q=2{keep_cursor},s={},v={},m={more};",
+                ",f=32,o=z,q=2{keep_cursor},s={},v={},m={more};",
                 image.width, image.height
             )?;
+        } else if !place {
+            write!(escape, "\x1b_Ga=f,m={more};")?;
         } else {
             write!(escape, "\x1b_Gm={more};")?;
         }
@@ -707,7 +740,9 @@ fn write_kitty(
             out.write_all(&escape)?;
         }
     }
-    if window.tmux {
+    if !place {
+        Ok(())
+    } else if window.tmux {
         out.write_all(&b"\n".repeat(rows))
     } else {
         out.write_all(b"\n")

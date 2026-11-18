@@ -151,9 +151,30 @@ fn svg_draws_embedded_raster_images() {
 }
 
 #[test]
-fn gif_shows_its_first_frame() {
-    // The second frame is black.
-    assert_eq!(pixel(&decode("sample.gif"), 0, 0), [255, 0, 0, 255]);
+fn show_plays_gif_and_webp_in_one_placement_at_the_file_delays() {
+    for (name, first, second, loops) in [
+        ("sample.gif", 100, 100, true),
+        ("animated.webp", 60, 90, false),
+    ] {
+        let mut bytes = Vec::new();
+        show(&sample(name), &Options::default(), big_window(), &mut bytes).unwrap();
+        let mut t = Terminal::new(80, 24);
+        t.set_cell_pixel_size(10.0, 20.0);
+        for chunk in bytes.chunks(7) {
+            t.advance(chunk);
+        }
+        assert!(t.take_responses().is_empty());
+        let placed = t.visible_placements();
+        assert_eq!(placed.len(), 1);
+        let id = placed[0].placement.image_id;
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        assert_eq!(t.advance_animations(start, 0), Some(at(first)));
+        assert_eq!(&t.image(id).unwrap().pixels[..4], &[255, 0, 0, 255]);
+        assert_eq!(t.advance_animations(at(first), 0), Some(at(first + second)));
+        assert_eq!(&t.image(id).unwrap().pixels[..4], &[0, 0, 0, 255]);
+        assert_eq!(t.advance_animations(at(first + second), 0).is_some(), loops);
+    }
 }
 
 #[test]

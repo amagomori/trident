@@ -32,9 +32,10 @@ img.save("sample.ppm")
 img.save("sample.tga")
 # Classic BMP-in-ICO; image also reads PNG-in-ICO, but only RGBA ones.
 pattern(32, 32).convert("RGBA").save("sample.ico", sizes=[(32, 32)], bitmap_format="bmp")
-# Two frames; only the first one (the pattern) is shown.
+# Two frames with different pixels, for playback and loop-count tests.
 black = Image.new("RGB", (W, H))
 img.save("sample.gif", save_all=True, append_images=[black], duration=100, loop=0)
+img.save("animated.webp", save_all=True, append_images=[black], duration=[60, 90], loop=1, lossless=True)
 
 # QOI by hand: Pillow only reads it. One QOI_OP_RGB per pixel is valid, if not compact.
 qoi = bytearray(b"qoif" + struct.pack(">IIBB", W, H, 3, 0))

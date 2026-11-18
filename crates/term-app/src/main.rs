@@ -423,6 +423,8 @@ struct Session {
     blink_epoch: Instant,
     /// When blinking text on screen next flips.
     blink_at: Option<Instant>,
+    /// Next frame of an animation visible in this window.
+    animation_at: Option<Instant>,
     /// The title set by OSC 0/2, shown after any OSC 9;4 progress.
     title: String,
     progress: Option<term_core::Progress>,
@@ -469,6 +471,7 @@ struct TabWindow {
     target: Option<Instant>,
     cursor_blink_at: Option<Instant>,
     blink_at: Option<Instant>,
+    animation_at: Option<Instant>,
     resize: ResizeThrottle,
     redraw_pending: bool,
     drawable_wait: Option<Instant>,
@@ -821,6 +824,7 @@ impl Session {
             swap(&mut self.target, &mut tab.target);
             swap(&mut self.cursor_blink_at, &mut tab.cursor_blink_at);
             swap(&mut self.blink_at, &mut tab.blink_at);
+            swap(&mut self.animation_at, &mut tab.animation_at);
             swap(&mut self.resize, &mut tab.resize);
             swap(&mut self.redraw_pending, &mut tab.redraw_pending);
             swap(&mut self.drawable_wait, &mut tab.drawable_wait);
@@ -1500,6 +1504,26 @@ fn sync_wakeup(
     .min()
 }
 
+fn animation_wakeup(
+    at: &mut Option<Instant>,
+    occluded: bool,
+    window: &Window,
+    now: Instant,
+    deadline: &mut Option<Instant>,
+) {
+    let Some(due) = *at else {
+        return;
+    };
+    if occluded {
+        *at = None;
+    } else if due <= now {
+        *at = None;
+        window.request_redraw();
+    } else {
+        *deadline = Some(deadline.map_or(due, |d| d.min(due)));
+    }
+}
+
 struct App {
     startup_stderr: bool,
     search: Option<search::Search>,
@@ -1914,6 +1938,7 @@ impl App {
             output: PendingOutput::default(),
             blink_epoch: Instant::now(),
             blink_at: None,
+            animation_at: None,
             title: String::new(),
             progress: None,
             pane: 0,
@@ -2167,6 +2192,7 @@ impl App {
             target: None,
             cursor_blink_at: None,
             blink_at: None,
+            animation_at: None,
             resize: ResizeThrottle::default(),
             redraw_pending: false,
             drawable_wait: None,
@@ -3108,6 +3134,12 @@ impl App {
             hover: self.tab_hover,
         });
         s.renderer.set_tab_bar(tab_bar, s.tab_bar);
+        s.animation_at = if self.occluded || s.size.width == 0 || s.size.height == 0 {
+            None
+        } else {
+            s.term
+                .advance_animations(started, usize::from(s.scroll.offset > 0.0))
+        };
         let rendered = s.renderer.render(
             &s.term,
             &mut s.fonts,
@@ -4803,7 +4835,26 @@ impl ApplicationHandler<UserEvent> for App {
         };
         self.update_ime_cursor_area();
         let mut deadline = self.click_to_move.deadline();
+        #[cfg(target_os = "macos")]
+        for pane in self.tabs.iter_mut().flatten() {
+            // A detached native tab can remain visible while another window has focus.
+            let w = &mut pane.window;
+            animation_wakeup(
+                &mut w.animation_at,
+                w.occluded,
+                &w.window,
+                now,
+                &mut deadline,
+            );
+        }
         if let Some(s) = &mut self.session {
+            animation_wakeup(
+                &mut s.animation_at,
+                self.occluded,
+                &s.window,
+                now,
+                &mut deadline,
+            );
             if let Some(at) = s.input_query.wake_at() {
                 deadline = Some(deadline.map_or(at, |deadline| deadline.min(at)));
             }
