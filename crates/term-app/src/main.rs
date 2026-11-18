@@ -1600,6 +1600,7 @@ struct WindowGroup {
     session: Option<Session>,
     tabs: Vec<Option<Pane>>,
     active_tab: usize,
+    font_size: f32,
     normal_cells: (usize, usize),
     occluded: bool,
     flash: bell::Flash,
@@ -1625,12 +1626,13 @@ struct WindowGroup {
 
 #[cfg(target_os = "linux")]
 impl WindowGroup {
-    fn new(session: Session) -> Self {
+    fn new(session: Session, font_size: f32) -> Self {
         let normal_cells = (session.term.cols(), session.term.rows());
         WindowGroup {
             session: Some(session),
             // The window starts with one tab, whose state lives in `session`.
             tabs: vec![None],
+            font_size,
             normal_cells,
             ..WindowGroup::default()
         }
@@ -1644,6 +1646,7 @@ impl Default for WindowGroup {
             session: None,
             tabs: Vec::new(),
             active_tab: 0,
+            font_size: DEFAULT_FONT_SIZE,
             normal_cells: window_state::DEFAULT_CELLS,
             occluded: false,
             flash: bell::Flash::default(),
@@ -2173,6 +2176,7 @@ impl App {
         swap(&mut self.session, &mut g.session);
         swap(&mut self.tabs, &mut g.tabs);
         swap(&mut self.active_tab, &mut g.active_tab);
+        swap(&mut self.font_size, &mut g.font_size);
         swap(&mut self.normal_cells, &mut g.normal_cells);
         swap(&mut self.occluded, &mut g.occluded);
         swap(&mut self.flash, &mut g.flash);
@@ -2285,7 +2289,10 @@ impl App {
             }
         };
         match self.session_for(window, pty, id, (cols, rows, cell), None) {
-            Ok(session) => self.windows.push(WindowGroup::new(session)),
+            Ok(session) => {
+                let font_size = self.options.size(&self.config);
+                self.windows.push(WindowGroup::new(session, font_size))
+            }
             Err(error) => diag!("trident: new window: {error}"),
         }
     }
