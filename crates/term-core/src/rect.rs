@@ -76,7 +76,13 @@ impl Terminal {
                     };
                     let src = &self.screen().lines[area.rows.start + i].cells;
                     copy.clear();
-                    copy.extend_from_slice(&src[area.cols.start..area.cols.start + width]);
+                    copy.extend(src[area.cols.start..area.cols.start + width].iter().map(
+                        |&cell| {
+                            let mut cell = cell;
+                            cell.flags.remove(Flags::WIDE_WRAP | Flags::PAD);
+                            cell
+                        },
+                    ));
                     if copy[0].flags.contains(Flags::WIDE_SPACER) {
                         copy[0] = blank;
                     }
@@ -280,6 +286,15 @@ fn change_attribute(flags: &mut Flags, param: u16, reverse: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_wrap_padding_is_a_selectable_space() {
+        let mut t = Terminal::new(4, 3);
+        t.advance("abc界\x1b[3;1HXYZ\x1b[1;4;1;4;1;3;2;1$v".as_bytes());
+        t.start_selection(t.viewport_to_point(2, 0), crate::SelectionKind::Simple);
+        t.update_selection(t.viewport_to_point(2, 2));
+        assert_eq!(t.selection_text().as_deref(), Some("X Z"));
+    }
 
     #[test]
     fn erase_to_end_checks_hidden_protected_wide_glyphs() {
