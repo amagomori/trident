@@ -171,7 +171,6 @@ def deb(binary, version, arch, out):
             f"Files: *\nLicense: MIT\n\n"
             f"Files: usr/bin/{PACKAGE}\nComment: embeds the JetBrains Mono fonts\n"
             f"License: OFL-1.1\n\nSee LICENSE and OFL.txt in this directory.\n")
-        (doc / "LICENSE").unlink()
         size = sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
         depends = list(DEB_DEPENDS)
         glibc = glibc_minimum(binary)
