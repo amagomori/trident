@@ -2311,7 +2311,7 @@ impl App {
                 // alive: when that window is the one going away, rebind to the
                 // window now shown and offer again the text Trident last stored.
                 let rebind =
-                    self.clipboard.window_id() == g.session.as_ref().map(|s| s.window.id());
+                    self.clipboard.window_id() == self.session.as_ref().map(|s| s.window.id());
                 let copied = rebind.then(|| self.clipboard.stored().clone());
                 self.swap_group(&mut g);
                 drop(g);
