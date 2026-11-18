@@ -643,12 +643,19 @@ impl Terminal {
     fn window_op(&mut self, params: &Params) {
         let op = arg(params, 0, 0);
         let (cell_w, cell_h) = self.cell_pixels;
+        let (display_cols, display_rows) = self.win_size_or_screen(0, 0);
+        // The display extent bounds resize requests; without a monitor a
+        // generous fixed bound still applies.
+        let (max_cols, max_rows) = (
+            if display_cols == 0 { 512 } else { display_cols },
+            if display_rows == 0 { 512 } else { display_rows },
+        );
         let reply = match op {
             4 | 8 => {
                 // 4 resizes the text area in pixels, 8 in characters. An
                 // explicit 0 uses the display's extent; an omitted or empty
-                // parameter keeps the size in that direction.
-                let (display_cols, display_rows) = self.win_size_or_screen(0, 0);
+                // parameter keeps the size in that direction. Requests are
+                // clamped to the display's extent, like a window manager.
                 let dim = |index: usize, cell: f32, extent: usize, current: usize| match params
                     .iter()
                     .nth(index)
@@ -665,8 +672,8 @@ impl Terminal {
                     (1.0, 1.0)
                 };
                 let (cols, rows) = (
-                    dim(2, cell.0, display_cols, self.cols),
-                    dim(1, cell.1, display_rows, self.rows),
+                    dim(2, cell.0, display_cols, self.cols).clamp(1, max_cols),
+                    dim(1, cell.1, display_rows, self.rows).clamp(1, max_rows),
                 );
                 self.resize(cols, rows);
                 self.window_ops.push(WindowOp::Resize { cols, rows });
@@ -709,11 +716,12 @@ impl Terminal {
                 return;
             }
             op if op >= 24 => {
-                // DECSLPP: resize to `op` lines.
-                self.resize(self.cols, op as usize);
+                // DECSLPP: resize to `op` lines, clamped to the display.
+                let rows = (op as usize).clamp(1, max_rows);
+                self.resize(self.cols, rows);
                 self.window_ops.push(WindowOp::Resize {
                     cols: self.cols,
-                    rows: op as usize,
+                    rows,
                 });
                 return;
             }
@@ -764,6 +772,10 @@ impl Terminal {
                 }
             } else {
                 self.title_stack.push(entry);
+                // A program can push without bound; drop the oldest past 64.
+                if self.title_stack.len() > 64 {
+                    self.title_stack.remove(0);
+                }
             }
         } else {
             // A pop restores only the components it names and consumes entries
@@ -822,12 +834,13 @@ impl Terminal {
     }
 
     /// A title as the program reports it: hex pairs under XTSMTITLE's query-hex
-    /// mode, the raw text otherwise.
+    /// mode, the text otherwise — with control characters removed, since the
+    /// reply lands in the program's input.
     fn encode_title(&self, title: &str) -> String {
         if self.title_query_hex {
             title.bytes().map(|b| format!("{b:02x}")).collect()
         } else {
-            title.to_string()
+            title.chars().filter(|&c| !c.is_control()).collect()
         }
     }
 
@@ -837,8 +850,15 @@ impl Terminal {
         let bytes = text.as_bytes();
         if self.title_set_hex
             && bytes.len().is_multiple_of(2)
-            && let Some(decoded) = (0..bytes.len() / 2)
-                .map(|i| u8::from_str_radix(&text[2 * i..2 * i + 2], 16).ok())
+            && let Some(decoded) = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[a, b]| {
+                    let hi = (a as char).to_digit(16)?;
+                    let lo = (b as char).to_digit(16)?;
+                    Some((hi * 16 + lo) as u8)
+                })
                 .collect::<Option<Vec<u8>>>()
         {
             return String::from_utf8_lossy(&decoded).into_owned();
