@@ -2555,7 +2555,9 @@ impl App {
         }
         for request in pane.term.take_clipboard_requests() {
             match request {
-                ClipboardRequest::Store { primary, text } => self.clipboard.set(text, primary),
+                ClipboardRequest::Store { primary, text } => {
+                    self.clipboard.set(text, None, primary)
+                }
                 ClipboardRequest::Load { primary, .. } if self.config.clipboard_read => {
                     let text = self.clipboard.get(primary).unwrap_or_default();
                     if let Some(reply) = request.reply(&text) {
@@ -2861,7 +2863,9 @@ impl App {
         s.pty.write(&responses);
         for request in s.term.take_clipboard_requests() {
             match request {
-                ClipboardRequest::Store { primary, text } => self.clipboard.set(text, primary),
+                ClipboardRequest::Store { primary, text } => {
+                    self.clipboard.set(text, None, primary)
+                }
                 ClipboardRequest::Load { primary, .. } if self.config.clipboard_read => {
                     let text = self.clipboard.get(primary).unwrap_or_default();
                     if let Some(reply) = request.reply(&text) {
@@ -3379,7 +3383,8 @@ impl App {
     fn copy(&mut self, primary: bool) {
         let Some(s) = &self.session else { return };
         if let Some(text) = s.term.selection_text().filter(|t| !t.is_empty()) {
-            self.clipboard.set(text, primary);
+            let html = s.term.selection_html();
+            self.clipboard.set(text, html, primary);
         }
     }
 
