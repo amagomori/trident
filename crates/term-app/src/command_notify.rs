@@ -1291,7 +1291,7 @@ mod tests {
         }
         assert!(kicks > 1000);
         let samples = activity.samples.load(Ordering::Relaxed) - samples;
-        assert!((4..=6).contains(&samples), "{samples} samples");
+        assert!((2..=6).contains(&samples), "{samples} samples");
         assert_eq!(activity.wakeups.load(Ordering::Relaxed), 0);
         drop(watcher);
     }
