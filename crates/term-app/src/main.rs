@@ -15,6 +15,7 @@ macro_rules! diag {
 mod app_icon;
 #[cfg(target_os = "linux")]
 mod appearance;
+mod autoscroll;
 mod bell;
 mod clipboard;
 mod close_confirm;
@@ -1568,6 +1569,8 @@ struct App {
     typing_pointer: pointer::TypingPointer,
     hover_preview: hover_preview::HoverPreview,
     left_down: bool,
+    /// Scrolls the view while a drag selection holds the pointer past the grid's edge.
+    autoscroll: autoscroll::AutoScroll,
     /// The left press landed on the pinned command header; swallow its release.
     ledger_click: bool,
     /// Button held while a program tracks the mouse, for drag reports.
@@ -1675,6 +1678,7 @@ impl App {
             typing_pointer: pointer::TypingPointer::default(),
             hover_preview: hover_preview::HoverPreview::new(),
             left_down: false,
+            autoscroll: autoscroll::AutoScroll::default(),
             ledger_click: false,
             reported_button: None,
             last_click: None,
@@ -2343,6 +2347,7 @@ impl App {
         }
         self.search = None;
         self.left_down = false;
+        self.autoscroll.set(false, Instant::now());
         self.ledger_click = false;
         self.last_click = None;
         self.click_to_move.cancel();
@@ -4049,6 +4054,7 @@ impl App {
         // Finish a local drag even if Shift was released while mouse reporting is on.
         if button == MouseButton::Left && !pressed && self.left_down {
             self.left_down = false;
+            self.autoscroll.set(false, Instant::now());
             self.copy(true);
             if self.options.copy_on_select {
                 self.copy(false);
@@ -4202,12 +4208,9 @@ impl App {
         self.refresh_link();
         let cell = self.cell_at(pos);
         if self.left_down {
-            if let (Some((row, col)), Some(s)) = (cell, &mut self.session) {
-                let point = s.term.viewport_to_point_signed(row, col);
-                self.click_to_move.drag(point);
-                s.term.update_selection(point);
-                s.request_frame();
-            }
+            self.extend_selection(cell);
+            let active = self.autoscroll_lines() != 0;
+            self.autoscroll.set(active, Instant::now());
             return;
         }
         if self.mouse_reporting() {
@@ -4224,6 +4227,46 @@ impl App {
                 }
             }
         }
+    }
+
+    fn extend_selection(&mut self, cell: Option<(isize, usize)>) {
+        if let (Some((row, col)), Some(s)) = (cell, &mut self.session) {
+            let point = s.term.viewport_to_point_signed(row, col);
+            self.click_to_move.drag(point);
+            s.term.update_selection(point);
+            s.request_frame();
+        }
+    }
+
+    /// Lines a drag selection scrolls per step at the current pointer position.
+    fn autoscroll_lines(&self) -> isize {
+        let Some(s) = &self.session else { return 0 };
+        let pad = self.config.padding as f64 * s.window.scale_factor();
+        let rows = s.term.rows() as f64 * s.fonts.metrics.height as f64;
+        autoscroll::lines(
+            self.mouse_pos.y,
+            (pad, pad + rows),
+            s.grid_px().height as f64,
+            s.window.scale_factor(),
+        )
+    }
+
+    /// Scrolls one step while a drag selection holds the pointer past the grid's edge,
+    /// extending the selection to the row the pointer is clamped to.
+    fn autoscroll_step(&mut self) {
+        let lines = self.autoscroll_lines();
+        if !self.left_down || lines == 0 {
+            self.autoscroll.set(false, Instant::now());
+            return;
+        }
+        let Some(s) = &mut self.session else { return };
+        let offset = s.term.display_offset();
+        s.term.scroll_display(lines);
+        if s.term.display_offset() == offset {
+            return;
+        }
+        s.scroll.reset();
+        self.extend_selection(self.cell_at(self.mouse_pos));
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
@@ -4633,6 +4676,9 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(point) = self.click_to_move.take_ready(now) {
             self.move_cursor_to(point);
         }
+        if self.autoscroll.take_ready(now) {
+            self.autoscroll_step();
+        }
         // A reply that arrived before its deadline still pairs with its click, even when
         // this wakeup also crossed the deadline before its deferred output was parsed.
         if self
@@ -4798,6 +4844,9 @@ impl ApplicationHandler<UserEvent> for App {
         if self.config.auto_secure_input && self.focused && self.session.is_some() {
             let poll = now + secure_input::POLL;
             deadline = Some(deadline.map_or(poll, |deadline| deadline.min(poll)));
+        }
+        if let Some(due) = self.autoscroll.deadline() {
+            deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
         }
         if let Some(due) = self.show_icons_when_idle() {
             deadline = Some(deadline.map_or(due, |deadline| deadline.min(due)));
