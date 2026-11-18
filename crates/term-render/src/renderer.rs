@@ -129,6 +129,8 @@ pub struct Renderer {
     /// Physical pixels above the grid taken by the tab bar.
     top_inset: u32,
     tab_bar: Option<crate::TabBar>,
+    /// Where the target instances start; they draw above floating previews.
+    link_target_start: u32,
     /// Where the tab bar's instances start among the overlays.
     bar_start: u32,
     #[cfg(target_os = "linux")]
@@ -382,6 +384,7 @@ impl Renderer {
             staging: Vec::new(),
             top_inset: 0,
             tab_bar: None,
+            link_target_start: 0,
             bar_start: 0,
             #[cfg(target_os = "linux")]
             shm,
@@ -592,7 +595,11 @@ impl Renderer {
             self.floating
                 .prepare_single(&self.device, &self.queue, &self.uniforms, image);
         }
-        self.draw(term.palette.background, pre_present)
+        self.draw(
+            term.palette.background,
+            search.map(|_| metrics.height),
+            pre_present,
+        )
     }
 
     fn grid_clip(&self, term: &Terminal, metrics: &CellMetrics, padding: f32) -> [u32; 4] {
@@ -1083,6 +1090,7 @@ impl Renderer {
             }
         }
 
+        self.link_target_start = overlays.len() as u32;
         if let Some(text) = self.link_target.take() {
             if !self.draw_link_target(
                 term,
@@ -1107,9 +1115,8 @@ impl Renderer {
         ok
     }
 
-    /// Draws `text` along the bottom-left corner, or the first of the top-left corner and the
-    /// rows next to them that keeps clear of the hovered link, the search bar, the pinned
-    /// command header and a preview card; false if the atlas filled up.
+    /// Draws `text` outside Find and the pinned header, avoiding linked rows and the preview
+    /// where possible; false if the atlas filled up.
     #[allow(clippy::too_many_arguments)]
     fn draw_link_target(
         &mut self,
@@ -1131,13 +1138,7 @@ impl Renderer {
         let columns = ((width / cw).floor() as usize).saturating_sub(2);
         let text = crate::link_target::elide(text, columns);
         let strip_width = ((text.chars().count() + 2) as f32 * cw).min(width);
-        let top = term.viewport_to_point_signed(0, 0).line as f32;
-        let covers = |y: f32| {
-            hover.is_some_and(|link| {
-                let rows = |line: u64| padding + (line as f32 - top) * ch + pixel_offset;
-                rows(link.start.line) < y + ch && y < rows(link.end.line) + ch
-            })
-        };
+        let top = term.viewport_to_point(0, 0).line;
         let card = self.floating_image.as_ref().map(|f| {
             let [x, y] = f.pos;
             [x, y, x + f.image.width as f32, y + f.image.height as f32]
@@ -1145,26 +1146,21 @@ impl Renderer {
         let bottom = (height - ch).max(0.0);
         let ledger = crate::ledger_bar(term, padding, pixel_offset, ch)
             .map(|bar| (bar.top, bar.top + bar.height));
-        let bands = [searching.then_some((bottom, bottom + ch)), ledger];
-        let free = |y: f32| {
-            !covers(y)
-                && bands.iter().flatten().all(|&(t, b)| b <= y || t >= y + ch)
-                && card.is_none_or(|[l, t, r, b]| {
-                    r <= 0.0 || l >= strip_width || b <= y || t >= y + ch
+        let Some([x, y]) = crate::link_target::place(
+            [width, height],
+            [strip_width, ch],
+            [searching.then_some((bottom, height)), ledger],
+            card,
+            padding + pixel_offset,
+            |y| {
+                hover.is_some_and(|link| {
+                    crate::link_target::covers_link(link, y, ch, top, padding + pixel_offset)
                 })
+            },
+        ) else {
+            return true;
         };
-        let below_ledger = ledger.map_or(0.0, |(_, b)| b.max(0.0)).min(bottom);
-        let y = [
-            bottom,
-            0.0,
-            below_ledger,
-            (bottom - ch).max(0.0),
-            ch.min(bottom),
-        ]
-        .into_iter()
-        .find(|&y| free(y))
-        .unwrap_or(bottom);
-        out.push(self.rect(0.0, y, strip_width, ch, term.palette.foreground));
+        out.push(self.rect(x, y, strip_width, ch, term.palette.foreground));
         for (i, c) in text.chars().enumerate() {
             let key = GlyphKey {
                 c,
@@ -1173,7 +1169,7 @@ impl Renderer {
             };
             match self.atlas.get(key, fonts, &self.device, &self.queue) {
                 Ok(Some(g)) => out.push(Instance {
-                    pos: [(i + 1) as f32 * cw + g.left, y + g.top],
+                    pos: [x + (i + 1) as f32 * cw + g.left, y + g.top],
                     size: [g.width, g.height],
                     uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
                     color: self.color(term.palette.background, 1.0),
@@ -1420,7 +1416,12 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn draw(&mut self, background: Rgb, pre_present: Option<&mut dyn FnMut()>) -> bool {
+    fn draw(
+        &mut self,
+        background: Rgb,
+        find_height: Option<f32>,
+        pre_present: Option<&mut dyn FnMut()>,
+    ) -> bool {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -1493,10 +1494,8 @@ impl Renderer {
             }
             pass.set_scissor_rect(0, inset, width, area);
             let overlays = (3 * self.instance_capacity) as u32;
-            self.draw_range(
-                &mut pass,
-                overlays..overlays + self.bar_start.min(self.lens[3]),
-            );
+            let target = self.link_target_start.min(self.lens[3]);
+            self.draw_range(&mut pass, overlays..overlays + target);
             if inset > 0 && self.lens[3] > self.bar_start {
                 pass.set_viewport(0.0, 0.0, width as f32, area as f32, 0.0, 1.0);
                 pass.set_scissor_rect(0, 0, width, inset.min(self.config.height));
@@ -1505,10 +1504,21 @@ impl Renderer {
                     overlays + self.bar_start..overlays + self.lens[3],
                 );
             }
-            if !self.floating.is_empty() {
+            let preview_height = find_height.map_or(area, |h| (area as f32 - h).max(0.0) as u32);
+            let target_end = self.bar_start.min(self.lens[3]);
+            if (!self.floating.is_empty() && preview_height > 0) || target < target_end {
                 pass.set_viewport(0.0, inset as f32, width as f32, area as f32, 0.0, 1.0);
-                self.floating
-                    .draw(&mut pass, Layer::AboveText, [0, inset, width, area]);
+                if !self.floating.is_empty() && preview_height > 0 {
+                    self.floating.draw(
+                        &mut pass,
+                        Layer::AboveText,
+                        [0, inset, width, preview_height],
+                    );
+                }
+                if target < target_end {
+                    pass.set_scissor_rect(0, inset, width, area);
+                    self.draw_range(&mut pass, overlays + target..overlays + target_end);
+                }
             }
         }
         self.queue.submit([encoder.finish()]);
