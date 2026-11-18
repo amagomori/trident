@@ -2666,6 +2666,7 @@ dependencies = [
  "tempfile",
  "term-core",
  "ttf-parser",
+ "unicode-bidi",
  "unicode-width",
  "wgpu",
  "x11rb",

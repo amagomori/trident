@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use term_core::{Cell, Flags, Terminal, grapheme};
+use unicode_bidi::{BidiClass, bidi_class};
 
 const MAX_INPUT: usize = 256;
 const MAX_RUNS: usize = 512;
@@ -194,6 +195,7 @@ pub(crate) fn run(
     let mut cols = 0;
     let mut face: Option<Face> = None;
     let mut script = None;
+    let mut rtl = false;
     fonts.runs.input.clear();
     while let Some(cell) = cells.get(cols) {
         if !candidate(cell, ligatures)
@@ -203,6 +205,12 @@ pub(crate) fn run(
             break;
         }
         let base = term.base_char(cell);
+        // Neutral punctuation stays in logical order, not mirrored by an RTL run.
+        let next_rtl = !base.is_ascii() && matches!(bidi_class(base), BidiClass::R | BidiClass::AL);
+        if cols != 0 && next_rtl != rtl {
+            break;
+        }
+        rtl = next_rtl;
         let width = if cell.flags.contains(Flags::WIDE) {
             2
         } else {
@@ -327,6 +335,34 @@ mod tests {
         assert_ne!(r.glyphs[0].id, r.glyphs[1].id);
         assert_eq!(r.glyphs[0].x, fonts.metrics.width);
         assert_eq!(r.glyphs[1].x, 0.);
+    }
+
+    #[test]
+    fn brackets_keep_their_logical_direction_around_arabic() {
+        use crate::family::{FontFaces, FontSpec};
+
+        let (faces, _) = FontFaces::resolve(&FontSpec {
+            regular: Some("DejaVu Sans Mono".into()),
+            ..FontSpec::default()
+        })
+        .unwrap();
+        if faces.face(Style::Regular).font.glyph_id('ب').0 == 0 {
+            return;
+        }
+        let mut fonts = Fonts::new(&faces, 16.);
+        let term = row("(بب)");
+        assert!(first(&term, &mut fonts, true).is_none());
+        let inner = run(
+            &term,
+            &term.viewport_row(0).cells[1..],
+            &mut fonts,
+            Style::Regular,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(inner.cols, 2);
+        assert_ne!(inner.glyphs[0].id, inner.glyphs[1].id);
     }
 
     #[test]

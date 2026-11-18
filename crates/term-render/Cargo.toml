@@ -16,6 +16,7 @@ png.workspace = true
 pollster.workspace = true
 term-core.workspace = true
 tempfile.workspace = true
+unicode-bidi.workspace = true
 unicode-width.workspace = true
 ttf-parser.workspace = true
 harfrust.workspace = true
