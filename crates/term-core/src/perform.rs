@@ -63,15 +63,19 @@ impl Perform for Terminal {
                 self.move_col(col);
             }
             ('D', []) => {
-                // While autowrap is on the do-wrap position counts as one cell
-                // past the edge, so a counted CUB spends its first step
-                // canceling it — unlike BS, whose single step lands on the cell
-                // to its left.
+                // The do-wrap position only costs a counted CUB inside a
+                // reverse-wraparound mode, where it sits two counts deep (one
+                // past the edge, one to unwrap, per xterm 390/412). With both
+                // modes off the flag clears for free and CUB keeps its full
+                // distance — unlike BS, whose single step always lands one
+                // cell left (or in place under a reverse mode).
                 let mut n = n(0);
                 if self.cursor.pending_wrap {
                     self.cursor.pending_wrap = false;
-                    if self.modes.autowrap {
-                        n = n.saturating_sub(1);
+                    if self.modes.autowrap
+                        && (self.modes.reverse_wrap || self.modes.reverse_wrap_ext)
+                    {
+                        n = n.saturating_sub(2);
                     }
                 }
                 for _ in 0..n {

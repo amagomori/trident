@@ -851,7 +851,22 @@ fn cases() -> Vec<Case> {
         ),
         ("reverse_wrap_cub", 4, 3, b"\x1b[?45habcdef\x1b[5DX"),
         ("reverse_wrap_pending", 4, 2, b"abcd\x1b[?45h\x08X"),
-        ("cub_wrap_pending", 4, 3, b"abcd\x1b[2DX"),
+        // Counted CUB from the do-wrap position: with no reverse mode the
+        // pending flag clears for free and the full count lands; modes 45 and
+        // 1045 (with autowrap) spend two counts on the position first.
+        // Columns match the xterm 390/412 captures behind QA's #171 replay.
+        ("cub_wrap_pending_1", 4, 3, b"abcd\x1b[1DX"),
+        ("cub_wrap_pending_2", 4, 3, b"abcd\x1b[2DX"),
+        ("cub_wrap_pending_3", 4, 3, b"abcd\x1b[3DX"),
+        ("cub_wrap_pending_4", 4, 3, b"abcd\x1b[4DX"),
+        ("cub_wrap_pending_45_1", 4, 3, b"\x1b[?45habcd\x1b[1DX"),
+        ("cub_wrap_pending_45_2", 4, 3, b"\x1b[?45habcd\x1b[2DX"),
+        ("cub_wrap_pending_45_3", 4, 3, b"\x1b[?45habcd\x1b[3DX"),
+        ("cub_wrap_pending_45_4", 4, 3, b"\x1b[?45habcd\x1b[4DX"),
+        ("cub_wrap_pending_1045_1", 4, 3, b"\x1b[?1045habcd\x1b[1DX"),
+        ("cub_wrap_pending_1045_2", 4, 3, b"\x1b[?1045habcd\x1b[2DX"),
+        ("cub_wrap_pending_1045_3", 4, 3, b"\x1b[?1045habcd\x1b[3DX"),
+        ("cub_wrap_pending_1045_4", 4, 3, b"\x1b[?1045habcd\x1b[4DX"),
         ("decawm_reset_clears_wrap", 4, 3, b"abcd\x1b[?7l\x08X"),
         (
             "reverse_wrap_requires_autowrap",
