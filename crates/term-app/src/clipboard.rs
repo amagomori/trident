@@ -67,13 +67,10 @@ pub struct Clipboard {
     x11_max_request_bytes: Option<Option<usize>>,
     #[cfg(target_os = "linux")]
     x11: bool,
+    /// The window the display handle came from, held for drop ordering with the
+    /// backend; rebinding only swaps this handle, never the backend or its offers.
     #[cfg(target_os = "linux")]
     _window: Option<Arc<Window>>,
-    /// Text and HTML last stored in each selection — clipboard then primary —
-    /// re-offered when the bound window is replaced, so the transfer never
-    /// touches a selection another application owns.
-    #[cfg(target_os = "linux")]
-    stored: [Option<(String, Option<String>)>; 2],
 }
 
 impl Clipboard {
@@ -114,21 +111,16 @@ impl Clipboard {
             x11,
             #[cfg(target_os = "linux")]
             _window: Some(window),
-            #[cfg(target_os = "linux")]
-            stored: [None, None],
         }
     }
 
-    /// The window the clipboard serves its selections through.
+    /// Points the held window at a still-live one before the window it was
+    /// created through closes. Both backends serve selections through
+    /// objects that outlive any window, so the swap changes nothing the
+    /// clipboard offers — including ownership another application holds.
     #[cfg(target_os = "linux")]
-    pub fn window_id(&self) -> Option<winit::window::WindowId> {
-        self._window.as_ref().map(|window| window.id())
-    }
-
-    /// The text and HTML last stored in each selection, clipboard then primary.
-    #[cfg(target_os = "linux")]
-    pub fn stored(&self) -> &[Option<(String, Option<String>)>; 2] {
-        &self.stored
+    pub fn rebind(&mut self, window: Arc<Window>) {
+        self._window = Some(window);
     }
 
     /// Whether the X server can be handed `len` bytes of clipboard text; true off X11
@@ -192,10 +184,6 @@ impl Clipboard {
         let Some(backend) = self.inner.as_mut() else {
             return;
         };
-        #[cfg(target_os = "linux")]
-        {
-            self.stored[primary as usize] = Some((text.clone(), html.clone()));
-        }
         #[cfg(target_os = "linux")]
         let clipboard = match backend {
             Backend::Wayland(clipboard) => {

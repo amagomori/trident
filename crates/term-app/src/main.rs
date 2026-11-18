@@ -2326,24 +2326,15 @@ impl App {
     fn remove_current_window(&mut self, event_loop: &ActiveEventLoop) {
         match self.windows.pop() {
             Some(mut g) => {
-                // The clipboard keeps the window it serves its selections through
-                // alive: when that window is the one going away, rebind to the
-                // window now shown and offer again the text Trident last stored.
-                let rebind =
-                    self.clipboard.window_id() == self.session.as_ref().map(|s| s.window.id());
-                let copied = rebind.then(|| self.clipboard.stored().clone());
                 self.swap_group(&mut g);
-                drop(g);
-                if rebind && let Some(s) = &self.session {
-                    self.clipboard = clipboard::Clipboard::new(s.window.clone());
-                    if let Some(copied) = copied {
-                        for (primary, stored) in [false, true].into_iter().zip(copied) {
-                            if let Some((text, html)) = stored {
-                                self.clipboard.set(text, html, primary);
-                            }
-                        }
-                    }
+                // The clipboard keeps the window it was created through alive,
+                // so point it at the window now shown before the closed one
+                // drops. Its backend and offers survive the close unchanged,
+                // so a selection another application owns is never touched.
+                if let Some(s) = &self.session {
+                    self.clipboard.rebind(s.window.clone());
                 }
+                drop(g);
             }
             None => event_loop.exit(),
         }
