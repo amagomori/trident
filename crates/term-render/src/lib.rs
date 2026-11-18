@@ -25,6 +25,7 @@ mod font;
 mod images;
 mod ledger;
 mod link_target;
+mod pipeline;
 mod preedit;
 #[cfg(target_os = "linux")]
 mod present_shm;

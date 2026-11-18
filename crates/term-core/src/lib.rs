@@ -33,6 +33,29 @@ mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
 pub use osc::{ClipboardRequest, WorkingDirectory};
+
+/// Window geometry the app feeds in for the XTWINOPS reports (ops 11/13/15/19).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowGeometry {
+    /// Outer position in pixels; negative values wrap to the unsigned range.
+    pub position: (i32, i32),
+    /// Outer window size in pixels.
+    pub size: (u32, u32),
+    /// Monitor size in pixels, for the "screen size" reports.
+    pub screen: (u32, u32),
+    /// The window is iconified (minimized).
+    pub iconic: bool,
+}
+
+/// A text-area resize a program asked for with `CSI Ps ; Ps ; Ps t` (XTWINOPS
+/// op 8), DECSLPP (`Ps >= 24`) or DECCOLM. The grid change is applied already;
+/// the app mirrors it on the real window by resizing that window to match.
+/// Drained with [`Terminal::take_window_ops`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowOp {
+    /// Resize the window so its text area is `cols`×`rows` cells.
+    Resize { cols: usize, rows: usize },
+}
 mod perform;
 mod prompt_input;
 pub use prompt_input::{PromptInput, PromptInputContext};
@@ -219,6 +242,10 @@ struct Screen {
     scrollback: VecDeque<Row>,
     saved: Option<SavedCursor>,
     placements: Vec<Placement>,
+    /// Kitty keyboard protocol enhancement flags (CSI u keyboard mode).
+    kitty_flags: u8,
+    /// Flag sets saved by `CSI > u` pushes, for `CSI < u` pops.
+    kitty_stack: Vec<u8>,
 }
 
 impl Screen {
@@ -230,6 +257,8 @@ impl Screen {
             scrollback: VecDeque::new(),
             saved: None,
             placements: Vec::new(),
+            kitty_flags: 0,
+            kitty_stack: Vec::new(),
         }
     }
 }
@@ -274,6 +303,13 @@ pub struct Modes {
     pub sgr_mouse: bool,
     /// Window focus changes should be reported.
     pub focus_events: bool,
+    /// Mode 3 (DECCOLM): the grid is 132 columns wide. Honored only when
+    /// [`Modes::allow_80_132`] is set.
+    pub columns_132: bool,
+    /// Mode 40: programs may switch the 80/132-column mode with DECCOLM.
+    pub allow_80_132: bool,
+    /// Mode 95 (DECNCSM): column-mode switches do not erase the screen.
+    pub no_clear_on_columns: bool,
     /// Wheel events on the alternate screen become cursor keys.
     pub alt_scroll: bool,
     /// Redraws should wait until synchronized output ends or times out.
@@ -427,7 +463,18 @@ pub struct Terminal {
     /// Positions [`Self::resize_tracking`] moves along with the lines while it runs.
     tracked: Vec<Point>,
     title: Option<String>,
+    /// Icon label set by `OSC 1` (and `OSC 0`, which also sets `title`).
+    icon_title: Option<String>,
     title_changed: bool,
+    /// `CSI 22/23 t` title stack; entries hold the titles that push saved.
+    title_stack: Vec<TitlePair>,
+    /// XTSMTITLE (`CSI > Pm t`): titles are set / reported as hex pairs.
+    title_set_hex: bool,
+    title_query_hex: bool,
+    /// Window state the app feeds for the XTWINOPS reports.
+    window: WindowGeometry,
+    /// Window requests for the app, from supported mutating window ops.
+    window_ops: Vec<WindowOp>,
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
     synchronized_output_started: bool,
@@ -448,6 +495,14 @@ pub struct Terminal {
     parser_ground: bool,
     shell: Box<ShellState>,
     reports: Box<Reports>,
+}
+
+/// One entry of the `CSI 22/23 t` title stack; `None` fields are titles the
+/// push did not save, so the pop leaves them alone.
+#[derive(Default)]
+struct TitlePair {
+    icon: Option<String>,
+    title: Option<String>,
 }
 
 /// Rarely used state for conformance reports, boxed to keep `Terminal`'s hot fields in place.
@@ -1208,7 +1263,17 @@ impl Terminal {
             selection: None,
             tracked: Vec::new(),
             title: None,
+            icon_title: None,
             title_changed: false,
+            title_stack: Vec::new(),
+            title_set_hex: false,
+            title_query_hex: false,
+            window: WindowGeometry {
+                size: (cols as u32 * 8, rows as u32 * 16),
+                screen: (1920, 1080),
+                ..WindowGeometry::default()
+            },
+            window_ops: Vec::new(),
             responses: Vec::new(),
             synchronized_output_started: false,
             synchronized_output_ended: false,
@@ -1417,6 +1482,17 @@ impl Terminal {
     /// Returns the latest changed title, or `None` if unchanged since last call.
     ///
     /// An empty string represents a cleared title.
+    /// Feeds the app's real window geometry for the XTWINOPS reports.
+    pub fn set_window_geometry(&mut self, geometry: WindowGeometry) {
+        self.window = geometry;
+    }
+
+    /// Window requests queued by supported window ops; the app applies them
+    /// to the real window (the grid resize is already applied).
+    pub fn take_window_ops(&mut self) -> Vec<WindowOp> {
+        std::mem::take(&mut self.window_ops)
+    }
+
     pub fn take_title(&mut self) -> Option<String> {
         if std::mem::take(&mut self.title_changed) {
             Some(self.title.clone().unwrap_or_default())
@@ -1433,6 +1509,12 @@ impl Terminal {
 
     pub fn is_alt_screen(&self) -> bool {
         self.alt_active
+    }
+
+    /// Kitty keyboard protocol flags on the active screen (`0` = legacy key
+    /// encoding). Set by `CSI =`/`>`/`< u` sequences and reported by `CSI ? u`.
+    pub fn kitty_flags(&self) -> u8 {
+        self.screen().kitty_flags
     }
 
     /// Clears mouse, focus and bracketed-paste modes on the primary screen.
@@ -1869,6 +1951,129 @@ impl Terminal {
             }
         }
         Some(out)
+    }
+
+    /// The selection as an HTML fragment for the clipboard's `text/html` flavor,
+    /// offered alongside [`Self::selection_text`]: a `<pre>` element whose `<span>`
+    /// runs carry the palette-resolved foreground/background colors and the
+    /// bold/italic/underline/strikethrough styles of their cells.
+    ///
+    /// Returns `None` when no nonempty selection remains in retained history.
+    pub fn selection_html(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        let block = self.selection?.kind == SelectionKind::Block;
+        // HTML strips one newline after `<pre>`; emitting it keeps a leading blank line.
+        let mut out = String::from("<pre>\n");
+        let mut style = Cell::default();
+        let mut span_open = false;
+        for line in start.line..=end.line {
+            let (from, to) = self.selection_columns((start, end), line)?;
+            let cells = self.selection_cells(line);
+            let wrapped = self
+                .output_end(line)
+                .map_or(self.line(line).wrapped(), |end| end.wrapped);
+            let skip = if block {
+                Flags::WIDE_SPACER
+            } else {
+                Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
+            };
+            let mut text = String::new();
+            for cell in &cells[from..=to] {
+                if !cell.flags.intersects(skip) {
+                    self.push_cell_text(cell, &mut text);
+                }
+            }
+            let keep = if block || (wrapped && line != end.line) {
+                text.len()
+            } else {
+                text.trim_end().len()
+            };
+            let mut left = keep;
+            for cell in &cells[from..=to] {
+                if left == 0 {
+                    break;
+                }
+                if cell.flags.intersects(skip) {
+                    continue;
+                }
+                if !span_open || !cell.same_sgr(&style) {
+                    if span_open {
+                        out.push_str("</span>");
+                    }
+                    out.push_str("<span style=\"");
+                    self.push_html_style(cell, &mut out);
+                    out.push_str("\">");
+                    span_open = true;
+                    style = *cell;
+                }
+                let mut cell_text = String::new();
+                self.push_cell_text(cell, &mut cell_text);
+                for c in cell_text.chars() {
+                    let len = c.len_utf8();
+                    if len > left {
+                        break;
+                    }
+                    left -= len;
+                    match c {
+                        '&' => out.push_str("&amp;"),
+                        '<' => out.push_str("&lt;"),
+                        '>' => out.push_str("&gt;"),
+                        c => out.push(c),
+                    }
+                }
+            }
+            if line != end.line && (block || !wrapped) {
+                out.push('\n');
+            }
+        }
+        if span_open {
+            out.push_str("</span>");
+        }
+        out.push_str("</pre>");
+        Some(out)
+    }
+
+    /// CSS declarations for one span of [`Self::selection_html`]: the palette-resolved
+    /// colors (foreground/background exchanged under SGR inverse) and text styles.
+    fn push_html_style(&self, cell: &Cell, out: &mut String) {
+        use std::fmt::Write;
+        let (fg, bg) = if cell.flags.contains(Flags::INVERSE) {
+            (cell.bg, cell.fg)
+        } else {
+            (cell.fg, cell.bg)
+        };
+        let (r, g, b) = self.palette.resolve(fg);
+        let (br, bgc, bb) = self.palette.resolve(bg);
+        let (r, g, b) = if cell.flags.contains(Flags::DIM) {
+            // The renderer blends dim text 3/5 toward the background.
+            let mix = |f: u8, b: u8| ((f as u16 * 3 + b as u16 * 2) / 5) as u8;
+            (mix(r, br), mix(g, bgc), mix(b, bb))
+        } else {
+            (r, g, b)
+        };
+        let _ = write!(out, "color:#{r:02x}{g:02x}{b:02x}");
+        let (r, g, b) = (br, bgc, bb);
+        let _ = write!(out, ";background-color:#{r:02x}{g:02x}{b:02x}");
+        if cell.flags.contains(Flags::BOLD) {
+            out.push_str(";font-weight:bold");
+        }
+        if cell.flags.contains(Flags::ITALIC) {
+            out.push_str(";font-style:italic");
+        }
+        let mut decoration = "";
+        if cell.flags.contains(Flags::UNDERLINE) {
+            decoration = "underline";
+        }
+        if cell.flags.contains(Flags::STRIKE) {
+            decoration = if decoration.is_empty() {
+                "line-through"
+            } else {
+                "underline line-through"
+            };
+        }
+        if !decoration.is_empty() {
+            let _ = write!(out, ";text-decoration:{decoration}");
+        }
     }
 
     fn output_end(&self, line: u64) -> Option<&OutputEnd> {
@@ -2729,6 +2934,9 @@ impl Terminal {
 
     fn reset(&mut self) {
         let (cols, rows) = (self.cols, self.rows);
+        // RIS returns to 80 columns when DECCOLM widened the grid.
+        let cols = if self.modes.columns_132 { 80 } else { cols };
+        let widened = cols != self.cols;
         let max_scrollback = self.max_scrollback;
         let mut fresh = Terminal::new(cols, rows);
         fresh.shell.progress_changed = self.shell.progress.is_some() || self.shell.progress_changed;
@@ -2743,7 +2951,12 @@ impl Terminal {
         let (enabled, share) = self.command_budget();
         fresh.shell.notifications = self.shell.notifications.reset();
         fresh.shell.runs = self.shell.runs.forget();
+        // Queued window ops are still owed to the window and PTY.
+        fresh.window_ops = std::mem::take(&mut self.window_ops);
         *self = fresh;
+        if widened {
+            self.window_ops.push(WindowOp::Resize { cols, rows });
+        }
         self.set_command_budget(enabled, share);
         self.title_changed = true;
     }

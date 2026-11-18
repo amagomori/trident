@@ -1001,6 +1001,57 @@ fn selection_text_skips_wide_character_wrap_blank() {
 }
 
 #[test]
+fn selection_html_carries_colors_and_styles() {
+    let mut t = term(10, 2, "\x1b[1;31mhi\x1b[0m <&>\r\n\x1b[3;4;9mend");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 2));
+    let html = t.selection_html().unwrap();
+    assert!(html.starts_with("<pre>") && html.ends_with("</pre>"));
+    assert!(html.contains("font-weight:bold"));
+    assert!(html.contains("font-style:italic"));
+    assert!(html.contains("text-decoration:underline line-through"));
+    assert!(html.contains("color:#f7768e"), "{html}");
+    assert!(html.contains("background-color:#1a1b26"), "{html}");
+    assert!(html.contains("&lt;&amp;&gt;"), "{html}");
+    assert!(html.contains("hi</span><span"), "{html}");
+    assert!(html.contains("\n</span><span"), "{html}");
+    assert_eq!(t.selection_text().as_deref(), Some("hi <&>\nend"));
+}
+
+#[test]
+fn selection_html_joins_wrapped_lines_and_trims_tail() {
+    let mut t = term(5, 4, "hello world\r\nnext");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(3, 4));
+    let html = t.selection_html().unwrap();
+    assert!(html.contains("hello world\nnext"), "{html}");
+    assert!(!html.contains("next "), "{html}");
+    assert!(t.selection_html().is_some());
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    assert!(t.selection_html().is_none());
+}
+
+#[test]
+fn selection_html_keeps_a_leading_blank_line() {
+    let mut t = term(5, 2, "\r\nnext");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 3));
+    let html = t.selection_html().unwrap();
+    // The parser-stripped newline after `<pre>` leaves the empty row's newline.
+    assert!(html.starts_with("<pre>\n\n"), "{html}");
+}
+
+#[test]
+fn selection_html_dims_toward_the_background() {
+    let mut t = term(8, 1, "\x1b[31;2mdim");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(0, 2));
+    let html = t.selection_html().unwrap();
+    // (0xf7*3+0x1a*2)/5 = 0x9e, (0x76*3+0x1b*2)/5 = 0x51, (0x8e*3+0x26*2)/5 = 0x64
+    assert!(html.contains("color:#9e5164"), "{html}");
+}
+
+#[test]
 fn block_selection_is_a_rectangle_in_every_drag_direction() {
     let mut t = term(6, 3, "abcdef\r\nghijkl\r\nmnopqr");
     for (a, b) in [
@@ -3264,4 +3315,51 @@ fn prompt_click_works_without_scrollback() {
     // A top-aligned region above the prompt scrolls without moving it.
     t.advance(b"\r\n\x1b]133;A\x07$ \x1b]133;B\x07ab\x1b7\x1b[1;2r\x1b[2H\n\x1b[r\x1b8");
     assert_eq!(click(&t, 3, 2), Some(PromptClick::Move(-2)));
+}
+
+#[test]
+fn kitty_keyboard_flag_query_push_pop_set() {
+    let mut t = Terminal::new(10, 3);
+    t.advance(b"\x1b[?u");
+    assert_eq!(t.take_responses(), b"\x1b[?0u");
+
+    t.advance(b"\x1b[=9;1u");
+    assert_eq!(t.kitty_flags(), 0b1001);
+    t.advance(b"\x1b[=2;2u");
+    assert_eq!(t.kitty_flags(), 0b1011);
+    t.advance(b"\x1b[=1;3u");
+    assert_eq!(t.kitty_flags(), 0b1010);
+    // Unsupported bits are masked out.
+    t.advance(b"\x1b[=255;1u");
+    assert_eq!(t.kitty_flags(), 0b11111);
+
+    t.advance(b"\x1b[>5u");
+    assert_eq!(t.kitty_flags(), 5);
+    t.advance(b"\x1b[>u");
+    assert_eq!(t.kitty_flags(), 0);
+    t.advance(b"\x1b[<u");
+    assert_eq!(t.kitty_flags(), 5);
+    // Popping past the bottom resets the flags.
+    t.advance(b"\x1b[<3u");
+    assert_eq!(t.kitty_flags(), 0);
+
+    t.advance(b"\x1b[?u");
+    assert_eq!(t.take_responses(), b"\x1b[?0u");
+}
+
+#[test]
+fn kitty_keyboard_flags_are_per_screen() {
+    let mut t = Terminal::new(10, 3);
+    t.advance(b"\x1b[=5;1u");
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.kitty_flags(), 0);
+    t.advance(b"\x1b[>11u\x1b[?u");
+    assert_eq!(t.take_responses(), b"\x1b[?11u");
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.kitty_flags(), 5);
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.kitty_flags(), 11);
+    // A full reset clears both stacks.
+    t.advance(b"\x1b[?1049l\x1bc");
+    assert_eq!(t.kitty_flags(), 0);
 }
