@@ -840,6 +840,25 @@ fn cases() -> Vec<Case> {
         ("tab", 12, 2, b"a\tb"),
         ("pending_wrap", 4, 2, b"abcd"),
         ("soft_wrap", 4, 3, b"abcdef"),
+        ("reverse_wrap", 4, 3, b"abcdef\r\x1b[?45h\x08X"),
+        ("reverse_wrap_unwrapped", 4, 3, b"\x1b[?45hab\x1b[2;1H\x08X"),
+        ("reverse_wrap_ext", 4, 3, b"\x1b[?1045hab\x1b[2;1H\x08X"),
+        (
+            "reverse_wrap_ext_region",
+            5,
+            4,
+            b"\x1b[?1045h\x1b[2;3r\x1b[2;1H\x08X",
+        ),
+        ("reverse_wrap_cub", 4, 3, b"\x1b[?45habcdef\x1b[5DX"),
+        ("reverse_wrap_pending", 4, 2, b"abcd\x1b[?45h\x08X"),
+        (
+            "reverse_wrap_requires_autowrap",
+            4,
+            3,
+            b"\x1b[?7l\x1b[?45h\x1b[2;1H\x08X",
+        ),
+        ("more_fix_tab", 12, 3, b"\x1b[?41habcdefghijkl\tX"),
+        ("more_fix_tab_off", 12, 3, b"abcdefghijkl\tX"),
         ("autowrap_off", 4, 2, b"\x1b[?7labcdef"),
         (
             "cursor_absolute_relative",
@@ -1541,6 +1560,15 @@ fn golden_conformance_reports() {
             "DECRQM fixed ANSI modes",
             b"\x1b[12$p\x1b[2$p\x1b[19$p\x1b[99$p",
         ),
+        (
+            "DECRQM stored DEC modes",
+            b"\x1b[?3;4;5;18;19;40;41;42;45;66;67;1045h\x1b[?3$p\x1b[?4$p\x1b[?5$p\x1b[?18$p\x1b[?19$p\x1b[?40$p\x1b[?41$p\x1b[?42$p\x1b[?45$p\x1b[?66$p\x1b[?67$p\x1b[?1045$p\x1b[?3;4;5;18;19;40;41;42;45;66;67;1045l\x1b[?3$p\x1b[?45$p",
+        ),
+        (
+            "DECCOLM needs mode 40",
+            b"\x1b[?3h\x1b[?3$p\x1b[?40h\x1b[?3h\x1b[?3$p\x1b[?40l\x1b[?3l",
+        ),
+        ("DECRQM KAM", b"\x1b[2h\x1b[2$p\x1b[2l\x1b[2$p"),
         ("DECRQSS SGR default", b"\x1bP$qm\x1b\\"),
         (
             "DECRQSS SGR styled",
@@ -1558,7 +1586,24 @@ fn golden_conformance_reports() {
             "DECRQSS DECSCUSR",
             b"\x1b[4 q\x1bP$q q\x1b\\\x1b[5 q\x1bP$q q\x1b\\\x1b[0 q",
         ),
-        ("DECRQSS unknown", b"\x1bP$q\"q\x1b\\\x1bP$qtoolong!\x1b\\"),
+        ("DECRQSS DECSCL", b"\x1b[65;1\"p\x1bP$q\"p\x1b\\"),
+        (
+            "DECRQSS DECSCL after drop",
+            b"\x1b[62;2\"p\x1b[64;1\"p\x1bP$q\"p\x1b\\",
+        ),
+        (
+            "DECRQSS stored settings",
+            b"\x1b[1\"q\x1bP$q\"q\x1b\\\x1b[2*x\x1bP$q*x\x1b\\\x1b[1$}\x1bP$q$}\x1b\\\x1b[2$~\x1bP$q$~\x1b\\\x1b[24*|\x1bP$q*|\x1b\\\x1b[1+q\x1bP$q+q\x1b\\\x1b[3*}\x1bP$q*}\x1b\\\x1b[2+r\x1bP$q+r\x1b\\",
+        ),
+        ("DECRQSS unknown", b"\x1bP$q x\x1b\\\x1bP$qtoolong!\x1b\\"),
+        (
+            "DECSCL below 63 silences DECRQM",
+            b"\x1b[62;1\"p\x1b[?25$p\x1b[4$p\x1bP$qm\x1b\\\x1b[64;1\"p\x1b[?25$p\x1b[4$p",
+        ),
+        (
+            "DECSTR resets new modes",
+            b"\x1b[?45;1045h\x1b[2h\x1b[1\"q\x1b[1$}\x1b[!p\x1b[?45$p\x1b[?1045$p\x1b[2$p\x1bP$q\"q\x1b\\\x1bP$q$}\x1b\\",
+        ),
         (
             "XTSAVE/XTRESTORE",
             b"\x1b[?7;2004;9999s\x1b[?7l\x1b[?2004h\x1b[?7;2004;9999r\x1b[?7$p\x1b[?2004$p",
