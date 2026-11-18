@@ -2059,20 +2059,20 @@ impl App {
     ) -> Result<Pty, String> {
         let proxy = self.proxy.clone();
         let command_proxy = self.proxy.clone();
-        let mut env = self.config.env.clone();
-        // A forwarded request carries the requester's environment; the
-        // terminal's own variables stay Trident's.
-        env.extend(
-            env_overlay
-                .iter()
-                .filter(|(key, _)| {
-                    !matches!(
-                        key.as_str(),
-                        "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION"
-                    )
-                })
-                .cloned(),
-        );
+        // A forwarded request carries the requester's environment. It sits
+        // under the configured `[env]` — same precedence as an inherited
+        // variable — and never over the terminal's own variables.
+        let mut env: std::collections::BTreeMap<String, String> = env_overlay
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION"
+                )
+            })
+            .cloned()
+            .collect();
+        env.extend(self.config.env.clone());
         if !env.contains_key("TERM") {
             let term = terminfo::term(&self.config.term, &self.config.env);
             env.insert("TERM".into(), term.into());
