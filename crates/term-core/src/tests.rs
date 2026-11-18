@@ -334,6 +334,14 @@ fn osc_special_and_dynamic_colors() {
         term.palette.ansi[1]
     );
     assert!(term.palette.dynamic.iter().all(Option::is_none));
+    term.advance(b"\x1b]4;1;red;2;#fff\x07\x1b]10;red;#000\x07");
+    assert_eq!(term.palette.ansi_overrides[1], None);
+    assert_eq!(
+        term.palette.resolve(crate::Color::Indexed(2)),
+        (0xf0, 0xf0, 0xf0)
+    );
+    assert_eq!(term.palette.background, (0, 0, 0));
+    assert_eq!(term.palette.foreground, crate::colors::FOREGROUND);
 }
 
 fn term(cols: usize, rows: usize, input: &str) -> Terminal {

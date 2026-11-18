@@ -368,11 +368,7 @@ impl Terminal {
                     self.palette.ansi_overrides[index] = Some(color);
                 } else if (256..261).contains(&index) {
                     self.palette.special[index - 256] = Some(color);
-                } else {
-                    return;
                 }
-            } else {
-                return;
             }
         }
     }
@@ -383,14 +379,12 @@ impl Terminal {
                 return;
             };
             if index >= 5 {
-                return;
+                continue;
             }
             if pair[1] == b"?" {
                 self.report_osc_color(b"5", Some(index), self.special_color(index), terminator);
             } else if let Some(color) = xcolor::parse(pair[1]) {
                 self.palette.special[index] = Some(color);
-            } else {
-                return;
             }
         }
     }
@@ -413,8 +407,6 @@ impl Terminal {
                 );
             } else if let Some(color) = xcolor::parse(spec) {
                 self.set_dynamic_color(code, color);
-            } else {
-                return;
             }
         }
     }
