@@ -576,8 +576,9 @@ impl EventProcessor {
 
         // This is where we receive data from drag and drop
         self.dnd.result = None;
-        if let Ok(mut data) = unsafe { self.dnd.read_data(window) } {
-            let parse_result = self.dnd.parse_data(&mut data);
+        if let Ok(data) = unsafe { self.dnd.read_data(window) } {
+            let parse_result = crate::platform_impl::common::uri_list::parse_uri_list(&data)
+                .and_then(|paths| paths.into_iter().map(|path| path.canonicalize()).collect::<Result<Vec<_>, _>>());
             if let Ok(ref path_list) = parse_result {
                 for path in path_list {
                     let event = Event::WindowEvent {
