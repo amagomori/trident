@@ -1001,6 +1001,92 @@ fn selection_text_skips_wide_character_wrap_blank() {
 }
 
 #[test]
+fn selection_html_carries_colors_and_styles() {
+    let mut t = term(10, 2, "\x1b[1;31mhi\x1b[0m <&>\r\n\x1b[3;4;9mend");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 2));
+    let html = t.selection_html().unwrap();
+    assert!(html.starts_with("<pre>") && html.ends_with("</pre>"));
+    assert!(html.contains("font-weight:bold"));
+    assert!(html.contains("font-style:italic"));
+    assert!(html.contains("text-decoration:underline line-through"));
+    assert!(html.contains("color:#f7768e"), "{html}");
+    assert!(html.contains("background-color:#1a1b26"), "{html}");
+    assert!(html.contains("&lt;&amp;&gt;"), "{html}");
+    assert!(html.contains("hi</span><span"), "{html}");
+    assert!(html.contains("\n</span><span"), "{html}");
+    assert_eq!(t.selection_text().as_deref(), Some("hi <&>\nend"));
+}
+
+#[test]
+fn selection_html_joins_wrapped_lines_and_trims_tail() {
+    let mut t = term(5, 4, "hello world\r\nnext");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(3, 4));
+    let html = t.selection_html().unwrap();
+    assert!(html.contains("hello world\nnext"), "{html}");
+    assert!(!html.contains("next "), "{html}");
+    assert!(t.selection_html().is_some());
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    assert!(t.selection_html().is_none());
+}
+
+#[test]
+fn widened_history_copies_implicit_columns_in_both_clipboard_formats() {
+    let mut t = term(4, 2, "\x1b[1mabc \x1b[m\r\nnext\r\nlive\r\n");
+    t.resize(8, 2);
+    t.scroll_display(10);
+    assert_eq!(t.primary.scrollback[0].cells.len(), 4);
+
+    let mut plain = String::new();
+    t.push_html_style(&Cell::default(), &mut plain);
+    let span = format!("<span style=\"{plain}\">");
+    t.start_selection(t.viewport_to_point(0, 2), SelectionKind::Block);
+    t.update_selection(t.viewport_to_point(0, 6));
+    assert_eq!(t.selection_text().as_deref(), Some("c    "));
+    assert_eq!(
+        t.selection_html().unwrap(),
+        format!("<pre>\n<span style=\"{plain};font-weight:bold\">c </span>{span}   </span></pre>")
+    );
+
+    t.start_selection(t.viewport_to_point(0, 5), SelectionKind::Block);
+    t.update_selection(t.viewport_to_point(1, 7));
+    assert_eq!(t.selection_text().as_deref(), Some("   \n   "));
+    assert_eq!(
+        t.selection_html().unwrap(),
+        format!("<pre>\n{span}   \n   </span></pre>")
+    );
+
+    t.start_selection(t.viewport_to_point(0, 5), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 7));
+    assert_eq!(t.selection_text().as_deref(), Some("\nnext"));
+    assert_eq!(
+        t.selection_html().unwrap(),
+        format!("<pre>\n\n{span}next</span></pre>")
+    );
+}
+
+#[test]
+fn selection_html_keeps_a_leading_blank_line() {
+    let mut t = term(5, 2, "\r\nnext");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 3));
+    let html = t.selection_html().unwrap();
+    // The parser-stripped newline after `<pre>` leaves the empty row's newline.
+    assert!(html.starts_with("<pre>\n\n"), "{html}");
+}
+
+#[test]
+fn selection_html_dims_toward_the_background() {
+    let mut t = term(8, 1, "\x1b[31;2mdim");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(0, 2));
+    let html = t.selection_html().unwrap();
+    // (0xf7*3+0x1a*2)/5 = 0x9e, (0x76*3+0x1b*2)/5 = 0x51, (0x8e*3+0x26*2)/5 = 0x64
+    assert!(html.contains("color:#9e5164"), "{html}");
+}
+
+#[test]
 fn block_selection_is_a_rectangle_in_every_drag_direction() {
     let mut t = term(6, 3, "abcdef\r\nghijkl\r\nmnopqr");
     for (a, b) in [

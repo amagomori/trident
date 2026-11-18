@@ -11,6 +11,8 @@ pub struct Link {
     pub end: Point,
     /// Other visible runs of the same OSC 8 link, which share its explicit `id`, in order.
     pub pieces: Vec<(Point, Point)>,
+    /// Whether the URI came from OSC 8, so the printed text need not show it.
+    pub osc8: bool,
 }
 
 /// A `path:line[:column]` reference in plain output, as compilers, grep and Python
@@ -40,6 +42,7 @@ impl FileLink {
             start: self.start,
             end: self.end,
             pieces: Vec::new(),
+            osc8: false,
         }
     }
 }
@@ -495,6 +498,7 @@ impl Terminal {
                 start,
                 end,
                 pieces,
+                osc8: true,
             });
         }
         let (text, positions) = self.logical_text(first, last);
@@ -539,6 +543,7 @@ impl Terminal {
                 start,
                 end,
                 pieces: Vec::new(),
+                osc8: false,
             };
             if link.contains(point) {
                 return Some(link);
@@ -654,6 +659,7 @@ mod tests {
         t.advance(b"\x1b]8;id=a;https://a\x07abcdefghij\x1b]8;;\x1b\\x");
         let link = t.link_at(Point { line: 1, col: 1 }).unwrap();
         assert_eq!(link.uri, "https://a");
+        assert!(link.osc8);
         assert_eq!(link.start, Point { line: 0, col: 0 });
         assert_eq!(link.end, Point { line: 1, col: 1 });
         assert!(t.link_at(Point { line: 1, col: 2 }).is_none());
@@ -701,7 +707,9 @@ mod tests {
                     t.line(p.line).cells[p.col].c == 'h' || t.line(p.line).cells[p.col].c == 'm'
                 })
                 .unwrap();
-            assert_eq!(t.link_at(p).unwrap().uri, expected);
+            let link = t.link_at(p).unwrap();
+            assert_eq!(link.uri, expected);
+            assert!(!link.osc8);
         }
         assert!(
             Terminal::new(8, 2)

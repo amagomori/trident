@@ -200,6 +200,7 @@ fn shell_integration_output_ends_before_missing_newline_marker() {
         t.advance(format!("\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07{marker}                    \r\x1b]133;A\x07$ ").as_bytes());
         t.select_command_output();
         assert_eq!(t.selection_text().as_deref(), Some("abc"));
+        assert!(t.selection_html().unwrap().ends_with("\">abc</span></pre>"));
     }
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;A\x07$ ");

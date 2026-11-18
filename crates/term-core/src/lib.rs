@@ -1862,12 +1862,13 @@ impl Terminal {
     /// Returns `None` when no nonempty selection remains in retained history.
     pub fn selection_text(&self) -> Option<String> {
         let (start, end) = self.selection_range()?;
-        let block = self.selection?.kind == SelectionKind::Block;
+        let kind = self.selection?.kind;
+        let block = kind == SelectionKind::Block;
         let mut out = String::new();
+        let blank = Cell::default();
         for line in start.line..=end.line {
             let row = self.line(line);
             let (from, to) = self.selection_columns((start, end), line)?;
-            let (cells, _) = self.selection_row(self.selection?.kind, line);
             let wrapped = self
                 .output_end(line)
                 .map_or(row.wrapped(), |end| end.wrapped);
@@ -1878,17 +1879,12 @@ impl Terminal {
                 Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
             };
             let mut text = String::new();
-            for cell in &cells[from.min(cells.len())..(to + 1).min(cells.len())] {
+            for cell in self.selected_cells(kind, line, from, to, &blank) {
                 if !cell.flags.intersects(skip) {
                     self.push_cell_text(cell, &mut text);
                 }
             }
-            if block {
-                text.extend(std::iter::repeat_n(
-                    ' ',
-                    (to + 1).saturating_sub(from.max(cells.len())),
-                ));
-            } else if !wrapped || line == end.line {
+            if !block && (!wrapped || line == end.line) {
                 text.truncate(text.trim_end().len());
             }
             out.push_str(&text);
@@ -1897,6 +1893,131 @@ impl Terminal {
             }
         }
         Some(out)
+    }
+
+    /// The selection as an HTML fragment for the clipboard's `text/html` flavor,
+    /// offered alongside [`Self::selection_text`]: a `<pre>` element whose `<span>`
+    /// runs carry the palette-resolved foreground/background colors and the
+    /// bold/italic/underline/strikethrough styles of their cells.
+    ///
+    /// Returns `None` when no nonempty selection remains in retained history.
+    pub fn selection_html(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        let kind = self.selection?.kind;
+        let block = kind == SelectionKind::Block;
+        // HTML strips one newline after `<pre>`; emitting it keeps a leading blank line.
+        let mut out = String::from("<pre>\n");
+        let mut style = Cell::default();
+        let blank = Cell::default();
+        let mut span_open = false;
+        for line in start.line..=end.line {
+            let (from, to) = self.selection_columns((start, end), line)?;
+            let cells = self.selected_cells(kind, line, from, to, &blank);
+            let wrapped = self
+                .output_end(line)
+                .map_or(self.line(line).wrapped(), |end| end.wrapped);
+            let skip = if block {
+                Flags::WIDE_SPACER
+            } else {
+                Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
+            };
+            let mut text = String::new();
+            for cell in cells.clone() {
+                if !cell.flags.intersects(skip) {
+                    self.push_cell_text(cell, &mut text);
+                }
+            }
+            let keep = if block || (wrapped && line != end.line) {
+                text.len()
+            } else {
+                text.trim_end().len()
+            };
+            let mut left = keep;
+            for cell in cells {
+                if left == 0 {
+                    break;
+                }
+                if cell.flags.intersects(skip) {
+                    continue;
+                }
+                if !span_open || !cell.same_sgr(&style) {
+                    if span_open {
+                        out.push_str("</span>");
+                    }
+                    out.push_str("<span style=\"");
+                    self.push_html_style(cell, &mut out);
+                    out.push_str("\">");
+                    span_open = true;
+                    style = *cell;
+                }
+                let mut cell_text = String::new();
+                self.push_cell_text(cell, &mut cell_text);
+                for c in cell_text.chars() {
+                    let len = c.len_utf8();
+                    if len > left {
+                        break;
+                    }
+                    left -= len;
+                    match c {
+                        '&' => out.push_str("&amp;"),
+                        '<' => out.push_str("&lt;"),
+                        '>' => out.push_str("&gt;"),
+                        c => out.push(c),
+                    }
+                }
+            }
+            if line != end.line && (block || !wrapped) {
+                out.push('\n');
+            }
+        }
+        if span_open {
+            out.push_str("</span>");
+        }
+        out.push_str("</pre>");
+        Some(out)
+    }
+
+    /// CSS declarations for one span of [`Self::selection_html`]: the palette-resolved
+    /// colors (foreground/background exchanged under SGR inverse) and text styles.
+    fn push_html_style(&self, cell: &Cell, out: &mut String) {
+        use std::fmt::Write;
+        let (fg, bg) = if cell.flags.contains(Flags::INVERSE) {
+            (cell.bg, cell.fg)
+        } else {
+            (cell.fg, cell.bg)
+        };
+        let (r, g, b) = self.palette.resolve(fg);
+        let (br, bgc, bb) = self.palette.resolve(bg);
+        let (r, g, b) = if cell.flags.contains(Flags::DIM) {
+            // The renderer blends dim text 3/5 toward the background.
+            let mix = |f: u8, b: u8| ((f as u16 * 3 + b as u16 * 2) / 5) as u8;
+            (mix(r, br), mix(g, bgc), mix(b, bb))
+        } else {
+            (r, g, b)
+        };
+        let _ = write!(out, "color:#{r:02x}{g:02x}{b:02x}");
+        let (r, g, b) = (br, bgc, bb);
+        let _ = write!(out, ";background-color:#{r:02x}{g:02x}{b:02x}");
+        if cell.flags.contains(Flags::BOLD) {
+            out.push_str(";font-weight:bold");
+        }
+        if cell.flags.contains(Flags::ITALIC) {
+            out.push_str(";font-style:italic");
+        }
+        let mut decoration = "";
+        if cell.flags.contains(Flags::UNDERLINE) {
+            decoration = "underline";
+        }
+        if cell.flags.contains(Flags::STRIKE) {
+            decoration = if decoration.is_empty() {
+                "line-through"
+            } else {
+                "underline line-through"
+            };
+        }
+        if !decoration.is_empty() {
+            let _ = write!(out, ";text-decoration:{decoration}");
+        }
     }
 
     fn output_end(&self, line: u64) -> Option<&OutputEnd> {
@@ -1926,6 +2047,28 @@ impl Terminal {
             || (&self.line(line).cells[..], self.cols),
             |end| (&end.cells[..], end.cells.len()),
         )
+    }
+
+    /// Selected cells in an inclusive column range. Only rectangular copies include
+    /// default blanks beyond the stored end of a widened history row.
+    fn selected_cells<'a>(
+        &'a self,
+        kind: SelectionKind,
+        line: u64,
+        from: usize,
+        to: usize,
+        blank: &'a Cell,
+    ) -> impl Iterator<Item = &'a Cell> + Clone {
+        let (cells, _) = self.selection_row(kind, line);
+        let end = to + 1;
+        let padding = if kind == SelectionKind::Block {
+            end.saturating_sub(from.max(cells.len()))
+        } else {
+            0
+        };
+        cells[from.min(cells.len())..end.min(cells.len())]
+            .iter()
+            .chain(std::iter::repeat_n(blank, padding))
     }
 
     /// A line or command-output selection's text with SGR sequences for its styles;
