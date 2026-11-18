@@ -3704,17 +3704,27 @@ impl App {
             return;
         }
         self.appearance = appearance;
+        self.apply_appearance_shown();
+        #[cfg(target_os = "linux")]
+        for index in 0..self.windows.len() {
+            self.with_window(index, |app| app.apply_appearance_shown());
+        }
+    }
+
+    /// Applies the automatic theme's current palette to the shown window's
+    /// terminals, when automatic theming is on.
+    fn apply_appearance_shown(&mut self) {
         if self.config.themes.automatic()
             && let Some(s) = &mut self.session
         {
             s.term
-                .set_palette(self.config.themes.palette(appearance).clone());
+                .set_palette(self.config.themes.palette(self.appearance).clone());
             let responses = s.term.take_responses();
             s.pty.write(&responses);
             s.window.request_redraw();
             for pane in self.tabs.iter_mut().flatten() {
                 pane.term
-                    .set_palette(self.config.themes.palette(appearance).clone());
+                    .set_palette(self.config.themes.palette(self.appearance).clone());
                 let responses = pane.term.take_responses();
                 pane.pty.write(&responses);
             }
@@ -3727,11 +3737,6 @@ impl App {
             let font_changed = spec != self.options.font(&self.config);
             let size_changed =
                 !self.options.font_size_override && next.font_size != self.config.font_size;
-            let size = if size_changed {
-                next.font_size
-            } else {
-                self.font_size
-            };
             let faces = if font_changed {
                 let (faces, warnings) = FontFaces::resolve(&spec).map_err(|e| {
                     format!(
@@ -3769,56 +3774,24 @@ impl App {
             #[cfg(target_os = "macos")]
             ime::set_command_chords(&self.config.bindings);
             self.watch_appearance();
-            if let Some(s) = &mut self.session {
-                self.icons_latest = None;
-                self.icons
-                    .apply(&s.window, self.config.app_icon, self.config.menu_bar_icon);
-                s.pty
-                    .set_command_notifications(self.config.notify_long_commands_after != 0)?;
-                s.term
-                    .set_palette(self.config.themes.palette(self.appearance).clone());
-                let responses = s.term.take_responses();
-                s.pty.write(&responses);
-                let scrollback = self.options.scrollback(&self.config);
-                configure_term(&mut s.term, &self.config, scrollback);
-                if let Some(search) = &mut self.search {
-                    search.dirty = true;
-                }
-                release_freed_memory(&mut s.term);
-                for pane in self.tabs.iter_mut().flatten() {
-                    pane.pty
-                        .set_command_notifications(self.config.notify_long_commands_after != 0)?;
-                    pane.term
-                        .set_palette(self.config.themes.palette(self.appearance).clone());
-                    let responses = pane.term.take_responses();
-                    pane.pty.write(&responses);
-                    configure_term(&mut pane.term, &self.config, scrollback);
-                    release_freed_memory(&mut pane.term);
-                }
-                if next_vsync_off {
-                    warn_vsync_unsupported(&self.config, &s.renderer);
-                }
-                s.renderer.set_vsync(self.config.vsync);
-                if font_changed {
-                    s.fonts = Fonts::new(&self.faces, size * s.window.scale_factor() as f32);
-                    s.renderer.clear_glyph_cache();
-                    #[cfg(target_os = "macos")]
-                    for pane in self.tabs.iter_mut().flatten() {
-                        let tab = &mut pane.window;
-                        let px = size * tab.window.scale_factor() as f32;
-                        tab.fonts = Fonts::new(&self.faces, px);
-                        tab.renderer.clear_glyph_cache();
-                    }
-                }
-                #[cfg(target_os = "macos")]
-                for pane in self.tabs.iter_mut().flatten() {
-                    pane.window.renderer.set_vsync(self.config.vsync);
-                }
-            }
+            self.apply_config_shown(font_changed, size_changed, next_vsync_off)?;
             if size_changed {
-                self.set_font_size(size);
+                self.set_font_size(self.config.font_size);
             }
             self.resize_grid();
+            #[cfg(target_os = "linux")]
+            for index in 0..self.windows.len() {
+                self.with_window(index, |app| {
+                    let _ = app.apply_config_shown(font_changed, size_changed, next_vsync_off);
+                    if size_changed {
+                        app.set_font_size(app.config.font_size);
+                    }
+                    app.resize_grid();
+                    if let Some(s) = &app.session {
+                        s.window.request_redraw();
+                    }
+                });
+            }
             Ok(())
         });
         self.config_error = result.err();
@@ -3828,6 +3801,70 @@ impl App {
         if let Some(s) = &self.session {
             s.window.request_redraw();
         }
+    }
+
+    /// Applies a just-loaded config to the window the fields currently show: command
+    /// notifications, palette, scrollback, vsync, icons and, when the font changed,
+    /// rebuilt fonts at the window's size.
+    fn apply_config_shown(
+        &mut self,
+        font_changed: bool,
+        size_changed: bool,
+        next_vsync_off: bool,
+    ) -> Result<(), String> {
+        let Some(s) = &mut self.session else {
+            return Ok(());
+        };
+        let size = if size_changed {
+            self.config.font_size
+        } else {
+            self.font_size
+        };
+        self.icons_latest = None;
+        self.icons
+            .apply(&s.window, self.config.app_icon, self.config.menu_bar_icon);
+        s.pty
+            .set_command_notifications(self.config.notify_long_commands_after != 0)?;
+        s.term
+            .set_palette(self.config.themes.palette(self.appearance).clone());
+        let responses = s.term.take_responses();
+        s.pty.write(&responses);
+        let scrollback = self.options.scrollback(&self.config);
+        configure_term(&mut s.term, &self.config, scrollback);
+        if let Some(search) = &mut self.search {
+            search.dirty = true;
+        }
+        release_freed_memory(&mut s.term);
+        for pane in self.tabs.iter_mut().flatten() {
+            pane.pty
+                .set_command_notifications(self.config.notify_long_commands_after != 0)?;
+            pane.term
+                .set_palette(self.config.themes.palette(self.appearance).clone());
+            let responses = pane.term.take_responses();
+            pane.pty.write(&responses);
+            configure_term(&mut pane.term, &self.config, scrollback);
+            release_freed_memory(&mut pane.term);
+        }
+        if next_vsync_off {
+            warn_vsync_unsupported(&self.config, &s.renderer);
+        }
+        s.renderer.set_vsync(self.config.vsync);
+        if font_changed {
+            s.fonts = Fonts::new(&self.faces, size * s.window.scale_factor() as f32);
+            s.renderer.clear_glyph_cache();
+            #[cfg(target_os = "macos")]
+            for pane in self.tabs.iter_mut().flatten() {
+                let tab = &mut pane.window;
+                let px = size * tab.window.scale_factor() as f32;
+                tab.fonts = Fonts::new(&self.faces, px);
+                tab.renderer.clear_glyph_cache();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        for pane in self.tabs.iter_mut().flatten() {
+            pane.window.renderer.set_vsync(self.config.vsync);
+        }
+        Ok(())
     }
 
     /// Handles terminal shortcuts; true if the key was consumed.
