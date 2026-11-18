@@ -1485,7 +1485,11 @@ impl Terminal {
     ///
     /// May panic if `row` is outside `0..self.rows()`.
     pub fn viewport_row(&self, row: usize) -> Cow<'_, Row> {
-        self.padded_line(self.viewport_to_point(row, 0).line)
+        if let Some(row) = row.checked_sub(self.display_offset) {
+            Cow::Borrowed(&self.screen().lines[row])
+        } else {
+            self.padded_line(self.viewport_to_point(row, 0).line)
+        }
     }
 
     /// Converts a zero-based viewport cell to an absolute position.
@@ -1510,7 +1514,11 @@ impl Terminal {
 
     /// Returns a row as in [`Self::viewport_row`], clamping its signed index to retained history and screen.
     pub fn viewport_row_signed(&self, row: isize) -> Cow<'_, Row> {
-        self.padded_line(self.viewport_to_point_signed(row, 0).line)
+        if (row as usize) < self.rows {
+            self.viewport_row(row as usize)
+        } else {
+            self.padded_line(self.viewport_to_point_signed(row, 0).line)
+        }
     }
 
     fn first_line(&self) -> u64 {
@@ -1523,10 +1531,15 @@ impl Terminal {
         if row.cells.len() == self.cols {
             Cow::Borrowed(row)
         } else {
-            let mut row = row.clone();
-            row.pad_to(self.cols);
-            Cow::Owned(row)
+            Cow::Owned(self.pad_history_row(row))
         }
+    }
+
+    #[cold]
+    fn pad_history_row(&self, row: &Row) -> Row {
+        let mut row = row.clone();
+        row.pad_to(self.cols);
+        row
     }
 
     fn line(&self, line: u64) -> &Row {
