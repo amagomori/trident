@@ -36,6 +36,7 @@ mod prompt_input;
 pub use prompt_input::{PromptInput, PromptInputContext};
 mod reflow;
 mod rerun;
+mod xcolor;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
@@ -453,8 +454,8 @@ struct Reports {
     checksums: bool,
     /// DEC private modes saved with XTSAVE (`CSI ? Pm s`) for XTRESTORE (`CSI ? Pm r`).
     saved_modes: Vec<(u16, bool)>,
-    /// The body of a DECRQSS request (`DCS $ q Pt ST`) while it is being received.
-    status_request: Option<Vec<u8>>,
+    /// The body and intermediate of a DCS status request while it is being received.
+    status_request: Option<(u8, Vec<u8>)>,
 }
 
 impl Terminal {
@@ -1318,8 +1319,12 @@ impl Terminal {
     }
 
     /// Switches the palette; with mode 2031 set, a dark/light change is reported.
-    pub fn set_palette(&mut self, palette: colors::Palette) {
+    pub fn set_palette(&mut self, mut palette: colors::Palette) {
         let changed = palette.is_dark() != self.palette.is_dark();
+        palette.dynamic_base[0] = palette.foreground;
+        palette.dynamic_base[1] = palette.background;
+        palette.dynamic_base[2] = palette.cursor;
+        palette.dynamic_base[7] = palette.selection;
         self.palette = palette;
         if changed && self.modes.color_scheme_updates {
             self.report_color_scheme();

@@ -1,4 +1,6 @@
-use super::{Charset, Color, CursorShape, Flags, MouseMode, Progress, Terminal, UnderlineStyle};
+use super::{
+    Charset, Color, CursorShape, Flags, MouseMode, Progress, Terminal, UnderlineStyle, xcolor,
+};
 use vte::{Params, Perform};
 
 /// The first value of each parameter, with 0 / missing replaced by `default`.
@@ -11,6 +13,30 @@ fn arg(params: &Params, index: usize, default: u16) -> u16 {
 
 /// DA1 reply: VT220 with ANSI color.
 const DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+const DYNAMIC_REPLIES: [&[u8]; 10] = [
+    b"10", b"11", b"12", b"13", b"14", b"15", b"16", b"17", b"18", b"19",
+];
+
+fn decimal(value: &[u8]) -> Option<usize> {
+    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(value.iter().fold(0usize, |n, &d| {
+        n.saturating_mul(10).saturating_add(usize::from(d - b'0'))
+    }))
+}
+
+fn dynamic_code(value: &[u8]) -> Option<usize> {
+    decimal(value).and_then(|code| (10..20).contains(&code).then(|| code - 10))
+}
+
+fn reset_dynamic_code(value: &[u8]) -> Option<usize> {
+    decimal(value).and_then(|code| (110..120).contains(&code).then(|| code - 110))
+}
+
+fn dynamic_reply(index: usize) -> &'static [u8] {
+    DYNAMIC_REPLIES[index]
+}
 
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
@@ -231,14 +257,15 @@ impl Perform for Terminal {
     #[inline(never)]
     fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.reports.status_request =
-            (!ignore && intermediates == b"$" && action == 'q').then(Vec::new);
+            (!ignore && matches!(intermediates, [b'$'] | [b'+']) && action == 'q')
+                .then(|| (intermediates[0], Vec::new()));
     }
 
     #[cold]
     #[inline(never)]
     fn put(&mut self, byte: u8) {
-        if let Some(request) = &mut self.reports.status_request
-            && request.len() < 8
+        if let Some((_, request)) = &mut self.reports.status_request
+            && request.len() < 16
         {
             request.push(byte);
         }
@@ -247,8 +274,12 @@ impl Perform for Terminal {
     #[cold]
     #[inline(never)]
     fn unhook(&mut self) {
-        if let Some(request) = self.reports.status_request.take() {
-            self.report_setting(&request);
+        if let Some((intermediate, request)) = self.reports.status_request.take() {
+            if intermediate == b'+' {
+                self.report_xterm_setting(&request);
+            } else {
+                self.report_setting(&request);
+            }
         }
     }
 
@@ -298,18 +329,21 @@ impl Perform for Terminal {
                 self.title = Some(title);
                 self.title_changed = true;
             }
-            [code @ (b"10" | b"11" | b"12"), b"?"] => {
-                let (r, g, b) = match *code {
-                    b"11" => self.palette.background,
-                    b"12" => self.palette.cursor,
-                    _ => self.palette.foreground,
-                };
-                let reply = format!(
-                    "\x1b]{};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}",
-                    String::from_utf8_lossy(code)
-                );
-                self.responses.extend_from_slice(reply.as_bytes());
-                self.responses.extend_from_slice(terminator);
+            [b"4", rest @ ..] if rest.len() >= 2 && rest.len() % 2 == 0 => {
+                self.osc_indexed_colors(rest, terminator);
+            }
+            [b"5", rest @ ..] if rest.len() >= 2 && rest.len() % 2 == 0 => {
+                self.osc_special_colors(rest, terminator);
+            }
+            [code, specs @ ..] if dynamic_code(code).is_some() && !specs.is_empty() => {
+                self.osc_dynamic_colors(dynamic_code(code).unwrap(), specs, terminator);
+            }
+            [b"104", indexes @ ..] => self.reset_indexed_colors(indexes),
+            [b"105", indexes @ ..] => self.reset_special_colors(indexes),
+            [code] => {
+                if let Some(code) = reset_dynamic_code(code) {
+                    self.reset_dynamic_color(code);
+                }
             }
             _ => {}
         }
@@ -319,6 +353,178 @@ impl Perform for Terminal {
 }
 
 impl Terminal {
+    fn osc_indexed_colors(&mut self, args: &[&[u8]], terminator: &[u8]) {
+        for pair in args.as_chunks::<2>().0 {
+            let Some(index) = decimal(pair[0]) else {
+                return;
+            };
+            if pair[1] == b"?" {
+                let Some(color) = self.indexed_color(index) else {
+                    return;
+                };
+                self.report_osc_color(b"4", Some(index), color, terminator);
+            } else if let Some(color) = xcolor::parse(pair[1]) {
+                if index < 256 {
+                    self.palette.ansi_overrides[index] = Some(color);
+                } else if (256..261).contains(&index) {
+                    self.palette.special[index - 256] = Some(color);
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+    }
+
+    fn osc_special_colors(&mut self, args: &[&[u8]], terminator: &[u8]) {
+        for pair in args.as_chunks::<2>().0 {
+            let Some(index) = decimal(pair[0]) else {
+                return;
+            };
+            if index >= 5 {
+                return;
+            }
+            if pair[1] == b"?" {
+                self.report_osc_color(b"5", Some(index), self.special_color(index), terminator);
+            } else if let Some(color) = xcolor::parse(pair[1]) {
+                self.palette.special[index] = Some(color);
+            } else {
+                return;
+            }
+        }
+    }
+
+    fn osc_dynamic_colors(&mut self, code: usize, specs: &[&[u8]], terminator: &[u8]) {
+        for (offset, spec) in specs.iter().enumerate() {
+            let code = code + offset;
+            if code >= 10 {
+                return;
+            }
+            if *spec == b"?" {
+                self.report_osc_color(
+                    dynamic_reply(code),
+                    None,
+                    self.dynamic_color(code),
+                    terminator,
+                );
+            } else if let Some(color) = xcolor::parse(spec) {
+                self.set_dynamic_color(code, color);
+            } else {
+                return;
+            }
+        }
+    }
+
+    fn indexed_color(&self, index: usize) -> Option<crate::colors::Rgb> {
+        match index {
+            0..=255 => Some(self.palette.ansi_overrides[index].unwrap_or_else(|| {
+                if index < 16 {
+                    self.palette.ansi[index]
+                } else {
+                    crate::colors::indexed(index as u8)
+                }
+            })),
+            256..=260 => Some(self.special_color(index - 256)),
+            _ => None,
+        }
+    }
+
+    fn special_color(&self, index: usize) -> crate::colors::Rgb {
+        self.palette.special[index].unwrap_or(self.palette.foreground)
+    }
+
+    fn dynamic_color(&self, index: usize) -> crate::colors::Rgb {
+        self.palette.dynamic[index].unwrap_or(match index {
+            0 => self.palette.foreground,
+            1 => self.palette.background,
+            2 => self.palette.cursor,
+            _ => self.palette.dynamic_base[index],
+        })
+    }
+
+    fn set_dynamic_color(&mut self, index: usize, color: crate::colors::Rgb) {
+        self.palette.dynamic[index] = Some(color);
+        match index {
+            0 => self.palette.foreground = color,
+            1 => self.palette.background = color,
+            2 => self.palette.cursor = color,
+            7 => self.palette.selection = color,
+            _ => {}
+        }
+    }
+
+    fn reset_indexed_colors(&mut self, indexes: &[&[u8]]) {
+        if indexes.is_empty() || indexes == [b""] {
+            self.palette.ansi_overrides = [None; 256];
+            return;
+        }
+        for index in indexes {
+            let Some(index) = decimal(index) else { return };
+            if index < 256 {
+                self.palette.ansi_overrides[index] = None;
+            } else if (256..261).contains(&index) {
+                self.palette.special[index - 256] = None;
+            } else {
+                return;
+            }
+        }
+    }
+
+    fn reset_special_colors(&mut self, indexes: &[&[u8]]) {
+        if indexes.is_empty() || indexes == [b""] {
+            self.palette.special = [None; 5];
+            return;
+        }
+        for index in indexes {
+            let Some(index) = decimal(index) else { return };
+            if index >= 5 {
+                return;
+            }
+            self.palette.special[index] = None;
+        }
+    }
+
+    fn reset_dynamic_color(&mut self, index: usize) {
+        self.palette.dynamic[index] = None;
+        let color = self.palette.dynamic_base[index];
+        match index {
+            0 => self.palette.foreground = color,
+            1 => self.palette.background = color,
+            2 => self.palette.cursor = color,
+            7 => self.palette.selection = color,
+            _ => {}
+        }
+    }
+
+    fn report_osc_color(
+        &mut self,
+        command: &[u8],
+        index: Option<usize>,
+        color: crate::colors::Rgb,
+        terminator: &[u8],
+    ) {
+        let (r, g, b) = color;
+        let mut reply = format!("\x1b]{}", String::from_utf8_lossy(command));
+        if let Some(index) = index {
+            reply.push_str(&format!(";{index}"));
+        }
+        reply.push_str(&format!(
+            ";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}"
+        ));
+        self.responses.extend_from_slice(reply.as_bytes());
+        self.responses.extend_from_slice(terminator);
+    }
+
+    fn report_xterm_setting(&mut self, request: &[u8]) {
+        let reply = if request == b"436F" {
+            "\x1bP1+r436F=323536\x1b\\"
+        } else {
+            "\x1bP0+r\x1b\\"
+        };
+        self.responses.extend_from_slice(reply.as_bytes());
+    }
+
     /// `ConEmu` progress (`OSC 9 ; 4 ; state ; percent`): 0 removes it, 1 sets a
     /// percentage, 2 marks an error, 3 is indeterminate and 4 paused. An error or pause
     /// without a percentage keeps the last one; percentages over 100 count as 100.
