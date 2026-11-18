@@ -7,12 +7,12 @@ desktop session. Use `--xvfb` only for a smoke check.
 
 | Script | Checks |
 | --- | --- |
-| `close_owner.py` | Selection contents after closing the window the clipboard is bound to and a window it is not bound to, under Trident ownership and under another application's, plus a fresh store after the rebind. Exits 1 on any mismatch. |
+| `close_owner.py` | Selection contents after closing the window the clipboard is bound to and a window it is not bound to, under Trident ownership and under another application's, plus a fresh store after the rebind. The external owner (`external_owner.py`) serves Trident's exact plain text plus a custom `text/x-qa-payload` target, so a stolen selection is caught by the dropped payload even when the text reads the same. Exits 1 on any mismatch. |
 
 ## Prerequisites
 
-- `xdotool`, `xclip` and a running window manager in the session. For `--xvfb`, `Xvfb` and
-  `openbox`.
+- `xdotool`, `xclip`, `python3-xlib` and a running window manager in the session. For `--xvfb`,
+  `Xvfb` and `openbox`.
 
 ## Run
 

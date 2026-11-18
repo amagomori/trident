@@ -41,11 +41,12 @@ def check(label, got, want):
     print(f"  ok: {label} -> {got!r}", flush=True)
 
 
-def xclip_read(env):
-    return subprocess.run(
-        ["xclip", "-selection", "clipboard", "-o"], env=env,
-        capture_output=True, text=True,
-    ).stdout
+def xclip_read(env, target=None):
+    cmd = ["xclip", "-selection", "clipboard"]
+    if target:
+        cmd += ["-t", target]
+    cmd += ["-o"]
+    return subprocess.run(cmd, env=env, capture_output=True, text=True).stdout
 
 
 def trident_windows(env):
@@ -174,18 +175,30 @@ def main():
         print("scenario: another app's selection survives either window closing")
         w4 = open_window(env)
         w5 = open_window(env)
-        xclip_hold = subprocess.Popen(
-            ["xclip", "-selection", "clipboard", "-i"], env=env,
-            stdin=subprocess.PIPE)
-        xclip_hold.stdin.write(b"EXTERNAL_CURRENT_MARKER")
-        xclip_hold.stdin.close()
+        # The external owner serves Trident's exact text as text/plain plus a
+        # custom target only it can answer: stealing the selection drops the
+        # payload even though the plain text stays byte-identical.
+        helper = os.path.join(os.path.dirname(__file__), "external_owner.py")
+        ext = subprocess.Popen(
+            ["python3", helper, "AFTER_REBIND_MARKER", "EXTERNAL_FORMAT_PAYLOAD"],
+            env=env)
         time.sleep(1)
-        check("external claim", xclip_read(env), "EXTERNAL_CURRENT_MARKER")
+        check("external claim, plain text", xclip_read(env),
+              "AFTER_REBIND_MARKER")
+        check("external claim, custom format",
+              xclip_read(env, "text/x-qa-payload"), "EXTERNAL_FORMAT_PAYLOAD")
         # w5 is shown but unbound; w2 holds the binding on every build.
         close_window(env, w5)
-        check("close unbound window", xclip_read(env), "EXTERNAL_CURRENT_MARKER")
+        check("close unbound window, plain text", xclip_read(env),
+              "AFTER_REBIND_MARKER")
+        check("close unbound window, custom format",
+              xclip_read(env, "text/x-qa-payload"), "EXTERNAL_FORMAT_PAYLOAD")
         close_window(env, w2)
-        check("close bound window", xclip_read(env), "EXTERNAL_CURRENT_MARKER")
+        check("close bound window, plain text", xclip_read(env),
+              "AFTER_REBIND_MARKER")
+        check("close bound window, custom format",
+              xclip_read(env, "text/x-qa-payload"), "EXTERNAL_FORMAT_PAYLOAD")
+        ext.terminate()
         print("PASS: all checks held")
     finally:
         proc.terminate()
