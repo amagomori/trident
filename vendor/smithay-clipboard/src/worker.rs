@@ -16,18 +16,18 @@ pub fn spawn(
     display: Connection,
     rx_chan: Channel<Command>,
     worker_replier: Sender<Result<String>>,
+    file_drops: crate::FileDrops,
 ) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name(name)
         .spawn(move || {
-            worker_impl(display, rx_chan, worker_replier);
+            worker_impl(display, rx_chan, worker_replier, file_drops);
         })
         .ok()
 }
 
 /// Clipboard worker thread command.
 pub enum Command {
-    FileDrops(crate::FileDrops),
     /// Store data to a clipboard.
     Store(String),
     /// Store data to a primary selection.
@@ -45,6 +45,7 @@ fn worker_impl(
     connection: Connection,
     rx_chan: Channel<Command>,
     reply_tx: Sender<Result<String>>,
+    file_drops: crate::FileDrops,
 ) {
     let (globals, event_queue) = match registry_queue_init(&connection) {
         Ok(data) => data,
@@ -54,8 +55,9 @@ fn worker_impl(
     let mut event_loop = EventLoop::<State>::try_new().unwrap();
     let loop_handle = event_loop.handle();
 
-    let mut state = match State::new(&globals, &event_queue.handle(), loop_handle.clone(), reply_tx)
-    {
+    let mut state = match State::new(
+        &globals, &event_queue.handle(), loop_handle.clone(), reply_tx, file_drops,
+    ) {
         Some(state) => state,
         None => return,
     };
@@ -85,7 +87,6 @@ fn worker_impl(
                             .reply_tx
                             .send(Err(Error::other("requested selection is not supported")));
                     },
-                    Command::FileDrops(handler) => state.file_drops = Some(handler),
                     Command::Exit => state.exit = true,
                 }
             }

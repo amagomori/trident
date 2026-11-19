@@ -232,7 +232,9 @@ doesn't run.
   the command. Your typed text and the path are kept.
 
 On Linux, Trident accepts local file drops from native Wayland and X11 file managers.
-On Wayland, no XWayland fallback or environment change is required.
+On Wayland, drop onto the window whose shell should receive the path; it does not
+need keyboard focus. Closing the first window does not disable drops to the others.
+No XWayland fallback or environment change is required.
 
 ## Wayland notes
 

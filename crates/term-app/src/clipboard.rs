@@ -76,10 +76,7 @@ pub struct Clipboard {
 }
 
 impl Clipboard {
-    pub fn new(
-        window: Arc<Window>,
-        _proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>,
-    ) -> Self {
+    pub fn new(window: Arc<Window>) -> Self {
         #[cfg(target_os = "linux")]
         let x11 = window.display_handle().is_ok_and(|display| {
             matches!(
@@ -100,15 +97,6 @@ impl Clipboard {
                     // it until after the clipboard backend and its worker are dropped.
                     let clipboard =
                         unsafe { smithay_clipboard::Clipboard::new(display.display.as_ptr()) };
-                    if let Ok(RawWindowHandle::Wayland(handle)) =
-                        window.window_handle().map(|h| h.as_raw())
-                    {
-                        clipboard.on_file_drop(handle.surface.as_ptr() as usize, move |data| {
-                            winit::platform::wayland::parse_uri_list(data).is_ok_and(|paths| {
-                                _proxy.send_event(crate::UserEvent::FileDrop(paths)).is_ok()
-                            })
-                        });
-                    }
                     Ok(Backend::Wayland(clipboard))
                 }
                 BackendKind::Arboard => arboard::Clipboard::new()
@@ -126,6 +114,31 @@ impl Clipboard {
             #[cfg(target_os = "linux")]
             _window: Some(window),
         }
+    }
+
+    /// Registers one session's surface without changing clipboard ownership.
+    #[cfg(target_os = "linux")]
+    pub fn file_drop_target(
+        &self,
+        window: &Arc<Window>,
+        proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>,
+    ) -> Option<smithay_clipboard::FileDropTarget> {
+        let Backend::Wayland(clipboard) = self.inner.as_ref()? else {
+            return None;
+        };
+        let RawWindowHandle::Wayland(handle) = window.window_handle().ok()?.as_raw() else {
+            return None;
+        };
+        let target = Arc::downgrade(window);
+        Some(
+            clipboard.on_file_drop(handle.surface.as_ptr() as usize, move |data| {
+                winit::platform::wayland::parse_uri_list(data).is_ok_and(|paths| {
+                    proxy
+                        .send_event(crate::UserEvent::FileDrop(target.clone(), paths))
+                        .is_ok()
+                })
+            }),
+        )
     }
 
     /// Points the held window at a still-live one before the window it was
