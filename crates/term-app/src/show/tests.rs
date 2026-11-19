@@ -596,6 +596,7 @@ fn tmux_chunks_precede_cells_and_do_not_move_the_cursor() {
     let image = noise(300, 300);
     let (mut term, cells) = virtual_replay(&image, in_tmux());
     assert_eq!(term.cursor_position(), Some((0, 0)));
+    term.advance(b"\x1b[58;5;77m");
     term.advance(&cells);
     let runs = term.visible_placements();
     assert_eq!(runs.len(), 15);

@@ -818,6 +818,8 @@ fn write_placeholders(
         }
         bands.push((nr, band));
     }
+    // An inherited underline color would select a different virtual placement.
+    out.write_all(b"\x1b[59m")?;
     for (nr, band) in bands {
         for row in &MARK[..nr] {
             for &(nc, low, high) in &band {
