@@ -273,7 +273,12 @@ picks the type from the file's contents, not its name:
 - Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG) are drawn shrunk to fit
   the window. GIFs show their first frame.
 - Text files are printed with control characters made visible.
-- Other files get a one-line summary, such as `ELF executable, 16.2 KiB`.
+- For other files, Trident asks Quick Look on macOS or an installed
+  freedesktop thumbnailer on Linux for a preview. For example, on Ubuntu,
+  `ffmpegthumbnailer` previews videos, `gnome-font-viewer` previews fonts, and
+  `libgsf-bin` extracts embedded Office thumbnails. If no helper can preview
+  the file within five seconds, you get the usual summary, such as
+  `ELF executable, 16.2 KiB`.
 
 A missing, unreadable or corrupt file prints an error, and the command exits with status 1. For
 sample files, see `crates/term-app/samples`.
