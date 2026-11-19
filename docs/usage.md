@@ -301,6 +301,8 @@ need for images. It sends pixels once, then writes Kitty Unicode placeholder cel
 tmux can restore the visible part of an image in copy-mode. This requires a terminal
 that supports Kitty virtual placements and a client with at least 256 colors. Images that
 are no longer visible can be evicted when Trident reaches its image-memory limit.
+Each tmux server allocates up to 61,200 tile IDs across `show` invocations.
+At that limit `show` reports an error rather than overwriting older history.
 To turn passthrough on for every pane, add this line to `~/.tmux.conf`:
 
 ```text

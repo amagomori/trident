@@ -679,7 +679,7 @@ fn write_kitty(
     mut wait: impl FnMut(),
 ) -> io::Result<()> {
     if window.tmux {
-        return write_placeholders(out, image, window, wait);
+        return write_placeholders(out, image, window, wait, reserve_tile_ids);
     }
     let mut compressed = ZlibEncoder::new(Vec::new(), Compression::fast());
     compressed.write_all(&image.pixels)?;
@@ -724,6 +724,37 @@ fn send_chunks(
     Ok(())
 }
 
+// Indexed color avoids tmux RGB quantization. The high ID byte uses a diacritic.
+const TILE_IDS: usize = 240 * 255;
+
+/// Reserves a disjoint sequence across all `show` processes in one tmux server.
+/// Both commands execute in one non-yielding tmux command list. Never recycle an
+/// index: even an evicted tile may still have placeholders in pane history.
+fn reserve_tile_ids(count: usize) -> io::Result<usize> {
+    let counter = "@trident-image-sequence";
+    let increment = format!("#{{e|+|:#{{?{counter},#{{{counter}}},0}},{count}}}");
+    let response = tmux(&[
+        "set",
+        "-sF",
+        counter,
+        &increment,
+        ";",
+        "display",
+        "-p",
+        "#{pid}:#{@trident-image-sequence}",
+    ])
+    .ok_or_else(|| io::Error::other("could not reserve image IDs in tmux"))?;
+    let (pid, end) = response
+        .trim()
+        .split_once(':')
+        .and_then(|(p, e)| Some((p.parse::<usize>().ok()?, e.parse::<usize>().ok()?)))
+        .ok_or_else(|| io::Error::other("tmux did not return an image ID range"))?;
+    if end > TILE_IDS || end < count {
+        return Err(io::Error::other("tmux image ID range exhausted"));
+    }
+    Ok((pid % TILE_IDS + end - count) % TILE_IDS)
+}
+
 /// Use indexed colors (even without RGB passthrough) and the high-ID diacritic.
 /// Each tile fits the protocol's row/column table. Send *all* tiles before the
 /// first text redraw: tmux can discard passthrough while catching up on a redraw.
@@ -732,10 +763,9 @@ fn write_placeholders(
     image: &Rgba,
     window: Window,
     mut wait: impl FnMut(),
+    reserve: impl FnOnce(usize) -> io::Result<usize>,
 ) -> io::Result<()> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use term_core::placeholder::{CHAR, DIACRITICS as MARK};
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let cell_w = window.cell_w.max(1.0);
     let cell_h = window.cell_h.max(1.0);
     let cols = (image.width as f32 / cell_w).ceil() as usize;
@@ -748,6 +778,7 @@ fn write_placeholders(
         .len()
         .min((MAX_SIDE as f32 / cell_h).floor() as usize)
         .max(1);
+    let mut next_id = reserve(cols.div_ceil(tile_cols) * rows.div_ceil(tile_rows))?;
     let mut bands = Vec::new();
     for top in (0..rows).step_by(tile_rows) {
         let nr = (rows - top).min(tile_rows);
@@ -772,12 +803,9 @@ fn write_placeholders(
             for _ in actual_h..height {
                 z.write_all(&zeros)?;
             }
-            // Separate sequential show processes as well as tiles within one invocation.
-            let key = (std::process::id() as usize)
-                .wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed).wrapping_mul(8191))
-                % (240 * 255);
-            let low = 16 + key % 240;
-            let high = 1 + key / 240;
+            let low = 16 + next_id % 240;
+            let high = 1 + next_id / 240;
+            next_id = (next_id + 1) % TILE_IDS;
             let id = (high << 24) | low;
             send_chunks(
                 out,

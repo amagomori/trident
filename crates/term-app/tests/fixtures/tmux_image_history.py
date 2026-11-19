@@ -67,9 +67,14 @@ def frame(name):
 try:
     pump(.4)
     assert ctl("display", "-p", "#{pane_width}x#{pane_height}") == "158x40"
+    # Reserve the last available IDs; wrapping to the start could corrupt an
+    # earlier image still reachable in history.
+    tiles = 2 if "tall" in Path(png).name else 1
+    ctl("set", "-s", "@trident-image-sequence", str(240 * 255 - tiles))
     Path("start").touch()
     until("done")
     assert Path("done").read_text().strip() == "0"
+    assert int(ctl("show", "-sv", "@trident-image-sequence")) == 240 * 255
     frame("live")
     Path("scroll").touch()
     until("scrolled")

@@ -553,7 +553,17 @@ fn in_tmux() -> Window {
 fn virtual_replay(image: &Rgba, window: Window) -> (Terminal, Vec<u8>) {
     let mut out = Vec::new();
     let mut chunks = 0;
-    write_kitty(&mut out, image, window, || chunks += 1).unwrap();
+    write_placeholders(
+        &mut out,
+        image,
+        window,
+        || chunks += 1,
+        |count| {
+            assert!(count > 0);
+            Ok(TILE_IDS - 1)
+        },
+    )
+    .unwrap();
     let mut term = Terminal::new(window.cols as usize, window.rows as usize);
     term.set_cell_pixel_size(window.cell_w, window.cell_h);
     let mut rest = out.as_slice();
