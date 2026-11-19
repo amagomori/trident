@@ -225,15 +225,17 @@ accept drops from X11 apps. Drops from native Wayland apps aren't supported.
 
 Trident runs natively on Wayland and on X11 (including XWayland). On Wayland:
 
-- Client-side decorations and the X11 `_GTK_THEME_VARIANT` hint follow the desktop's
-  dark or light color scheme through the `org.freedesktop.appearance` portal.
+- When `theme` follows the OS appearance (`theme = "auto"` or a `light`/`dark`
+  pair), client-side decorations and the X11 `_GTK_THEME_VARIANT` hint track the
+  desktop's color scheme through the `org.freedesktop.appearance` portal. A fixed
+  `theme` keeps the platform's default decorations.
 - Fractional scaling works; moving the window between monitors re-renders at the new
   scale.
 - The window icon comes from the installed `trident.desktop` entry and icon theme, not
   the `app_icon` setting, which Wayland has no protocol for.
-- Primary selection needs the `zwp_primary_selection_v1` protocol. KDE and wlroots
-  compositors have it; GNOME does not, so select-to-copy and middle-click paste do
-  nothing there — use Ctrl+Shift+C/V and the regular clipboard.
+- Primary selection (select-to-copy, middle-click paste) uses the
+  `zwp_primary_selection_v1` protocol, which GNOME, KDE and wlroots compositors
+  provide. On a compositor without it, use Ctrl+Shift+C/V and the regular clipboard.
 - The compositor owns window position: Trident can restore its size, not its place.
 - Drops from native Wayland apps aren't supported yet (see above).
 
