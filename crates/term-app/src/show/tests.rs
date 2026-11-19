@@ -196,7 +196,7 @@ fn show_uploads_lossless_blended_webp_pixels_exactly() {
 
     let frame = term.image(id).unwrap();
     assert_eq!((frame.width, frame.height), (48, 32));
-    for (i, pixel) in frame.pixels.chunks_exact(4).enumerate() {
+    for (i, &pixel) in frame.pixels.as_chunks::<4>().0.iter().enumerate() {
         let (x, y) = (i % 48, i / 48);
         let expected = if (2..8).contains(&x) && y < 16 {
             [255, 0, 0, 255]
