@@ -212,9 +212,9 @@ enum UserEvent {
     /// The PTY of the tab with this pane id exited.
     Exit(u64),
     /// A second `trident` run forwarded a new-window request: its working
-    /// directory, environment and `-e` command.
+    /// directory, environment and `-e` command words (byte-exact).
     #[cfg(target_os = "linux")]
-    OpenWindow(Option<PathBuf>, Vec<(String, String)>, Vec<String>),
+    OpenWindow(Option<PathBuf>, Vec<(String, String)>, Vec<OsString>),
     PagerFailed(String),
     #[cfg(target_os = "macos")]
     Presented,
@@ -2049,10 +2049,10 @@ impl App {
     }
 
     /// Starts the shell for the tab with pane id `id`, its events tagged with that id.
-    fn spawn_pty(
+    fn spawn_pty<S: AsRef<std::ffi::OsStr>>(
         &self,
         id: u64,
-        command: &[String],
+        command: &[S],
         cwd: Option<&std::path::Path>,
         env_overlay: &[(String, String)],
         grid: (usize, usize, (f32, f32)),
@@ -2302,7 +2302,7 @@ impl App {
         event_loop: &ActiveEventLoop,
         cwd: Option<PathBuf>,
         env: Vec<(String, String)>,
-        command: Vec<String>,
+        command: Vec<OsString>,
     ) {
         let Some(s) = &self.session else { return };
         let attrs = Window::default_attributes()
@@ -2327,8 +2327,13 @@ impl App {
         let (cols, rows) = (s.term.cols(), s.term.rows());
         self.next_pane += 1;
         let id = self.next_pane;
-        let shell = self.options.command(&self.config, false);
-        let command = if command.is_empty() { shell } else { &command };
+        let shell: Vec<OsString> = self
+            .options
+            .command(&self.config, false)
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let command: &[OsString] = if command.is_empty() { &shell } else { &command };
         let pty = match self.spawn_pty(id, command, cwd.as_deref(), &env, (cols, rows, cell)) {
             Ok(pty) => pty,
             Err(error) => {
@@ -5791,8 +5796,24 @@ fn main() {
         // directory, environment and `-e` command, and exit. Options a forwarded
         // window cannot honor — another config file, font, scrollback and the
         // like — start a standalone process instead.
-        let request = parse_args_from(std::env::args().skip(1))
+        // `-e`'s words keep their raw bytes (non-UTF-8 arguments survive the
+        // hop); the options ahead of it still parse as text, and anything the
+        // forwarded window cannot honor — another config file, font,
+        // scrollback and the like — starts a standalone process instead.
+        let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        let split = args
+            .iter()
+            .position(|arg| arg == "-e" || arg == "--command");
+        let (head, command): (&[OsString], Vec<OsString>) = match split {
+            Some(at) => (&args[..at], args[at + 1..].to_vec()),
+            None => (&args, Vec::new()),
+        };
+        let request = head
+            .iter()
+            .map(|arg| arg.clone().into_string())
+            .collect::<Result<Vec<_>, _>>()
             .ok()
+            .and_then(|head| parse_args_from(head).ok())
             .filter(|options| {
                 options.config_path == config::default_path()
                     && !options.font_size_override
@@ -5800,15 +5821,17 @@ fn main() {
                     && options.font.is_none()
                     && !options.copy_on_select
                     && options.window_cells.is_none()
+                    // `-e` without a command is a parse error, not a request.
+                    && (split.is_none() || !command.is_empty())
             });
-        if let Some(options) = request {
+        if request.is_some() {
             let cwd = std::env::current_dir().unwrap_or_default();
             let env = std::env::vars_os()
                 .filter_map(|(key, value)| {
                     Some((key.into_string().ok()?, value.into_string().ok()?))
                 })
                 .collect::<Vec<_>>();
-            if ipc::forward(std::path::Path::new(&socket), &cwd, &env, &options.command) {
+            if ipc::forward(std::path::Path::new(&socket), &cwd, &env, &command) {
                 return;
             }
         }
