@@ -2230,14 +2230,13 @@ impl App {
         self.windows[index] = g;
     }
 
-    /// Runs `f` against background window `index`, restoring the fields' window after.
-    /// The swapped-in window is not the focused one, so `f` sees `focused` false and
-    /// unfocused-only notifications still fire for it. Skips the restore when `f`
-    /// closed the shown window or swapped another one in.
+    /// Runs `f` with background window `index` shown but unfocused.
+    ///
+    /// Restores the original window even if closing the background window
+    /// brought a third window into the fields.
     #[cfg(target_os = "linux")]
     fn with_window(&mut self, index: usize, f: impl FnOnce(&mut App)) {
         self.swap_window(index);
-        let shown = self.session.as_ref().map(|s| s.window.id());
         let home = self
             .windows
             .get(index)
@@ -2246,13 +2245,6 @@ impl App {
         let focused = std::mem::replace(&mut self.focused, false);
         f(self);
         self.focused = focused;
-        if !self
-            .session
-            .as_ref()
-            .is_some_and(|s| Some(s.window.id()) == shown)
-        {
-            return;
-        }
         if let Some(pos) = self.windows.iter().position(|g| {
             g.session
                 .as_ref()
@@ -2326,24 +2318,15 @@ impl App {
     fn remove_current_window(&mut self, event_loop: &ActiveEventLoop) {
         match self.windows.pop() {
             Some(mut g) => {
-                // The clipboard keeps the window it serves its selections through
-                // alive: when that window is the one going away, rebind to the
-                // window now shown and offer again the text Trident last stored.
-                let rebind =
-                    self.clipboard.window_id() == self.session.as_ref().map(|s| s.window.id());
-                let copied = rebind.then(|| self.clipboard.stored().clone());
                 self.swap_group(&mut g);
-                drop(g);
-                if rebind && let Some(s) = &self.session {
-                    self.clipboard = clipboard::Clipboard::new(s.window.clone());
-                    if let Some(copied) = copied {
-                        for (primary, stored) in [false, true].into_iter().zip(copied) {
-                            if let Some((text, html)) = stored {
-                                self.clipboard.set(text, html, primary);
-                            }
-                        }
-                    }
+                // The clipboard keeps the window it was created through alive,
+                // so point it at the window now shown before the closed one
+                // drops. Its backend and offers survive the close unchanged,
+                // so a selection another application owns is never touched.
+                if let Some(s) = &self.session {
+                    self.clipboard.rebind(s.window.clone());
                 }
+                drop(g);
             }
             None => event_loop.exit(),
         }
@@ -3517,6 +3500,11 @@ impl App {
             self.clear_pager_error();
         }
         let Some(s) = &mut self.session else { return };
+        // KAM (ANSI mode 2) locks out typed input, so it also swallows IME
+        // commits, Send shortcuts and pastes, which arrive on the same path.
+        if s.term.modes.keyboard_locked {
+            return;
+        }
         if s.input_query.buffer(bytes) {
             return;
         }
@@ -5181,11 +5169,18 @@ impl App {
                 if event.state != ElementState::Pressed {
                     // Releases reach the PTY only where the press would: not past a
                     // dialog or search, and without write_input's scroll reset.
-                    if kitty_flags != 0
-                        && self.pending_close.is_none()
-                        && self.pending_paste.is_none()
-                        && self.search.is_none()
-                    {
+                    let locked = self
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.term.modes.keyboard_locked);
+                    if forwards_key_event(
+                        kitty_flags,
+                        true,
+                        self.pending_close.is_some()
+                            || self.pending_paste.is_some()
+                            || self.search.is_some(),
+                        locked,
+                    ) {
                         let base = event.key_without_modifiers();
                         if let Some(bytes) = input::encode_kitty_key(
                             &input::KeyEvent {
@@ -5197,6 +5192,9 @@ impl App {
                             input::KeyEventKind::Release,
                             kitty_flags,
                             self.options.option_as_alt,
+                            self.session
+                                .as_ref()
+                                .is_some_and(|s| s.term.modes.backarrow_sends_bs),
                         ) && let Some(s) = &mut self.session
                         {
                             s.pty.write(&bytes);
@@ -5228,6 +5226,11 @@ impl App {
                     return;
                 }
                 let Some(s) = &self.session else { return };
+                // KAM (ANSI mode 2) locks out typed input; terminal shortcuts
+                // still work so the lock is always escapable.
+                if s.term.modes.keyboard_locked {
+                    return;
+                }
                 let base = event.key_without_modifiers();
                 let kind = if event.repeat {
                     input::KeyEventKind::Repeat
@@ -5242,6 +5245,7 @@ impl App {
                         self.modifiers,
                         s.term.modes.app_cursor,
                         self.options.option_as_alt,
+                        s.term.modes.backarrow_sends_bs,
                     )
                 } else {
                     input::encode_kitty_key(
@@ -5254,6 +5258,7 @@ impl App {
                         kind,
                         kitty_flags,
                         self.options.option_as_alt,
+                        s.term.modes.backarrow_sends_bs,
                     )
                 };
                 if let Some(bytes) = bytes {
@@ -5452,17 +5457,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.output_ready()
             }
             UserEvent::Output(id) => self.output_elsewhere(id),
-            #[cfg(target_os = "linux")]
-            UserEvent::Exit(id) if self.window_of_pane(id).is_some() => {
-                let index = self.window_of_pane(id).unwrap();
-                if self.windows[index].tabs.len() <= 1 {
-                    // The window's only tab exited: close the window outright.
-                    self.windows.remove(index);
-                } else {
+            UserEvent::Exit(id) => {
+                #[cfg(target_os = "linux")]
+                if let Some(index) = self.window_of_pane(id) {
                     self.with_window(index, |app| app.pane_exited(id, event_loop));
+                    return;
                 }
+                self.pane_exited(id, event_loop);
             }
-            UserEvent::Exit(id) => self.pane_exited(id, event_loop),
             #[cfg(target_os = "macos")]
             UserEvent::Presented => {
                 if self.exit_deadline.is_none()
@@ -5786,6 +5788,22 @@ fn main() {
     }
 }
 
+/// Whether a key event reaches the PTY: the modal layers (close and paste
+/// confirmations, search) and KAM's keyboard lock swallow both presses and
+/// releases, and releases only go out while Kitty event-type reporting asks
+/// for them.
+fn forwards_key_event(
+    kitty_flags: u8,
+    release: bool,
+    modal_open: bool,
+    keyboard_locked: bool,
+) -> bool {
+    if modal_open || keyboard_locked {
+        return false;
+    }
+    !release || kitty_flags != 0
+}
+
 /// How long a pager window waits for its pager's exit status once its output has ended.
 const PAGER_STATUS_WAIT: Duration = Duration::from_millis(500);
 
@@ -5809,6 +5827,21 @@ mod tests {
     fn drawn_tab_bar_gives_way_to_native_tabs_on_macos() {
         assert!(!tab_bar_drawn(false));
         assert_eq!(tab_bar_drawn(true), !cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn keyboard_lock_swallows_presses_and_releases() {
+        // With Kitty event-type reporting on, an unlocked terminal forwards
+        // presses and releases alike; KAM (ANSI mode 2) swallows both.
+        let kitty_flags = 1;
+        assert!(forwards_key_event(kitty_flags, false, false, false));
+        assert!(forwards_key_event(kitty_flags, true, false, false));
+        assert!(!forwards_key_event(kitty_flags, false, false, true));
+        assert!(!forwards_key_event(kitty_flags, true, false, true));
+        // The lock and modal layers win over reporting, and without reporting
+        // an unlocked release stays local.
+        assert!(!forwards_key_event(kitty_flags, false, true, false));
+        assert!(!forwards_key_event(0, true, false, false));
     }
 
     #[test]

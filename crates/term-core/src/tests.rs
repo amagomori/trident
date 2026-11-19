@@ -1279,6 +1279,9 @@ fn reset_clears_everything() {
 
 #[test]
 fn backspace_after_last_column_moves_left() {
+    // BS cancels the do-wrap position and lands one cell left of it; a counted
+    // CUB instead spends a step on the cancel itself (see golden
+    // cub_wrap_pending).
     let t = term(5, 2, "abcde\x08X");
     assert_eq!(screen(&t), ["abcXe", ""]);
 }

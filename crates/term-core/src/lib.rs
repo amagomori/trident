@@ -315,6 +315,30 @@ pub struct Modes {
     pub synchronized_output: bool,
     /// Mode 2031: report color-scheme changes with `CSI ? 997 ; 1|2 n`.
     pub color_scheme_updates: bool,
+    /// ANSI mode 2 (KAM): typed input is not sent to the application.
+    pub keyboard_locked: bool,
+    /// Mode 4 (DECSCLM): smooth scrolling, stored for DECRQM.
+    pub smooth_scroll: bool,
+    /// Mode 5 (DECSCNM): reverse video, stored for DECRQM.
+    pub reverse_video: bool,
+    /// Mode 18 (DECPFF): a form feed ends a screen print.
+    pub print_form_feed: bool,
+    /// Mode 19 (DECPEX): printing covers the full screen, not the scroll region.
+    pub print_full_page: bool,
+    /// Mode 41: a tab in the do-wrap position wraps first (xterm's `more(1)` fix).
+    pub more_fix: bool,
+    /// Mode 42 (DECNRCM): national replacement charsets, stored for DECRQM.
+    pub national_charsets: bool,
+    /// Mode 45 (XTREVWRAP): BS/CUB wrap onto soft-wrapped lines (xterm ≥383).
+    pub reverse_wrap: bool,
+    /// Mode 66 (DECNKM): the keypad sends numeric-keypad sequences.
+    pub numeric_keypad: bool,
+    /// Mode 67 (DECBKM): the backarrow key sends BS rather than DEL.
+    pub backarrow_sends_bs: bool,
+    /// Mode 1045 (XTREVWRAP2): BS/CUB wrap anywhere inside the scroll region.
+    pub reverse_wrap_ext: bool,
+    /// Mode 12 (SRM): send-only, input is not echoed locally.
+    pub send_echo: bool,
 }
 
 /// A cell position in terminal history.
@@ -502,7 +526,6 @@ struct TitlePair {
 }
 
 /// Rarely used state for conformance reports, boxed to keep `Terminal`'s hot fields in place.
-#[derive(Default)]
 struct Reports {
     /// Whether DECRQCRA rectangle checksums are answered (off by default: they let any
     /// program that writes to the terminal read the screen back).
@@ -511,6 +534,35 @@ struct Reports {
     saved_modes: Vec<(u16, bool)>,
     /// The body and intermediate of a DCS status request while it is being received.
     status_request: Option<(u8, Vec<u8>)>,
+    /// DECSCL conformance level, 61-64. Levels below 63 silence DECRQM and DECRQSS.
+    conformance_level: u8,
+    /// DECSCL's control-representation parameter, echoed back by DECRQSS.
+    conformance_pc: u16,
+    /// DECRQSS-reportable settings, stored and echoed but not enacted: character
+    /// protection (`"q`), attribute-change extent (`*x`), status display (`$}`),
+    /// status-line type (`$~`) and lines per screen (`*|`).
+    decsca: u16,
+    decsace: u16,
+    decsasd: u16,
+    decssdt: u16,
+    decsnls: u16,
+}
+
+impl Default for Reports {
+    fn default() -> Reports {
+        Reports {
+            checksums: false,
+            saved_modes: Vec::new(),
+            status_request: None,
+            conformance_level: 64,
+            conformance_pc: 0,
+            decsca: 0,
+            decsace: 0,
+            decsasd: 0,
+            decssdt: 0,
+            decsnls: 0,
+        }
+    }
 }
 
 impl Terminal {
@@ -1241,6 +1293,7 @@ impl Terminal {
                 show_cursor: true,
                 autowrap: true,
                 alt_scroll: true,
+                send_echo: true,
                 ..Modes::default()
             },
             cursor_shape: CursorShape::Block,
@@ -1512,7 +1565,7 @@ impl Terminal {
         self.screen().kitty_flags
     }
 
-    /// Clears mouse, focus and bracketed-paste modes on the primary screen.
+    /// Clears mouse, focus, bracketed-paste and keyboard-lock modes on the primary screen.
     ///
     /// Returns whether a mode changed. Does nothing on the alternate screen.
     pub fn reset_input_modes(&mut self) -> bool {
@@ -1522,11 +1575,13 @@ impl Terminal {
         let changed = self.modes.mouse != MouseMode::Off
             || self.modes.sgr_mouse
             || self.modes.focus_events
-            || self.modes.bracketed_paste;
+            || self.modes.bracketed_paste
+            || self.modes.keyboard_locked;
         self.modes.mouse = MouseMode::Off;
         self.modes.sgr_mouse = false;
         self.modes.focus_events = false;
         self.modes.bracketed_paste = false;
+        self.modes.keyboard_locked = false;
         changed
     }
 
@@ -2832,15 +2887,68 @@ impl Terminal {
         }
     }
 
+    /// One step of BS/CUB. At the do-wrap position a reverse-wraparound mode just
+    /// cancels the wrap — but only while autowrap is on, since the mode needs it
+    /// (xterm's reverse wraparound requires DECAWM); otherwise the step moves
+    /// left, wrapping to the end of the previous line when `reverse_wrap_row`
+    /// allows it.
+    fn cursor_back(&mut self) {
+        if self.cursor.pending_wrap {
+            self.cursor.pending_wrap = false;
+            if !(self.modes.autowrap && (self.modes.reverse_wrap || self.modes.reverse_wrap_ext)) {
+                self.cursor.col = self.cursor.col.saturating_sub(1);
+            }
+            return;
+        }
+        if self.cursor.col > 0 {
+            self.cursor.col -= 1;
+        } else if self.modes.autowrap
+            && let Some(row) = self.reverse_wrap_row()
+        {
+            self.cursor.row = row;
+            self.cursor.col = self.cols - 1;
+        }
+    }
+
+    /// The row reverse wraparound lands on from column zero: mode 1045 wraps
+    /// anywhere inside the scrolling region, top back to bottom; mode 45 only
+    /// when the line above is a soft wrap continuation, as xterm limits it
+    /// since patch 383. Both need autowrap, checked by the caller.
+    fn reverse_wrap_row(&self) -> Option<usize> {
+        let row = self.cursor.row;
+        if self.modes.reverse_wrap_ext {
+            if row == self.scroll_top {
+                return Some(self.scroll_bottom);
+            }
+            return (row > 0).then(|| row - 1);
+        }
+        if self.modes.reverse_wrap {
+            return (row > 0 && self.screen().lines[row - 1].wrapped()).then(|| row - 1);
+        }
+        None
+    }
+
     fn tab(&mut self, n: usize) {
         for _ in 0..n {
+            if self.cursor.pending_wrap {
+                // Mode 41 (the more(1) fix) wraps a pending line before tabbing;
+                // without it the tab is ignored in the do-wrap position.
+                if !(self.modes.more_fix && self.modes.autowrap) {
+                    continue;
+                }
+                self.sync_cursor_row();
+                let row = self.cursor.row;
+                self.lines_mut()[row].set_wrapped(true);
+                self.cursor.col = 0;
+                self.linefeed();
+            }
+            self.cursor.pending_wrap = false;
             let mut col = self.cursor.col + 1;
             while col < self.cols - 1 && !self.tabs[col] {
                 col += 1;
             }
             self.cursor.col = col.min(self.cols - 1);
         }
-        self.cursor.pending_wrap = false;
     }
 
     fn back_tab(&mut self, n: usize) {
