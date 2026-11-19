@@ -1,10 +1,8 @@
 use std::io;
 use std::os::raw::*;
-use std::path::{Path, PathBuf};
-use std::str::Utf8Error;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use percent_encoding::percent_decode;
 use x11rb::protocol::xproto::{self, ConnectionExt};
 
 use super::atoms::AtomName::None as DndNone;
@@ -17,27 +15,6 @@ pub enum DndState {
     Rejected,
 }
 
-#[derive(Debug)]
-pub enum DndDataParseError {
-    EmptyData,
-    InvalidUtf8(#[allow(dead_code)] Utf8Error),
-    HostnameSpecified(#[allow(dead_code)] String),
-    UnexpectedProtocol(#[allow(dead_code)] String),
-    UnresolvablePath(#[allow(dead_code)] io::Error),
-}
-
-impl From<Utf8Error> for DndDataParseError {
-    fn from(e: Utf8Error) -> Self {
-        DndDataParseError::InvalidUtf8(e)
-    }
-}
-
-impl From<io::Error> for DndDataParseError {
-    fn from(e: io::Error) -> Self {
-        DndDataParseError::UnresolvablePath(e)
-    }
-}
-
 pub struct Dnd {
     xconn: Arc<XConnection>,
     // Populated by XdndEnter event handler
@@ -46,7 +23,7 @@ pub struct Dnd {
     // Populated by XdndPosition event handler
     pub source_window: Option<xproto::Window>,
     // Populated by SelectionNotify event handler (triggered by XdndPosition event handler)
-    pub result: Option<Result<Vec<PathBuf>, DndDataParseError>>,
+    pub result: Option<io::Result<Vec<PathBuf>>>,
 }
 
 impl Dnd {
@@ -141,34 +118,5 @@ impl Dnd {
     ) -> Result<Vec<c_uchar>, util::GetPropertyError> {
         let atoms = self.xconn.atoms();
         self.xconn.get_property(window, atoms[XdndSelection], atoms[TextUriList])
-    }
-
-    pub fn parse_data(&self, data: &mut [c_uchar]) -> Result<Vec<PathBuf>, DndDataParseError> {
-        if !data.is_empty() {
-            let mut path_list = Vec::new();
-            let decoded = percent_decode(data).decode_utf8()?.into_owned();
-            for uri in decoded.split("\r\n").filter(|u| !u.is_empty()) {
-                // The format is specified as protocol://host/path
-                // However, it's typically simply protocol:///path
-                let path_str = if uri.starts_with("file://") {
-                    let path_str = uri.replace("file://", "");
-                    if !path_str.starts_with('/') {
-                        // A hostname is specified
-                        // Supporting this case is beyond the scope of my mental health
-                        return Err(DndDataParseError::HostnameSpecified(path_str));
-                    }
-                    path_str
-                } else {
-                    // Only the file protocol is supported
-                    return Err(DndDataParseError::UnexpectedProtocol(uri.to_owned()));
-                };
-
-                let path = Path::new(&path_str).canonicalize()?;
-                path_list.push(path);
-            }
-            Ok(path_list)
-        } else {
-            Err(DndDataParseError::EmptyData)
-        }
     }
 }

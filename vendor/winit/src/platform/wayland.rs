@@ -21,6 +21,7 @@ use crate::event_loop::{ActiveEventLoop, EventLoop, EventLoopBuilder};
 use crate::monitor::MonitorHandle;
 use crate::window::{Window, WindowAttributes};
 
+pub use crate::platform_impl::common::uri_list::parse_uri_list;
 pub use crate::window::Theme;
 
 /// Additional methods on [`ActiveEventLoop`] that are specific to Wayland.

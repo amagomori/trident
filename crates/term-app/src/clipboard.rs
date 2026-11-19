@@ -5,6 +5,8 @@
 use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
 use std::sync::Arc;
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+#[cfg(target_os = "linux")]
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 #[derive(Debug, PartialEq)]
@@ -93,9 +95,9 @@ impl Clipboard {
                     };
                     // SAFETY: This is the window's live wl_display; _window retains
                     // it until after the clipboard backend and its worker are dropped.
-                    Ok(Backend::Wayland(unsafe {
-                        smithay_clipboard::Clipboard::new(display.display.as_ptr())
-                    }))
+                    let clipboard =
+                        unsafe { smithay_clipboard::Clipboard::new(display.display.as_ptr()) };
+                    Ok(Backend::Wayland(clipboard))
                 }
                 BackendKind::Arboard => arboard::Clipboard::new()
                     .map(Backend::Arboard)
@@ -112,6 +114,31 @@ impl Clipboard {
             #[cfg(target_os = "linux")]
             _window: Some(window),
         }
+    }
+
+    /// Registers one session's surface without changing clipboard ownership.
+    #[cfg(target_os = "linux")]
+    pub fn file_drop_target(
+        &self,
+        window: &Arc<Window>,
+        proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>,
+    ) -> Option<smithay_clipboard::FileDropTarget> {
+        let Backend::Wayland(clipboard) = self.inner.as_ref()? else {
+            return None;
+        };
+        let RawWindowHandle::Wayland(handle) = window.window_handle().ok()?.as_raw() else {
+            return None;
+        };
+        let target = Arc::downgrade(window);
+        Some(
+            clipboard.on_file_drop(handle.surface.as_ptr() as usize, move |data| {
+                winit::platform::wayland::parse_uri_list(data).is_ok_and(|paths| {
+                    proxy
+                        .send_event(crate::UserEvent::FileDrop(target.clone(), paths))
+                        .is_ok()
+                })
+            }),
+        )
     }
 
     /// Points the held window at a still-live one before the window it was
