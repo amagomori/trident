@@ -52,6 +52,7 @@ For the full capability list, see
 | Paste | Cmd+V | Ctrl+Shift+V, Shift+Insert, middle click |
 | New window | Cmd+N | Ctrl+Shift+N |
 | New tab / close tab | Cmd+T / Cmd+W | Ctrl+Shift+T / Ctrl+Shift+W |
+| Reopen the last closed tab | Cmd+Shift+T | Ctrl+Shift+Alt+T |
 | Close window (every tab in it) | Cmd+Shift+W | — |
 | Next / previous tab | Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+PageDown / Ctrl+PageUp, Ctrl+Tab / Ctrl+Shift+Tab |
 | Go to tab 1-8 / last tab | Cmd+1..8 / Cmd+9 | Alt+1..8 / Alt+9 |
@@ -87,6 +88,9 @@ Hold Cmd (macOS) or Ctrl (Linux) over a link to underline it, and click to open 
   `--> src/lib.rs:7:13`, `main.go:5:2:`, `Makefile:12:`, `at f (/srv/app.js:12:9)` and Python's
   `File "app.py", line 12`
 
+- While you hold the key over an OSC 8 hyperlink, its real target shows at the bottom-left by
+  default. It moves if needed to leave Find, the pinned command header and linked text readable.
+  Characters outside printable ASCII show percent-encoded, and a long target is cut in the middle.
 - A file reference is a link only when the file exists. Relative paths are tried against the
   shell's directory (OSC 7), then the foreground program's working directory. `~/` is your home
   directory.
@@ -216,6 +220,24 @@ doesn't run.
 
 On Linux, Trident accepts local file drops from native Wayland and X11 file managers.
 On Wayland, no XWayland fallback or environment change is required.
+
+## Wayland notes
+
+Trident runs natively on Wayland and on X11 (including XWayland). On Wayland:
+
+- When `theme` follows the OS appearance (`theme = "auto"` or a `light`/`dark`
+  pair), client-side decorations and the X11 `_GTK_THEME_VARIANT` hint track the
+  desktop's color scheme through the `org.freedesktop.appearance` portal. A fixed
+  `theme` keeps the platform's default decorations.
+- Fractional scaling works; moving the window between monitors re-renders at the new
+  scale.
+- The window icon comes from the installed `trident.desktop` entry and icon theme, not
+  the `app_icon` setting, which Wayland has no protocol for.
+- Primary selection (select-to-copy, middle-click paste) uses the
+  `zwp_primary_selection_v1` protocol, which GNOME, KDE and wlroots compositors
+  provide. On a compositor without it, use Ctrl+Shift+C/V and the regular clipboard.
+- The compositor owns window position: Trident can restore its size, not its place.
+- Drops from native Wayland apps aren't supported yet (see above).
 
 ## Hover previews
 

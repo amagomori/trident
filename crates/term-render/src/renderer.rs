@@ -7,6 +7,7 @@ use crate::atlas::{Atlas, GlyphKey};
 use crate::damage::{self, Damage};
 use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
+use crate::pipeline;
 use std::sync::Arc;
 use term_core::colors::Rgb;
 use term_core::{Cell, CursorShape, Flags, Terminal, UnderlineStyle, grapheme};
@@ -95,6 +96,8 @@ pub struct Renderer {
     /// A transient card drawn over everything, such as a file preview.
     floating: ImagePipeline,
     floating_image: Option<FloatingImage>,
+    /// The hovered OSC 8 link's URI, shown in a corner of the window.
+    link_target: Option<String>,
     /// Instances in each region this frame.
     lens: [u32; 4],
     /// The grid area images are clipped to: x, y, width, height in physical pixels.
@@ -127,6 +130,8 @@ pub struct Renderer {
     /// Physical pixels above the grid taken by the tab bar.
     top_inset: u32,
     tab_bar: Option<crate::TabBar>,
+    /// Where the target instances start; they draw above floating previews.
+    link_target_start: u32,
     /// Where the tab bar's instances start among the overlays.
     bar_start: u32,
     #[cfg(target_os = "linux")]
@@ -251,92 +256,34 @@ impl Renderer {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("terminal bind group layout"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                pipeline::uniform_entry(0),
+                pipeline::texture_entry(1),
+                pipeline::sampler_entry(2),
+                pipeline::texture_entry(3),
             ],
         });
         let bind_group = create_bind_group(&device, &layout, &uniforms, &sampler, &atlas);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("terminal shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terminal pipeline layout"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("terminal pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Instance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Float32x2,
-                        2 => Float32x4,
-                        3 => Float32x4,
-                    ],
-                })],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let vertex_attributes = wgpu::vertex_attr_array![
+            0 => Float32x2,
+            1 => Float32x2,
+            2 => Float32x4,
+            3 => Float32x4,
+        ];
+        let pipeline = pipeline::alpha_pipeline(
+            &device,
+            ("terminal pipeline", "terminal shader"),
+            include_str!("shader.wgsl"),
+            &pipeline_layout,
+            std::mem::size_of::<Instance>() as u64,
+            &vertex_attributes,
+            format,
+        );
 
         let instance_capacity = 1024;
         let instances = create_instance_buffer(&device, 4 * instance_capacity);
@@ -359,6 +306,7 @@ impl Renderer {
             images,
             floating,
             floating_image: None,
+            link_target: None,
             lens: [0; 4],
             image_clip: [0; 4],
             srgb: format.is_srgb(),
@@ -379,6 +327,7 @@ impl Renderer {
             staging: Vec::new(),
             top_inset: 0,
             tab_bar: None,
+            link_target_start: 0,
             bar_start: 0,
             #[cfg(target_os = "linux")]
             shm,
@@ -390,14 +339,29 @@ impl Renderer {
         self.floating_image = floating;
     }
 
-    /// Reconfigures the surface for physical-pixel dimensions, ignoring zeros.
+    /// Sets or clears the link target drawn from the next frame on.
+    pub fn set_link_target(&mut self, uri: Option<&str>) {
+        if self.link_target.as_deref() != uri {
+            self.link_target = uri.map(crate::link_target::sanitize);
+        }
+    }
+
+    /// Reconfigures the surface for physical-pixel dimensions, ignoring zeros
+    /// and clamping to the largest surface the device supports.
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
+        let max = self.device.limits().max_texture_dimension_2d;
+        self.config.width = width.min(max);
+        self.config.height = height.min(max);
         self.surface.configure(&self.device, &self.config);
+    }
+
+    /// The surface's current `(width, height)` in physical pixels, capped at
+    /// the device limit.
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
     }
 
     /// Selects synchronized presentation, falling back to a supported mode.
@@ -582,7 +546,11 @@ impl Renderer {
             self.floating
                 .prepare_single(&self.device, &self.queue, &self.uniforms, image);
         }
-        self.draw(term.palette.background, pre_present)
+        self.draw(
+            term.palette.background,
+            search.map(|_| metrics.height),
+            pre_present,
+        )
     }
 
     fn grid_clip(&self, term: &Terminal, metrics: &CellMetrics, padding: f32) -> [u32; 4] {
@@ -1073,12 +1041,95 @@ impl Renderer {
             }
         }
 
+        self.link_target_start = overlays.len() as u32;
+        if let Some(text) = self.link_target.take() {
+            if !self.draw_link_target(
+                term,
+                fonts,
+                &text,
+                hover,
+                search.is_some(),
+                padding,
+                pixel_offset,
+                &mut overlays,
+            ) {
+                ok = false;
+            }
+            self.link_target = Some(text);
+        }
+
         self.bar_start = overlays.len() as u32;
         if !self.draw_tab_bar(term, fonts, &mut overlays) {
             ok = false;
         }
         self.overlays = overlays;
         ok
+    }
+
+    /// Draws `text` outside Find and the pinned header, avoiding linked rows and the preview
+    /// where possible; false if the atlas filled up.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_link_target(
+        &mut self,
+        term: &Terminal,
+        fonts: &mut Fonts,
+        text: &str,
+        hover: Option<&term_core::Link>,
+        searching: bool,
+        padding: f32,
+        pixel_offset: f32,
+        out: &mut Vec<Instance>,
+    ) -> bool {
+        let CellMetrics {
+            width: cw,
+            height: ch,
+            ..
+        } = fonts.metrics;
+        let (width, height) = (self.config.width as f32, self.area_height() as f32);
+        let columns = ((width / cw).floor() as usize).saturating_sub(2);
+        let text = crate::link_target::elide(text, columns);
+        let strip_width = ((text.chars().count() + 2) as f32 * cw).min(width);
+        let top = term.viewport_to_point(0, 0).line;
+        let card = self.floating_image.as_ref().map(|f| {
+            let [x, y] = f.pos;
+            [x, y, x + f.image.width as f32, y + f.image.height as f32]
+        });
+        let bottom = (height - ch).max(0.0);
+        let ledger = crate::ledger_bar(term, padding, pixel_offset, ch)
+            .map(|bar| (bar.top, bar.top + bar.height));
+        let Some([x, y]) = crate::link_target::place(
+            [width, height],
+            [strip_width, ch],
+            [searching.then_some((bottom, height)), ledger],
+            card,
+            padding + pixel_offset,
+            |y| {
+                hover.is_some_and(|link| {
+                    crate::link_target::covers_link(link, y, ch, top, padding + pixel_offset)
+                })
+            },
+        ) else {
+            return true;
+        };
+        out.push(self.rect(x, y, strip_width, ch, term.palette.foreground));
+        for (i, c) in text.chars().enumerate() {
+            let key = GlyphKey {
+                c,
+                style: Style::new(false, false),
+                cells: 1,
+            };
+            match self.atlas.get(key, fonts, &self.device, &self.queue) {
+                Ok(Some(g)) => out.push(Instance {
+                    pos: [x + (i + 1) as f32 * cw + g.left, y + g.top],
+                    size: [g.width, g.height],
+                    uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
+                    color: self.color(term.palette.background, 1.0),
+                }),
+                Ok(None) => {}
+                Err(_) => return false,
+            }
+        }
+        true
     }
 
     /// Draws the tab bar above the grid; false if the atlas filled up.
@@ -1316,7 +1367,12 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn draw(&mut self, background: Rgb, pre_present: Option<&mut dyn FnMut()>) -> bool {
+    fn draw(
+        &mut self,
+        background: Rgb,
+        find_height: Option<f32>,
+        pre_present: Option<&mut dyn FnMut()>,
+    ) -> bool {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -1389,10 +1445,8 @@ impl Renderer {
             }
             pass.set_scissor_rect(0, inset, width, area);
             let overlays = (3 * self.instance_capacity) as u32;
-            self.draw_range(
-                &mut pass,
-                overlays..overlays + self.bar_start.min(self.lens[3]),
-            );
+            let target = self.link_target_start.min(self.lens[3]);
+            self.draw_range(&mut pass, overlays..overlays + target);
             if inset > 0 && self.lens[3] > self.bar_start {
                 pass.set_viewport(0.0, 0.0, width as f32, area as f32, 0.0, 1.0);
                 pass.set_scissor_rect(0, 0, width, inset.min(self.config.height));
@@ -1401,10 +1455,21 @@ impl Renderer {
                     overlays + self.bar_start..overlays + self.lens[3],
                 );
             }
-            if !self.floating.is_empty() {
+            let preview_height = find_height.map_or(area, |h| (area as f32 - h).max(0.0) as u32);
+            let target_end = self.bar_start.min(self.lens[3]);
+            if (!self.floating.is_empty() && preview_height > 0) || target < target_end {
                 pass.set_viewport(0.0, inset as f32, width as f32, area as f32, 0.0, 1.0);
-                self.floating
-                    .draw(&mut pass, Layer::AboveText, [0, inset, width, area]);
+                if !self.floating.is_empty() && preview_height > 0 {
+                    self.floating.draw(
+                        &mut pass,
+                        Layer::AboveText,
+                        [0, inset, width, preview_height],
+                    );
+                }
+                if target < target_end {
+                    pass.set_scissor_rect(0, inset, width, area);
+                    self.draw_range(&mut pass, overlays + target..overlays + target_end);
+                }
             }
         }
         self.queue.submit([encoder.finish()]);

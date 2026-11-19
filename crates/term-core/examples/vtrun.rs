@@ -112,6 +112,19 @@ mod unix {
                 t.advance(&buf[..n as usize]);
                 let replies = t.take_responses();
                 write_all(master, &replies);
+                // App-requested text-area resizes (XTWINOPS 8, DECSLPP, DECCOLM)
+                // become the child PTY's new size, like a real window resize.
+                for op in t.take_window_ops() {
+                    let term_core::WindowOp::Resize { cols, rows } = op;
+                    let mut size = libc::winsize {
+                        ws_row: rows as u16,
+                        ws_col: cols as u16,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    // SAFETY: master is open; size is initialized.
+                    unsafe { libc::ioctl(master, libc::TIOCSWINSZ as _, &raw mut size) };
+                }
                 last_output = Instant::now();
                 continue;
             }

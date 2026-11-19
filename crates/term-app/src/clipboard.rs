@@ -69,6 +69,8 @@ pub struct Clipboard {
     x11_max_request_bytes: Option<Option<usize>>,
     #[cfg(target_os = "linux")]
     x11: bool,
+    /// The window the display handle came from, held for drop ordering with the
+    /// backend; rebinding only swaps this handle, never the backend or its offers.
     #[cfg(target_os = "linux")]
     _window: Option<Arc<Window>>,
 }
@@ -126,6 +128,15 @@ impl Clipboard {
         }
     }
 
+    /// Points the held window at a still-live one before the window it was
+    /// created through closes. Both backends serve selections through
+    /// objects that outlive any window, so the swap changes nothing the
+    /// clipboard offers — including ownership another application holds.
+    #[cfg(target_os = "linux")]
+    pub fn rebind(&mut self, window: Arc<Window>) {
+        self._window = Some(window);
+    }
+
     /// Whether the X server can be handed `len` bytes of clipboard text; true off X11
     /// or when the server's limit can't be read.
     #[cfg(target_os = "linux")]
@@ -170,12 +181,17 @@ impl Clipboard {
         clipboard.get_text().ok()
     }
 
-    pub fn set(&mut self, text: String, primary: bool) {
+    /// Stores `text`, plus `html` as the `text/html` flavor when the backend can
+    /// serve more than one format (arboard; the smithay Wayland backend is
+    /// text-only, so HTML is dropped there).
+    pub fn set(&mut self, text: String, html: Option<String>, primary: bool) {
         #[cfg(target_os = "linux")]
-        if self.inner.is_some() && !self.x11_can_serve(text.len()) {
+        if self.inner.is_some()
+            && !self.x11_can_serve(text.len().max(html.as_ref().map_or(0, |h| h.len())))
+        {
             diag!(
                 "trident: {} bytes is more than the X server can transfer; clipboard left unchanged",
-                text.len()
+                text.len().max(html.as_ref().map_or(0, |h| h.len()))
             );
             return;
         }
@@ -198,14 +214,23 @@ impl Clipboard {
         let Backend::Arboard(clipboard) = backend;
         #[cfg(all(unix, not(target_os = "macos")))]
         if primary {
-            let _ = clipboard
-                .set()
-                .clipboard(LinuxClipboardKind::Primary)
-                .text(text);
+            let _ = match html {
+                Some(html) => clipboard
+                    .set()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .html(html, Some(text)),
+                None => clipboard
+                    .set()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .text(text),
+            };
             return;
         }
         if !primary {
-            let _ = clipboard.set_text(text);
+            let _ = match html {
+                Some(html) => clipboard.set_html(html, Some(text)),
+                None => clipboard.set_text(text),
+            };
         }
     }
 }
