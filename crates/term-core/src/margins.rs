@@ -76,8 +76,12 @@ impl Terminal {
     pub(super) fn wrap_line(&mut self) {
         self.sync_cursor_row();
         let row = self.cursor.row;
-        let whole = !self.has_partial_width();
-        self.lines_mut()[row].set_wrapped(whole);
+        if self.has_partial_width() {
+            let (left, right) = (self.scroll_left, self.scroll_right);
+            self.lines_mut()[row].set_split_wrapped(left, right, true);
+        } else {
+            self.lines_mut()[row].set_wrapped(true);
+        }
         self.linefeed();
         self.cursor.col = self.scroll_left;
     }
@@ -118,14 +122,19 @@ impl Terminal {
         for row in rows.iter_mut() {
             split_pair(row, left, blank);
             split_pair(row, end, blank);
-            row.set_wrapped(false);
             row.touch_all();
         }
         let kept = rows.len() - n;
         for i in 0..kept {
             let i = if down { kept - 1 - i } else { i };
             let (above, below) = rows.split_at_mut(i + n);
-            above[i].cells[left..end].swap_with_slice(&mut below[0].cells[left..end]);
+            let (dst, src) = if down {
+                (&mut below[0], &mut above[i])
+            } else {
+                (&mut above[i], &mut below[0])
+            };
+            dst.set_split_wrapped(left, end - 1, src.split_wrapped(left, end - 1));
+            dst.cells[left..end].swap_with_slice(&mut src.cells[left..end]);
         }
         let cleared = if down {
             &mut rows[..n]
@@ -133,6 +142,7 @@ impl Terminal {
             &mut rows[kept..]
         };
         for row in cleared {
+            row.set_split_wrapped(left, end - 1, false);
             row.cells[left..end].fill(blank);
         }
     }

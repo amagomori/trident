@@ -1557,9 +1557,8 @@ struct App {
     tab_click: bool,
     /// The tab a close confirmation is for; none when it is for the window.
     pending_close_tab: Option<u64>,
-    /// The tabs, by pane id, of the native window a close confirmation is for while other
-    /// windows hold the rest.
-    #[cfg(target_os = "macos")]
+    /// The tabs, by pane id, of the window a close confirmation is for while other
+    /// windows hold the rest; on Linux it marks a window close rather than app quit.
     pending_close_window: Option<Vec<u64>>,
     /// Per tab pane id, whether a program other than the shell runs there; asked before
     /// the app quits.
@@ -1597,6 +1596,90 @@ struct App {
     exit_deadline: Option<Instant>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     exit_presentation: ExitPresentation,
+    /// The windows other than the one the fields above belong to, held whole so each
+    /// keeps its own tabs and interaction state.
+    #[cfg(target_os = "linux")]
+    windows: Vec<WindowGroup>,
+}
+
+/// Everything `App` keeps per window on Linux: the live session and tabs plus the input
+/// and prompt state that belongs to that window. Swapped in and out of `App`'s fields as
+/// focus moves, like `Pane` swaps with `Session` for tabs.
+#[cfg(target_os = "linux")]
+struct WindowGroup {
+    session: Option<Session>,
+    tabs: Vec<Option<Pane>>,
+    active_tab: usize,
+    font_size: f32,
+    normal_cells: (usize, usize),
+    occluded: bool,
+    flash: bell::Flash,
+    search: Option<search::Search>,
+    tab_hover: Option<term_render::TabHit>,
+    tab_pointer: PhysicalPosition<f64>,
+    tab_click: bool,
+    pending_close_tab: Option<u64>,
+    pending_close_window: Option<Vec<u64>>,
+    pending_close: Option<Option<String>>,
+    pending_paste: Option<String>,
+    held_at_focus: HeldAtFocus,
+    mouse_pos: PhysicalPosition<f64>,
+    left_down: bool,
+    ledger_click: bool,
+    reported_button: Option<ReportButton>,
+    last_click: Option<(Instant, Point, u8)>,
+    click_to_move: prompt_click::ClickToMove,
+    scroll_accum: f64,
+    typing_pointer: pointer::TypingPointer,
+    hover_preview: hover_preview::HoverPreview,
+}
+
+#[cfg(target_os = "linux")]
+impl WindowGroup {
+    fn new(session: Session, font_size: f32) -> Self {
+        let normal_cells = (session.term.cols(), session.term.rows());
+        WindowGroup {
+            session: Some(session),
+            // The window starts with one tab, whose state lives in `session`.
+            tabs: vec![None],
+            font_size,
+            normal_cells,
+            ..WindowGroup::default()
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Default for WindowGroup {
+    fn default() -> Self {
+        WindowGroup {
+            session: None,
+            tabs: Vec::new(),
+            active_tab: 0,
+            font_size: DEFAULT_FONT_SIZE,
+            normal_cells: window_state::DEFAULT_CELLS,
+            occluded: false,
+            flash: bell::Flash::default(),
+            search: None,
+            tab_hover: None,
+            tab_pointer: PhysicalPosition::default(),
+            tab_click: false,
+            pending_close_tab: None,
+            pending_close_window: None,
+            pending_close: None,
+            pending_paste: None,
+            held_at_focus: HeldAtFocus::default(),
+            mouse_pos: PhysicalPosition::default(),
+            left_down: false,
+            ledger_click: false,
+            reported_button: None,
+            last_click: None,
+            click_to_move: prompt_click::ClickToMove::default(),
+            scroll_accum: 0.0,
+            typing_pointer: pointer::TypingPointer::default(),
+            hover_preview: hover_preview::HoverPreview::new(),
+        }
+    }
 }
 
 fn select_at(term: &mut Terminal, point: Point, modifiers: ModifiersState, clicks: u8) {
@@ -1673,7 +1756,6 @@ impl App {
             tab_pointer: PhysicalPosition::default(),
             tab_click: false,
             pending_close_tab: None,
-            #[cfg(target_os = "macos")]
             pending_close_window: None,
             #[cfg(target_os = "macos")]
             quit_checks: QuitChecks::default(),
@@ -1702,6 +1784,8 @@ impl App {
             exit_deadline: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             exit_presentation: ExitPresentation::default(),
+            #[cfg(target_os = "linux")]
+            windows: Vec::new(),
         }
     }
 
@@ -1808,11 +1892,32 @@ impl App {
                 .ok()
                 .map(|position| (position, window.inner_size()));
         }
+        self.session_for(
+            window,
+            pty,
+            0,
+            (spawn_cols, spawn_rows, spawn_cell),
+            Some((guess, guessed_fonts)),
+        )
+    }
+
+    /// Builds the session for a just-created window: renderer, fonts and terminal at the
+    /// window's scale, with `pty` resized when the guessed grid did not match.
+    ///
+    /// `guess` is the monitor scale and fonts the PTY was sized with, reused when the
+    /// window's scale factor matches.
+    fn session_for(
+        &mut self,
+        window: Arc<Window>,
+        pty: Pty,
+        pane: u64,
+        spawn: (usize, usize, (f32, f32)),
+        guess: Option<(f64, Fonts)>,
+    ) -> Result<Session, String> {
         let scale = window.scale_factor();
-        let fonts = if scale == guess {
-            guessed_fonts
-        } else {
-            Fonts::new(&self.faces, self.font_size * scale as f32)
+        let fonts = match guess {
+            Some((gscale, fonts)) if scale == gscale => fonts,
+            _ => Fonts::new(&self.faces, self.font_size * scale as f32),
         };
         let size = window.inner_size();
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
@@ -1824,12 +1929,19 @@ impl App {
         let mut term = Terminal::new(cols, rows);
         self.appearance = window.theme().or(self.appearance);
         #[cfg(target_os = "linux")]
-        if let Some(theme) = self
-            .appearance_watch
-            .as_mut()
-            .and_then(|watch| watch.initial(INITIAL_APPEARANCE_WAIT))
         {
-            self.appearance = theme;
+            if let Some(theme) = self
+                .appearance_watch
+                .as_mut()
+                .and_then(|watch| watch.initial(INITIAL_APPEARANCE_WAIT))
+            {
+                self.appearance = theme;
+            }
+            // The Wayland CSD frame and the X11 _GTK_THEME_VARIANT hint track the
+            // palette's theme; fixed palettes keep the platform default.
+            if self.config.themes.automatic() {
+                window.set_theme(decoration_theme(self.appearance));
+            }
         }
         term.set_palette(self.config.themes.palette(self.appearance).clone());
         configure_term(
@@ -1839,7 +1951,7 @@ impl App {
         );
         term.set_cell_pixel_size(fonts.metrics.width, fonts.metrics.height);
         let cell = (fonts.metrics.width, fonts.metrics.height);
-        if (cols, rows, cell) != (spawn_cols, spawn_rows, spawn_cell) {
+        if (cols, rows, cell) != spawn {
             pty.resize(cols, rows, cell);
         }
         window.request_redraw();
@@ -1927,7 +2039,7 @@ impl App {
             blink_at: None,
             title: String::new(),
             progress: None,
-            pane: 0,
+            pane,
             tab_bar,
         })
     }
@@ -2080,6 +2192,151 @@ impl App {
         self.tabs
             .iter()
             .position(|pane| pane.as_ref().is_some_and(|pane| pane.id == id))
+    }
+
+    /// Exchanges the per-window fields with `g`: after it returns the app's handlers
+    /// see `g`'s window, and `g` holds the previous window's state.
+    #[cfg(target_os = "linux")]
+    fn swap_group(&mut self, g: &mut WindowGroup) {
+        use std::mem::swap;
+        swap(&mut self.session, &mut g.session);
+        swap(&mut self.tabs, &mut g.tabs);
+        swap(&mut self.active_tab, &mut g.active_tab);
+        swap(&mut self.font_size, &mut g.font_size);
+        swap(&mut self.normal_cells, &mut g.normal_cells);
+        swap(&mut self.occluded, &mut g.occluded);
+        swap(&mut self.flash, &mut g.flash);
+        swap(&mut self.search, &mut g.search);
+        swap(&mut self.tab_hover, &mut g.tab_hover);
+        swap(&mut self.tab_pointer, &mut g.tab_pointer);
+        swap(&mut self.tab_click, &mut g.tab_click);
+        swap(&mut self.pending_close_tab, &mut g.pending_close_tab);
+        swap(&mut self.pending_close_window, &mut g.pending_close_window);
+        swap(&mut self.pending_close, &mut g.pending_close);
+        swap(&mut self.pending_paste, &mut g.pending_paste);
+        swap(&mut self.held_at_focus, &mut g.held_at_focus);
+        swap(&mut self.mouse_pos, &mut g.mouse_pos);
+        swap(&mut self.left_down, &mut g.left_down);
+        swap(&mut self.ledger_click, &mut g.ledger_click);
+        swap(&mut self.reported_button, &mut g.reported_button);
+        swap(&mut self.last_click, &mut g.last_click);
+        swap(&mut self.click_to_move, &mut g.click_to_move);
+        swap(&mut self.scroll_accum, &mut g.scroll_accum);
+        swap(&mut self.typing_pointer, &mut g.typing_pointer);
+        swap(&mut self.hover_preview, &mut g.hover_preview);
+    }
+
+    /// Moves `windows[index]`'s state into the per-window fields and the fields' contents
+    /// into that slot: after it returns the app's handlers see `index`'s window.
+    #[cfg(target_os = "linux")]
+    fn swap_window(&mut self, index: usize) {
+        let Some(mut g) = self.windows.get_mut(index).map(std::mem::take) else {
+            return;
+        };
+        self.swap_group(&mut g);
+        self.windows[index] = g;
+    }
+
+    /// Runs `f` with background window `index` shown but unfocused.
+    ///
+    /// Restores the original window even if closing the background window
+    /// brought a third window into the fields.
+    #[cfg(target_os = "linux")]
+    fn with_window(&mut self, index: usize, f: impl FnOnce(&mut App)) {
+        self.swap_window(index);
+        let home = self
+            .windows
+            .get(index)
+            .and_then(|g| g.session.as_ref())
+            .map(|s| s.window.id());
+        let focused = std::mem::replace(&mut self.focused, false);
+        f(self);
+        self.focused = focused;
+        if let Some(pos) = self.windows.iter().position(|g| {
+            g.session
+                .as_ref()
+                .is_some_and(|s| Some(s.window.id()) == home)
+        }) {
+            self.swap_window(pos);
+        }
+    }
+
+    /// Which background window owns pane `id`, if any does.
+    #[cfg(target_os = "linux")]
+    fn window_of_pane(&self, id: u64) -> Option<usize> {
+        self.windows.iter().position(|g| {
+            g.session.as_ref().is_some_and(|s| s.pane == id)
+                || g.tabs.iter().flatten().any(|pane| pane.id == id)
+        })
+    }
+
+    /// Opens a new window inside this process instead of spawning a child: a winit
+    /// window, a PTY on a fresh pane id, and a `WindowGroup` pushed to `windows`.
+    /// The window becomes the app's current one through its `Focused` event.
+    #[cfg(target_os = "linux")]
+    fn new_window(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(s) = &self.session else { return };
+        let attrs = Window::default_attributes()
+            .with_title("Trident")
+            .with_inner_size(s.size);
+        let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+            attrs, "trident", "trident",
+        );
+        let window = Arc::new(match event_loop.create_window(attrs) {
+            Ok(window) => window,
+            Err(error) => {
+                diag!("trident: new window: {error}");
+                return;
+            }
+        });
+        window.set_ime_allowed(true);
+        let cwd = local_working_directory(s.term.working_directory())
+            .or_else(|| self.options.working_directory.clone());
+        let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
+        let (cols, rows) = (s.term.cols(), s.term.rows());
+        self.next_pane += 1;
+        let id = self.next_pane;
+        let pty = match self.spawn_pty(
+            id,
+            self.options.command(&self.config, false),
+            cwd.as_deref(),
+            cols,
+            rows,
+            cell,
+        ) {
+            Ok(pty) => pty,
+            Err(error) => {
+                diag!("trident: new window: {error}");
+                return;
+            }
+        };
+        match self.session_for(window, pty, id, (cols, rows, cell), None) {
+            Ok(session) => {
+                let font_size = self.options.size(&self.config);
+                self.windows.push(WindowGroup::new(session, font_size))
+            }
+            Err(error) => diag!("trident: new window: {error}"),
+        }
+    }
+
+    /// Drops the current window's group — its window, PTYs and panes — and brings the
+    /// next background window's state into the fields, or exits when none is left.
+    #[cfg(target_os = "linux")]
+    fn remove_current_window(&mut self, event_loop: &ActiveEventLoop) {
+        match self.windows.pop() {
+            Some(mut g) => {
+                self.swap_group(&mut g);
+                // The clipboard keeps the window it was created through alive,
+                // so point it at the window now shown before the closed one
+                // drops. Its backend and offers survive the close unchanged,
+                // so a selection another application owns is never touched.
+                if let Some(s) = &self.session {
+                    self.clipboard.rebind(s.window.clone());
+                }
+                drop(g);
+            }
+            None => event_loop.exit(),
+        }
     }
 
     /// Opens a tab after the active one, in the active tab's OSC 7 directory, and shows it.
@@ -2426,8 +2683,10 @@ impl App {
     fn close_tab(&mut self, index: usize, event_loop: &ActiveEventLoop) {
         self.cancel_prompt_click();
         if self.tabs.len() <= 1 {
-            self.close_requested(event_loop);
-            return;
+            #[cfg(target_os = "linux")]
+            return self.close_this_window(event_loop);
+            #[cfg(not(target_os = "linux"))]
+            return self.close_requested(event_loop);
         }
         let id = if index == self.active_tab {
             self.session.as_ref().map(|s| s.pane)
@@ -3248,6 +3507,11 @@ impl App {
             self.clear_pager_error();
         }
         let Some(s) = &mut self.session else { return };
+        // KAM (ANSI mode 2) locks out typed input, so it also swallows IME
+        // commits, Send shortcuts and pastes, which arrive on the same path.
+        if s.term.modes.keyboard_locked {
+            return;
+        }
         if s.input_query.buffer(bytes) {
             return;
         }
@@ -3386,20 +3650,50 @@ impl App {
         }
     }
 
-    /// Whether the close prompt is for one native window's tabs rather than the app.
-    fn window_prompt(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        return self.pending_close_window.is_some();
-        #[cfg(not(target_os = "macos"))]
-        false
+    /// Closes this window on Linux: the app when it is the only one, else just this
+    /// window's tabs, asking first while a program other than the shell runs in one.
+    #[cfg(target_os = "linux")]
+    fn close_this_window(&mut self, event_loop: &ActiveEventLoop) {
+        if self.windows.is_empty() {
+            self.close_requested(event_loop);
+            return;
+        }
+        self.cancel_prompt_click();
+        let running = self.session.as_ref().and_then(|s| {
+            s.pty.running_program().or_else(|| {
+                self.tabs
+                    .iter()
+                    .flatten()
+                    .find_map(|pane| pane.pty.running_program())
+            })
+        });
+        let Some(pid) = running.filter(|_| self.config.confirm_close) else {
+            self.remove_current_window(event_loop);
+            return;
+        };
+        let Some(s) = &self.session else { return };
+        let ids: Vec<u64> = std::iter::once(s.pane)
+            .chain(self.tabs.iter().flatten().map(|pane| pane.id))
+            .collect();
+        let minimized = s.window.is_minimized() == Some(true);
+        self.pending_close_tab = None;
+        self.pending_close_window = Some(ids);
+        self.pending_close = Some(close_confirm::process_name(pid));
+        let Some(s) = &self.session else { return };
+        if minimized {
+            s.window.set_minimized(false);
+        }
+        s.window.request_redraw();
     }
 
-    /// Clears a close prompt for one native window's tabs; whether there was one.
+    /// Whether the close prompt is for one window's tabs rather than the app.
+    fn window_prompt(&self) -> bool {
+        self.pending_close_window.is_some()
+    }
+
+    /// Clears a close prompt for one window's tabs; whether there was one.
     fn take_window_prompt(&mut self) -> bool {
-        #[cfg(target_os = "macos")]
-        return self.pending_close_window.take().is_some();
-        #[cfg(not(target_os = "macos"))]
-        false
+        self.pending_close_window.take().is_some()
     }
 
     /// Enter closes the window and Escape keeps it; other keys are ignored.
@@ -3408,10 +3702,15 @@ impl App {
         use winit::keyboard::NamedKey;
         match event.logical_key {
             Key::Named(NamedKey::Enter) => {
-                #[cfg(target_os = "macos")]
                 if let Some(ids) = self.pending_close_window.take() {
                     self.pending_close = None;
+                    #[cfg(target_os = "macos")]
                     self.remove_tabs(&ids);
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = ids;
+                        self.remove_current_window(event_loop);
+                    }
                     return;
                 }
                 if let Some(id) = self.pending_close_tab.take() {
@@ -3497,17 +3796,33 @@ impl App {
             return;
         }
         self.appearance = appearance;
+        self.apply_appearance_shown();
+        #[cfg(target_os = "linux")]
+        for index in 0..self.windows.len() {
+            self.with_window(index, |app| app.apply_appearance_shown());
+        }
+    }
+
+    /// Applies the automatic theme's current palette to the shown window's
+    /// terminals, when automatic theming is on.
+    fn apply_appearance_shown(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.config.themes.automatic()
+            && let Some(s) = &self.session
+        {
+            s.window.set_theme(decoration_theme(self.appearance));
+        }
         if self.config.themes.automatic()
             && let Some(s) = &mut self.session
         {
             s.term
-                .set_palette(self.config.themes.palette(appearance).clone());
+                .set_palette(self.config.themes.palette(self.appearance).clone());
             let responses = s.term.take_responses();
             s.pty.write(&responses);
             s.window.request_redraw();
             for pane in self.tabs.iter_mut().flatten() {
                 pane.term
-                    .set_palette(self.config.themes.palette(appearance).clone());
+                    .set_palette(self.config.themes.palette(self.appearance).clone());
                 let responses = pane.term.take_responses();
                 pane.pty.write(&responses);
             }
@@ -3520,11 +3835,6 @@ impl App {
             let font_changed = spec != self.options.font(&self.config);
             let size_changed =
                 !self.options.font_size_override && next.font_size != self.config.font_size;
-            let size = if size_changed {
-                next.font_size
-            } else {
-                self.font_size
-            };
             let faces = if font_changed {
                 let (faces, warnings) = FontFaces::resolve(&spec).map_err(|e| {
                     format!(
@@ -3562,56 +3872,35 @@ impl App {
             #[cfg(target_os = "macos")]
             ime::set_command_chords(&self.config.bindings);
             self.watch_appearance();
-            if let Some(s) = &mut self.session {
-                self.icons_latest = None;
-                self.icons
-                    .apply(&s.window, self.config.app_icon, self.config.menu_bar_icon);
-                s.pty
-                    .set_command_notifications(self.config.notify_long_commands_after != 0)?;
-                s.term
-                    .set_palette(self.config.themes.palette(self.appearance).clone());
-                let responses = s.term.take_responses();
-                s.pty.write(&responses);
-                let scrollback = self.options.scrollback(&self.config);
-                configure_term(&mut s.term, &self.config, scrollback);
-                if let Some(search) = &mut self.search {
-                    search.dirty = true;
-                }
-                release_freed_memory(&mut s.term);
-                for pane in self.tabs.iter_mut().flatten() {
-                    pane.pty
-                        .set_command_notifications(self.config.notify_long_commands_after != 0)?;
-                    pane.term
-                        .set_palette(self.config.themes.palette(self.appearance).clone());
-                    let responses = pane.term.take_responses();
-                    pane.pty.write(&responses);
-                    configure_term(&mut pane.term, &self.config, scrollback);
-                    release_freed_memory(&mut pane.term);
-                }
-                if next_vsync_off {
-                    warn_vsync_unsupported(&self.config, &s.renderer);
-                }
-                s.renderer.set_vsync(self.config.vsync);
-                if font_changed {
-                    s.fonts = Fonts::new(&self.faces, size * s.window.scale_factor() as f32);
-                    s.renderer.clear_glyph_cache();
-                    #[cfg(target_os = "macos")]
-                    for pane in self.tabs.iter_mut().flatten() {
-                        let tab = &mut pane.window;
-                        let px = size * tab.window.scale_factor() as f32;
-                        tab.fonts = Fonts::new(&self.faces, px);
-                        tab.renderer.clear_glyph_cache();
-                    }
-                }
-                #[cfg(target_os = "macos")]
-                for pane in self.tabs.iter_mut().flatten() {
-                    pane.window.renderer.set_vsync(self.config.vsync);
-                }
-            }
+            self.apply_config_shown(font_changed, size_changed, next_vsync_off)?;
             if size_changed {
-                self.set_font_size(size);
+                self.set_font_size(self.config.font_size);
             }
             self.resize_grid();
+            #[cfg(target_os = "linux")]
+            {
+                let mut group_error = None;
+                for index in 0..self.windows.len() {
+                    self.with_window(index, |app| {
+                        if let Err(e) =
+                            app.apply_config_shown(font_changed, size_changed, next_vsync_off)
+                            && group_error.is_none()
+                        {
+                            group_error = Some(e);
+                        }
+                        if size_changed {
+                            app.set_font_size(app.config.font_size);
+                        }
+                        app.resize_grid();
+                        if let Some(s) = &app.session {
+                            s.window.request_redraw();
+                        }
+                    });
+                }
+                if let Some(error) = group_error {
+                    return Err(error);
+                }
+            }
             Ok(())
         });
         self.config_error = result.err();
@@ -3621,6 +3910,80 @@ impl App {
         if let Some(s) = &self.session {
             s.window.request_redraw();
         }
+    }
+
+    /// Applies a just-loaded config to the window the fields currently show: command
+    /// notifications, palette, scrollback, vsync, icons and, when the font changed,
+    /// rebuilt fonts at the window's size.
+    fn apply_config_shown(
+        &mut self,
+        font_changed: bool,
+        size_changed: bool,
+        next_vsync_off: bool,
+    ) -> Result<(), String> {
+        let Some(s) = &mut self.session else {
+            return Ok(());
+        };
+        let mut error = None;
+        let size = if size_changed {
+            self.config.font_size
+        } else {
+            self.font_size
+        };
+        self.icons_latest = None;
+        self.icons
+            .apply(&s.window, self.config.app_icon, self.config.menu_bar_icon);
+        if let Err(e) = s
+            .pty
+            .set_command_notifications(self.config.notify_long_commands_after != 0)
+        {
+            error = Some(e);
+        }
+        s.term
+            .set_palette(self.config.themes.palette(self.appearance).clone());
+        let responses = s.term.take_responses();
+        s.pty.write(&responses);
+        let scrollback = self.options.scrollback(&self.config);
+        configure_term(&mut s.term, &self.config, scrollback);
+        if let Some(search) = &mut self.search {
+            search.dirty = true;
+        }
+        release_freed_memory(&mut s.term);
+        for pane in self.tabs.iter_mut().flatten() {
+            if let Err(e) = pane
+                .pty
+                .set_command_notifications(self.config.notify_long_commands_after != 0)
+                && error.is_none()
+            {
+                error = Some(e);
+            }
+            pane.term
+                .set_palette(self.config.themes.palette(self.appearance).clone());
+            let responses = pane.term.take_responses();
+            pane.pty.write(&responses);
+            configure_term(&mut pane.term, &self.config, scrollback);
+            release_freed_memory(&mut pane.term);
+        }
+        if next_vsync_off {
+            warn_vsync_unsupported(&self.config, &s.renderer);
+        }
+        s.renderer.set_vsync(self.config.vsync);
+        if font_changed {
+            s.fonts = Fonts::new(&self.faces, size * s.window.scale_factor() as f32);
+            s.renderer.clear_glyph_cache();
+            #[cfg(target_os = "macos")]
+            for pane in self.tabs.iter_mut().flatten() {
+                let tab = &mut pane.window;
+                let px = size * tab.window.scale_factor() as f32;
+                tab.fonts = Fonts::new(&self.faces, px);
+                tab.renderer.clear_glyph_cache();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        for pane in self.tabs.iter_mut().flatten() {
+            pane.window.renderer.set_vsync(self.config.vsync);
+        }
+        error.map_or(Ok(()), Err)
     }
 
     /// Handles terminal shortcuts; true if the key was consumed.
@@ -3685,6 +4048,9 @@ impl App {
             ),
             #[cfg(not(target_os = "macos"))]
             Action::SelectTab(index) => self.select_tab(shortcut_tab(index, self.tabs.len())),
+            #[cfg(target_os = "linux")]
+            Action::NewWindow => self.new_window(event_loop),
+            #[cfg(target_os = "macos")]
             Action::NewWindow => {
                 let working_directory = self
                     .session
@@ -4608,6 +4974,411 @@ fn grid_size_for(
     (cols, rows)
 }
 
+impl App {
+    /// Output for a pane outside the active tab: another tab of this window, or a pane
+    /// in a background window, handled with that window's state swapped in.
+    fn output_elsewhere(&mut self, id: u64) {
+        #[cfg(target_os = "linux")]
+        if let Some(index) = self.window_of_pane(id) {
+            self.with_window(index, |app| {
+                if app.session.as_ref().is_some_and(|s| s.pane == id) {
+                    app.output_ready();
+                } else {
+                    app.background_output(id);
+                }
+            });
+            return;
+        }
+        self.background_output(id);
+    }
+
+    /// A pane's program exited: its tab closes, or the window when that was the last
+    /// tab. On Linux the app exits only once no windows are left.
+    fn pane_exited(&mut self, id: u64, event_loop: &ActiveEventLoop) {
+        if self.tabs.len() > 1 {
+            if let Some(index) = self.tab_index(id) {
+                if self.pending_close_tab == Some(id) {
+                    self.pending_close_tab = None;
+                    self.pending_close = None;
+                }
+                self.remove_tab(index);
+            }
+            return;
+        }
+        if self.session.as_ref().is_some_and(|s| s.pane != id) {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if !self.windows.is_empty() {
+            self.remove_current_window(event_loop);
+            return;
+        }
+        let _ = event_loop;
+        self.exit_deadline
+            .get_or_insert_with(|| Instant::now() + EXIT_TIMEOUT);
+        if let Some(s) = &mut self.session {
+            #[cfg(target_os = "macos")]
+            {
+                present_macos::begin_exit();
+                s.renderer.prepare_exit();
+            }
+            let queued = s.pty.take_output();
+            let mut processed = 0;
+            update_terminal(&mut s.term, &mut s.scroll, |term| {
+                processed = s.output.drain_on_exit(term, queued);
+            });
+            s.since_frame += processed;
+            if let Some(log) = &mut s.latency {
+                log.output(processed);
+            }
+            s.synchronized_since = None;
+            s.deferred = None;
+            if s.since_frame == 0 && s.sequence > 0 {
+                // Do not replace an already submitted final frame with an unchanged commit.
+                s.output.presented();
+                #[cfg(target_os = "linux")]
+                if s.presentation.is_some() {
+                    self.exit_presentation.submitted(s.sequence, Instant::now());
+                }
+                #[cfg(target_os = "macos")]
+                self.exit_presentation
+                    .submitted(present_macos::arm_exit() - 1, Instant::now());
+            }
+        }
+        let pending_final = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.since_frame > 0 || s.sequence == 0);
+        #[cfg(target_os = "linux")]
+        let pending_final = pending_final
+            || self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.presentation.is_some())
+                && self.exit_presentation.needs_wayland_submission();
+        #[cfg(target_os = "macos")]
+        let pending_final = pending_final
+            || self
+                .exit_presentation
+                .needs_metal_submission(present_macos::feedback().0);
+        if pending_final {
+            self.present_frame();
+        }
+    }
+
+    /// Events for a background window on Linux: `Focused` swaps it in as the current
+    /// window, everything else is handled with its state swapped in briefly.
+    #[cfg(target_os = "linux")]
+    fn background_window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(index) = self
+            .windows
+            .iter()
+            .position(|g| g.session.as_ref().is_some_and(|s| s.window.id() == id))
+        else {
+            return;
+        };
+        match event {
+            // A background window cannot hold focus, so its blur events mean nothing.
+            WindowEvent::Focused(false) => {}
+            WindowEvent::Focused(true) => {
+                // `focused` still describes the outgoing window: blur it once, since a
+                // separate Focused(false) may never reach it.
+                let blur = self.focused;
+                self.swap_window(index);
+                if blur
+                    && let Some(g) = self.windows.get_mut(index)
+                    && let Some(old) = &mut g.session
+                    && old.term.modes.focus_events
+                {
+                    old.pty.write(b"\x1b[O");
+                }
+                self.window_event_inner(event_loop, event);
+            }
+            _ => self.with_window(index, |app| app.window_event_inner(event_loop, event)),
+        }
+    }
+
+    fn window_event_inner(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        match event {
+            WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
+            #[cfg(target_os = "macos")]
+            WindowEvent::CloseRequested => match close_confirm::take_wide_close() {
+                Some(close_confirm::WideClose::Quit) => self.close_requested(event_loop),
+                Some(close_confirm::WideClose::Window) => self.close_window(event_loop),
+                None => self.close_tab(self.active_tab, event_loop),
+            },
+            #[cfg(not(target_os = "macos"))]
+            WindowEvent::CloseRequested => self.close_this_window(event_loop),
+            WindowEvent::Resized(size) => {
+                self.cancel_prompt_click();
+                if let Some(search) = &mut self.search {
+                    search.dirty = true;
+                }
+                if let Some(s) = &mut self.session {
+                    s.size = size;
+                    s.renderer.resize(size.width, size.height);
+                    s.resize.schedule(Instant::now());
+                    s.window.request_redraw();
+                }
+                #[cfg(target_os = "macos")]
+                self.note_normal_frame();
+                self.update_ime_cursor_area();
+            }
+            #[cfg(target_os = "macos")]
+            WindowEvent::Moved(_) => self.note_normal_frame(),
+            WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
+            WindowEvent::Focused(focused) => {
+                if !focused {
+                    self.cancel_prompt_click();
+                }
+                self.typing_pointer.show();
+                let changed = std::mem::replace(&mut self.focused, focused) != focused;
+                if let Some(s) = &mut self.session {
+                    s.blink_since = Instant::now();
+                    if !focused {
+                        s.composition.clear();
+                        if let Some(search) = &mut self.search {
+                            search.clear_preedit();
+                        }
+                        s.ime_cursor_area = None;
+                    }
+                    if changed && s.term.modes.focus_events {
+                        s.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+                    }
+                    s.window.request_redraw();
+                }
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                // wgpu acquires no drawable while the window is occluded, which includes a new
+                // window before macOS first shows it, so draw again once it is visible.
+                if !occluded && let Some(s) = &self.session {
+                    s.window.request_redraw();
+                }
+            }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+                #[cfg(target_os = "macos")]
+                if links::command_modifier(self.modifiers) {
+                    self.sync_pointer();
+                }
+                self.refresh_link();
+            }
+            WindowEvent::DroppedFile(path) => self.dropped_file(path),
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                let held_at_focus =
+                    self.held_at_focus
+                        .observe(event.physical_key, event.state, is_synthetic);
+                let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
+                if event.state != ElementState::Pressed {
+                    // Releases reach the PTY only where the press would: not past a
+                    // dialog or search, and without write_input's scroll reset.
+                    let locked = self
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.term.modes.keyboard_locked);
+                    if forwards_key_event(
+                        kitty_flags,
+                        true,
+                        self.pending_close.is_some()
+                            || self.pending_paste.is_some()
+                            || self.search.is_some(),
+                        locked,
+                    ) {
+                        let base = event.key_without_modifiers();
+                        if let Some(bytes) = input::encode_kitty_key(
+                            &input::KeyEvent {
+                                key: &event.logical_key,
+                                base: &base,
+                                text: event.text.as_deref(),
+                                mods: self.modifiers,
+                            },
+                            input::KeyEventKind::Release,
+                            kitty_flags,
+                            self.options.option_as_alt,
+                            self.session
+                                .as_ref()
+                                .is_some_and(|s| s.term.modes.backarrow_sends_bs),
+                        ) && let Some(s) = &mut self.session
+                        {
+                            s.pty.write(&bytes);
+                        }
+                    }
+                    return;
+                }
+                if self.pending_close.is_some() {
+                    self.confirm_close_key(&event, event_loop);
+                    return;
+                }
+                if self.pending_paste.is_some() {
+                    self.confirm_paste_key(&event);
+                    return;
+                }
+                if self.shortcut(&event, held_at_focus, event_loop) {
+                    return;
+                }
+                let find_preedit = self.search.as_ref().map(|f| f.preedit.as_str());
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| ime::holds_keys(&s.composition, find_preedit))
+                {
+                    return;
+                }
+                if self.search.is_some() {
+                    self.search_key(&event);
+                    return;
+                }
+                let Some(s) = &self.session else { return };
+                // KAM (ANSI mode 2) locks out typed input; terminal shortcuts
+                // still work so the lock is always escapable.
+                if s.term.modes.keyboard_locked {
+                    return;
+                }
+                let base = event.key_without_modifiers();
+                let kind = if event.repeat {
+                    input::KeyEventKind::Repeat
+                } else {
+                    input::KeyEventKind::Press
+                };
+                let bytes = if kitty_flags == 0 {
+                    input::encode_key(
+                        &event.logical_key,
+                        &base,
+                        event.text.as_deref(),
+                        self.modifiers,
+                        s.term.modes.app_cursor,
+                        self.options.option_as_alt,
+                        s.term.modes.backarrow_sends_bs,
+                    )
+                } else {
+                    input::encode_kitty_key(
+                        &input::KeyEvent {
+                            key: &event.logical_key,
+                            base: &base,
+                            text: event.text.as_deref(),
+                            mods: self.modifiers,
+                        },
+                        kind,
+                        kitty_flags,
+                        self.options.option_as_alt,
+                        s.term.modes.backarrow_sends_bs,
+                    )
+                };
+                if let Some(bytes) = bytes {
+                    self.write_input(&bytes);
+                    self.hide_pointer_for_typing();
+                }
+            }
+            WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
+                if self.pending_paste.is_some() || self.pending_close.is_some() {
+                    // Like typed keys, committed text never reaches the shell past the banner.
+                } else if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
+                    search.insert(&text, &mut s.term);
+                    s.scroll.reset();
+                    s.window.request_redraw();
+                } else {
+                    self.write_input(text.as_bytes());
+                }
+                self.update_ime_cursor_area();
+            }
+            WindowEvent::Ime(event) if self.search.is_some() => {
+                if let Some(search) = &mut self.search {
+                    match event {
+                        Ime::Preedit(text, cursor) => search.set_preedit(text, cursor),
+                        Ime::Disabled => search.clear_preedit(),
+                        _ => {}
+                    }
+                }
+                self.update_ime_cursor_area();
+                if let Some(s) = &self.session {
+                    s.window.request_redraw();
+                }
+            }
+            WindowEvent::Ime(event) => {
+                // X11 can report only an empty preedit at a composition boundary.
+                // That boundary still invalidates movement queued before the IME.
+                if matches!(&event, Ime::Preedit(..)) {
+                    self.cancel_prompt_click();
+                }
+                if let Some(s) = &mut self.session {
+                    s.composition.update(&event);
+                    if matches!(event, Ime::Enabled | Ime::Disabled) {
+                        s.ime_cursor_area = None;
+                    }
+                    if matches!(&event, Ime::Preedit(text, _) if !text.is_empty()) {
+                        s.term.scroll_to_bottom();
+                        s.scroll.reset();
+                    }
+                    s.window.request_redraw();
+                }
+                if let Ime::Commit(text) = event
+                    && self.pending_paste.is_none()
+                    && self.pending_close.is_none()
+                {
+                    let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
+                    let bytes = input::encode_kitty_text(&text, kitty_flags)
+                        .unwrap_or_else(|| text.as_bytes().to_vec());
+                    self.write_input(&bytes);
+                    self.hide_pointer_for_typing();
+                }
+                self.refresh_link();
+                self.update_ime_cursor_area();
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.typing_pointer.show();
+                if !self.tab_mouse_input(state, button, event_loop) {
+                    self.mouse_input(state, button);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                // Hiding the pointer can report a motion event at the same position.
+                if position != self.tab_pointer {
+                    self.typing_pointer.show();
+                }
+                self.pointer_moved(position)
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if self.tab_hover.take().is_some()
+                    && let Some(s) = &self.session
+                {
+                    s.window.request_redraw();
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.typing_pointer.show();
+                self.mouse_wheel(delta)
+            }
+            WindowEvent::RedrawRequested => {
+                self.present_frame();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The decoration theme matching `palette(appearance)`: light only on an
+/// explicit Light, dark otherwise. Winit's Linux backends have no "system"
+/// value — X11 writes `dark` for `None` and Wayland falls back to light — so
+/// `None` must not reach `set_theme` or the frame splits from the palette.
+#[cfg(target_os = "linux")]
+fn decoration_theme(appearance: Option<Theme>) -> Option<Theme> {
+    Some(if appearance == Some(Theme::Light) {
+        Theme::Light
+    } else {
+        Theme::Dark
+    })
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.session.is_some() {
@@ -4664,12 +5435,19 @@ impl ApplicationHandler<UserEvent> for App {
         // AppKit may never return from this callback; collect the pager status before
         // hang_up_all takes its child, but keep the normal exit code to report on Linux.
         self.pager_exit_code = window_exit_code(self);
-        pty::hang_up_all(
-            self.session
+        let ptys = self
+            .session
+            .iter_mut()
+            .map(|s| &mut s.pty)
+            .chain(self.tabs.iter_mut().flatten().map(|pane| &mut pane.pty));
+        #[cfg(target_os = "linux")]
+        let ptys = ptys.chain(self.windows.iter_mut().flat_map(|g| {
+            g.session
                 .iter_mut()
                 .map(|s| &mut s.pty)
-                .chain(self.tabs.iter_mut().flatten().map(|pane| &mut pane.pty)),
-        );
+                .chain(g.tabs.iter_mut().flatten().map(|pane| &mut pane.pty))
+        }));
+        pty::hang_up_all(ptys);
         remove_on_exit();
     }
 
@@ -4704,75 +5482,21 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
                 self.output_ready()
             }
-            UserEvent::Output(id) => self.background_output(id),
+            UserEvent::Output(id) => self.output_elsewhere(id),
+            UserEvent::Exit(id) => {
+                #[cfg(target_os = "linux")]
+                if let Some(index) = self.window_of_pane(id) {
+                    self.with_window(index, |app| app.pane_exited(id, event_loop));
+                    return;
+                }
+                self.pane_exited(id, event_loop);
+            }
             #[cfg(target_os = "macos")]
             UserEvent::Presented => {
                 if self.exit_deadline.is_none()
                     && let Some(s) = &self.session
                 {
                     s.window.request_redraw();
-                }
-            }
-            UserEvent::Exit(id) if self.tabs.len() > 1 => {
-                if let Some(index) = self.tab_index(id) {
-                    if self.pending_close_tab == Some(id) {
-                        self.pending_close_tab = None;
-                        self.pending_close = None;
-                    }
-                    self.remove_tab(index);
-                }
-            }
-            UserEvent::Exit(id) if self.session.as_ref().is_some_and(|s| s.pane != id) => {}
-            UserEvent::Exit(_) => {
-                self.exit_deadline
-                    .get_or_insert_with(|| Instant::now() + EXIT_TIMEOUT);
-                if let Some(s) = &mut self.session {
-                    #[cfg(target_os = "macos")]
-                    {
-                        present_macos::begin_exit();
-                        s.renderer.prepare_exit();
-                    }
-                    let queued = s.pty.take_output();
-                    let mut processed = 0;
-                    update_terminal(&mut s.term, &mut s.scroll, |term| {
-                        processed = s.output.drain_on_exit(term, queued);
-                    });
-                    s.since_frame += processed;
-                    if let Some(log) = &mut s.latency {
-                        log.output(processed);
-                    }
-                    s.synchronized_since = None;
-                    s.deferred = None;
-                    if s.since_frame == 0 && s.sequence > 0 {
-                        // Do not replace an already submitted final frame with an unchanged commit.
-                        s.output.presented();
-                        #[cfg(target_os = "linux")]
-                        if s.presentation.is_some() {
-                            self.exit_presentation.submitted(s.sequence, Instant::now());
-                        }
-                        #[cfg(target_os = "macos")]
-                        self.exit_presentation
-                            .submitted(present_macos::arm_exit() - 1, Instant::now());
-                    }
-                }
-                let pending_final = self
-                    .session
-                    .as_ref()
-                    .is_some_and(|s| s.since_frame > 0 || s.sequence == 0);
-                #[cfg(target_os = "linux")]
-                let pending_final = pending_final
-                    || self
-                        .session
-                        .as_ref()
-                        .is_some_and(|s| s.presentation.is_some())
-                        && self.exit_presentation.needs_wayland_submission();
-                #[cfg(target_os = "macos")]
-                let pending_final = pending_final
-                    || self
-                        .exit_presentation
-                        .needs_metal_submission(present_macos::feedback().0);
-                if pending_final {
-                    self.present_frame();
                 }
             }
         }
@@ -5008,250 +5732,12 @@ impl ApplicationHandler<UserEvent> for App {
             self.background_window_event(event_loop, id, event);
             return;
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = id;
-        match event {
-            WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
-            #[cfg(target_os = "macos")]
-            WindowEvent::CloseRequested => match close_confirm::take_wide_close() {
-                Some(close_confirm::WideClose::Quit) => self.close_requested(event_loop),
-                Some(close_confirm::WideClose::Window) => self.close_window(event_loop),
-                None => self.close_tab(self.active_tab, event_loop),
-            },
-            #[cfg(not(target_os = "macos"))]
-            WindowEvent::CloseRequested => self.close_requested(event_loop),
-            WindowEvent::Resized(size) => {
-                self.cancel_prompt_click();
-                if let Some(search) = &mut self.search {
-                    search.dirty = true;
-                }
-                if let Some(s) = &mut self.session {
-                    s.size = size;
-                    s.renderer.resize(size.width, size.height);
-                    s.resize.schedule(Instant::now());
-                    s.window.request_redraw();
-                }
-                #[cfg(target_os = "macos")]
-                self.note_normal_frame();
-                self.update_ime_cursor_area();
-            }
-            #[cfg(target_os = "macos")]
-            WindowEvent::Moved(_) => self.note_normal_frame(),
-            WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
-            WindowEvent::Focused(focused) => {
-                if !focused {
-                    self.cancel_prompt_click();
-                }
-                self.typing_pointer.show();
-                let changed = std::mem::replace(&mut self.focused, focused) != focused;
-                if let Some(s) = &mut self.session {
-                    s.blink_since = Instant::now();
-                    if !focused {
-                        s.composition.clear();
-                        if let Some(search) = &mut self.search {
-                            search.clear_preedit();
-                        }
-                        s.ime_cursor_area = None;
-                    }
-                    if changed && s.term.modes.focus_events {
-                        s.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
-                    }
-                    s.window.request_redraw();
-                }
-            }
-            WindowEvent::Occluded(occluded) => {
-                self.occluded = occluded;
-                // wgpu acquires no drawable while the window is occluded, which includes a new
-                // window before macOS first shows it, so draw again once it is visible.
-                if !occluded && let Some(s) = &self.session {
-                    s.window.request_redraw();
-                }
-            }
-            WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
-                #[cfg(target_os = "macos")]
-                if links::command_modifier(self.modifiers) {
-                    self.sync_pointer();
-                }
-                self.refresh_link();
-            }
-            WindowEvent::DroppedFile(path) => self.dropped_file(path),
-            WindowEvent::KeyboardInput {
-                event,
-                is_synthetic,
-                ..
-            } => {
-                let held_at_focus =
-                    self.held_at_focus
-                        .observe(event.physical_key, event.state, is_synthetic);
-                let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
-                if event.state != ElementState::Pressed {
-                    // Releases reach the PTY only where the press would: not past a
-                    // dialog or search, and without write_input's scroll reset.
-                    if kitty_flags != 0
-                        && self.pending_close.is_none()
-                        && self.pending_paste.is_none()
-                        && self.search.is_none()
-                    {
-                        let base = event.key_without_modifiers();
-                        if let Some(bytes) = input::encode_kitty_key(
-                            &input::KeyEvent {
-                                key: &event.logical_key,
-                                base: &base,
-                                text: event.text.as_deref(),
-                                mods: self.modifiers,
-                            },
-                            input::KeyEventKind::Release,
-                            kitty_flags,
-                            self.options.option_as_alt,
-                        ) && let Some(s) = &mut self.session
-                        {
-                            s.pty.write(&bytes);
-                        }
-                    }
-                    return;
-                }
-                if self.pending_close.is_some() {
-                    self.confirm_close_key(&event, event_loop);
-                    return;
-                }
-                if self.pending_paste.is_some() {
-                    self.confirm_paste_key(&event);
-                    return;
-                }
-                if self.shortcut(&event, held_at_focus, event_loop) {
-                    return;
-                }
-                let find_preedit = self.search.as_ref().map(|f| f.preedit.as_str());
-                if self
-                    .session
-                    .as_ref()
-                    .is_some_and(|s| ime::holds_keys(&s.composition, find_preedit))
-                {
-                    return;
-                }
-                if self.search.is_some() {
-                    self.search_key(&event);
-                    return;
-                }
-                let Some(s) = &self.session else { return };
-                let base = event.key_without_modifiers();
-                let kind = if event.repeat {
-                    input::KeyEventKind::Repeat
-                } else {
-                    input::KeyEventKind::Press
-                };
-                let bytes = if kitty_flags == 0 {
-                    input::encode_key(
-                        &event.logical_key,
-                        &base,
-                        event.text.as_deref(),
-                        self.modifiers,
-                        s.term.modes.app_cursor,
-                        self.options.option_as_alt,
-                    )
-                } else {
-                    input::encode_kitty_key(
-                        &input::KeyEvent {
-                            key: &event.logical_key,
-                            base: &base,
-                            text: event.text.as_deref(),
-                            mods: self.modifiers,
-                        },
-                        kind,
-                        kitty_flags,
-                        self.options.option_as_alt,
-                    )
-                };
-                if let Some(bytes) = bytes {
-                    self.write_input(&bytes);
-                    self.hide_pointer_for_typing();
-                }
-            }
-            WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
-                if self.pending_paste.is_some() || self.pending_close.is_some() {
-                    // Like typed keys, committed text never reaches the shell past the banner.
-                } else if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
-                    search.insert(&text, &mut s.term);
-                    s.scroll.reset();
-                    s.window.request_redraw();
-                } else {
-                    self.write_input(text.as_bytes());
-                }
-                self.update_ime_cursor_area();
-            }
-            WindowEvent::Ime(event) if self.search.is_some() => {
-                if let Some(search) = &mut self.search {
-                    match event {
-                        Ime::Preedit(text, cursor) => search.set_preedit(text, cursor),
-                        Ime::Disabled => search.clear_preedit(),
-                        _ => {}
-                    }
-                }
-                self.update_ime_cursor_area();
-                if let Some(s) = &self.session {
-                    s.window.request_redraw();
-                }
-            }
-            WindowEvent::Ime(event) => {
-                // X11 can report only an empty preedit at a composition boundary.
-                // That boundary still invalidates movement queued before the IME.
-                if matches!(&event, Ime::Preedit(..)) {
-                    self.cancel_prompt_click();
-                }
-                if let Some(s) = &mut self.session {
-                    s.composition.update(&event);
-                    if matches!(event, Ime::Enabled | Ime::Disabled) {
-                        s.ime_cursor_area = None;
-                    }
-                    if matches!(&event, Ime::Preedit(text, _) if !text.is_empty()) {
-                        s.term.scroll_to_bottom();
-                        s.scroll.reset();
-                    }
-                    s.window.request_redraw();
-                }
-                if let Ime::Commit(text) = event
-                    && self.pending_paste.is_none()
-                    && self.pending_close.is_none()
-                {
-                    let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
-                    let bytes = input::encode_kitty_text(&text, kitty_flags)
-                        .unwrap_or_else(|| text.as_bytes().to_vec());
-                    self.write_input(&bytes);
-                    self.hide_pointer_for_typing();
-                }
-                self.refresh_link();
-                self.update_ime_cursor_area();
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                self.typing_pointer.show();
-                if !self.tab_mouse_input(state, button, event_loop) {
-                    self.mouse_input(state, button);
-                }
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                // Hiding the pointer can report a motion event at the same position.
-                if position != self.tab_pointer {
-                    self.typing_pointer.show();
-                }
-                self.pointer_moved(position)
-            }
-            WindowEvent::CursorLeft { .. } => {
-                if self.tab_hover.take().is_some()
-                    && let Some(s) = &self.session
-                {
-                    s.window.request_redraw();
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                self.typing_pointer.show();
-                self.mouse_wheel(delta)
-            }
-            WindowEvent::RedrawRequested => {
-                self.present_frame();
-            }
-            _ => {}
+        #[cfg(target_os = "linux")]
+        if !self.session.as_ref().is_some_and(|s| s.window.id() == id) {
+            self.background_window_event(event_loop, id, event);
+            return;
         }
+        self.window_event_inner(event_loop, event);
     }
 }
 
@@ -5328,6 +5814,22 @@ fn main() {
     }
 }
 
+/// Whether a key event reaches the PTY: the modal layers (close and paste
+/// confirmations, search) and KAM's keyboard lock swallow both presses and
+/// releases, and releases only go out while Kitty event-type reporting asks
+/// for them.
+fn forwards_key_event(
+    kitty_flags: u8,
+    release: bool,
+    modal_open: bool,
+    keyboard_locked: bool,
+) -> bool {
+    if modal_open || keyboard_locked {
+        return false;
+    }
+    !release || kitty_flags != 0
+}
+
 /// How long a pager window waits for its pager's exit status once its output has ended.
 const PAGER_STATUS_WAIT: Duration = Duration::from_millis(500);
 
@@ -5351,6 +5853,21 @@ mod tests {
     fn drawn_tab_bar_gives_way_to_native_tabs_on_macos() {
         assert!(!tab_bar_drawn(false));
         assert_eq!(tab_bar_drawn(true), !cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn keyboard_lock_swallows_presses_and_releases() {
+        // With Kitty event-type reporting on, an unlocked terminal forwards
+        // presses and releases alike; KAM (ANSI mode 2) swallows both.
+        let kitty_flags = 1;
+        assert!(forwards_key_event(kitty_flags, false, false, false));
+        assert!(forwards_key_event(kitty_flags, true, false, false));
+        assert!(!forwards_key_event(kitty_flags, false, false, true));
+        assert!(!forwards_key_event(kitty_flags, true, false, true));
+        // The lock and modal layers win over reporting, and without reporting
+        // an unlocked release stays local.
+        assert!(!forwards_key_event(kitty_flags, false, true, false));
+        assert!(!forwards_key_event(0, true, false, false));
     }
 
     #[test]

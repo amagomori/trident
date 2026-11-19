@@ -13,7 +13,7 @@ VTRUN=target/release/examples/vtrun
 
 # esctest (from an esctest2 checkout's esctest/ directory)
 $VTRUN --idle 5000 -- python3 esctest.py --expected-terminal=xterm --max-vt-level=4 \
-  --timeout=0.3 --logfile=esctest.log --v=2
+  --xterm-reverse-wrap=383 --timeout=0.3 --logfile=esctest.log --v=2
 
 # vttest menu N: --key is typed once output goes idle; screens are printed to stdout
 $VTRUN --idle 400 --key '1\r' --key '\r' --key '\r' --key '0\r' -- vttest
@@ -26,16 +26,20 @@ $VTRUN --idle 400 --key '1\r' --key '\r' --key '\r' --key '0\r' -- vttest
 
 ## esctest results
 
-With xterm expectations at VT level 4, 384 tests pass and 144 fail; the suite skips 39 tests for
+With xterm expectations at VT level 4, 414 tests pass and 114 fail; the suite marks 39 tests as
 known xterm bugs. The failures group under these tickets:
 
 | Failures | Cause | Ticket |
 | --- | --- | --- |
 | 54 | VT420 rectangle and column ops, character protection (DECSCA, DECSED, DECSEL) | [KAN-137](https://jarettforzano.atlassian.net/browse/KAN-137) |
 | 47 | OSC 4/10-19 color spec formats, special colors (OSC 5/105) | [KAN-138](https://jarettforzano.atlassian.net/browse/KAN-138) |
-| 32 | Reverse wraparound (including within margins), more(1) fix (41), DECSCL, remaining DECRQM/DECRQSS settings | [KAN-140](https://jarettforzano.atlassian.net/browse/KAN-140) |
+| 2 | DECRQSS for DECSLPP; VT level 4 honors DECNCSM instead of clearing on DECCOLM | [KAN-139](https://jarettforzano.atlassian.net/browse/KAN-139) |
 | 7 | XTWINOPS window-manager ops refused by policy (table below) | intentional |
 | 4 | DA1/DA2: Trident reports a VT220 (`CSI ? 62 ; 22 c`, `CSI > 0 ; 10 ; 1 c`), not xterm's VT420 | intentional |
+
+The left/right margin cases pass, including origin-relative movement, reverse wraparound,
+bounded scrolling, and margin reports. The two DECSLPP and DECNCSM failures above also occur
+without horizontal margins. The suite counts DECELF/DECLFKC/DECSMKR as known xterm bugs.
 
 ## XTWINOPS and DECCOLM decisions
 
@@ -58,9 +62,9 @@ known xterm bugs. The failures group under these tickets:
 
 | Menu | Result |
 | --- | --- |
-| 1 Cursor movements | Pass except the 132-column screen; DECCOLM is implemented (`?40h` + `?3h`) but vttest has not been rerun |
-| 2 Screen features | Pass except the 132-column screen; DECCOLM is implemented (`?40h` + `?3h`) but vttest has not been rerun |
-| 3 Character sets | VT100 sets (US, UK, DEC Special Graphics) pass. NRCS and VT220 sets (G2/G3, SS2/SS3) are not supported (KAN-140). |
+| 1 Cursor movements | Pass except the 132-column screen (DECCOLM, KAN-139) |
+| 2 Screen features | Pass except 132-column screens (DECCOLM, KAN-139) |
+| 3 Character sets | VT100 sets (US, UK, DEC Special Graphics) pass. NRCS and VT220 sets (G2/G3, SS2/SS3) are not supported. |
 | 4 Double-sized characters | DECDHL/DECDWL are not supported or planned. Lines render at single size. |
 | 5 Keyboard | The term-app key encoding tests cover keyboard behavior (KAN-14). The `vtrun` example cannot exercise the app's encoder. |
 | 6 Terminal reports | DA, DSR 5/6 and LNM pass. Answerback is empty. |

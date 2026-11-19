@@ -67,6 +67,8 @@ pub struct Clipboard {
     x11_max_request_bytes: Option<Option<usize>>,
     #[cfg(target_os = "linux")]
     x11: bool,
+    /// The window the display handle came from, held for drop ordering with the
+    /// backend; rebinding only swaps this handle, never the backend or its offers.
     #[cfg(target_os = "linux")]
     _window: Option<Arc<Window>>,
 }
@@ -110,6 +112,15 @@ impl Clipboard {
             #[cfg(target_os = "linux")]
             _window: Some(window),
         }
+    }
+
+    /// Points the held window at a still-live one before the window it was
+    /// created through closes. Both backends serve selections through
+    /// objects that outlive any window, so the swap changes nothing the
+    /// clipboard offers — including ownership another application holds.
+    #[cfg(target_os = "linux")]
+    pub fn rebind(&mut self, window: Arc<Window>) {
+        self._window = Some(window);
     }
 
     /// Whether the X server can be handed `len` bytes of clipboard text; true off X11

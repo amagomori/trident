@@ -25,10 +25,7 @@ impl Perform for Terminal {
         self.print_state.disarm_clear();
         match byte {
             0x07 => self.bell = true,
-            0x08 => {
-                self.cursor.pending_wrap = false;
-                self.cursor.col = self.cursor.col.saturating_sub(1).max(self.left_bound());
-            }
+            0x08 => self.cursor_back(),
             0x09 => self.tab(1),
             0x0a..=0x0c => {
                 self.prompt_redraw = false;
@@ -66,8 +63,24 @@ impl Perform for Terminal {
                 self.move_col(col);
             }
             ('D', []) => {
-                let col = self.cursor.col.saturating_sub(n(0)).max(self.left_bound());
-                self.move_col(col);
+                // The do-wrap position only costs a counted CUB inside a
+                // reverse-wraparound mode, where it sits two counts deep (one
+                // past the edge, one to unwrap, per xterm 390/412). With both
+                // modes off the flag clears for free and CUB keeps its full
+                // distance — unlike BS, whose single step always lands one
+                // cell left (or in place under a reverse mode).
+                let mut n = n(0);
+                if self.cursor.pending_wrap {
+                    self.cursor.pending_wrap = false;
+                    if self.modes.autowrap
+                        && (self.modes.reverse_wrap || self.modes.reverse_wrap_ext)
+                    {
+                        n = n.saturating_sub(2);
+                    }
+                }
+                for _ in 0..n {
+                    self.cursor_back();
+                }
             }
             ('E', []) => {
                 self.move_down(n(0));
@@ -154,12 +167,6 @@ impl Perform for Terminal {
             }
             ('t', []) => self.window_op(params),
             ('t', [b'>']) => self.title_modes(params),
-            ('p', [b'"']) => {
-                self.reports.pre_vt420 = arg(params, 0, 64) < 64;
-                if self.reports.pre_vt420 {
-                    self.set_mode(69, true, false);
-                }
-            }
             ('y', [b'*']) if self.reports.checksums => self.report_rect_checksum(params),
             ('s', []) if self.lr_margin_mode != LrMode::Off => {
                 let right = arg(params, 1, 0) as usize;
@@ -186,6 +193,14 @@ impl Perform for Terminal {
                 self.modes.autowrap = true;
                 self.modes.app_cursor = false;
                 self.modes.app_keypad = false;
+                self.modes.keyboard_locked = false;
+                self.modes.national_charsets = false;
+                self.modes.numeric_keypad = false;
+                self.modes.more_fix = false;
+                self.modes.reverse_wrap = false;
+                self.modes.reverse_wrap_ext = false;
+                self.reports.decsca = 0;
+                self.reports.decsasd = 0;
                 self.cursor.template = Default::default();
                 self.charsets = [Charset::Ascii; 2];
                 self.active_charset = 0;
@@ -194,6 +209,14 @@ impl Perform for Terminal {
                 // DECRC after a soft reset goes home with default attributes.
                 self.screen_mut().saved = None;
             }
+            ('p', [b'"']) => self.set_conformance(params),
+            // Stored-and-echoed DECRQSS settings (see `Reports`): the values are
+            // kept for the request reply without being enacted.
+            ('q', [b'"']) => self.reports.decsca = arg(params, 0, 0),
+            ('x', [b'*']) => self.reports.decsace = arg(params, 0, 0),
+            ('}', [b'$']) => self.reports.decsasd = arg(params, 0, 0),
+            ('~', [b'$']) => self.reports.decssdt = arg(params, 0, 0),
+            ('|', [b'*']) => self.reports.decsnls = arg(params, 0, 0),
             _ => {}
         }
     }
@@ -211,6 +234,7 @@ impl Perform for Terminal {
                     self.erase_placements(0, self.rows - 1, 0, usize::MAX);
                 }
                 for row in 0..self.rows {
+                    self.lines_mut()[row].set_wrapped(false);
                     self.lines_mut()[row].clear_hidden();
                     self.lines_mut()[row].touch_all();
                     for cell in self.lines_mut()[row].cells.iter_mut() {
@@ -398,14 +422,23 @@ impl Terminal {
         Some(match mode {
             1 => self.modes.app_cursor,
             3 => self.modes.columns_132,
+            4 => self.modes.smooth_scroll,
+            5 => self.modes.reverse_video,
             6 => self.modes.origin,
-            69 if !self.reports.pre_vt420 => self.lr_margin_mode != LrMode::Off,
+            69 if self.reports.conformance_level >= 64 => self.lr_margin_mode != LrMode::Off,
             7 => self.modes.autowrap,
             12 => self.cursor_blink,
+            18 => self.modes.print_form_feed,
+            19 => self.modes.print_full_page,
             25 => self.modes.show_cursor,
             40 => self.modes.allow_80_132,
+            41 => self.modes.more_fix,
+            42 => self.modes.national_charsets,
+            45 => self.modes.reverse_wrap,
             95 => self.modes.no_clear_on_columns,
             47 | 1047 | 1049 => self.is_alt_screen(),
+            66 => self.modes.numeric_keypad,
+            67 => self.modes.backarrow_sends_bs,
             9 => self.modes.mouse == MouseMode::X10,
             1000 => self.modes.mouse == MouseMode::Click,
             1002 => self.modes.mouse == MouseMode::Drag,
@@ -413,6 +446,7 @@ impl Terminal {
             1004 => self.modes.focus_events,
             1006 => self.modes.sgr_mouse,
             1007 => self.modes.alt_scroll,
+            1045 => self.modes.reverse_wrap_ext,
             2004 => self.modes.bracketed_paste,
             2026 => self.modes.synchronized_output,
             2031 => self.modes.color_scheme_updates,
@@ -455,26 +489,43 @@ impl Terminal {
         };
     }
 
+    /// DECRQM (`CSI ? Ps $ p`, `CSI Ps $ p`) and DECRQSS are level-3 features:
+    /// they stay silent below DECSCL 63.
+    fn decrqm_supported(&self) -> bool {
+        self.reports.conformance_level >= 63
+    }
+
     #[cold]
     #[inline(never)]
     fn report_private_mode(&mut self, mode: u16) {
-        let status = self
-            .private_mode(mode)
-            .map_or(0, |set| if set { 1 } else { 2 });
+        if !self.decrqm_supported() {
+            return;
+        }
+        let status = if mode == 60 {
+            // DECHCCM is a fixed mode on the VT420+: always reported reset.
+            4
+        } else {
+            self.private_mode(mode)
+                .map_or(0, |set| if set { 1 } else { 2 })
+        };
         let reply = format!("\x1b[?{mode};{status}$y");
         self.responses.extend_from_slice(reply.as_bytes());
     }
 
-    /// DECRQM for ANSI modes (`CSI Ps $ p`): IRM and LNM can change, SRM is always set
-    /// (no local echo) and the other ECMA-48 modes are always reset.
+    /// DECRQM for ANSI modes (`CSI Ps $ p`): IRM, LNM, KAM and SRM can change and
+    /// the other ECMA-48 modes are always reset.
     #[cold]
     #[inline(never)]
     fn report_ansi_mode(&mut self, mode: u16) {
+        if !self.decrqm_supported() {
+            return;
+        }
         let status = match mode {
+            2 => 2 - self.modes.keyboard_locked as u8,
             4 => 2 - self.modes.insert as u8,
+            12 => 2 - self.modes.send_echo as u8,
             20 => 2 - self.modes.linefeed_newline as u8,
-            12 => 3,
-            1 | 2 | 5 | 7 | 10 | 11 | 13..=19 => 4,
+            1 | 5 | 7 | 10 | 11 | 13..=19 => 4,
             _ => 0,
         };
         let reply = format!("\x1b[{mode};{status}$y");
@@ -542,14 +593,18 @@ impl Terminal {
         self.responses.extend_from_slice(reply.as_bytes());
     }
 
-    /// DECRQSS reply: `DCS 1 $ r Pt ST` with the setting for SGR, DECSTBM and DECSCUSR,
+    /// DECRQSS reply: `DCS 1 $ r Pt ST` with the setting for SGR, DECSTBM,
+    /// DECSCUSR, DECSCL and the stored DECRQSS-reportable settings,
     /// `DCS 0 $ r ST` for anything else.
     #[cold]
     #[inline(never)]
     fn report_setting(&mut self, request: &[u8]) {
+        if !self.decrqm_supported() {
+            return;
+        }
         let setting = match request {
             b"m" => Some(self.sgr_setting()),
-            b"s" => Some(format!(
+            b"s" if self.reports.conformance_level >= 64 => Some(format!(
                 "{};{}s",
                 self.scroll_left + 1,
                 self.scroll_right + 1
@@ -559,6 +614,15 @@ impl Terminal {
                 self.scroll_top + 1,
                 self.scroll_bottom + 1
             )),
+            b"\"p" => Some(format!(
+                "{};{}\"p",
+                self.reports.conformance_level, self.reports.conformance_pc
+            )),
+            b"\"q" => Some(format!("{}\"q", self.reports.decsca)),
+            b"*x" => Some(format!("{}*x", self.reports.decsace)),
+            b"$}" => Some(format!("{}$}}", self.reports.decsasd)),
+            b"$~" => Some(format!("{}$~", self.reports.decssdt)),
+            b"*|" => Some(format!("{}*|", self.reports.decsnls)),
             b" q" => {
                 let style = match self.cursor_shape {
                     CursorShape::Block => 1,
@@ -950,10 +1014,27 @@ impl Terminal {
         }
     }
 
+    /// DECSCL (`CSI Pv ; Pc " p`): stores the requested conformance level and
+    /// control representation; a level change performs an RIS, as on the VT300+.
+    #[cold]
+    #[inline(never)]
+    fn set_conformance(&mut self, params: &Params) {
+        let level = arg(params, 0, 64).clamp(61, 64) as u8;
+        if level != self.reports.conformance_level {
+            self.reset();
+            self.reports.conformance_level = level;
+        }
+        if let Some(&pc) = params.iter().nth(1).and_then(|p| p.first()) {
+            self.reports.conformance_pc = pc;
+        }
+    }
+
     fn set_mode(&mut self, mode: u16, private: bool, enable: bool) {
         if !private {
             match mode {
+                2 => self.modes.keyboard_locked = enable,
                 4 => self.modes.insert = enable,
+                12 => self.modes.send_echo = enable,
                 20 => self.modes.linefeed_newline = enable,
                 _ => {}
             }
@@ -962,13 +1043,28 @@ impl Terminal {
         match mode {
             1 => self.modes.app_cursor = enable,
             3 => self.set_columns(if enable { 132 } else { 80 }),
+            4 => self.modes.smooth_scroll = enable,
+            5 => self.modes.reverse_video = enable,
             6 => {
                 self.modes.origin = enable;
                 self.goto(0, 0);
             }
-            7 => self.modes.autowrap = enable,
+            7 => {
+                self.modes.autowrap = enable;
+                if !enable {
+                    // The do-wrap position means nothing once autowrap is off.
+                    self.cursor.pending_wrap = false;
+                }
+            }
+            18 => self.modes.print_form_feed = enable,
+            19 => self.modes.print_full_page = enable,
             40 => self.modes.allow_80_132 = enable,
-            69 if !enable || !self.reports.pre_vt420 => {
+            41 => self.modes.more_fix = enable,
+            42 => self.modes.national_charsets = enable,
+            45 => self.modes.reverse_wrap = enable,
+            66 => self.modes.numeric_keypad = enable,
+            67 => self.modes.backarrow_sends_bs = enable,
+            69 if !enable || self.reports.conformance_level >= 64 => {
                 if !enable {
                     self.lr_margin_mode = LrMode::Off;
                     self.reset_lr_margins();
@@ -989,6 +1085,7 @@ impl Terminal {
                     self.restore_cursor()
                 }
             }
+            1045 => self.modes.reverse_wrap_ext = enable,
             1049 => self.set_alt_screen(enable, true, enable),
             9 => self.set_mouse(MouseMode::X10, enable),
             1000 => self.set_mouse(MouseMode::Click, enable),
