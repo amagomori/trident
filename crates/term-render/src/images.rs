@@ -56,7 +56,8 @@ pub(crate) fn layout(
         let scale = (cw / p.cell_pixels.0, ch / p.cell_pixels.1);
         let (x_off, y_off) = (p.x_offset as f32 * scale.0, p.y_offset as f32 * scale.1);
         let x = padding + p.col as f32 * cw + x_off;
-        let y = padding + v.row as f32 * ch + y_off + pixel_offset;
+        let relative_y = y_off - p.skipped_rows as f32 * ch;
+        let y = padding + v.row as f32 * ch + relative_y.max(0.0) + pixel_offset;
         let w = if p.fixed_cols {
             p.cols as f32 * cw - x_off
         } else {
@@ -67,10 +68,11 @@ pub(crate) fn layout(
         } else {
             p.source.height as f32 * scale.1
         };
-        let clipped_h = p
+        let top = (-relative_y).max(0.0);
+        let bottom = p
             .clipped_rows
             .map_or(h, |rows| h.min(rows as f32 * ch - y_off));
-        if w <= 0.0 || clipped_h <= 0.0 || p.source.width == 0 || p.source.height == 0 {
+        if w <= 0.0 || bottom <= top || p.source.width == 0 || p.source.height == 0 {
             continue;
         }
         let (iw, ih) = (image.width as f32, image.height as f32);
@@ -79,12 +81,12 @@ pub(crate) fn layout(
             image_id: p.image_id,
             layer: Layer::of(p.z),
             pos: [x, y],
-            size: [w, clipped_h],
+            size: [w, bottom - top],
             uv: [
                 s.x as f32 / iw,
-                s.y as f32 / ih,
+                (s.y as f32 + s.height as f32 * (top / h)) / ih,
                 (s.x + s.width) as f32 / iw,
-                (s.y as f32 + s.height as f32 * (clipped_h / h)) / ih,
+                (s.y as f32 + s.height as f32 * (bottom / h)) / ih,
             ],
         });
     }

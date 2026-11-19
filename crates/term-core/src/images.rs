@@ -85,12 +85,14 @@ pub struct Placement {
     pub cols: usize,
     /// Unclipped vertical cell span.
     pub rows: usize,
-    /// A bottom clip in cell rows, independent of the original span and source rectangle.
-    /// ED 2 uses this to save only the visible part, even for stretched single-pixel images.
+    /// Original cell rows skipped above this fragment's anchor.
+    pub skipped_rows: usize,
+    /// Exclusive end row in the original span, or `None` for the whole height.
+    /// Clipping in cells preserves scale even for stretched single-pixel images.
     pub clipped_rows: Option<usize>,
     /// Horizontal pixel offset within the anchor cell.
     pub x_offset: u32,
-    /// Vertical pixel offset within the anchor cell.
+    /// Vertical pixel offset in the original first cell, before row clipping.
     pub y_offset: u32,
     /// Clamped source rectangle in image pixels.
     pub source: Rect,
@@ -117,7 +119,10 @@ pub struct VisiblePlacement {
 impl Placement {
     /// Cell rows occupied after clipping, without changing the image's original scale.
     pub fn visible_rows(&self) -> usize {
-        self.clipped_rows.unwrap_or(self.rows).min(self.rows)
+        self.clipped_rows
+            .unwrap_or(self.rows)
+            .min(self.rows)
+            .saturating_sub(self.skipped_rows)
     }
 }
 
@@ -377,6 +382,7 @@ impl Terminal {
                 0 => span(source.height, opts.y_offset, cell_h),
                 n => n,
             },
+            skipped_rows: 0,
             clipped_rows: None,
             x_offset: opts.x_offset,
             y_offset: opts.y_offset,
@@ -522,7 +528,7 @@ impl Terminal {
             }
             changed = true;
             let rows = end.saturating_sub(p.line) as usize;
-            p.clipped_rows = Some(rows);
+            p.clipped_rows = Some(p.skipped_rows + rows);
             rows > 0
         });
         if changed {
