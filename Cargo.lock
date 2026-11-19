@@ -2640,6 +2640,7 @@ version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
+ "image",
  "libc",
  "memchr",
  "png",

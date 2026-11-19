@@ -24,6 +24,7 @@ mod budget;
 mod cell;
 mod ghost;
 pub mod grapheme;
+mod iterm;
 mod kitty;
 mod links;
 pub use links::{FileLink, Link};

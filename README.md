@@ -82,7 +82,7 @@ trident --install-terminfo     # optional: install the xterm-trident terminfo en
   selection.
 - Shell integration through OSC 133 lets you jump between prompts and marks output that changed
   since the last run.
-- You can display inline images through the kitty graphics protocol, receive desktop notifications
+- You can display inline images with kitty graphics or iTerm2’s `imgcat`, receive desktop notifications
   and drop files.
 - Trident bundles JetBrains Mono and supports color emoji and font fallback.
 - Configuration reloads when you save, and bundled themes can follow the OS appearance.
