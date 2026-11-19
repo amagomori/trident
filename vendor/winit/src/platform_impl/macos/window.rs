@@ -1,9 +1,9 @@
 #![allow(clippy::unnecessary_cast)]
 
 use objc2::rc::{autoreleasepool, Retained};
-use objc2::{declare_class, mutability, ClassType, DeclaredClass};
-use objc2_app_kit::{NSResponder, NSWindow};
-use objc2_foundation::{MainThreadBound, MainThreadMarker, NSObject};
+use objc2::{declare_class, msg_send, mutability, ClassType, DeclaredClass};
+use objc2_app_kit::{NSApplication, NSResponder, NSWindow};
+use objc2_foundation::{MainThreadBound, MainThreadMarker, NSObject, NSRect};
 
 use super::event_loop::ActiveEventLoop;
 use super::window_delegate::WindowDelegate;
@@ -105,6 +105,19 @@ declare_class!(
     impl DeclaredClass for WinitWindow {}
 
     unsafe impl WinitWindow {
+        #[method(setFrame:display:animate:)]
+        fn set_frame(&self, frame: NSRect, display: bool, animate: bool) {
+            // During a Spaces transition AppKit applies stale screen-adjustment frames
+            // to detached tab groups. Do not resize their views, even temporarily.
+            if self.is_inactive_group_during_transition() {
+                return;
+            }
+            // SAFETY: Forward the original NSWindow setter with unchanged arguments.
+            unsafe {
+                let _: () = msg_send![super(self), setFrame: frame, display: display, animate: animate];
+            }
+        }
+
         #[method(canBecomeMainWindow)]
         fn can_become_main_window(&self) -> bool {
             trace_scope!("canBecomeMainWindow");
@@ -120,6 +133,25 @@ declare_class!(
 );
 
 impl WinitWindow {
+    fn is_inactive_group_during_transition(&self) -> bool {
+        let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+        let Some(key) = app.keyWindow() else { return false };
+        if std::ptr::eq(self.as_super(), &*key)
+            || WindowDelegate::fullscreen_transition(&key) != Some(true)
+        {
+            return false;
+        }
+        // Only protect existing, tab-enabled windows. A new NSWindow still needs
+        // its initial frame before it can join the key window's group.
+        if WindowDelegate::fullscreen_transition(self) != Some(false) {
+            return false;
+        }
+        match (self.tabGroup(), key.tabGroup()) {
+            (Some(group), Some(active)) => !std::ptr::eq(&*group, &*active),
+            _ => false,
+        }
+    }
+
     pub(super) fn id(&self) -> WindowId {
         WindowId(self as *const Self as usize)
     }

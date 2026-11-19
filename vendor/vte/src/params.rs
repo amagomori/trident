@@ -23,6 +23,13 @@ pub struct Params {
 
     /// Total number of parameters and subparameters.
     len: usize,
+
+    /// Total number of parameters (groups, excluding subparameters).
+    groups: u8,
+
+    /// Bitmask of parameters that arrived with no digits (`;;` or a bare
+    /// sequence), which are distinct from an explicit `0`.
+    empties: u32,
 }
 
 impl Params {
@@ -50,11 +57,20 @@ impl Params {
         self.len == MAX_PARAMS
     }
 
+    /// Returns whether the `index`-th parameter arrived with no digits, as
+    /// counted by [`Params::iter`].
+    #[inline]
+    pub fn is_empty_param(&self, index: usize) -> bool {
+        self.empties & (1 << index) != 0
+    }
+
     /// Clear all parameters.
     #[inline]
     pub(crate) fn clear(&mut self) {
         self.current_subparams = 0;
         self.len = 0;
+        self.groups = 0;
+        self.empties = 0;
     }
 
     /// Add an additional parameter.
@@ -63,7 +79,16 @@ impl Params {
         self.subparams[self.len - self.current_subparams as usize] = self.current_subparams + 1;
         self.params[self.len] = item;
         self.current_subparams = 0;
+        self.groups += 1;
         self.len += 1;
+    }
+
+    /// Add an additional parameter that arrived with no digits; the parser
+    /// distinguishes it from an explicit `0`.
+    #[inline]
+    pub(crate) fn push_empty(&mut self) {
+        self.empties |= 1 << self.groups;
+        self.push(0);
     }
 
     /// Add an additional subparameter to the current parameter.

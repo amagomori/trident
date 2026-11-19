@@ -472,6 +472,17 @@ fn binaries_get_a_summary() {
 }
 
 #[test]
+fn large_video_reads_only_its_header_for_the_system_thumbnailer() {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(b"\0\0\0\x18ftypmp42").unwrap();
+    file.as_file().set_len(1024 * 1024 * 1024).unwrap();
+    let (bytes, size) = read_for_show(file.path()).unwrap();
+    assert_eq!(size, 1024 * 1024 * 1024);
+    assert!(bytes.len() <= 64 * 1024);
+    assert_eq!(detect(&bytes), Kind::Binary("MP4/QuickTime media".into()));
+}
+
+#[test]
 fn images_shrink_to_the_window_but_never_grow() {
     let window = Window {
         cols: 80,

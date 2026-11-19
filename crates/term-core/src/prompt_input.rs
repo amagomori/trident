@@ -6,7 +6,7 @@
 //! Unicode scalars; the payload is the buffer plus one final newline. The last
 //! field declares the editor's cursor-key unit, which differs between shells.
 //! Snapshots are on demand, not a stream of the user's keystrokes.
-use crate::{Flags, Point, PromptClick, Terminal, Zone};
+use crate::{Cell, Flags, Point, PromptClick, Terminal, Zone};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use unicode_width::UnicodeWidthChar;
 
@@ -224,7 +224,8 @@ impl Terminal {
             if line > last {
                 return None;
             }
-            let cell = &self.line(line).cells[col];
+            let plain = Cell::default();
+            let cell = self.line(line).cells.get(col).unwrap_or(&plain);
             let mut buf = [0; 4];
             let glyph = self
                 .grapheme(cell)

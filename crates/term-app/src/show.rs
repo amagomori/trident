@@ -1,7 +1,10 @@
 //! `trident show`: prints files in the terminal. Images (detected from their
 //! bytes) are
 //! scaled to the window and sent as kitty graphics escapes, so any terminal that speaks the
-//! protocol shows them; text is printed as text and other files get a one-line summary.
+//! protocol shows them. Text is printed as text. Other files get a system
+//! thumbnail when available, or a one-line summary.
+
+mod thumbnail;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -80,8 +83,8 @@ pub fn usage() -> String {
         "USAGE: {} show [--width N] [--height N] [--fit] FILE...\n\n\
          Shows files in the terminal. Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM,\n\
          TGA and SVG, told apart by their contents) are drawn with the kitty graphics\n\
-         protocol, shrunk to fit the window; text files are printed; anything else gets a\n\
-         one-line summary.\n\n\
+         protocol, shrunk to fit the window; text files are printed. Other files get a\n\
+         system thumbnail or a one-line summary.\n\n\
          OPTIONS:\n  \
            --width N    Draw images N columns wide\n  \
            --height N   Draw images N rows tall (with --width: fit inside both)\n  \
@@ -169,7 +172,7 @@ fn show(
     window: Window,
     out: &mut impl Write,
 ) -> Result<(), String> {
-    let bytes = std::fs::read(path).map_err(|e| io_message(&e))?;
+    let (bytes, size) = read_for_show(path).map_err(|e| io_message(&e))?;
     let write_err = |e: io::Error| format!("cannot write output: {}", io_message(&e));
     match detect(&bytes) {
         Kind::Raster(format @ (ImageFormat::Gif | ImageFormat::WebP)) => {
@@ -186,9 +189,32 @@ fn show(
         Kind::Text => write_text(out, &bytes).map_err(write_err),
         Kind::DecodedText(text) => write_text(out, text.as_bytes()).map_err(write_err),
         Kind::Binary(kind) => {
-            writeln!(out, "{kind}, {}", human_size(bytes.len() as u64)).map_err(write_err)
+            if let Some(image) = thumbnail::render(path, &bytes, options, window) {
+                return write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err);
+            }
+            writeln!(out, "{kind}, {}", human_size(size)).map_err(write_err)
         }
     }
+}
+
+/// Large videos and Office archives only need a header for classification.
+/// Their native thumbnailer reads the original path, not this buffer.
+fn read_for_show(path: &Path) -> io::Result<(Vec<u8>, u64)> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut bytes = Vec::new();
+    if size > 1024 * 1024 {
+        (&mut file).take(64 * 1024).read_to_end(&mut bytes)?;
+        if (bytes.starts_with(b"PK\x03\x04") || bytes.get(4..8) == Some(b"ftyp"))
+            && matches!(detect(&bytes), Kind::Binary(_))
+        {
+            return Ok((bytes, size));
+        }
+    }
+    file.read_to_end(&mut bytes)?;
+    let size = bytes.len() as u64;
+    Ok((bytes, size))
 }
 
 /// Small, image-only drop preview. This is deliberately separate from `show`: no text,

@@ -114,8 +114,24 @@ impl Terminal {
         editing: bool,
     ) -> Option<u64> {
         let old_rows = self.rows;
-        let old_first = self.history - self.primary.scrollback.len() as u64;
-        let back = self.primary.scrollback.len();
+        let history_len = self.primary.scrollback.len();
+        let first = self.history - history_len as u64;
+        let gaps = self.gap_rows(first, history_len + self.primary.lines.len());
+        // A prefix of independent lines that already fit has an identity position map.
+        // Leave enough rows at the end to fill the live screen if reflow pulls it up.
+        let keep = self
+            .primary
+            .scrollback
+            .iter()
+            .take(
+                history_len
+                    .saturating_sub(rows)
+                    .min(gaps.first().map_or(history_len, |g| g.0)),
+            )
+            .take_while(|row| !row.wrapped() && !row.has_hidden() && row.cells.len() <= cols)
+            .count();
+        let back = history_len - keep;
+        let old_first = first + keep as u64;
         // The primary cursor: the live one, or the one saved when the alternate screen
         // was entered. A cursor past the end of its row keeps the blanks before it, so
         // text typed after the resize lands where it would have.
@@ -131,13 +147,15 @@ impl Terminal {
         // end of a full row it waits there to wrap, as if the line had been typed anew.
         let mut cursor_end = false;
         // Budget placeholders stay one row, rewritten for the new width.
-        let gaps = self.gap_rows(old_first, back + self.primary.lines.len());
-        let mut gaps = gaps.into_iter().peekable();
+        let mut gaps = gaps
+            .into_iter()
+            .map(|(i, text)| (i - keep, text))
+            .peekable();
 
         // Draining keeps the scrollback's buffer and avoids `make_contiguous`, whose
         // `rotate_left::<Row>` would then stop being inlined into scrolling.
         let mut old = Vec::with_capacity(back + self.primary.lines.len());
-        old.extend(self.primary.scrollback.drain(..));
+        old.extend(self.primary.scrollback.drain(keep..));
         old.append(&mut self.primary.lines);
         let old_len = old.len();
 
@@ -164,26 +182,25 @@ impl Terminal {
                 continue;
             }
             let has_cursor = cursor.is_some() && i == cursor_index;
-            if !row.wrapped() && !row.has_hidden() {
-                let used = row
+            if !row.wrapped()
+                && !row.has_hidden()
+                && (!has_cursor || cursor_at <= cols)
+                && row
                     .cells
-                    .iter()
-                    .rposition(|c| *c != Cell::default())
-                    .map_or(0, |c| c + 1)
-                    .max(if has_cursor { cursor_at } else { 0 });
-                if used <= cols {
-                    // A line that fits in one row keeps its row and marks.
-                    row.resize(cols);
-                    map_rows.push(OldRow {
-                        first: new.len(),
-                        count: 1,
-                        base: 0,
-                        len: usize::MAX,
-                    });
-                    starts.push(0);
-                    new.push(row);
-                    continue;
-                }
+                    .get(cols..)
+                    .is_none_or(|tail| tail.iter().all(|c| *c == Cell::default()))
+            {
+                // Unstored trailing cells of a hard history row are default blanks.
+                row.cells.truncate(cols);
+                map_rows.push(OldRow {
+                    first: new.len(),
+                    count: 1,
+                    base: 0,
+                    len: usize::MAX,
+                });
+                starts.push(0);
+                new.push(row);
+                continue;
             }
 
             // Gather the whole logical line.
@@ -249,7 +266,6 @@ impl Terminal {
                 if wide_cut {
                     cells.push(wide_wrap_blank());
                 }
-                cells.resize(cols, Cell::default());
                 let mut row = Row::from_cells(cells, RowFlags::default());
                 row.set_wrapped(end < line.len());
                 starts.push(pos);
@@ -312,6 +328,9 @@ impl Terminal {
         let mut lines = new.split_off(top);
         lines.truncate(rows);
         lines.resize_with(rows, || Row::new(cols, &Cell::default()));
+        for row in &mut lines {
+            row.pad_to(cols);
+        }
         self.primary.scrollback.extend(new);
         self.primary.lines = lines;
         self.history = old_first + top as u64;

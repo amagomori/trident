@@ -1,4 +1,7 @@
-use super::{Charset, Color, CursorShape, Flags, MouseMode, Progress, Terminal, UnderlineStyle};
+use super::{
+    Charset, Color, CursorShape, Flags, MouseMode, Progress, Terminal, TitlePair, UnderlineStyle,
+    WindowOp,
+};
 use vte::{Params, Perform};
 
 /// The first value of each parameter, with 0 / missing replaced by `default`.
@@ -22,10 +25,7 @@ impl Perform for Terminal {
         self.print_state.disarm_clear();
         match byte {
             0x07 => self.bell = true,
-            0x08 => {
-                self.cursor.pending_wrap = false;
-                self.cursor.col = self.cursor.col.saturating_sub(1);
-            }
+            0x08 => self.cursor_back(),
             0x09 => self.tab(1),
             0x0a..=0x0c => {
                 self.prompt_redraw = false;
@@ -63,8 +63,24 @@ impl Perform for Terminal {
                 self.move_col(col);
             }
             ('D', []) => {
-                let col = self.cursor.col.saturating_sub(n(0));
-                self.move_col(col);
+                // The do-wrap position only costs a counted CUB inside a
+                // reverse-wraparound mode, where it sits two counts deep (one
+                // past the edge, one to unwrap, per xterm 390/412). With both
+                // modes off the flag clears for free and CUB keeps its full
+                // distance — unlike BS, whose single step always lands one
+                // cell left (or in place under a reverse mode).
+                let mut n = n(0);
+                if self.cursor.pending_wrap {
+                    self.cursor.pending_wrap = false;
+                    if self.modes.autowrap
+                        && (self.modes.reverse_wrap || self.modes.reverse_wrap_ext)
+                    {
+                        n = n.saturating_sub(2);
+                    }
+                }
+                for _ in 0..n {
+                    self.cursor_back();
+                }
             }
             ('E', []) => {
                 self.move_down(n(0));
@@ -153,10 +169,20 @@ impl Perform for Terminal {
                 let bottom = arg(params, 1, self.rows as u16) as usize - 1;
                 self.set_scroll_region(top, bottom);
             }
-            ('t', []) => self.window_report(arg(params, 0, 0)),
+            ('t', []) => self.window_op(params),
+            ('t', [b'>']) => self.title_modes(params),
             ('y', [b'*']) if self.reports.checksums => self.report_rect_checksum(params),
             ('s', []) => self.save_cursor(),
             ('u', []) => self.restore_cursor(),
+            // Kitty keyboard protocol: query, push, pop and set the enhancement flags.
+            ('u', [b'?']) => {
+                let flags = self.screen().kitty_flags;
+                self.responses
+                    .extend_from_slice(format!("\x1b[?{flags}u").as_bytes());
+            }
+            ('u', [b'>']) => self.kitty_push(arg(params, 0, 0)),
+            ('u', [b'<']) => self.kitty_pop(arg(params, 0, 1)),
+            ('u', [b'=']) => self.kitty_set(arg(params, 0, 0), arg(params, 1, 1)),
             ('p', [b'!']) => {
                 // DECSTR soft reset.
                 self.modes.show_cursor = true;
@@ -165,6 +191,14 @@ impl Perform for Terminal {
                 self.modes.autowrap = true;
                 self.modes.app_cursor = false;
                 self.modes.app_keypad = false;
+                self.modes.keyboard_locked = false;
+                self.modes.national_charsets = false;
+                self.modes.numeric_keypad = false;
+                self.modes.more_fix = false;
+                self.modes.reverse_wrap = false;
+                self.modes.reverse_wrap_ext = false;
+                self.reports.decsca = 0;
+                self.reports.decsasd = 0;
                 self.cursor.template = Default::default();
                 self.charsets = [Charset::Ascii; 2];
                 self.active_charset = 0;
@@ -173,6 +207,14 @@ impl Perform for Terminal {
                 // DECRC after a soft reset goes home with default attributes.
                 self.screen_mut().saved = None;
             }
+            ('p', [b'"']) => self.set_conformance(params),
+            // Stored-and-echoed DECRQSS settings (see `Reports`): the values are
+            // kept for the request reply without being enacted.
+            ('q', [b'"']) => self.reports.decsca = arg(params, 0, 0),
+            ('x', [b'*']) => self.reports.decsace = arg(params, 0, 0),
+            ('}', [b'$']) => self.reports.decsasd = arg(params, 0, 0),
+            ('~', [b'$']) => self.reports.decssdt = arg(params, 0, 0),
+            ('|', [b'*']) => self.reports.decsnls = arg(params, 0, 0),
             _ => {}
         }
     }
@@ -252,11 +294,16 @@ impl Perform for Terminal {
         }
     }
 
+    fn raw_osc_limit(&self, code: &[u8]) -> Option<usize> {
+        (code == b"1337").then_some(crate::iterm::MAX_OSC)
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         self.sync_cursor_row();
         self.print_state.disarm_clear();
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
+            [b"1337", body] => self.iterm_file(body),
             [b"52", targets, data] => self.osc_clipboard(targets, data, bell_terminated),
             [b"7", rest @ ..] if !rest.is_empty() => self.osc_working_directory(&rest.join(&b';')),
             [b"8", attributes, rest @ ..] if !rest.is_empty() => {
@@ -289,14 +336,20 @@ impl Perform for Terminal {
                     self.responses.extend_from_slice(terminator);
                 }
             }
-            [b"0" | b"2", rest @ ..] if !rest.is_empty() => {
-                let title = rest
-                    .iter()
-                    .map(|p| String::from_utf8_lossy(p))
-                    .collect::<Vec<_>>()
-                    .join(";");
-                self.title = Some(title);
-                self.title_changed = true;
+            [code @ (b"0" | b"1" | b"2"), rest @ ..] if !rest.is_empty() => {
+                let title = self.decode_title(
+                    rest.iter()
+                        .map(|p| String::from_utf8_lossy(p))
+                        .collect::<Vec<_>>()
+                        .join(";"),
+                );
+                if code == b"1" || code == b"0" {
+                    self.icon_title = Some(title.clone());
+                }
+                if code != b"1" {
+                    self.title = Some(title);
+                    self.title_changed = true;
+                }
             }
             [code @ (b"10" | b"11" | b"12"), b"?"] => {
                 let (r, g, b) = match *code {
@@ -367,11 +420,23 @@ impl Terminal {
     fn private_mode(&self, mode: u16) -> Option<bool> {
         Some(match mode {
             1 => self.modes.app_cursor,
+            3 => self.modes.columns_132,
+            4 => self.modes.smooth_scroll,
+            5 => self.modes.reverse_video,
             6 => self.modes.origin,
             7 => self.modes.autowrap,
             12 => self.cursor_blink,
+            18 => self.modes.print_form_feed,
+            19 => self.modes.print_full_page,
             25 => self.modes.show_cursor,
+            40 => self.modes.allow_80_132,
+            41 => self.modes.more_fix,
+            42 => self.modes.national_charsets,
+            45 => self.modes.reverse_wrap,
+            95 => self.modes.no_clear_on_columns,
             47 | 1047 | 1049 => self.is_alt_screen(),
+            66 => self.modes.numeric_keypad,
+            67 => self.modes.backarrow_sends_bs,
             9 => self.modes.mouse == MouseMode::X10,
             1000 => self.modes.mouse == MouseMode::Click,
             1002 => self.modes.mouse == MouseMode::Drag,
@@ -379,33 +444,87 @@ impl Terminal {
             1004 => self.modes.focus_events,
             1006 => self.modes.sgr_mouse,
             1007 => self.modes.alt_scroll,
+            1045 => self.modes.reverse_wrap_ext,
             2004 => self.modes.bracketed_paste,
             2026 => self.modes.synchronized_output,
+            2027 => self.modes.grapheme_clusters,
             2031 => self.modes.color_scheme_updates,
             _ => return None,
         })
     }
 
+    /// `CSI > u`: save the active flags and install the pushed set.
+    #[cold]
+    #[inline(never)]
+    fn kitty_push(&mut self, flags: u16) {
+        let screen = self.screen_mut();
+        if screen.kitty_stack.len() >= 16 {
+            screen.kitty_stack.remove(0);
+        }
+        screen.kitty_stack.push(screen.kitty_flags);
+        screen.kitty_flags = flags as u8 & 0x1f;
+    }
+
+    /// `CSI < u`: restore saved flag sets; emptying the stack resets the flags.
+    #[cold]
+    #[inline(never)]
+    fn kitty_pop(&mut self, count: u16) {
+        let screen = self.screen_mut();
+        for _ in 0..count.max(1) {
+            screen.kitty_flags = screen.kitty_stack.pop().unwrap_or(0);
+        }
+    }
+
+    /// `CSI = flags ; mode u`: mode 1 replaces, mode 2 sets, mode 3 clears bits.
+    #[cold]
+    #[inline(never)]
+    fn kitty_set(&mut self, flags: u16, mode: u16) {
+        let flags = flags as u8 & 0x1f;
+        let current = &mut self.screen_mut().kitty_flags;
+        *current = match mode {
+            2 => *current | flags,
+            3 => *current & !flags,
+            _ => flags,
+        };
+    }
+
+    /// DECRQM (`CSI ? Ps $ p`, `CSI Ps $ p`) and DECRQSS are level-3 features:
+    /// they stay silent below DECSCL 63.
+    fn decrqm_supported(&self) -> bool {
+        self.reports.conformance_level >= 63
+    }
+
     #[cold]
     #[inline(never)]
     fn report_private_mode(&mut self, mode: u16) {
-        let status = self
-            .private_mode(mode)
-            .map_or(0, |set| if set { 1 } else { 2 });
+        if !self.decrqm_supported() {
+            return;
+        }
+        let status = if mode == 60 {
+            // DECHCCM is a fixed mode on the VT420+: always reported reset.
+            4
+        } else {
+            self.private_mode(mode)
+                .map_or(0, |set| if set { 1 } else { 2 })
+        };
         let reply = format!("\x1b[?{mode};{status}$y");
         self.responses.extend_from_slice(reply.as_bytes());
     }
 
-    /// DECRQM for ANSI modes (`CSI Ps $ p`): IRM and LNM can change, SRM is always set
-    /// (no local echo) and the other ECMA-48 modes are always reset.
+    /// DECRQM for ANSI modes (`CSI Ps $ p`): IRM, LNM, KAM and SRM can change and
+    /// the other ECMA-48 modes are always reset.
     #[cold]
     #[inline(never)]
     fn report_ansi_mode(&mut self, mode: u16) {
+        if !self.decrqm_supported() {
+            return;
+        }
         let status = match mode {
+            2 => 2 - self.modes.keyboard_locked as u8,
             4 => 2 - self.modes.insert as u8,
+            12 => 2 - self.modes.send_echo as u8,
             20 => 2 - self.modes.linefeed_newline as u8,
-            12 => 3,
-            1 | 2 | 5 | 7 | 10 | 11 | 13..=19 => 4,
+            1 | 5 | 7 | 10 | 11 | 13..=19 => 4,
             _ => 0,
         };
         let reply = format!("\x1b[{mode};{status}$y");
@@ -477,11 +596,15 @@ impl Terminal {
         self.responses.extend_from_slice(reply.as_bytes());
     }
 
-    /// DECRQSS reply: `DCS 1 $ r Pt ST` with the setting for SGR, DECSTBM and DECSCUSR,
+    /// DECRQSS reply: `DCS 1 $ r Pt ST` with the setting for SGR, DECSTBM,
+    /// DECSCUSR, DECSCL and the stored DECRQSS-reportable settings,
     /// `DCS 0 $ r ST` for anything else.
     #[cold]
     #[inline(never)]
     fn report_setting(&mut self, request: &[u8]) {
+        if !self.decrqm_supported() {
+            return;
+        }
         let setting = match request {
             b"m" => Some(self.sgr_setting()),
             b"r" => Some(format!(
@@ -489,6 +612,15 @@ impl Terminal {
                 self.scroll_top + 1,
                 self.scroll_bottom + 1
             )),
+            b"\"p" => Some(format!(
+                "{};{}\"p",
+                self.reports.conformance_level, self.reports.conformance_pc
+            )),
+            b"\"q" => Some(format!("{}\"q", self.reports.decsca)),
+            b"*x" => Some(format!("{}*x", self.reports.decsace)),
+            b"$}" => Some(format!("{}$}}", self.reports.decsasd)),
+            b"$~" => Some(format!("{}$~", self.reports.decssdt)),
+            b"*|" => Some(format!("{}*|", self.reports.decsnls)),
             b" q" => {
                 let style = match self.cursor_shape {
                     CursorShape::Block => 1,
@@ -620,27 +752,286 @@ impl Terminal {
         self.responses.extend_from_slice(reply.as_bytes());
     }
 
-    /// XTWINOPS size reports: text area in pixels (14), cell size in pixels (16) and text
-    /// area in cells (18).
-    fn window_report(&mut self, op: u16) {
-        let (w, h) = self.cell_pixels;
+    /// XTWINOPS (`CSI Ps ; Ps ; Ps t`). Window-manager operations (iconify,
+    /// move, resize in pixels, raise/lower, maximize, fullscreen, refresh) are
+    /// refused: programs may not drive the window (docs/conformance.md).
+    /// Supported are the size reports (11/13/15/19), text-area pixel reports
+    /// (14/16/18), title reports (20/21), the title stack (22/23), text-area
+    /// resizes in characters (8 and DECSLPP `Ps >= 24`) — applied to the grid
+    /// and queued for the app to mirror on the real window.
+    fn window_op(&mut self, params: &Params) {
+        let op = arg(params, 0, 0);
+        let (cell_w, cell_h) = self.cell_pixels;
+        let (display_cols, display_rows) = self.win_size_or_screen(0, 0);
+        // The display extent bounds resize requests; without a monitor a
+        // generous fixed bound still applies.
+        let (max_cols, max_rows) = (
+            if display_cols == 0 { 512 } else { display_cols },
+            if display_rows == 0 { 512 } else { display_rows },
+        );
         let reply = match op {
+            4 | 8 => {
+                // 4 resizes the text area in pixels, 8 in characters. An
+                // explicit 0 uses the display's extent; an omitted or empty
+                // parameter keeps the size in that direction. Requests are
+                // clamped to the display's extent, like a window manager.
+                let dim = |index: usize, cell: f32, extent: usize, current: usize| match params
+                    .iter()
+                    .nth(index)
+                    .and_then(|p| p.first())
+                {
+                    _ if params.is_empty_param(index) => current,
+                    Some(&0) => extent,
+                    Some(&v) => (v as f32 / cell) as usize,
+                    None => current,
+                };
+                let cell = if op == 4 {
+                    (cell_w, cell_h)
+                } else {
+                    (1.0, 1.0)
+                };
+                let (cols, rows) = (
+                    dim(2, cell.0, display_cols, self.cols).clamp(1, max_cols),
+                    dim(1, cell.1, display_rows, self.rows).clamp(1, max_rows),
+                );
+                self.resize(cols, rows);
+                self.window_ops.push(WindowOp::Resize { cols, rows });
+                return;
+            }
+            11 => format!("\x1b[{}t", if self.window.iconic { 2 } else { 1 }),
+            13 => format!(
+                "\x1b[3;{};{}t",
+                self.window.position.0 & 0xffff,
+                self.window.position.1 & 0xffff
+            ),
             14 => format!(
                 "\x1b[4;{};{}t",
-                (self.rows as f32 * h) as u32,
-                (self.cols as f32 * w) as u32
+                (self.rows as f32 * cell_h) as u32,
+                (self.cols as f32 * cell_w) as u32
             ),
-            16 => format!("\x1b[6;{};{}t", h.round() as u32, w.round() as u32),
+            15 => format!("\x1b[5;{};{}t", self.window.screen.1, self.window.screen.0),
+            16 => format!(
+                "\x1b[6;{};{}t",
+                cell_h.round() as u32,
+                cell_w.round() as u32
+            ),
             18 => format!("\x1b[8;{};{}t", self.rows, self.cols),
+            19 => {
+                let (cols, rows) = self.win_size_or_screen(0, 0);
+                format!("\x1b[9;{rows};{cols}t")
+            }
+            20 | 21 => {
+                let label = self.encode_title(if op == 20 {
+                    self.icon_title.as_deref().unwrap_or_default()
+                } else {
+                    self.title.as_deref().unwrap_or_default()
+                });
+                return self.responses.extend_from_slice(
+                    format!("\x1b]{}{label}\x1b\\", if op == 20 { 'L' } else { 'l' }).as_bytes(),
+                );
+            }
+            22 | 23 => {
+                self.title_stack_op(op == 22, arg(params, 1, 0), arg(params, 2, 0));
+                return;
+            }
+            op if op >= 24 => {
+                // DECSLPP: resize to `op` lines, clamped to the display.
+                let rows = (op as usize).clamp(1, max_rows);
+                self.resize(self.cols, rows);
+                self.window_ops.push(WindowOp::Resize {
+                    cols: self.cols,
+                    rows,
+                });
+                return;
+            }
             _ => return,
         };
         self.responses.extend_from_slice(reply.as_bytes());
     }
 
+    /// `0`/omitted width and height in a resize op use the display's extent in
+    /// cells; a zero monitor extent falls back to the current size.
+    fn win_size_or_screen(&self, cols: usize, rows: usize) -> (usize, usize) {
+        let (cell_w, cell_h) = self.cell_pixels;
+        let (w, h) = self.window.screen;
+        (
+            if cols == 0 {
+                (w as f32 / cell_w) as usize
+            } else {
+                cols
+            },
+            if rows == 0 {
+                (h as f32 / cell_h) as usize
+            } else {
+                rows
+            },
+        )
+    }
+
+    /// `CSI 22 ; which ; slot t` pushes titles, `23` pops or reads them.
+    /// `which`: 0 both, 1 icon only, 2 window only; a `slot` in 1..=10
+    /// addresses a stack entry directly instead of pushing/popping.
+    fn title_stack_op(&mut self, push: bool, which: u16, slot: u16) {
+        let entry = TitlePair {
+            icon: (which != 2).then(|| self.icon_title.clone().unwrap_or_default()),
+            title: (which != 1).then(|| self.title.clone().unwrap_or_default()),
+        };
+        if push {
+            if (1..=10).contains(&slot) {
+                let i = (slot - 1) as usize;
+                if i >= self.title_stack.len() {
+                    self.title_stack.resize_with(i + 1, TitlePair::default);
+                }
+                let e = &mut self.title_stack[i];
+                if let Some(icon) = entry.icon {
+                    e.icon = Some(icon);
+                }
+                if let Some(title) = entry.title {
+                    e.title = Some(title);
+                }
+            } else {
+                self.title_stack.push(entry);
+                // A program can push without bound; drop the oldest past 64.
+                if self.title_stack.len() > 64 {
+                    self.title_stack.remove(0);
+                }
+            }
+        } else {
+            // A pop restores only the components it names and consumes entries
+            // until each has been restored once.
+            let mut need_icon = which != 2;
+            let mut need_title = which != 1;
+            if (1..=10).contains(&slot)
+                && let Some(entry) = self
+                    .title_stack
+                    .get_mut((slot - 1) as usize)
+                    .map(std::mem::take)
+            {
+                if need_icon && entry.icon.is_some() {
+                    self.icon_title = entry.icon;
+                    need_icon = false;
+                }
+                if need_title && entry.title.is_some() {
+                    self.title = entry.title;
+                    self.title_changed = true;
+                    need_title = false;
+                }
+            }
+            while !(1..=10).contains(&slot) && (need_icon || need_title) {
+                let Some(entry) = self.title_stack.pop() else {
+                    break;
+                };
+                if need_icon && entry.icon.is_some() {
+                    self.icon_title = entry.icon;
+                    need_icon = false;
+                }
+                if need_title && entry.title.is_some() {
+                    self.title = entry.title;
+                    self.title_changed = true;
+                    need_title = false;
+                }
+            }
+        }
+    }
+
+    /// XTSMTITLE (`CSI > Pm t`): set/query window titles as hex pairs or
+    /// UTF-8. No parameters restore the defaults (UTF-8).
+    fn title_modes(&mut self, params: &Params) {
+        if params.is_empty() {
+            self.title_set_hex = false;
+            self.title_query_hex = false;
+        }
+        for p in params.iter() {
+            match p[0] {
+                0 => self.title_set_hex = true,
+                1 => self.title_query_hex = true,
+                2 => self.title_set_hex = false,
+                3 => self.title_query_hex = false,
+                _ => {}
+            }
+        }
+    }
+
+    /// A title as the program reports it: hex pairs under XTSMTITLE's query-hex
+    /// mode, the text otherwise — with control characters removed, since the
+    /// reply lands in the program's input.
+    fn encode_title(&self, title: &str) -> String {
+        if self.title_query_hex {
+            title.bytes().map(|b| format!("{b:02x}")).collect()
+        } else {
+            title.chars().filter(|&c| !c.is_control()).collect()
+        }
+    }
+
+    /// A title set by the program: hex pairs decoded under XTSMTITLE's set-hex
+    /// mode (malformed hex stays literal).
+    fn decode_title(&self, text: String) -> String {
+        let bytes = text.as_bytes();
+        if self.title_set_hex
+            && bytes.len().is_multiple_of(2)
+            && let Some(decoded) = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[a, b]| {
+                    let hi = (a as char).to_digit(16)?;
+                    let lo = (b as char).to_digit(16)?;
+                    Some((hi * 16 + lo) as u8)
+                })
+                .collect::<Option<Vec<u8>>>()
+        {
+            return String::from_utf8_lossy(&decoded).into_owned();
+        }
+        text
+    }
+
+    /// `CSI ? 3 h/l`: DECCOLM 132/80-column mode, gated by mode 40
+    /// (`Allow80To132`). A switch erases the screen unless mode 95 (DECNCSM) is
+    /// set, homes the cursor and resets the scrolling region.
+    fn set_columns(&mut self, cols: usize) {
+        let wide = cols != 80;
+        // A grid that no longer matches the mode — e.g. the window manager
+        // granted less than a 132-column request — still re-requests.
+        if !self.modes.allow_80_132 || (self.modes.columns_132 == wide && self.cols == cols) {
+            return;
+        }
+        self.modes.columns_132 = wide;
+        if cols != self.cols {
+            self.resize(cols, self.rows);
+            self.window_ops.push(WindowOp::Resize {
+                cols,
+                rows: self.rows,
+            });
+        }
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows - 1;
+        self.goto(0, 0);
+        if !self.modes.no_clear_on_columns {
+            self.erase_display(2);
+        }
+    }
+
+    /// DECSCL (`CSI Pv ; Pc " p`): stores the requested conformance level and
+    /// control representation; a level change performs an RIS, as on the VT300+.
+    #[cold]
+    #[inline(never)]
+    fn set_conformance(&mut self, params: &Params) {
+        let level = arg(params, 0, 64).clamp(61, 64) as u8;
+        if level != self.reports.conformance_level {
+            self.reset();
+            self.reports.conformance_level = level;
+        }
+        if let Some(&pc) = params.iter().nth(1).and_then(|p| p.first()) {
+            self.reports.conformance_pc = pc;
+        }
+    }
+
     fn set_mode(&mut self, mode: u16, private: bool, enable: bool) {
         if !private {
             match mode {
+                2 => self.modes.keyboard_locked = enable,
                 4 => self.modes.insert = enable,
+                12 => self.modes.send_echo = enable,
                 20 => self.modes.linefeed_newline = enable,
                 _ => {}
             }
@@ -648,11 +1039,29 @@ impl Terminal {
         }
         match mode {
             1 => self.modes.app_cursor = enable,
+            3 => self.set_columns(if enable { 132 } else { 80 }),
+            4 => self.modes.smooth_scroll = enable,
+            5 => self.modes.reverse_video = enable,
             6 => {
                 self.modes.origin = enable;
                 self.goto(0, 0);
             }
-            7 => self.modes.autowrap = enable,
+            7 => {
+                self.modes.autowrap = enable;
+                if !enable {
+                    // The do-wrap position means nothing once autowrap is off.
+                    self.cursor.pending_wrap = false;
+                }
+            }
+            18 => self.modes.print_form_feed = enable,
+            19 => self.modes.print_full_page = enable,
+            40 => self.modes.allow_80_132 = enable,
+            41 => self.modes.more_fix = enable,
+            42 => self.modes.national_charsets = enable,
+            45 => self.modes.reverse_wrap = enable,
+            66 => self.modes.numeric_keypad = enable,
+            67 => self.modes.backarrow_sends_bs = enable,
+            95 => self.modes.no_clear_on_columns = enable,
             12 => self.cursor_blink = enable,
             25 => self.modes.show_cursor = enable,
             // 1049 clears the alternate buffer on entry; 1047 clears it on exit.
@@ -664,6 +1073,7 @@ impl Terminal {
                     self.restore_cursor()
                 }
             }
+            1045 => self.modes.reverse_wrap_ext = enable,
             1049 => self.set_alt_screen(enable, true, enable),
             9 => self.set_mouse(MouseMode::X10, enable),
             1000 => self.set_mouse(MouseMode::Click, enable),
@@ -673,6 +1083,7 @@ impl Terminal {
             1006 => self.modes.sgr_mouse = enable,
             1007 => self.modes.alt_scroll = enable,
             2004 => self.modes.bracketed_paste = enable,
+            2027 => self.modes.grapheme_clusters = enable,
             2031 => self.modes.color_scheme_updates = enable,
             2026 => {
                 if !enable && self.modes.synchronized_output {
@@ -805,6 +1216,7 @@ fn extended_color<'a>(param: &[u16], iter: &mut impl Iterator<Item = &'a [u16]>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WindowGeometry;
 
     #[test]
     fn empty_sgr_params_preserve_hyperlink_and_reset_style() {
@@ -820,5 +1232,80 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn xtwinops_reports_answer_from_window_geometry() {
+        let mut term = Terminal::new(80, 24);
+        term.set_window_geometry(WindowGeometry {
+            position: (-1, 40),
+            size: (640, 384),
+            screen: (1920, 1080),
+            iconic: true,
+        });
+        term.advance(b"\x1b[11t");
+        assert_eq!(term.take_responses(), b"\x1b[2t");
+        term.advance(b"\x1b[13t");
+        assert_eq!(term.take_responses(), b"\x1b[3;65535;40t");
+        term.advance(b"\x1b[18t\x1b[19t");
+        assert_eq!(term.take_responses(), b"\x1b[8;24;80t\x1b[9;67;240t");
+        // Refused window-manager ops reply nothing and move nothing.
+        term.advance(b"\x1b[3;1;1t\x1b[9;1t\x1b[10;1t");
+        assert_eq!(term.take_responses(), b"");
+    }
+
+    #[test]
+    fn xtwinops_resizes_queue_a_window_op() {
+        let mut term = Terminal::new(80, 24);
+        term.advance(b"\x1b[8;10;40t");
+        assert_eq!((term.cols(), term.rows()), (40, 10));
+        assert_eq!(
+            term.take_window_ops(),
+            vec![WindowOp::Resize { cols: 40, rows: 10 }]
+        );
+        // DECSLPP (op >= 24) changes only the row count.
+        term.advance(b"\x1b[12t\x1b[17t");
+        assert_eq!(term.take_responses(), b"");
+        term.advance(b"\x1b[30t");
+        assert_eq!((term.cols(), term.rows()), (40, 30));
+        assert_eq!(
+            term.take_window_ops(),
+            vec![WindowOp::Resize { cols: 40, rows: 30 }]
+        );
+    }
+
+    #[test]
+    fn deccolm_needs_mode_40_and_resets_like_xterm() {
+        let mut term = Terminal::new(80, 24);
+        term.advance(b"hello\x1b[?3h");
+        assert_eq!(term.cols(), 80);
+        term.advance(b"\x1b[?40h\x1b[?3h");
+        assert_eq!(term.cols(), 132);
+        assert_eq!((term.cursor.col, term.cursor.row), (0, 0));
+        assert_eq!(
+            term.take_window_ops(),
+            vec![WindowOp::Resize {
+                cols: 132,
+                rows: 24
+            }]
+        );
+        // Mode 95 keeps the screen contents on a width change.
+        term.advance(b"\x1b[?95h\x1b[?3l");
+        assert_eq!(term.cols(), 80);
+        term.advance(b"\x1bc");
+        assert_eq!(term.cols(), 80);
+    }
+
+    #[test]
+    fn title_stack_and_reports_follow_xterm() {
+        let mut term = Terminal::new(80, 24);
+        term.advance(b"\x1b]0;first\x07\x1b]1;icon-one\x07");
+        term.advance(b"\x1b[22;0t\x1b]0;second\x07\x1b[20t\x1b[21t");
+        assert_eq!(
+            term.take_responses(),
+            b"\x1b]Lsecond\x1b\\\x1b]lsecond\x1b\\"
+        );
+        term.advance(b"\x1b[23;0t");
+        assert_eq!(term.take_title(), Some("first".to_string()));
     }
 }
