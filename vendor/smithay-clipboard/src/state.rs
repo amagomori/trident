@@ -44,7 +44,7 @@ pub struct State {
     pub data_device_manager_state: Option<DataDeviceManagerState>,
     pub reply_tx: Sender<Result<String>>,
     pub exit: bool,
-    pub file_drops: Option<crate::FileDrops>,
+    file_drops: crate::FileDrops,
 
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -70,6 +70,7 @@ impl State {
         queue_handle: &QueueHandle<Self>,
         loop_handle: LoopHandle<'static, Self>,
         reply_tx: Sender<Result<String>>,
+        file_drops: crate::FileDrops,
     ) -> Option<Self> {
         // NOTE: while it's mutable, it's not part of the hash compute.
         #[allow(clippy::mutable_key_type)]
@@ -104,7 +105,7 @@ impl State {
             latest_seat: None,
             loop_handle,
             exit: false,
-            file_drops: None,
+            file_drops,
             seat_state,
             reply_tx,
             seats,
@@ -390,12 +391,14 @@ impl PointerHandler for State {
 const URI_LIST: &str = "text/uri-list";
 
 impl State {
-    fn file_offer(&self, device: &WlDataDevice) -> Option<DragOffer> {
-        let handler = self.file_drops.as_ref()?;
+    fn file_offer(
+        &self,
+        device: &WlDataDevice,
+    ) -> Option<(DragOffer, std::sync::Weak<crate::DropCallback>)> {
         let offer = device.data::<DataDeviceData>()?.drag_offer()?;
-        (offer.surface.id().as_ptr() as usize == handler.surface
-            && offer.with_mime_types(|types| types.iter().any(|t| t == URI_LIST)))
-        .then_some(offer)
+        let target = self.file_drops.target(offer.surface.id().as_ptr() as usize)?;
+        offer.with_mime_types(|types| types.iter().any(|t| t == URI_LIST))
+            .then_some((offer, target))
     }
 }
 
@@ -409,7 +412,7 @@ impl DataDeviceHandler for State {
         _: f64,
         _: &WlSurface,
     ) {
-        if let Some(offer) = self.file_offer(device) {
+        if let Some((offer, _)) = self.file_offer(device) {
             offer.accept_mime_type(offer.serial, Some(URI_LIST.into()));
             offer.set_actions(DndAction::Copy, DndAction::Copy);
         }
@@ -421,7 +424,7 @@ impl DataDeviceHandler for State {
     fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
 
     fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice) {
-        let Some(offer) = self.file_offer(device) else {
+        let Some((offer, target)) = self.file_offer(device) else {
             return;
         };
         if offer.inner().version() >= 3 && offer.selected_action != DndAction::Copy {
@@ -444,14 +447,11 @@ impl DataDeviceHandler for State {
         let mut content = Vec::new();
         seat.drop_read = self
             .loop_handle
-            .insert_source(pipe, move |_, file, state| {
+            .insert_source(pipe, move |_, file, _| {
                 let mut buf = [0; 8192];
                 match (&**file).read(&mut buf) {
                     Ok(0) => {
-                        if state
-                            .file_drops
-                            .as_ref()
-                            .is_some_and(|handler| (handler.callback)(&content))
+                        if target.upgrade().is_some_and(|callback| callback(&content))
                             && offer.inner().is_alive()
                         {
                             offer.finish();
