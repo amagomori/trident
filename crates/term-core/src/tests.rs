@@ -19,6 +19,7 @@ fn input_cursor_ignores_visibility_but_tracks_viewport_and_alternate_screen() {
 
 mod budget;
 mod golden;
+mod row_filter;
 
 #[test]
 fn scrolling_recycles_rows_as_fresh_blanks() {

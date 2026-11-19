@@ -403,6 +403,9 @@ pub(crate) fn placeholder_row(cols: usize, text: &str) -> Row {
             break;
         }
         row.cells[col].c = c;
+        if c == crate::placeholder::CHAR {
+            row.note_placeholder();
+        }
         row.cells[col].flags = Flags::DIM;
         if width == 2 {
             row.cells[col].flags.insert(Flags::WIDE);

@@ -80,13 +80,16 @@ fn color_id(color: Color) -> u32 {
 }
 
 impl Terminal {
-    fn placeholder_tile(&self, cell: &Cell, prev: Option<Tile>) -> Option<Tile> {
+    fn placeholder_marks<'a>(&'a self, cell: &Cell) -> Option<&'a str> {
         let cluster = self.grapheme(cell);
-        let marks = match cluster {
-            Some(s) => s.strip_prefix(CHAR)?,
-            None if cell.c == CHAR => "",
-            _ => return None,
-        };
+        match cluster {
+            Some(s) => s.strip_prefix(CHAR),
+            None if cell.c == CHAR => Some(""),
+            _ => None,
+        }
+    }
+
+    fn placeholder_tile(&self, cell: &Cell, marks: &str, prev: Option<Tile>) -> Option<Tile> {
         let mut marks = marks
             .chars()
             .map(|c| DIACRITICS.binary_search(&c).ok().map(|n| n as u32));
@@ -116,11 +119,15 @@ impl Terminal {
         &self,
         cells: &[Cell],
         mut visit: impl FnMut(Tile, usize, usize),
-    ) {
+    ) -> bool {
         let mut run = None;
         let mut prev = None;
+        let mut saw_base = false;
         for (col, cell) in cells.iter().enumerate() {
-            let tile = self.placeholder_tile(cell, prev);
+            let tile = self.placeholder_marks(cell).and_then(|marks| {
+                saw_base = true;
+                self.placeholder_tile(cell, marks, prev)
+            });
             if prev.map(|p| Tile { x: p.x + 1, ..p }) != tile {
                 if let Some((first, start)) = run.take() {
                     visit(first, start, col - start);
@@ -132,6 +139,7 @@ impl Terminal {
         if let Some((first, start)) = run {
             visit(first, start, cells.len() - start);
         }
+        saw_base
     }
 
     pub(crate) fn append_placeholder_rows(&self, extra: usize, out: &mut Vec<VisiblePlacement>) {
@@ -141,11 +149,19 @@ impl Terminal {
         let above = extra.min(self.scrollback_len().saturating_sub(self.display_offset));
         for row in -(above as isize)..self.rows as isize {
             let line = self.viewport_to_point_signed(row, 0).line;
-            self.placeholder_runs(&self.line(line).cells, |tile, col, len| {
+            let stored = self.line(line);
+            if !stored.may_have_placeholder() {
+                continue;
+            }
+            let saw_base = self.placeholder_runs(&stored.cells, |tile, col, len| {
                 if let Some(v) = self.placeholder_slice(tile, col, len, row, line) {
                     out.push(v);
                 }
             });
+            // Missing images, placement IDs and even malformed marks aren't proof of absence.
+            if !saw_base {
+                stored.no_visible_placeholder();
+            }
         }
     }
 

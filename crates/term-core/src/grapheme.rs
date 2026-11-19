@@ -446,6 +446,7 @@ impl Terminal {
             self.sync_cursor_row();
             let row = self.cursor.row;
             let line = &mut self.lines_mut()[row];
+            let possible_placeholder = line.may_have_placeholder();
             let mut cell = line.cells[col];
             let mut blank = Cell::blank(&template);
             blank.flags.insert(Flags::WIDE_WRAP);
@@ -469,6 +470,9 @@ impl Terminal {
             spacer.flags.remove(Flags::WIDE | Flags::GRAPHEME);
             spacer.flags.insert(Flags::WIDE_SPACER);
             line.cells[0] = cell;
+            if possible_placeholder {
+                line.note_placeholder();
+            }
             line.cells[1] = spacer;
             line.touch(2);
             if cols == 2 {

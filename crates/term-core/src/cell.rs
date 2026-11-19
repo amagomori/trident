@@ -1,5 +1,7 @@
 //! Cell attributes and physical rows, including cells hidden by narrowing.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// A terminal color as specified by the program; see [`crate::colors`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Color {
@@ -212,9 +214,26 @@ pub struct Row {
     /// `u8::MAX` means not known. Writers to `cells` must call `touch` or `touch_all`;
     /// `put_char` relies on `Terminal::sync_cursor_row`.
     occupied: u8,
-    /// Cells past the right edge, kept when the window narrows so widening brings them back.
-    /// Boxed so rows that were never cut stay small; every scroll moves rows around.
-    hidden: Option<Box<Hidden>>,
+    /// Hidden cells and placeholder hints share the existing cold allocation slot.
+    extras: Option<Box<RowExtras>>,
+}
+
+#[derive(Debug, Default)]
+struct RowExtras {
+    hidden: Option<Hidden>,
+    hidden_may_have_placeholder: bool,
+    // Cleared by shared layout only after decoding the entire visible row.
+    possible_placeholder: AtomicBool,
+}
+
+impl Clone for RowExtras {
+    fn clone(&self) -> Self {
+        Self {
+            hidden: self.hidden.clone(),
+            hidden_may_have_placeholder: self.hidden_may_have_placeholder,
+            possible_placeholder: self.possible_placeholder.load(Ordering::Relaxed).into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -225,20 +244,42 @@ struct Hidden {
     padded: bool,
 }
 
-/// `occupied` is only a bound on the content, so rows that show the same thing are equal.
+/// Bounds and scan hints do not change a row's contents.
 impl PartialEq for Row {
     fn eq(&self, other: &Self) -> bool {
         self.cells == other.cells
             && self.flags == other.flags
             && self.prompt_col == other.prompt_col
             && self.output_col == other.output_col
-            && self.hidden == other.hidden
+            && self.hidden() == other.hidden()
     }
 }
 
 impl Eq for Row {}
 
 impl Row {
+    #[cold]
+    pub(crate) fn note_placeholder(&mut self) {
+        let extras = self.extras.get_or_insert_with(Default::default);
+        *extras.possible_placeholder.get_mut() = true;
+    }
+
+    pub(crate) fn may_have_placeholder(&self) -> bool {
+        self.extras
+            .as_ref()
+            .is_some_and(|e| e.possible_placeholder.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn no_visible_placeholder(&self) {
+        if let Some(extras) = &self.extras {
+            extras.possible_placeholder.store(false, Ordering::Relaxed);
+        }
+    }
+
+    fn hidden(&self) -> Option<&Hidden> {
+        self.extras.as_ref()?.hidden.as_ref()
+    }
+
     /// Blank the row in place, keeping its allocation unless it is oversized.
     pub(crate) fn reset(&mut self, cols: usize, template: &Cell, released: &mut bool) {
         let blank = Cell::blank(template);
@@ -260,14 +301,14 @@ impl Row {
         self.flags = RowFlags::default();
         self.prompt_col = 0;
         self.output_col = 0;
-        self.hidden = None;
+        self.extras = None;
     }
 
     pub(crate) fn erase(&mut self, blank: Row) {
         self.cells = blank.cells;
         self.occupied = blank.occupied;
         self.set_wrapped(false);
-        self.hidden = None;
+        self.extras = blank.extras;
     }
 
     /// The line continues on the next row because it soft-wrapped.
@@ -317,31 +358,40 @@ impl Row {
             prompt_col: 0,
             output_col: 0,
             occupied: 0,
-            hidden: None,
+            extras: None,
         }
     }
 
     /// A row holding `cells`, as reflow builds them.
-    pub(crate) fn from_cells(cells: Vec<Cell>, flags: RowFlags) -> Row {
-        Row {
+    pub(crate) fn from_cells(cells: Vec<Cell>, flags: RowFlags, possible: bool) -> Row {
+        let mut row = Row {
             cells,
             flags,
             prompt_col: 0,
             output_col: 0,
             occupied: u8::MAX,
-            hidden: None,
+            extras: None,
+        };
+        if possible {
+            row.note_placeholder();
         }
+        row
     }
 
     /// Takes every cell of the row, with the cells hidden by narrowing back in place.
     pub(crate) fn take_cells(&mut self) -> Vec<Cell> {
         self.touch_all();
         let mut cells = std::mem::take(&mut self.cells);
-        if let Some(hidden) = self.hidden.take() {
+        if let Some(extras) = &mut self.extras
+            && let Some(hidden) = extras.hidden.take()
+        {
+            // A negative scan while narrow says nothing about the restored suffix.
+            *extras.possible_placeholder.get_mut() |=
+                std::mem::take(&mut extras.hidden_may_have_placeholder);
             let Hidden {
                 cells: mut hidden,
                 padded,
-            } = *hidden;
+            } = hidden;
             if padded {
                 let pad = cells.pop().unwrap_or_default();
                 if !pad.flags.contains(Flags::PAD) {
@@ -392,10 +442,12 @@ impl Row {
                 hidden.truncate(used);
             }
             if wide_at_edge || !hidden.is_empty() {
-                self.hidden = Some(Box::new(Hidden {
+                let extras = self.extras.get_or_insert_with(Default::default);
+                extras.hidden_may_have_placeholder = *extras.possible_placeholder.get_mut();
+                extras.hidden = Some(Hidden {
                     cells: hidden,
                     padded: wide_at_edge,
-                }));
+                });
             }
         } else {
             let mut blank = Cell::default();
@@ -409,7 +461,14 @@ impl Row {
 
     /// Forgets the cells past the right edge, for when the line is erased to its end.
     pub fn clear_hidden(&mut self) {
-        self.hidden = None;
+        if let Some(extras) = &mut self.extras
+            && *extras.possible_placeholder.get_mut()
+        {
+            extras.hidden = None;
+            extras.hidden_may_have_placeholder = false;
+        } else {
+            self.extras = None;
+        }
     }
 
     /// Cells past the right edge, in order after the visible ones, as `resize` would bring
@@ -426,7 +485,7 @@ impl Row {
     }
 
     pub(crate) fn has_hidden(&self) -> bool {
-        self.hidden.is_some()
+        self.hidden().is_some()
     }
 
     /// The column of the first hidden cell, a blank standing in for an overwritten wide
@@ -439,7 +498,7 @@ impl Row {
             flags: Flags(0),
             hyperlink: 0,
         };
-        let h = self.hidden.as_deref()?;
+        let h = self.hidden()?;
         let pad_intact = self
             .cells
             .last()
@@ -473,7 +532,7 @@ impl Row {
 
     /// Marks the links the row references and returns how many were not marked yet.
     pub(crate) fn mark_hyperlinks(&self, used: &mut [bool]) -> usize {
-        let hidden = self.hidden.as_deref().map_or(&[][..], |h| &h.cells[..]);
+        let hidden = self.hidden().map_or(&[][..], |h| &h.cells[..]);
         let mut marked = 0;
         for cells in [&self.cells[..], hidden] {
             // Neighbouring cells mostly share a link, so only a change of index is looked up.
@@ -495,15 +554,19 @@ impl Row {
     pub(crate) fn hyperlinks_mut(&mut self) -> impl Iterator<Item = &mut u16> {
         self.cells
             .iter_mut()
-            .chain(self.hidden.iter_mut().flat_map(|h| h.cells.iter_mut()))
+            .chain(
+                self.extras
+                    .iter_mut()
+                    .filter_map(|e| e.hidden.as_mut())
+                    .flat_map(|h| h.cells.iter_mut()),
+            )
             .map(|c| &mut c.hyperlink)
     }
 
     pub(crate) fn is_blank(&self) -> bool {
         self.cells.iter().all(|c| *c == Cell::default())
             && self
-                .hidden
-                .as_ref()
+                .hidden()
                 .is_none_or(|h| h.cells.iter().all(|c| *c == Cell::default()))
     }
 
