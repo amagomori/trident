@@ -357,9 +357,11 @@ impl Perform for Terminal {
             }
             [b"104", indexes @ ..] => self.reset_indexed_colors(indexes),
             [b"105", indexes @ ..] => self.reset_special_colors(indexes),
-            [code] => {
+            [code, rest @ ..] => {
                 if let Some(code) = reset_dynamic_code(code) {
-                    self.reset_dynamic_color(code);
+                    if rest.iter().all(|field| field.is_empty()) {
+                        self.reset_dynamic_color(code);
+                    }
                 }
             }
             _ => {}
@@ -469,6 +471,7 @@ impl Terminal {
     fn reset_indexed_colors(&mut self, indexes: &[&[u8]]) {
         if indexes.is_empty() || indexes == [b""] {
             self.palette.ansi_overrides = [None; 256];
+            self.palette.special = [None; 5];
             return;
         }
         for index in indexes {
