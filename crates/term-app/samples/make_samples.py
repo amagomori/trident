@@ -37,6 +37,12 @@ black = Image.new("RGB", (W, H))
 img.save("sample.gif", save_all=True, append_images=[black], duration=100, loop=0)
 img.save("animated.webp", save_all=True, append_images=[black], duration=[60, 90], loop=1, lossless=True)
 
+# A blended lossless patch: unchanged red pixels are encoded as transparent,
+# while the opaque replacement has nonzero channels near both ends of the range.
+patch = Image.new("RGB", img.size, (1, 127, 255))
+patch.paste(img.crop((2, 0, 8, 16)), (2, 0))
+img.save("blended.webp", save_all=True, append_images=[patch], duration=[60, 90], loop=1, lossless=True)
+
 # QOI by hand: Pillow only reads it. One QOI_OP_RGB per pixel is valid, if not compact.
 qoi = bytearray(b"qoif" + struct.pack(">IIBB", W, H, 3, 0))
 for r, g, b in zip(*[iter(img.tobytes())] * 3):
