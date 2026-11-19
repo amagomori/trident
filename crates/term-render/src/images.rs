@@ -33,8 +33,10 @@ pub(crate) struct Quad {
     pub layer: Layer,
     pub pos: [f32; 2],
     pub size: [f32; 2],
-    /// The source rectangle as fractions of the image: left, top, right, bottom.
+    /// The visible texture rectangle: left, top, right, bottom.
     pub uv: [f32; 4],
+    /// Unclipped vertical texture bounds for filtering at source-pixel centers.
+    pub source_v: [f32; 2],
 }
 
 /// Lays out the visible placements over a grid of `cell`-sized cells starting at
@@ -88,6 +90,7 @@ pub(crate) fn layout(
                 (s.x + s.width) as f32 / iw,
                 (s.y as f32 + s.height as f32 * (bottom / h)) / ih,
             ],
+            source_v: [s.y as f32 / ih, (s.y + s.height) as f32 / ih],
         });
     }
     // visible_placements is sorted by z, so the layers are already in order.
@@ -100,6 +103,7 @@ struct Instance {
     pos: [f32; 2],
     size: [f32; 2],
     uv: [f32; 4],
+    source_v: [f32; 2],
 }
 
 struct GpuImage {
@@ -140,6 +144,7 @@ impl ImagePipeline {
             0 => Float32x2,
             1 => Float32x2,
             2 => Float32x4,
+            3 => Float32x2,
         ];
         let pipeline = pipeline::alpha_pipeline(
             device,
@@ -224,6 +229,7 @@ impl ImagePipeline {
             pos,
             size: [image.width as f32, image.height as f32],
             uv: [0.0, 0.0, 1.0, 1.0],
+            source_v: [0.0, 1.0],
         }];
         self.write_instances(device, queue);
     }
@@ -240,6 +246,7 @@ impl ImagePipeline {
                 pos: q.pos,
                 size: q.size,
                 uv: q.uv,
+                source_v: q.source_v,
             })
             .collect();
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));

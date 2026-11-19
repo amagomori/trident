@@ -127,6 +127,8 @@ fn command_budget_and_erase_display_crop_a_stretched_source_pixel() {
     let first_pixel = 16.0 * 6.0 - 2.0;
     let last_pixel = 20.0 * 6.0 - 2.0;
     let view_top = q.uv[1] + (q.uv[3] - q.uv[1]) * (-q.pos[1] / q.size[1]);
+    // Filtering a fraction of this texel must still clamp to its original center.
+    assert_eq!(q.source_v, [1.0 / 3.0, 2.0 / 3.0]);
     assert!((view_top - (1.0 + first_pixel / height) / 3.0).abs() < 1e-6);
     assert!((q.uv[3] - (1.0 + last_pixel / height) / 3.0).abs() < 1e-6);
 }
@@ -154,6 +156,7 @@ fn draws_at_pixel_size_on_the_cursor_cell() {
             pos: [6.0 + 30.0, 6.0 + 20.0],
             size: [20.0, 40.0],
             uv: [0.0, 0.0, 1.0, 1.0],
+            source_v: [0.0, 1.0],
         }]
     );
 }
