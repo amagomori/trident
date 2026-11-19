@@ -358,10 +358,10 @@ impl Perform for Terminal {
             [b"104", indexes @ ..] => self.reset_indexed_colors(indexes),
             [b"105", indexes @ ..] => self.reset_special_colors(indexes),
             [code, rest @ ..] => {
-                if let Some(code) = reset_dynamic_code(code) {
-                    if rest.iter().all(|field| field.is_empty()) {
-                        self.reset_dynamic_color(code);
-                    }
+                if let Some(code) = reset_dynamic_code(code)
+                    && rest.iter().all(|field| field.is_empty())
+                {
+                    self.reset_dynamic_color(code);
                 }
             }
             _ => {}
