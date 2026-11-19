@@ -56,6 +56,7 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
     intermediate_idx: usize,
     params: Params,
     param: u16,
+    param_nonempty: bool,
     #[cfg(not(feature = "std"))]
     osc_raw: ArrayVec<u8, OSC_RAW_BUF_SIZE>,
     #[cfg(feature = "std")]
@@ -172,17 +173,28 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     fn advance_csi<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
         self.reset_params();
         let mut param: u16 = 0;
+        let mut nonempty = false;
         for (i, &byte) in bytes.iter().enumerate().skip(1) {
             match byte {
                 b'0'..=b'9' => {
                     param = param.saturating_mul(10).saturating_add((byte - b'0') as u16);
+                    nonempty = true;
                 },
                 b';' if !self.params.is_full() => {
-                    self.params.push(param);
+                    if nonempty {
+                        self.params.push(param);
+                    } else {
+                        self.params.push_empty();
+                    }
                     param = 0;
+                    nonempty = false;
                 },
                 0x40..=0x7E if !self.params.is_full() => {
-                    self.params.push(param);
+                    if nonempty {
+                        self.params.push(param);
+                    } else {
+                        self.params.push_empty();
+                    }
                     performer.csi_dispatch(&self.params, &[], false, byte as char);
                     self.state = State::Ground;
                     return i + 1;
@@ -484,8 +496,10 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     fn action_csi_dispatch<P: Perform>(&mut self, performer: &mut P, byte: u8) {
         if self.params.is_full() {
             self.ignoring = true;
-        } else {
+        } else if self.param_nonempty {
             self.params.push(self.param);
+        } else {
+            self.params.push_empty();
         }
         performer.csi_dispatch(self.params(), self.intermediates(), self.ignoring, byte as char);
 
@@ -520,8 +534,9 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             self.ignoring = true;
         } else {
             self.params.extend(self.param);
-            self.param = 0;
         }
+        self.param = 0;
+        self.param_nonempty = false;
     }
 
     /// Advance to the next parameter.
@@ -529,10 +544,13 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     fn action_param(&mut self) {
         if self.params.is_full() {
             self.ignoring = true;
-        } else {
+        } else if self.param_nonempty {
             self.params.push(self.param);
-            self.param = 0;
+        } else {
+            self.params.push_empty();
         }
+        self.param = 0;
+        self.param_nonempty = false;
     }
 
     /// Advance inside the parameter without terminating it.
@@ -544,6 +562,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             // Continue collecting bytes into param.
             self.param = self.param.saturating_mul(10);
             self.param = self.param.saturating_add((byte - b'0') as u16);
+            self.param_nonempty = true;
         }
     }
 
@@ -595,6 +614,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         self.intermediate_idx = 0;
         self.ignoring = false;
         self.param = 0;
+        self.param_nonempty = false;
 
         self.params.clear();
     }

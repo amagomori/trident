@@ -527,7 +527,7 @@ fn window_size_reports() {
     t.advance(b"\x1b[14t\x1b[16t\x1b[18t\x1b[19t");
     assert_eq!(
         t.take_responses(),
-        b"\x1b[4;456;768t\x1b[6;19;10t\x1b[8;24;80t"
+        b"\x1b[4;456;768t\x1b[6;19;10t\x1b[8;24;80t\x1b[9;56;199t"
     );
     t.resize(100, 30);
     t.advance(b"\x1b[14t\x1b[18t");

@@ -52,6 +52,7 @@ For the full capability list, see
 | Paste | Cmd+V | Ctrl+Shift+V, Shift+Insert, middle click |
 | New window | Cmd+N | Ctrl+Shift+N |
 | New tab / close tab | Cmd+T / Cmd+W | Ctrl+Shift+T / Ctrl+Shift+W |
+| Reopen the last closed tab | Cmd+Shift+T | Ctrl+Shift+Alt+T |
 | Close window (every tab in it) | Cmd+Shift+W | — |
 | Next / previous tab | Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+PageDown / Ctrl+PageUp, Ctrl+Tab / Ctrl+Shift+Tab |
 | Go to tab 1-8 / last tab | Cmd+1..8 / Cmd+9 | Alt+1..8 / Alt+9 |
@@ -221,6 +222,24 @@ doesn't run.
 
 On Linux, drops work from X11 apps. On a Wayland desktop, run `env -u WAYLAND_DISPLAY trident` to
 accept drops from X11 apps. Drops from native Wayland apps aren't supported.
+
+## Wayland notes
+
+Trident runs natively on Wayland and on X11 (including XWayland). On Wayland:
+
+- When `theme` follows the OS appearance (`theme = "auto"` or a `light`/`dark`
+  pair), client-side decorations and the X11 `_GTK_THEME_VARIANT` hint track the
+  desktop's color scheme through the `org.freedesktop.appearance` portal. A fixed
+  `theme` keeps the platform's default decorations.
+- Fractional scaling works; moving the window between monitors re-renders at the new
+  scale.
+- The window icon comes from the installed `trident.desktop` entry and icon theme, not
+  the `app_icon` setting, which Wayland has no protocol for.
+- Primary selection (select-to-copy, middle-click paste) uses the
+  `zwp_primary_selection_v1` protocol, which GNOME, KDE and wlroots compositors
+  provide. On a compositor without it, use Ctrl+Shift+C/V and the regular clipboard.
+- The compositor owns window position: Trident can restore its size, not its place.
+- Drops from native Wayland apps aren't supported yet (see above).
 
 ## Hover previews
 
