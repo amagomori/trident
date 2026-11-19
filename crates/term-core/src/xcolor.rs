@@ -80,7 +80,8 @@ fn xyz_to_rgb(xyz: [f64; 3]) -> Rgb {
             *value /= scale;
         }
     }
-    rgbi_to_rgb(rgbi)
+    // Matrix roundoff can put a full channel just above 1.0.
+    rgbi_to_rgb(rgbi.map(|v| v.clamp(0.0, 1.0)))
 }
 
 fn uv_y_to_xyz(u: f64, v: f64, y_value: f64) -> Option<[f64; 3]> {

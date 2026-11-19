@@ -297,6 +297,24 @@ fn osc_colors_accept_xterm_specs_and_reset() {
 }
 
 #[test]
+fn osc_color_preserves_full_channels_after_xyz_conversion() {
+    for (spec, expected) in [
+        ("CIELab:100/0/0", "ffff/ffff/ffff"),
+        ("CIEXYZ:0.9496644/1/1.4060403", "ffff/ffff/ffff"),
+        ("CIEXYZ:0.3202571/0.6805464/0.1429719", "0000/ffff/0000"),
+        ("CIEXYZ:0.6294073/0.3194536/1.2630684", "ffff/0000/ffff"),
+    ] {
+        let mut term = Terminal::new(80, 24);
+        term.advance(format!("\x1b]4;5;{spec};5;?\x07").as_bytes());
+        assert_eq!(
+            term.take_responses(),
+            format!("\x1b]4;5;rgb:{expected}\x07").as_bytes(),
+            "{spec}"
+        );
+    }
+}
+
+#[test]
 fn xterm_color_setting_report() {
     let mut term = Terminal::new(80, 24);
     term.advance(b"\x1bP+q436F\x1b\\");
