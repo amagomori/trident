@@ -164,7 +164,9 @@ could then read what you copied.
 ## Close confirmation
 
 If a program such as vim, ssh or a build is running, closing the window shows a confirmation banner
-with the program's name. Press Enter or close again to confirm, or Escape to keep the window open.
+with the program's name. Press Enter to close the window or Escape to keep it open.
+Closing again also confirms for the last window in a Trident process. On Linux, if another window
+in the same process is open, closing again repeats the prompt instead.
 Commands started with `-e` also require confirmation unless the command is a shell at its prompt.
 At an idle shell prompt, the window closes without confirmation.
 
@@ -201,9 +203,10 @@ A stream of bells (`yes $'\a'`) flashes once until it pauses for a quarter secon
 
 ## App icons
 
-`app_icon` picks the Dock icon on macOS and the window icon on Linux from eight variants:
-`tide`, the default, `lagoon`, `dusk`, `reef`, `kelp`, `midnight`, `golden` and `sunset`,
-all case-insensitive. On macOS, the same icon also shows in the menu bar, with a menu that brings
+`app_icon` sets the Dock icon on macOS or the window icon on X11 (including XWayland).
+Native Wayland uses the installed desktop icon instead. The eight variants are `tide` (the
+default), `lagoon`, `dusk`, `reef`, `kelp`, `midnight`, `golden` and `sunset`, all
+case-insensitive. On macOS, the same icon also shows in the menu bar, with a menu that brings
 the window forward or quits. To hide it, set `menu_bar_icon = false`. Both settings apply when the
 config reloads. An unknown name logs a warning and uses `tide`.
 
@@ -228,12 +231,14 @@ Trident runs natively on Wayland and on X11 (including XWayland). On Wayland:
 
 - When `theme` follows the OS appearance (`theme = "auto"` or a `light`/`dark`
   pair), client-side decorations and the X11 `_GTK_THEME_VARIANT` hint track the
-  desktop's color scheme through the `org.freedesktop.appearance` portal. A fixed
-  `theme` keeps the platform's default decorations.
+  desktop's color scheme through the `org.freedesktop.appearance` portal. A window
+  opened with a fixed theme uses the platform's default decorations. Switching from
+  automatic to fixed on config reload changes the terminal palette but does not
+  reset the existing window's decorations.
 - Fractional scaling works; moving the window between monitors re-renders at the new
   scale.
 - The window icon comes from the installed `trident.desktop` entry and icon theme, not
-  the `app_icon` setting, which Wayland has no protocol for.
+  the `app_icon` setting.
 - Primary selection (select-to-copy, middle-click paste) uses the
   `zwp_primary_selection_v1` protocol, which GNOME, KDE and wlroots compositors
   provide. On a compositor without it, use Ctrl+Shift+C/V and the regular clipboard.

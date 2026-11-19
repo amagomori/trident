@@ -5,6 +5,9 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+mod reference;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// A font file or family name, as are the style overrides below.
