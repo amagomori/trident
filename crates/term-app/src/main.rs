@@ -1929,12 +1929,19 @@ impl App {
         let mut term = Terminal::new(cols, rows);
         self.appearance = window.theme().or(self.appearance);
         #[cfg(target_os = "linux")]
-        if let Some(theme) = self
-            .appearance_watch
-            .as_mut()
-            .and_then(|watch| watch.initial(INITIAL_APPEARANCE_WAIT))
         {
-            self.appearance = theme;
+            if let Some(theme) = self
+                .appearance_watch
+                .as_mut()
+                .and_then(|watch| watch.initial(INITIAL_APPEARANCE_WAIT))
+            {
+                self.appearance = theme;
+            }
+            // The Wayland CSD frame and the X11 _GTK_THEME_VARIANT hint track the
+            // palette's theme; fixed palettes keep the platform default.
+            if self.config.themes.automatic() {
+                window.set_theme(decoration_theme(self.appearance));
+            }
         }
         term.set_palette(self.config.themes.palette(self.appearance).clone());
         configure_term(
@@ -3799,6 +3806,12 @@ impl App {
     /// Applies the automatic theme's current palette to the shown window's
     /// terminals, when automatic theming is on.
     fn apply_appearance_shown(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.config.themes.automatic()
+            && let Some(s) = &self.session
+        {
+            s.window.set_theme(decoration_theme(self.appearance));
+        }
         if self.config.themes.automatic()
             && let Some(s) = &mut self.session
         {
@@ -5351,6 +5364,19 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// The decoration theme matching `palette(appearance)`: light only on an
+/// explicit Light, dark otherwise. Winit's Linux backends have no "system"
+/// value — X11 writes `dark` for `None` and Wayland falls back to light — so
+/// `None` must not reach `set_theme` or the frame splits from the palette.
+#[cfg(target_os = "linux")]
+fn decoration_theme(appearance: Option<Theme>) -> Option<Theme> {
+    Some(if appearance == Some(Theme::Light) {
+        Theme::Light
+    } else {
+        Theme::Dark
+    })
 }
 
 impl ApplicationHandler<UserEvent> for App {
