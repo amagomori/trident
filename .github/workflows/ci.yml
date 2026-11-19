@@ -36,6 +36,7 @@ jobs:
       - run: cargo test --doc -p term-core -p term-render
       - run: cargo test --workspace
       - run: python3 -m unittest discover -s .github/scripts/merge-queue
+      - run: python3 -m unittest discover -s .github/scripts/pgrp-qa
       - run: python3 -m unittest discover -s .github/scripts/release
       - name: term-core has no GPU, window or PTY dependencies
         run: |
