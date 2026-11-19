@@ -35,6 +35,12 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - run: cargo test --doc -p term-core -p term-render
       - run: cargo test --workspace
+      - name: Replay tmux image history
+        run: |
+          if ! command -v tmux >/dev/null; then
+            if [[ "$RUNNER_OS" == "macOS" ]]; then brew install tmux; else sudo apt-get install -y tmux; fi
+          fi
+          cargo test -p term-app --test tmux_image_history -- --ignored
       - run: python3 -m unittest discover -s .github/scripts/merge-queue
       - run: python3 -m unittest discover -s .github/scripts/release
       - name: term-core has no GPU, window or PTY dependencies

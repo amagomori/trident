@@ -26,6 +26,7 @@ mod ghost;
 pub mod grapheme;
 mod kitty;
 mod links;
+pub mod placeholder;
 pub use links::{FileLink, Link};
 mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};

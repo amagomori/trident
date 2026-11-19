@@ -229,7 +229,7 @@ pub(super) fn drop_preview(
     };
     let image_rows = (image.height as f32 / cell.1).ceil() as usize;
     let mut output = Vec::new();
-    write_kitty(&mut output, &image, window, |_| {}).ok()?;
+    write_kitty(&mut output, &image, window, || {}).ok()?;
     Some((output, image_rows))
 }
 
@@ -645,96 +645,146 @@ fn load_fonts(db: &mut resvg::usvg::fontdb::Database) {
     db.set_monospace_family(term_render::BUNDLED_FONT_FAMILY);
 }
 
-/// Sends `image` as one kitty `a=T` command (zlib-compressed RGBA, split into chunks) and
-/// moves to the line below it.
-///
-/// Inside tmux each escape goes through its passthrough. tmux keeps its own cursor, which
-/// wouldn't follow the terminal's past the image, so the image leaves the cursor alone
-/// (`C=1`) and newlines step over its rows instead. Those newlines go out first, and the
-/// cursor back up, so that tmux scrolls the pane before the image is drawn: scrolling it
-/// after would erase the new bottom row (`ESC [ K`) across the image, which drops it.
-/// tmux also homes the terminal's cursor after every passthrough, and the image is placed
-/// when its last chunk arrives, so the first chunk saves the cursor (`ESC 7`) and the last
-/// restores it (`ESC 8`). `wait` is called, with `out` flushed, once the room is made and
-/// after every chunk but the last.
+/// Transmit pixels directly unless tmux needs text cells it can replay from history.
 fn write_kitty(
     out: &mut impl Write,
     image: &Rgba,
     window: Window,
-    mut wait: impl FnMut(TmuxWait),
+    mut wait: impl FnMut(),
 ) -> io::Result<()> {
-    let mut zlib = ZlibEncoder::new(Vec::new(), Compression::fast());
-    zlib.write_all(&image.pixels)?;
-    let payload = BASE64.encode(zlib.finish()?);
-    let chunks: Vec<&[u8]> = payload.as_bytes().chunks(CHUNK).collect();
-    let keep_cursor = if window.tmux { ",C=1" } else { "" };
-    let rows = (image.height as f32 / window.cell_h).ceil().max(1.0) as usize;
     if window.tmux {
-        out.write_all(&b"\n".repeat(rows))?;
-        write!(out, "\x1b[{rows}A")?;
-        out.flush()?;
-        wait(TmuxWait::Room);
+        return write_placeholders(out, image, window, wait);
     }
-    let mut escape = Vec::with_capacity(CHUNK + 64);
-    for (i, chunk) in chunks.iter().enumerate() {
-        let more = u8::from(i + 1 < chunks.len());
-        escape.clear();
-        if window.tmux && chunks.len() > 1 {
-            if i == 0 {
-                escape.extend_from_slice(b"\x1b7");
-            } else if more == 0 {
-                escape.extend_from_slice(b"\x1b8");
-            }
-        }
-        if i == 0 {
-            write!(
-                escape,
-                "\x1b_Ga=T,f=32,o=z,q=2{keep_cursor},s={},v={},m={more};",
-                image.width, image.height
-            )?;
+    let mut compressed = ZlibEncoder::new(Vec::new(), Compression::fast());
+    compressed.write_all(&image.pixels)?;
+    send_chunks(
+        out,
+        &compressed.finish()?,
+        &format!("s={},v={}", image.width, image.height),
+        false,
+        &mut wait,
+    )?;
+    out.write_all(b"\n")
+}
+
+fn send_chunks(
+    out: &mut impl Write,
+    compressed: &[u8],
+    header: &str,
+    tmux: bool,
+    wait: &mut impl FnMut(),
+) -> io::Result<()> {
+    let encoded = BASE64.encode(compressed);
+    let chunks = encoded.as_bytes().chunks(CHUNK);
+    let count = chunks.len();
+    for (i, chunk) in chunks.enumerate() {
+        let more = u8::from(i + 1 < count);
+        let mut escape = if i == 0 {
+            format!("\x1b_Ga=T,f=32,o=z,q=2,{header},m={more};")
         } else {
-            write!(escape, "\x1b_Gm={more};")?;
+            format!("\x1b_Gm={more};")
         }
+        .into_bytes();
         escape.extend_from_slice(chunk);
         escape.extend_from_slice(b"\x1b\\");
-        if window.tmux {
+        if tmux {
             out.write_all(&tmux_passthrough(&escape))?;
-            if more == 1 {
-                out.flush()?;
-                wait(TmuxWait::Chunk);
-            }
+            out.flush()?;
+            wait();
         } else {
             out.write_all(&escape)?;
         }
     }
-    if window.tmux {
-        out.write_all(&b"\n".repeat(rows))
-    } else {
-        out.write_all(b"\n")
-    }
+    Ok(())
 }
 
-/// Where [`write_kitty`] waits for tmux.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum TmuxWait {
-    /// The newlines making room for the image are out; tmux must draw them first.
-    Room,
-    /// A chunk is out and more follow.
-    Chunk,
-}
-
-/// What [`write_kitty`] waits for inside tmux, after turning on its passthrough.
-fn tmux_wait(window: Window) -> impl FnMut(TmuxWait) {
-    let old_tmux = window.tmux && allow_passthrough();
-    move |wait| match wait {
-        TmuxWait::Room => {
-            #[cfg(unix)]
-            unix::sync();
+/// Use indexed colors (even without RGB passthrough) and the high-ID diacritic.
+/// Each tile fits the protocol's row/column table. Send *all* tiles before the
+/// first text redraw: tmux can discard passthrough while catching up on a redraw.
+fn write_placeholders(
+    out: &mut impl Write,
+    image: &Rgba,
+    window: Window,
+    mut wait: impl FnMut(),
+) -> io::Result<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use term_core::placeholder::{CHAR, DIACRITICS as MARK};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let cell_w = window.cell_w.max(1.0);
+    let cell_h = window.cell_h.max(1.0);
+    let cols = (image.width as f32 / cell_w).ceil() as usize;
+    let rows = (image.height as f32 / cell_h).ceil() as usize;
+    let tile_cols = MARK
+        .len()
+        .min((MAX_SIDE as f32 / cell_w).floor() as usize)
+        .max(1);
+    let tile_rows = MARK
+        .len()
+        .min((MAX_SIDE as f32 / cell_h).floor() as usize)
+        .max(1);
+    let mut bands = Vec::new();
+    for top in (0..rows).step_by(tile_rows) {
+        let nr = (rows - top).min(tile_rows);
+        let mut band = Vec::new();
+        for left in (0..cols).step_by(tile_cols) {
+            let nc = (cols - left).min(tile_cols);
+            let x = (left as f32 * cell_w).round() as usize;
+            let y = (top as f32 * cell_h).round() as usize;
+            let width = (((left + nc) as f32 * cell_w).round() as usize - x).min(MAX_SIDE as usize);
+            let height = (((top + nr) as f32 * cell_h).round() as usize - y).min(MAX_SIDE as usize);
+            let stride = image.width as usize * 4;
+            let actual_w = width.min((image.width as usize).saturating_sub(x));
+            let actual_h = height.min((image.height as usize).saturating_sub(y));
+            // Transparent padding keeps fractional last cells at the original pixel size.
+            let zeros = vec![0; width * 4];
+            let mut z = ZlibEncoder::new(Vec::new(), Compression::fast());
+            for row in y..y + actual_h {
+                let off = row * stride + x * 4;
+                z.write_all(&image.pixels[off..off + actual_w * 4])?;
+                z.write_all(&zeros[..(width - actual_w) * 4])?;
+            }
+            for _ in actual_h..height {
+                z.write_all(&zeros)?;
+            }
+            // Separate sequential show processes as well as tiles within one invocation.
+            let key = (std::process::id() as usize)
+                .wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed).wrapping_mul(8191))
+                % (240 * 255);
+            let low = 16 + key % 240;
+            let high = 1 + key / 240;
+            let id = (high << 24) | low;
+            send_chunks(
+                out,
+                &z.finish()?,
+                &format!("U=1,i={id},c={nc},r={nr},s={width},v={height}"),
+                true,
+                &mut wait,
+            )?;
+            band.push((nc, low, high));
         }
-        // tmux before 3.3 throws away output, passthrough included, while the terminal falls
-        // behind reading it (`TTY_BLOCK`), which a large image does at full speed.
-        TmuxWait::Chunk if old_tmux => std::thread::sleep(OLD_TMUX_CHUNK_PAUSE),
-        TmuxWait::Chunk => {}
+        bands.push((nr, band));
+    }
+    for (nr, band) in bands {
+        for row in &MARK[..nr] {
+            for &(nc, low, high) in &band {
+                write!(out, "\x1b[38;5;{low}m")?;
+                for col in &MARK[..nc] {
+                    write!(out, "{CHAR}{row}{col}{}", MARK[high])?;
+                }
+            }
+            out.write_all(b"\x1b[39m\r\n")?;
+        }
+    }
+    Ok(())
+}
+
+fn tmux_wait(window: Window) -> impl FnMut() {
+    let old_tmux = window.tmux && allow_passthrough();
+    move || {
+        if old_tmux {
+            // Older tmux discards passthrough when its client falls behind.
+            std::thread::sleep(OLD_TMUX_CHUNK_PAUSE);
+        }
     }
 }
 
@@ -920,14 +970,6 @@ mod unix {
     /// terminal answers, so one that ignores the first doesn't cost the whole timeout.
     fn query_pixels(tty: File) -> Option<(u32, u32)> {
         parse_pixel_report(&query(tty, b"\x1b[14t\x1b[c", da1_answered))
-    }
-
-    /// Waits until the terminal (tmux, inside it) has handled everything written so far, by
-    /// asking for the cursor position.
-    pub(super) fn sync() {
-        if let Ok(tty) = File::options().read(true).write(true).open("/dev/tty") {
-            query(tty, b"\x1b[6n", |reply| reply.contains(&b'R'));
-        }
     }
 
     /// Writes `request` to the tty and reads the reply until `done` or the timeout.

@@ -276,7 +276,11 @@ A missing, unreadable or corrupt file prints an error, and the command exits wit
 sample files, see `crates/term-app/samples`.
 
 Inside tmux, `trident show` turns on `allow-passthrough` for its pane, which tmux 3.3 and later
-need for images. To turn it on for every pane, add this line to `~/.tmux.conf`:
+need for images. It sends pixels once, then writes Kitty Unicode placeholder cells so
+tmux can restore the visible part of an image in copy-mode. This requires a terminal
+that supports Kitty virtual placements and a client with at least 256 colors. Images that
+are no longer visible can be evicted when Trident reaches its image-memory limit.
+To turn passthrough on for every pane, add this line to `~/.tmux.conf`:
 
 ```text
 set -g allow-passthrough on

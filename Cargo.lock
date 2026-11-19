@@ -2622,6 +2622,7 @@ dependencies = [
  "serde",
  "shlex",
  "smithay-clipboard",
+ "tempfile",
  "term-core",
  "term-render",
  "toml",

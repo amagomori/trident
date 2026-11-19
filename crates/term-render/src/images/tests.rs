@@ -180,3 +180,23 @@ fn erase_display_crops_bottom_clipped_images_without_squashing() {
         assert_eq!(saved.uv, [0.0, 0.0, 1.0, height / original.size[1]]);
     }
 }
+
+#[test]
+fn virtual_cells_letterbox_and_clip_fractional_source_pixels() {
+    use term_core::placeholder::{CHAR, DIACRITICS as M};
+    let mut t = term();
+    kitty(&mut t, ",U=1,c=8,r=8");
+    // 20x40 scaled to fill an 80x160 rectangle. One cell is 2.5x5 source pixels.
+    t.advance(format!("\x1b[38;5;1m{CHAR}{}{}{CHAR}", M[1], M[1]).as_bytes());
+    let q = layout(&t, CELL, 0., 0.)[0];
+    assert_eq!(q.pos, [0., 0.]);
+    assert_eq!(q.size, [20., 20.]);
+    assert_eq!(q.uv, [0.125, 0.125, 0.375, 0.25]);
+    // The grid gets wider relative to the image: these columns are now in the margin.
+    t.set_cell_pixel_size(20., 20.);
+    assert!(
+        layout(&t, (20., 20.), 0., 0.)
+            .iter()
+            .all(|q| q.pos[0] >= 20.)
+    );
+}
