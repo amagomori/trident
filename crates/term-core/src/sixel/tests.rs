@@ -89,19 +89,45 @@ fn aborted_or_oversize_images_do_not_place_or_move_cursor() {
 
 #[test]
 fn a_full_height_image_keeps_its_visible_bands_without_hiding_following_text() {
-    for setup in [b"".as_slice(), b"\x1b[?1049h", b"\x1b[2;4r\x1b[2H"] {
+    let colors = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 0, 255],
+    ];
+    for (setup, row, skipped) in [
+        (b"".as_slice(), 0, 1),
+        (b"\x1b[?1049h", 0, 1),
+        (b"\x1b[2;4r\x1b[2H", 1, 2),
+    ] {
         let mut t = Terminal::new(5, 4);
+        t.set_cell_pixel_size(8., 6.);
         if setup.is_empty() {
             t.set_scrollback_limit(0);
         }
         t.advance(setup);
-        t.advance(b"\x1bPq\"1;1;1;64@\x1b\\");
-        assert_eq!(image(&t).height, 64);
-        let visible = t.visible_placements()[0];
-        assert!(visible.placement.source.y >= 16);
-        assert_eq!(visible.row + visible.placement.rows as isize, 3);
+        t.advance(b"\x1bP7q#1;2;100;0;0~-#2;2;0;100;0~-#3;2;0;0;100~-#4;2;100;100;0~\x1b\\");
+        let img = image(&t);
+        assert_eq!((img.width, img.height), (1, 24));
+        let v = t.visible_placements()[0];
+        let source = v.placement.source;
+        assert_eq!((v.row, v.placement.rows), (row, 4 - skipped));
+        assert_eq!((source.x, source.width), (0, 1));
+        assert_eq!(
+            (source.y, source.height),
+            (6 * skipped as u32, 24 - 6 * skipped as u32)
+        );
+        let pixels = img.pixels.as_chunks::<4>().0;
+        assert_eq!(
+            &pixels[source.y as usize..(source.y + source.height) as usize],
+            colors[skipped..]
+                .iter()
+                .flat_map(|c| [*c; 6])
+                .collect::<Vec<_>>()
+        );
         assert_eq!(t.cursor_position(), Some((3, 0)));
         t.advance(b"X");
+        assert_eq!(t.viewport_row(3).text(), "X");
         assert_eq!(t.cursor_position(), Some((3, 1)));
     }
 }
