@@ -288,12 +288,20 @@ impl Terminal {
         true
     }
 
-    /// Removes one placement from the active screen.
+    /// Removes a placement from the active screen, or the named virtual grid.
     pub fn delete_placement(&mut self, image_id: u32, placement_id: u32) -> bool {
         let placements = &mut self.screen_mut().placements;
         let before = placements.len();
         placements.retain(|p| (p.image_id, p.placement_id) != (image_id, placement_id));
-        let removed = placements.len() != before;
+        let mut removed = placements.len() != before;
+        if placement_id != 0
+            && let Some(grids) = self.images.virtuals.get_mut(&image_id)
+        {
+            removed |= grids.remove(&placement_id).is_some();
+            if grids.is_empty() {
+                self.images.virtuals.remove(&image_id);
+            }
+        }
         if removed {
             self.images.generation += 1;
         }
@@ -399,11 +407,10 @@ impl Terminal {
             fixed_cols: opts.cols != 0,
             fixed_rows: opts.rows != 0,
         };
-        let placements = &mut self.screen_mut().placements;
         if opts.placement_id != 0 {
-            placements.retain(|p| (p.image_id, p.placement_id) != (image_id, opts.placement_id));
+            self.delete_placement(image_id, opts.placement_id);
         }
-        placements.push(Placement {
+        self.screen_mut().placements.push(Placement {
             line: placement.line - base,
             ..placement
         });

@@ -677,3 +677,18 @@ fn virtual_image_is_pinned_only_while_its_cells_are_visible() {
     t.advance(format!("{}", crate::placeholder::CHAR).as_bytes());
     assert!(t.visible_placements().is_empty());
 }
+
+#[test]
+fn named_placement_replaces_the_other_kind() {
+    let mut t = term();
+    t.advance(&apc("a=T,i=42,p=7,s=1,v=1,f=24,C=1,q=2", &[1, 2, 3]));
+    assert!(t.visible_placements()[0].slice.is_none());
+    t.advance(b"\x1b_Ga=p,U=1,i=42,p=7,c=1,r=1,q=2\x1b\\");
+    assert!(t.visible_placements().is_empty());
+    t.advance(format!("\x1b[38;5;42;58;5;7m{}", crate::placeholder::CHAR).as_bytes());
+    assert!(t.visible_placements()[0].slice.is_some());
+    t.advance(b"\x1b_Ga=p,i=42,p=7,q=2\x1b\\");
+    let placements = t.visible_placements();
+    assert_eq!(placements.len(), 1);
+    assert!(placements[0].slice.is_none());
+}

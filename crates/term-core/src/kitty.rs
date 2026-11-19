@@ -482,7 +482,14 @@ impl Terminal {
             if grids.len() >= 4096 && !grids.contains_key(&control.placement) {
                 return Err("ENOSPC:too many virtual placements for this image");
             }
-            grids.insert(control.placement, (control.cols, control.rows));
+            if control.placement != 0 {
+                self.delete_placement(id, control.placement);
+            }
+            self.images
+                .virtuals
+                .entry(id)
+                .or_default()
+                .insert(control.placement, (control.cols, control.rows));
             self.images.generation += 1;
             return Ok(id);
         }
