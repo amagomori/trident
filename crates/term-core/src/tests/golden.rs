@@ -828,6 +828,12 @@ fn cases() -> Vec<Case> {
         ),
         ("emoji_skin_tone", 6, 2, "\u{1f44d}\u{1f3fd}x".as_bytes()),
         (
+            "emoji_mode_in_input",
+            5,
+            3,
+            "\x1b]133;B\x07\x1b[?2027h👨\u{200d}👩\u{200d}👧👍🏽x\x1b[?2027l👍🏽y".as_bytes(),
+        ),
+        (
             "emoji_tag_sequence",
             6,
             2,

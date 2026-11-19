@@ -40,6 +40,14 @@ infocmp -x xterm-trident | ssh host -- tic -x /dev/stdin
 For the full capability list, see
 [xterm-trident.terminfo](../crates/term-app/terminfo/xterm-trident.terminfo).
 
+## Emoji widths in line editors
+
+Trident joins emoji sequences in command output. At a shell prompt or in a line editor, it normally
+counts each code point separately to match the editor’s cursor. An editor that counts joined emoji
+as two columns can send `CSI ? 2027 h` to use those widths and `CSI ? 2027 l` to restore the default.
+Query the mode with `CSI ? 2027 $ p`: the reply is `CSI ? 2027 ; 1 $ y` when set, or `2` instead of
+`1` when reset. Changing the mode does not reflow existing text.
+
 ## Keyboard and mouse
 
 | Action | macOS | Linux |
