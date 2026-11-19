@@ -228,9 +228,7 @@ impl State {
                         break PostAction::Remove;
                     },
                     Ok(n) => content.extend_from_slice(&reader_buffer[..n]),
-                    Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                        break PostAction::Continue;
-                    },
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => break PostAction::Continue,
                     Err(err) => {
                         let _ = state.reply_tx.send(Err(err));
                         break PostAction::Remove;
@@ -270,9 +268,7 @@ impl State {
                         break PostAction::Remove;
                     },
                     Ok(n) => written += n,
-                    Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                        break PostAction::Continue;
-                    },
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => break PostAction::Continue,
                     Err(_) => break PostAction::Remove,
                 }
             }
