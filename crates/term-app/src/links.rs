@@ -121,6 +121,16 @@ pub enum Editor {
     System(PathBuf),
 }
 
+fn editor_target<'a>(program: &str, file: &'a Path) -> (&'a Path, Option<PathBuf>) {
+    if Path::new(program).ends_with("red")
+        && let (Some(name), Some(dir)) = (file.file_name(), file.parent())
+    {
+        (Path::new(name), Some(dir.to_owned()))
+    } else {
+        (file, None)
+    }
+}
+
 /// The editor command for `file` at `line`: the configured `editor` with its `{file}`,
 /// `{line}` and `{column}` placeholders filled in (the file is appended when no argument
 /// names it), else `$VISUAL` or `$EDITOR` with that editor's own line syntax.
@@ -143,7 +153,8 @@ pub fn editor(
                 .iter()
                 .any(|arg| ["-nw", "--no-window-system", "-t", "--tty"].contains(&arg.as_str()))
     };
-    if !configured.is_empty() {
+    if let Some(program) = configured.first() {
+        let (file, dir) = editor_target(program, file);
         let file_text = file.to_string_lossy();
         let named = configured.iter().any(|arg| arg.contains("{file}"));
         let mut argv: Vec<OsString> = configured
@@ -180,7 +191,7 @@ pub fn editor(
             argv.push(file.into());
         }
         return if terminal(configured) {
-            Editor::Terminal(argv, None)
+            Editor::Terminal(argv, dir)
         } else {
             Editor::Program(argv)
         };
@@ -227,13 +238,10 @@ pub fn editor(
             argv.push(format!("+{line}:{column}").into());
             argv.push(file.into());
         }
-        "ed" => argv.push(file.into()),
-        "red" => {
-            if let (Some(name), Some(dir)) = (file.file_name(), file.parent()) {
-                argv.push(name.into());
-                return Editor::Terminal(argv, Some(dir.to_owned()));
-            }
+        "ed" | "red" => {
+            let (file, dir) = editor_target(&name, file);
             argv.push(file.into());
+            return Editor::Terminal(argv, dir);
         }
         _ => {
             argv.push(format!("+{line}").into());
@@ -485,6 +493,37 @@ mod tests {
         assert_eq!(
             args(&argv),
             ["myedit", "/w/{line}/{column}.rs", "73", "{x}{"]
+        );
+    }
+
+    #[test]
+    fn configured_red_appends_basename_in_parent_directory() {
+        assert_eq!(
+            editor(
+                &["red".into()],
+                Some("vim"),
+                Path::new("/w/sub/a b"),
+                2,
+                None
+            ),
+            Editor::Terminal(
+                vec!["red".into(), "a b".into()],
+                Some(PathBuf::from("/w/sub"))
+            )
+        );
+    }
+
+    #[test]
+    fn configured_red_substitutes_basename_without_appending_it() {
+        let configured = ["/usr/bin/red", "-p", "{line}:{column}", "{file}"].map(String::from);
+        assert_eq!(
+            editor(&configured, None, Path::new("/w/sub/a b"), 2, Some(4)),
+            Editor::Terminal(
+                ["/usr/bin/red", "-p", "2:4", "a b"]
+                    .map(OsString::from)
+                    .to_vec(),
+                Some(PathBuf::from("/w/sub"))
+            )
         );
     }
 

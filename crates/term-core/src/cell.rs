@@ -391,6 +391,15 @@ impl Row {
         cells
     }
 
+    /// Expands implicit trailing blanks when a history row becomes a screen row.
+    pub(crate) fn pad_to(&mut self, cols: usize) {
+        if self.cells.len() < cols {
+            debug_assert!(!self.wrapped() && !self.has_hidden());
+            self.touch_all();
+            self.cells.resize(cols, Cell::default());
+        }
+    }
+
     /// Resizes the row, retaining cut-off text for a later widening.
     ///
     /// Unlike terminal resizing this does not reflow text onto other rows.

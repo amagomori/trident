@@ -200,6 +200,7 @@ fn shell_integration_output_ends_before_missing_newline_marker() {
         t.advance(format!("\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07{marker}                    \r\x1b]133;A\x07$ ").as_bytes());
         t.select_command_output();
         assert_eq!(t.selection_text().as_deref(), Some("abc"));
+        assert!(t.selection_html().unwrap().ends_with("\">abc</span></pre>"));
     }
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;A\x07$ ");
@@ -839,6 +840,12 @@ fn cases() -> Vec<Case> {
             "\u{2764}\u{fe0f}x".as_bytes(),
         ),
         ("emoji_skin_tone", 6, 2, "\u{1f44d}\u{1f3fd}x".as_bytes()),
+        (
+            "emoji_mode_in_input",
+            5,
+            3,
+            "\x1b]133;B\x07\x1b[?2027h👨\u{200d}👩\u{200d}👧👍🏽x\x1b[?2027l👍🏽y".as_bytes(),
+        ),
         (
             "emoji_tag_sequence",
             6,
@@ -1600,6 +1607,14 @@ fn golden_conformance_reports() {
         ),
         ("DECRQCRA clamps", b"\x1b[6;0;9;9;99;99*y"),
         ("DECXCPR", b"\x1b[2;3H\x1b[?6n"),
+        (
+            "SCOSC ignores parameters with DECLRMM off",
+            b"\x1b[2;3H\x1b[3s\x1b[H\x1b[u\x1b[6n\x1b[3;2H\x1b[3;4s\x1b[H\x1b[u\x1b[6n",
+        ),
+        (
+            "DECSLRM does not overwrite SCOSC",
+            b"\x1b[?69h\x1b[1;2H\x1b[2;3s\x1bP$qs\x1b\\\x1b[?69l\x1b[u\x1b[6n",
+        ),
         ("printer, UDK, keyboard", b"\x1b[?15n\x1b[?25n\x1b[?26n"),
         ("locator", b"\x1b[?53n\x1b[?55n\x1b[?56n"),
         ("macros, DECCKSR", b"\x1b[?62n\x1b[?63;7n"),

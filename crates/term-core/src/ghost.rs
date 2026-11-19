@@ -262,6 +262,10 @@ impl Perform for Ghost<'_> {
         Perform::esc_dispatch(self.term, intermediates, ignore, byte);
     }
 
+    fn raw_osc_limit(&self, code: &[u8]) -> Option<usize> {
+        self.term.raw_osc_limit(code)
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         Perform::osc_dispatch(self.term, params, bell_terminated);
     }

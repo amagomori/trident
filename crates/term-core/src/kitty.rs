@@ -449,7 +449,7 @@ impl Terminal {
         self.kitty_reply(&t.control, reply_id, result);
     }
 
-    fn free_image_id(&mut self) -> u32 {
+    pub(crate) fn free_image_id(&mut self) -> u32 {
         loop {
             // Counting down from the top keeps clear of the small ids clients pick.
             self.kitty.next_id = self.kitty.next_id.wrapping_sub(1);
@@ -478,6 +478,7 @@ impl Terminal {
         let s = control.source;
         let opts = PlaceOptions {
             placement_id: control.placement,
+            display_pixels: None,
             cols: control.cols as usize,
             rows: control.rows as usize,
             x_offset: control.x_offset.min((cell_w as u32).saturating_sub(1)),
@@ -487,31 +488,7 @@ impl Terminal {
         };
         let placement = self.place_image(id, opts).map_err(image_error)?;
         if !control.keep_cursor {
-            // Like kitty: the cursor ends on the image's last row, just past its right edge.
-            // Without scrollback an image whose top scrolls off is dropped, so stop short of
-            // that; with it, linefeeds past screen plus scrollback only push out blank lines.
-            let history = if self.alt_active {
-                0
-            } else {
-                self.max_scrollback
-            };
-            let rows = if self.has_partial_width()
-                && self.in_horizontal_margins()
-                && (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row)
-            {
-                self.scroll_bottom - self.scroll_top + 1
-            } else if history == 0 {
-                self.rows
-            } else {
-                self.rows + history
-            };
-            for _ in 1..placement.rows.min(rows) {
-                self.linefeed();
-            }
-            let col = self.cursor.col.saturating_add(placement.cols);
-            let right = self.right_bound();
-            self.cursor.col = col.min(right);
-            self.cursor.pending_wrap = col > right;
+            self.advance_image_cursor(&placement);
         }
         Ok(id)
     }

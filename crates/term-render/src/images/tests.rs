@@ -180,3 +180,19 @@ fn erase_display_crops_bottom_clipped_images_without_squashing() {
         assert_eq!(saved.uv, [0.0, 0.0, 1.0, height / original.size[1]]);
     }
 }
+
+#[test]
+fn pixel_sized_placement_does_not_stretch_to_rounded_cell_edges() {
+    let mut t = term();
+    t.place_image(
+        1,
+        term_core::PlaceOptions {
+            display_pixels: Some((31, 17)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let q = layout(&t, CELL, 0.0, 0.0)[0];
+    assert_eq!(q.size, [31., 17.]);
+    assert_eq!(q.uv, [0., 0., 1., 1.]);
+}

@@ -123,6 +123,10 @@ impl Perform for Writer<'_> {
     }
 
     #[inline]
+    fn raw_osc_limit(&self, code: &[u8]) -> Option<usize> {
+        self.term.raw_osc_limit(code)
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         self.flush();
         self.term.osc_dispatch(params, bell_terminated);
