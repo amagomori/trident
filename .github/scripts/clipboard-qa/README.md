@@ -1,18 +1,19 @@
 # Clipboard QA scripts
 
-These scripts check that window lifetimes never disturb X11/Wayland clipboard ownership:
+These scripts check that window lifetimes never disturb X11 clipboard ownership:
 closing a window must neither drop a selection Trident still serves nor clobber one another
-application owns. They need Python 3 with only the standard library on Linux. Run them from a
-desktop session. Use `--xvfb` only for a smoke check.
+application owns. Run them on a dedicated X11 display: they change focus, type into
+shells and replace the display's clipboard. Use `--xvfb` for a private smoke check,
+not as a substitute for a native desktop QA pass.
 
 | Script | Checks |
 | --- | --- |
-| `close_owner.py` | Selection contents after closing the window the clipboard is bound to and a window it is not bound to, under Trident ownership and under another application's, plus a fresh store after the rebind. The external owner (`external_owner.py`) serves Trident's exact plain text plus a custom `text/x-qa-payload` target, so a stolen selection is caught by the dropped payload even when the text reads the same. Exits 1 on any mismatch. |
+| `close_owner.py` | Checks the exact surviving window of the launched PID and selection contents after each unbound and bound close, under Trident and external ownership. The external helper serves the same plain text plus a custom `text/x-qa-payload` target, so losing ownership is detectable even when the text matches. Both bound-close survivors must accept a fresh OSC 52 store. |
 
 ## Prerequisites
 
-- `xdotool`, `xclip`, `python3-xlib` and a running window manager in the session. For `--xvfb`,
-  `Xvfb` and `openbox`.
+- `xdotool`, `xclip`, Python 3 with `python3-xlib`, and an EWMH window manager.
+  For `--xvfb`, also install `xvfb-run`, `Xvfb`, `xauth` and `openbox`.
 
 ## Run
 
