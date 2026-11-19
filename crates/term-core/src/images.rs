@@ -227,7 +227,7 @@ impl Terminal {
             .images
             .images
             .iter()
-            .filter(|(k, _)| **k != id && visible.contains(k))
+            .filter(|(k, _)| **k != id && visible.binary_search(k).is_ok())
             .map(|(_, s)| s.image.pixels.len())
             .sum();
         if pinned + len > self.images.quota {
@@ -240,7 +240,7 @@ impl Terminal {
                 .images
                 .images
                 .iter()
-                .filter(|(id, _)| !visible.contains(id))
+                .filter(|(id, _)| visible.binary_search(id).is_err())
                 .min_by_key(|(_, img)| img.last_used)
                 .map(|(&id, _)| id);
             match victim {
@@ -504,9 +504,8 @@ impl Terminal {
         if alt { self.history } else { 0 }
     }
 
-    /// Images with a placement on either screen's visible rows (or the scrolled-back view),
-    /// which eviction must keep.
-    fn images_on_screen(&self) -> std::collections::HashSet<u32> {
+    /// Sorted IDs of images eviction must keep on either screen or in the scrolled-back view.
+    fn images_on_screen(&self) -> Vec<u32> {
         let rows = self.rows as i64;
         let on = |p: &Placement, base: u64, top: i64| {
             let row = screen_row(p.line, base, self.history);
@@ -523,8 +522,7 @@ impl Terminal {
             .placements
             .iter()
             .filter(|p| on(p, self.history, 0));
-        let mut ids: std::collections::HashSet<_> =
-            primary.chain(alt).map(|p| p.image_id).collect();
+        let mut ids: Vec<_> = primary.chain(alt).map(|p| p.image_id).collect();
         if !self.images.virtuals.is_empty() {
             // Both live screens plus the displayed history window are protected.
             let history = self
@@ -543,11 +541,13 @@ impl Terminal {
             {
                 self.placeholder_runs(&row.cells, |cell, col, len| {
                     if self.placeholder_slice(cell, col, len, 0, 0).is_some() {
-                        ids.insert(cell.image);
+                        ids.push(cell.image);
                     }
                 });
             }
         }
+        ids.sort_unstable();
+        ids.dedup();
         ids
     }
 
