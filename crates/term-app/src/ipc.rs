@@ -92,10 +92,14 @@ pub fn read_request(stream: &mut UnixStream) -> Option<Request> {
             env.push((key.to_string(), value.to_string()));
         }
     }
-    let command = fields
-        .filter(|field| !field.is_empty())
+    let mut command: Vec<OsString> = fields
         .map(|field| OsString::from_vec(field.to_vec()))
         .collect();
+    // The write ends every word in NUL, so the split leaves one empty tail;
+    // interior empties are real arguments and must be kept.
+    if command.last().is_some_and(|field| field.is_empty()) {
+        command.pop();
+    }
     Some((cwd, env, command))
 }
 
@@ -174,6 +178,19 @@ mod tests {
         assert_eq!(
             command.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
             [&b"echo"[..], &b"\xffarg"[..]]
+        );
+    }
+
+    #[test]
+    fn read_request_keeps_empty_arguments() {
+        // `cmd "" "x"` forwarded: interior and trailing empties are arguments.
+        let mut buf = b"/tmp\x00\x00cmd\x00\x00x\x00".to_vec();
+        buf.extend_from_slice(REQUEST_END);
+        let mut stream = request_stream(&buf);
+        let (_, _, command) = read_request(&mut stream).unwrap();
+        assert_eq!(
+            command.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            [&b"cmd"[..], &b""[..], &b"x"[..]]
         );
     }
 }
