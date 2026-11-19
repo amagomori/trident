@@ -200,3 +200,19 @@ fn virtual_cells_letterbox_and_clip_fractional_source_pixels() {
             .all(|q| q.pos[0] >= 20.)
     );
 }
+
+#[test]
+fn pixel_sized_placement_does_not_stretch_to_rounded_cell_edges() {
+    let mut t = term();
+    t.place_image(
+        1,
+        term_core::PlaceOptions {
+            display_pixels: Some((31, 17)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let q = layout(&t, CELL, 0.0, 0.0)[0];
+    assert_eq!(q.size, [31., 17.]);
+    assert_eq!(q.uv, [0., 0., 1., 1.]);
+}

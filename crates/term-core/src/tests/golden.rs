@@ -200,6 +200,7 @@ fn shell_integration_output_ends_before_missing_newline_marker() {
         t.advance(format!("\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07{marker}                    \r\x1b]133;A\x07$ ").as_bytes());
         t.select_command_output();
         assert_eq!(t.selection_text().as_deref(), Some("abc"));
+        assert!(t.selection_html().unwrap().ends_with("\">abc</span></pre>"));
     }
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;A\x07$ ");
@@ -827,6 +828,12 @@ fn cases() -> Vec<Case> {
             "\u{2764}\u{fe0f}x".as_bytes(),
         ),
         ("emoji_skin_tone", 6, 2, "\u{1f44d}\u{1f3fd}x".as_bytes()),
+        (
+            "emoji_mode_in_input",
+            5,
+            3,
+            "\x1b]133;B\x07\x1b[?2027h👨\u{200d}👩\u{200d}👧👍🏽x\x1b[?2027l👍🏽y".as_bytes(),
+        ),
         (
             "emoji_tag_sequence",
             6,

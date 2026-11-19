@@ -452,7 +452,7 @@ impl Terminal {
         self.kitty_reply(&t.control, reply_id, result);
     }
 
-    fn free_image_id(&mut self) -> u32 {
+    pub(crate) fn free_image_id(&mut self) -> u32 {
         loop {
             // Counting down from the top keeps clear of the small ids clients pick.
             self.kitty.next_id = self.kitty.next_id.wrapping_sub(1);
@@ -490,6 +490,7 @@ impl Terminal {
         let s = control.source;
         let opts = PlaceOptions {
             placement_id: control.placement,
+            display_pixels: None,
             cols: control.cols as usize,
             rows: control.rows as usize,
             x_offset: control.x_offset.min((cell_w as u32).saturating_sub(1)),
@@ -499,25 +500,7 @@ impl Terminal {
         };
         let placement = self.place_image(id, opts).map_err(image_error)?;
         if !control.keep_cursor {
-            // Like kitty: the cursor ends on the image's last row, just past its right edge.
-            // Without scrollback an image whose top scrolls off is dropped, so stop short of
-            // that; with it, linefeeds past screen plus scrollback only push out blank lines.
-            let history = if self.alt_active {
-                0
-            } else {
-                self.max_scrollback
-            };
-            let rows = if history == 0 {
-                self.rows
-            } else {
-                self.rows + history
-            };
-            for _ in 1..placement.rows.min(rows) {
-                self.linefeed();
-            }
-            let col = self.cursor.col.saturating_add(placement.cols);
-            self.cursor.col = col.min(self.cols - 1);
-            self.cursor.pending_wrap = col >= self.cols;
+            self.advance_image_cursor(&placement);
         }
         Ok(id)
     }

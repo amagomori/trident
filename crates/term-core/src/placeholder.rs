@@ -221,7 +221,8 @@ impl Terminal {
                 width: x1.ceil() as u32 - x0 as u32,
                 height: y1.ceil() as u32 - y0 as u32,
             },
-            cell_pixels: (cw / scale, ch / scale),
+            display_pixels: ((right - dx).ceil() as u32, (bottom - dy).ceil() as u32),
+            cell_pixels: (cw, ch),
             fixed_cols: false,
             fixed_rows: false,
         };

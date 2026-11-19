@@ -76,12 +76,12 @@ pub(crate) fn layout(
         let w = if p.fixed_cols {
             p.cols as f32 * cw - x_off
         } else {
-            p.source.width as f32 * scale.0
+            p.display_pixels.0 as f32 * scale.0
         };
         let h = if p.fixed_rows {
             p.rows as f32 * ch - y_off
         } else {
-            p.source.height as f32 * scale.1
+            p.display_pixels.1 as f32 * scale.1
         };
         let clipped_h = p
             .clipped_rows
