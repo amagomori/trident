@@ -24,7 +24,7 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
 flate2 = "1"
-image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
+image = { version = "0.25", default-features = false }
 libc = "0.2"
 memchr = "2"
 memmap2 = "0.9"

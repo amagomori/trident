@@ -87,7 +87,7 @@ pub fn line_text(term: &Terminal, row: isize) -> (isize, Vec<(char, usize, usize
     for (i, r) in (first..=end).enumerate() {
         row_text(
             term,
-            term.viewport_row_signed(r),
+            &term.viewport_row_signed(r),
             i * term.cols(),
             &mut chars,
         );
@@ -106,10 +106,9 @@ fn breaks(c: char) -> bool {
         || ('\u{2500}'..='\u{259f}').contains(&c)
 }
 
-/// Strings around column `col` of a row that may be paths, most literal first: the word
-/// under the pointer as printed, then without trailing punctuation or a `:line:col`
-/// location, then without git's `a/` and `b/` prefixes. A quoted stretch holding spaces,
-/// as `ls` prints names with spaces, comes first.
+/// Possible paths at cell `col`, in lookup order: a quoted name, then unquoted names
+/// spanning single spaces, then the word at the pointer with its location or git prefix
+/// optionally removed. Runs of spaces between columns are not part of unquoted names.
 pub fn candidates_at(chars: &[(char, usize, usize)], col: usize) -> Vec<Candidate> {
     let mut out = Vec::new();
     let Some(i) = chars
@@ -118,18 +117,33 @@ pub fn candidates_at(chars: &[(char, usize, usize)], col: usize) -> Vec<Candidat
     else {
         return out;
     };
-    if breaks(chars[i].0) {
-        return out;
-    }
-    for q in ['\'', '"'] {
+    for q in ['"', '\''] {
         let open = chars[..i].iter().rposition(|c| c.0 == q);
         let close = chars[i..].iter().position(|c| c.0 == q).map(|p| p + i);
         if let (Some(a), Some(b)) = (open, close)
+            && i < b
             && b - a - 1 <= MAX_PATH
-            && chars[a + 1..b].iter().any(|c| c.0 == ' ')
         {
-            push_variants(&mut out, chars, a + 1, b);
+            if q == '"'
+                && let Some(line) = traceback_line(chars, a, b)
+            {
+                push_candidate(&mut out, chars, a + 1, b, Some(line));
+                return out;
+            }
+            if chars[a + 1..b].iter().any(|c| c.0 == ' ') {
+                push_variants(&mut out, chars, a + 1, b);
+            }
         }
+    }
+    let joins_words = |k: usize| {
+        chars[k].0 == ' '
+            && k > 0
+            && !breaks(chars[k - 1].0)
+            && chars.get(k + 1).is_some_and(|c| !breaks(c.0))
+    };
+    let space = chars[i].0 == ' ';
+    if breaks(chars[i].0) && !joins_words(i) {
+        return out;
     }
     let mut a = i;
     while a > 0 && !breaks(chars[a - 1].0) {
@@ -139,42 +153,111 @@ pub fn candidates_at(chars: &[(char, usize, usize)], col: usize) -> Vec<Candidat
     while b < chars.len() && !breaks(chars[b].0) {
         b += 1;
     }
-    if b - a <= MAX_PATH {
+    // Try the whole stretch first. Trim at most three words of surrounding prose on
+    // either side, bounding allocations and filesystem probes even on a line of prose.
+    let (mut left, mut right) = (a, b);
+    while left > 0 && (!breaks(chars[left - 1].0) || joins_words(left - 1)) {
+        left -= 1;
+    }
+    while right < chars.len() && (!breaks(chars[right].0) || joins_words(right)) {
+        right += 1;
+    }
+    if space || left != a || right != b {
+        let starts = std::iter::once(left).chain(
+            (left..a)
+                .filter(|&k| chars[k].0 == ' ')
+                .map(|k| k + 1)
+                .take(3),
+        );
+        let ends =
+            std::iter::once(right).chain((b..right).rev().filter(|&k| chars[k].0 == ' ').take(3));
+        for from in starts {
+            for to in ends.clone() {
+                if to - from <= MAX_PATH && (space || (from, to) != (a, b)) {
+                    push_path(&mut out, chars, from, to);
+                }
+            }
+        }
+    }
+    if !space && b - a <= MAX_PATH {
         push_variants(&mut out, chars, a, b);
     }
     out
 }
 
-fn push_variants(out: &mut Vec<Candidate>, chars: &[(char, usize, usize)], a: usize, b: usize) {
-    let mut push = |from: usize, to: usize, line: Option<usize>| {
-        if to <= from {
-            return;
-        }
-        let text: String = chars[from..to].iter().map(|c| c.0).collect();
-        let named = text.chars().any(char::is_alphanumeric) || text.starts_with(['/', '~']);
-        if !named || text.contains("://") {
-            return;
-        }
-        let candidate = Candidate {
-            text,
-            start: chars[from].1,
-            end: chars[to - 1].1 + chars[to - 1].2,
-            line,
-        };
-        if !out.contains(&candidate) {
-            out.push(candidate);
-        }
+/// The one-based line in Python's `File "name", line N[, in function]`.
+fn traceback_line(chars: &[(char, usize, usize)], open: usize, close: usize) -> Option<usize> {
+    let prefix = open.checked_sub("File ".len())?;
+    if (prefix > 0 && !chars[prefix - 1].0.is_whitespace())
+        || !chars[prefix..open].iter().map(|c| c.0).eq("File ".chars())
+    {
+        return None;
+    }
+    let mut tail = chars[close + 1..].iter().map(|c| c.0).peekable();
+    if !", line ".chars().all(|c| tail.next() == Some(c)) {
+        return None;
+    }
+    let mut line = 0usize;
+    while let Some(digit) = tail.next_if(char::is_ascii_digit) {
+        line = line
+            .checked_mul(10)?
+            .checked_add(digit.to_digit(10)? as usize)?;
+    }
+    (line > 0 && tail.peek().is_none_or(|&c| c == ',' || c.is_whitespace())).then_some(line)
+}
+
+fn push_candidate(
+    out: &mut Vec<Candidate>,
+    chars: &[(char, usize, usize)],
+    from: usize,
+    to: usize,
+    line: Option<usize>,
+) {
+    if to <= from {
+        return;
+    }
+    let text: String = chars[from..to].iter().map(|c| c.0).collect();
+    let named = text.chars().any(char::is_alphanumeric) || text.starts_with(['/', '~']);
+    if !named || text.contains("://") {
+        return;
+    }
+    let candidate = Candidate {
+        text,
+        start: chars[from].1,
+        end: chars[to - 1].1 + chars[to - 1].2,
+        line,
     };
-    push(a, b, None);
+    if !out.contains(&candidate) {
+        out.push(candidate);
+    }
+}
+
+/// Tries the literal path before removing punctuation or a trailing compiler location.
+fn push_path(
+    out: &mut Vec<Candidate>,
+    chars: &[(char, usize, usize)],
+    a: usize,
+    b: usize,
+) -> (usize, Option<usize>) {
+    push_candidate(out, chars, a, b, None);
     let mut trimmed = b;
     while trimmed > a && matches!(chars[trimmed - 1].0, '.' | ',' | ':' | ';' | '!' | '?') {
         trimmed -= 1;
     }
     let (path, line) = strip_location(chars, a, trimmed);
-    push(a, path, line);
-    push(a, trimmed, None);
+    if path < trimmed {
+        push_candidate(out, chars, a, path, line);
+    }
+    if trimmed < b {
+        push_candidate(out, chars, a, trimmed, None);
+    }
+    (path, line)
+}
+
+fn push_variants(out: &mut Vec<Candidate>, chars: &[(char, usize, usize)], a: usize, b: usize) {
+    let (path, line) = push_path(out, chars, a, b);
     // `path:line:text`, as grep -n prints.
-    if let Some(colon) = (a + 1..trimmed)
+    if let Some(colon) = (a + 1..b)
         .find(|&k| chars[k].0 == ':' && chars.get(k + 1).is_some_and(|c| c.0.is_ascii_digit()))
     {
         let mut end = colon + 1;
@@ -182,10 +265,10 @@ fn push_variants(out: &mut Vec<Candidate>, chars: &[(char, usize, usize)], a: us
             end += 1;
         }
         let number: String = chars[colon + 1..end].iter().map(|c| c.0).collect();
-        push(a, colon, number.parse().ok());
+        push_candidate(out, chars, a, colon, number.parse().ok());
     }
     if path > a + 2 && matches!(chars[a].0, 'a' | 'b') && chars[a + 1].0 == '/' {
-        push(a + 2, path, line);
+        push_candidate(out, chars, a + 2, path, line);
     }
 }
 
@@ -1160,9 +1243,8 @@ mod tests {
         let renamed = "\trenamed:    old.txt -> new.txt";
         assert_eq!(texts(renamed, at(renamed, "new")), ["new.txt"]);
         let diff = "diff --git a/src/lib.rs b/src/lib.rs";
-        assert_eq!(
-            texts(diff, at(diff, "a/src")),
-            ["a/src/lib.rs", "src/lib.rs"]
+        assert!(
+            texts(diff, at(diff, "a/src")).ends_with(&["a/src/lib.rs".into(), "src/lib.rs".into()])
         );
     }
 
@@ -1177,8 +1259,11 @@ mod tests {
 
         let gcc = "foo.c:10: error: expected ';'";
         let found = candidates_at(&chars(gcc), 1);
-        assert_eq!(found[1].text, "foo.c");
-        assert_eq!(found[1].line, Some(10));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.text == "foo.c" && c.line == Some(10))
+        );
 
         let grep = "src/lib.rs:42:fn main() {";
         let found = candidates_at(&chars(grep), 3);
@@ -1192,10 +1277,18 @@ mod tests {
     #[test]
     fn python_traceback_quotes() {
         let line = r#"  File "/usr/lib/python3/foo.py", line 12, in main"#;
-        assert_eq!(
-            texts(line, at(line, "python3")),
-            ["/usr/lib/python3/foo.py"]
-        );
+        let found = candidates_at(&chars(line), at(line, "python3"));
+        assert_eq!(found[0].text, "/usr/lib/python3/foo.py");
+        assert_eq!(found[0].line, Some(12));
+
+        for line in [
+            r#"NotFile "notes.txt", line 25"#,
+            r#"File "notes.txt", line 25x"#,
+            r#"File "notes.txt", line 0"#,
+            r#"File "notes.txt", line 999999999999999999999999"#,
+        ] {
+            assert_eq!(candidates_at(&chars(line), at(line, "notes"))[0].line, None);
+        }
     }
 
     #[test]
@@ -1204,12 +1297,17 @@ mod tests {
         let found = texts(line, at(line, "notes"));
         assert_eq!(found[0], "my notes.txt");
         assert!(found.contains(&"notes.txt".to_string()));
+
+        let line = "Don't delete 'my notes (copy).txt'";
+        assert_eq!(texts(line, at(line, "notes"))[0], "my notes (copy).txt");
     }
 
     #[test]
     fn trailing_punctuation_and_prose() {
         let line = "See README.md.";
-        assert_eq!(texts(line, at(line, "README")), ["README.md.", "README.md"]);
+        assert!(
+            texts(line, at(line, "README")).ends_with(&["README.md.".into(), "README.md".into()])
+        );
         assert!(texts("  ...  ", 3).is_empty(), "no name");
         assert!(
             texts("see https://example.com/a.png", 10).is_empty(),
@@ -1239,7 +1337,7 @@ mod tests {
         let mut term = term_core::Terminal::new(10, 2);
         term.advance("日a".as_bytes());
         let mut text = Vec::new();
-        row_text(&term, term.viewport_row(0), 0, &mut text);
+        row_text(&term, &term.viewport_row(0), 0, &mut text);
         assert_eq!(text[0], ('日', 0, 2));
         assert_eq!(text[1], ('a', 2, 1));
     }
@@ -1315,6 +1413,71 @@ mod tests {
         let (candidate, _) = resolve_first(&found, Some(&dir), None).unwrap();
         assert_eq!(candidate.text, "src/main.rs");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn spaced_paths_resolve_across_every_cell() {
+        let dir = scratch();
+        std::fs::create_dir(dir.join("my dir")).unwrap();
+        let file = dir.join("my dir/space name.txt");
+        std::fs::write(&file, "full path").unwrap();
+        std::fs::write(dir.join("name.txt"), "partial match").unwrap();
+        for (line, name, number) in [
+            ("my dir/space name.txt", "my dir/space name.txt", None),
+            (
+                "my dir/space name.txt:25:3: error",
+                "my dir/space name.txt",
+                Some(25),
+            ),
+            (
+                "open ./my dir/space name.txt here",
+                "./my dir/space name.txt",
+                None,
+            ),
+            (
+                "prefix  'my dir/space name.txt'  suffix",
+                "my dir/space name.txt",
+                None,
+            ),
+        ] {
+            let start = line.find(name).unwrap();
+            for col in start..start + name.len() {
+                let found = candidates_at(&chars(line), col);
+                let (candidate, path) = resolve_first(&found, Some(&dir), None).unwrap();
+                assert_eq!(path, file, "{line} at {col}");
+                assert_eq!(candidate.line, number);
+                assert_eq!(
+                    (candidate.start, candidate.end),
+                    (start, start + name.len())
+                );
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn traceback_preview_marks_the_referenced_line() {
+        let dir = scratch();
+        let name = "my notes.txt";
+        std::fs::write(
+            dir.join(name),
+            (1..=50).map(|n| format!("row {n}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let mut term = Terminal::new(12, 4);
+        term.advance(format!(r#"  File "{name}", line 25, in main"#).as_bytes());
+        let (_, chars) = line_text(&term, 1);
+        let found = candidates_at(&chars, 11);
+        let (candidate, path) = resolve_first(&found, Some(&dir), None).unwrap();
+        assert_eq!((candidate.start, candidate.end), (8, 8 + name.len()));
+        let Body::Lines { lines, first, mark } =
+            content(&path, candidate.line, (400, 200), 5).unwrap().body
+        else {
+            panic!("expected text preview")
+        };
+        assert_eq!((first, mark), (Some(23), Some(2)));
+        assert_eq!(lines[2], "row 25");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
