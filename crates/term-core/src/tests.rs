@@ -1032,6 +1032,41 @@ fn selection_html_joins_wrapped_lines_and_trims_tail() {
 }
 
 #[test]
+fn widened_history_copies_implicit_columns_in_both_clipboard_formats() {
+    let mut t = term(4, 2, "\x1b[1mabc \x1b[m\r\nnext\r\nlive\r\n");
+    t.resize(8, 2);
+    t.scroll_display(10);
+    assert_eq!(t.primary.scrollback[0].cells.len(), 4);
+
+    let mut plain = String::new();
+    t.push_html_style(&Cell::default(), &mut plain);
+    let span = format!("<span style=\"{plain}\">");
+    t.start_selection(t.viewport_to_point(0, 2), SelectionKind::Block);
+    t.update_selection(t.viewport_to_point(0, 6));
+    assert_eq!(t.selection_text().as_deref(), Some("c    "));
+    assert_eq!(
+        t.selection_html().unwrap(),
+        format!("<pre>\n<span style=\"{plain};font-weight:bold\">c </span>{span}   </span></pre>")
+    );
+
+    t.start_selection(t.viewport_to_point(0, 5), SelectionKind::Block);
+    t.update_selection(t.viewport_to_point(1, 7));
+    assert_eq!(t.selection_text().as_deref(), Some("   \n   "));
+    assert_eq!(
+        t.selection_html().unwrap(),
+        format!("<pre>\n{span}   \n   </span></pre>")
+    );
+
+    t.start_selection(t.viewport_to_point(0, 5), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 7));
+    assert_eq!(t.selection_text().as_deref(), Some("\nnext"));
+    assert_eq!(
+        t.selection_html().unwrap(),
+        format!("<pre>\n\n{span}next</span></pre>")
+    );
+}
+
+#[test]
 fn selection_html_keeps_a_leading_blank_line() {
     let mut t = term(5, 2, "\r\nnext");
     t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
@@ -1186,6 +1221,9 @@ fn reset_clears_everything() {
 
 #[test]
 fn backspace_after_last_column_moves_left() {
+    // BS cancels the do-wrap position and lands one cell left of it; a counted
+    // CUB instead spends a step on the cancel itself (see golden
+    // cub_wrap_pending).
     let t = term(5, 2, "abcde\x08X");
     assert_eq!(screen(&t), ["abcXe", ""]);
 }
@@ -2155,11 +2193,11 @@ fn inserted_lines_drop_commands_pushed_out_of_the_region() {
 }
 
 fn primary_rows(t: &Terminal) -> Vec<(String, Vec<Cell>, bool)> {
-    t.primary
-        .scrollback
-        .iter()
-        .chain(&t.primary.lines)
-        .map(|row| (row.text(), row.cells.clone(), row.wrapped()))
+    (t.first_line()..t.history + t.rows() as u64)
+        .map(|line| {
+            let row = t.padded_line(line);
+            (row.text(), row.cells.clone(), row.wrapped())
+        })
         .collect()
 }
 
@@ -2326,6 +2364,67 @@ fn reflow_keeps_the_row_of_a_cursor_in_shell_input() {
     let mut t = term(8, 4, &input.replace("\x1b]133;B\x07", ""));
     t.resize(16, 4);
     assert_eq!(t.cursor_position(), Some((0, 15)));
+}
+
+#[test]
+fn widening_keeps_history_allocations_and_projects_blank_columns() {
+    let mut t = Terminal::new(8, 2);
+    t.advance(b"\x1b[41mheader  \x1b[m\r\n");
+    for _ in 0..64 {
+        t.advance(b"short\r\n");
+    }
+    let allocations = |t: &Terminal| {
+        t.primary
+            .scrollback
+            .iter()
+            .map(|r| (r.cells.as_ptr(), r.cells.capacity()))
+            .collect::<Vec<_>>()
+    };
+    let before = allocations(&t);
+    t.scroll_display(200);
+    let mut points = [Point { line: 1, col: 4 }];
+    t.resize_tracking(16, 2, &mut points);
+    assert_eq!(points[0], Point { line: 1, col: 4 });
+    assert_eq!(t.viewport_row(0).cells[7].bg, Color::Indexed(1));
+    assert_eq!(t.viewport_row(0).cells[15], Cell::default());
+    assert!(t.link_at(t.viewport_to_point(0, 15)).is_none());
+    t.start_selection(t.viewport_to_point(0, 12), SelectionKind::Block);
+    t.update_selection(t.viewport_to_point(1, 15));
+    assert_eq!(t.selection_text().as_deref(), Some("    \n    "));
+    assert!(t.is_selected(t.selection_range(), t.viewport_to_point(1, 15)));
+    t.resize(8, 2);
+    t.resize(24, 2);
+    assert_eq!(allocations(&t), before);
+
+    // A height-only resize pulls a short row into the writable grid.
+    t.scroll_to_bottom();
+    t.resize(24, 3);
+    assert_eq!(t.primary.lines[0].cells.len(), 24);
+    t.advance(b"\x1b[1;24HX");
+    assert_eq!(t.viewport_row(0).cells[23].c, 'X');
+    assert_eq!(t.primary.scrollback[0].cells.len(), 8);
+}
+
+#[test]
+fn widening_leaves_hard_rows_short_after_a_rewrapped_line() {
+    let mut t = term(5, 2, "short\r\nabcdefghij\r\nx\r\ny\r\nz\r\n");
+    t.resize(9, 2);
+    let rows: Vec<_> = t
+        .primary
+        .scrollback
+        .iter()
+        .map(|r| (r.text(), r.cells.len()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("short".into(), 5),
+            ("abcdefghi".into(), 9),
+            ("j".into(), 1),
+            ("x".into(), 5),
+            ("y".into(), 5)
+        ]
+    );
 }
 
 #[test]

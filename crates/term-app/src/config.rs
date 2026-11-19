@@ -5,6 +5,9 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+mod reference;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// A font file or family name, as are the style overrides below.
@@ -271,6 +274,7 @@ impl TabBarMode {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "lowercase")]
 pub enum OptionAsAlt {
     #[default]
@@ -311,6 +315,7 @@ pub enum Action {
     NewWindow,
     NewTab,
     CloseTab,
+    ReopenTab,
     NextTab,
     PreviousTab,
     /// Selects the tab at this zero-based index.
@@ -345,6 +350,7 @@ impl Action {
                 "new_window" => Self::NewWindow,
                 "new_tab" => Self::NewTab,
                 "close_tab" => Self::CloseTab,
+                "reopen_tab" => Self::ReopenTab,
                 "next_tab" => Self::NextTab,
                 "previous_tab" => Self::PreviousTab,
                 "scroll_line_up" => Self::LineUp,
@@ -553,6 +559,12 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
     } else {
         (next, previous)
     };
+    let reopen = if macos {
+        "super+shift+t"
+    } else {
+        "ctrl+shift+alt+t"
+    };
+    bindings.insert(Chord::parse(reopen).unwrap(), Action::ReopenTab);
     for (chord, action) in [
         ("ctrl+tab", Action::NextTab),
         ("ctrl+shift+tab", Action::PreviousTab),
@@ -1718,6 +1730,20 @@ bright_white = "#fefdfc"
                     assert_eq!(configured.bindings[&chord], expected);
                 }
             }
+            let reopen = if macos {
+                "super+shift+t"
+            } else {
+                "ctrl+shift+alt+t"
+            };
+            assert_eq!(
+                defaults.get(&Chord::parse(reopen).unwrap()),
+                Some(&Action::ReopenTab)
+            );
+            let configured = parse_text("[keybindings]\n'ctrl+x' = 'reopen_tab'").unwrap();
+            assert_eq!(
+                configured.bindings[&Chord::parse("ctrl+x").unwrap()],
+                Action::ReopenTab
+            );
             for (key, action) in [
                 ("up", Action::JumpToPromptUp),
                 ("down", Action::JumpToPromptDown),

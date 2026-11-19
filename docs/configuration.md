@@ -13,72 +13,17 @@ Trident reads `$XDG_CONFIG_HOME/trident/config.toml`, or `~/.config/trident/conf
   a reload.
 - If only an old `terminal/config.toml` exists, Trident reads that.
 
-This example shows every setting with its default or an example value:
+For example, to use a larger font, follow the system appearance and customize the cursor:
 
 ```toml
-# All entries are optional; omitted colors use Tokyo Night.
-# font = "Fira Code"       # family name or font file; default: bundled JetBrains Mono
-# font_bold = "/path/to/mono-bold.ttf" # optional per-style faces: family names or files
-# font_italic = "Fira Code"
-# font_bold_italic = "Fira Code"
-font_size = 14.0            # 4..=200 points
-padding = 6.0               # 0..=1000 logical pixels
-# window_columns = 100      # first window's width in cells; default: last closed window's, or 100
-# window_rows = 30          # first window's height in cells; default: last closed window's, or 30
-remember_window_size = true # false: always open at window_columns x window_rows
-scrollback = 10000          # retained lines; 0 disables history; see the [scrollback] table below
-drop_preview = true         # false: file drops insert only the shell-quoted path
-hover_preview = false       # true: hold Ctrl, or Cmd on macOS, over a file path to preview it
-paste_protection = true     # false: never confirm multi-line or control-character pastes
-trim_paste = true           # false: keep trailing whitespace and newlines on single-line pastes
-clipboard_read = false      # true: let programs read the clipboard with OSC 52
-confirm_close = true        # false: close the window at once even while a program runs
-visual_bell = false         # true: briefly flash the grid on BEL; background tabs always get a bell mark
-compare_runs = true         # false: don't mark output that changed since the last run; see the [compare_runs] table below
-tab_bar = "always"          # Linux: "auto": only with two or more tabs; "never": hide it; tab shortcuts still work; macOS uses native tabs
-desktop_notifications = true # false: ignore OSC 9/777/99 notification requests
-vsync = true                # false: present without waiting for vblank; lower latency, may tear
-app_icon = "tide"           # tide, lagoon, dusk, reef, kelp, midnight, golden or sunset; see App icons in usage.md
-menu_bar_icon = true        # macOS: false hides the menu bar item
-auto_secure_input = true    # macOS: false never turns on Secure Keyboard Entry at password prompts
-option_as_alt = "none"      # macOS: "left", "right" or "both" selects the Option keys that send Meta
-hide_mouse_when_typing = true # false: keep the mouse pointer shown while you type
-shell = ["/bin/zsh", "-l"]   # also accepts shell = "/bin/zsh"; default: login shell
-pager = ["less", "-R", "+G"] # opens the last command's output; file path appended; also accepts a string
-term = "xterm-256color"     # "xterm-trident" once installed; falls back if not found
-editor = ["code", "--goto", "{file}:{line}:{column}"] # path:line links; default: $VISUAL/$EDITOR; see usage.md
+font_size = 16.0
+theme = "auto"
 
-[env]                      # applied after TERM/COLORTERM; overrides inherited values
-EDITOR = "vim"
-
-[colors]                   # exactly "#rrggbb"
-foreground = "#c0caf5"
-background = "#1a1b26"
-cursor = "#c0caf5"
-selection = "#33467c"
-black = "#15161e"
-red = "#f7768e"
-green = "#9ece6a"
-yellow = "#e0af68"
-blue = "#7aa2f7"
-magenta = "#bb9af7"
-cyan = "#7dcfff"
-white = "#a9b1d6"
-bright_black = "#414868"
-bright_red = "#ff899d"
-bright_green = "#9fe044"
-bright_yellow = "#faba4a"
-bright_blue = "#8db0ff"
-bright_magenta = "#c7a9ff"
-bright_cyan = "#a4daff"
-bright_white = "#c0caf5"
-
-[keybindings]              # layered over the platform defaults in usage.md
-"ctrl+shift+c" = "copy"
-"super+k" = "clear_scrollback"
-"ctrl+shift+t" = { send = "\u001b[1;5T" }
-"ctrl+shift+v" = "none"     # remove a default shortcut; pass key to the shell
+[colors]
+cursor = "#ff9900"
 ```
+
+See the [configuration reference](config-reference.md) for every setting, its type and its default.
 
 `hide_mouse_when_typing` hides the mouse pointer over the window when a key press sends input to
 the shell or the running program, including committed IME text and `{ send = "..." }` bindings.
@@ -88,10 +33,11 @@ shortcuts such as copy, tab switching and font size don't hide it.
 `window_columns` and `window_rows` accept 1 to 10,000 cells. Trident limits the window to at least
 20 by 5 cells and to what fits on the screen. Setting either value opens at that size every time,
 with 100 columns or 30 rows for the other. Otherwise, `remember_window_size = true` restores the
-last closed window's size and maximized state.
+last saved window size and maximized state.
 
-On Linux, Trident saves these to
-`$XDG_STATE_HOME/trident/window.toml`, defaulting to `~/.local/state/trident/window.toml`.
+On Linux, Trident saves this state when the process exits. Closing one window while another in
+the same process stays open does not update `$XDG_STATE_HOME/trident/window.toml`
+(default: `~/.local/state/trident/window.toml`).
 On macOS, it uses `~/Library/Application Support/Trident/window.toml`.
 A missing or unreadable file means 100 by 30. Windows opened with Ctrl+Shift+N (Cmd+N on macOS)
 take the size of the window they were opened from.
@@ -137,7 +83,7 @@ A chord maps to one of the following actions.
 
 | Kind | Actions |
 | --- | --- |
-| Windows and tabs | `new_window`, `new_tab`, `close_tab`, `next_tab`, `previous_tab`, `select_tab_1` through `select_tab_9`, `toggle_fullscreen` |
+| Windows and tabs | `new_window`, `new_tab`, `close_tab`, `reopen_tab`, `next_tab`, `previous_tab`, `select_tab_1` through `select_tab_9`, `toggle_fullscreen` |
 | Clipboard and search | `copy`, `paste`, `paste_primary` (primary selection, where supported), `search` |
 | Font size | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
 | Scrolling | `scroll_line_up`, `scroll_line_down`, `scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`, `clear_scrollback` |
@@ -252,7 +198,7 @@ saves through a symlink and a file created after launch.
 
 - Fonts, padding, colors, scrollback, key bindings and the other settings apply at once. Your
   font-size adjustments survive an unrelated edit.
-- `shell` and `[env]` changes apply to the next launch, and Trident prints a note on stderr.
+- `shell`, `term` and `[env]` changes apply to the next launch, and Trident prints a note on stderr.
 
 ## Config errors
 

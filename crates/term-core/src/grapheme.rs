@@ -5,7 +5,7 @@
 //! `Cell::c`, flagged `Flags::GRAPHEME`. Combining marks keep the base
 //! character's
 //! width. Recognized emoji sequences can widen that cell to two columns; line
-//! editing instead preserves per-codepoint widths to match the shell's cursor.
+//! editing preserves per-codepoint widths unless the editor requests mode 2027.
 
 use std::collections::HashMap;
 
@@ -621,6 +621,33 @@ mod tests {
             Some("\u{1f469}\u{200d}\u{1f4bb}")
         );
         assert_eq!(t.base_char(&row.cells[2]), '|');
+    }
+
+    #[test]
+    fn grapheme_mode_overrides_editor_widths_until_reset() {
+        let mut t = Terminal::new(20, 2);
+        t.set_line_editing(Some(0));
+        let emoji = "👩🏽\u{200d}💻";
+        for (mode, reply, col) in [
+            ("", 2, 6),
+            ("\x1b[?2027h", 1, 2),
+            ("\x1b[?2027s\x1b[?2027l", 2, 6),
+            ("\x1b[?2027r", 1, 2),
+        ] {
+            t.advance(format!("\r\x1b[2K{mode}\x1b[?2027$p{emoji}\x1b[6n").as_bytes());
+            assert_eq!(
+                t.take_responses(),
+                format!("\x1b[?2027;{reply}$y\x1b[1;{}R", col + 1).as_bytes()
+            );
+            if reply == 1 {
+                let cells = &t.viewport_row(0).cells;
+                assert_eq!(t.grapheme(&cells[0]), Some(emoji));
+                assert!(cells[0].flags.contains(Flags::WIDE));
+                assert!(cells[1].flags.contains(Flags::WIDE_SPACER));
+            }
+        }
+        t.advance(b"\x1bc\x1b[?2027$p");
+        assert_eq!(t.take_responses(), b"\x1b[?2027;2$y");
     }
 
     #[test]

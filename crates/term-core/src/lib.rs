@@ -24,6 +24,7 @@ mod budget;
 mod cell;
 mod ghost;
 pub mod grapheme;
+mod iterm;
 mod kitty;
 mod links;
 pub use links::{FileLink, Link};
@@ -31,6 +32,29 @@ mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
 pub use osc::{ClipboardRequest, WorkingDirectory};
+
+/// Window geometry the app feeds in for the XTWINOPS reports (ops 11/13/15/19).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowGeometry {
+    /// Outer position in pixels; negative values wrap to the unsigned range.
+    pub position: (i32, i32),
+    /// Outer window size in pixels.
+    pub size: (u32, u32),
+    /// Monitor size in pixels, for the "screen size" reports.
+    pub screen: (u32, u32),
+    /// The window is iconified (minimized).
+    pub iconic: bool,
+}
+
+/// A text-area resize a program asked for with `CSI Ps ; Ps ; Ps t` (XTWINOPS
+/// op 8), DECSLPP (`Ps >= 24`) or DECCOLM. The grid change is applied already;
+/// the app mirrors it on the real window by resizing that window to match.
+/// Drained with [`Terminal::take_window_ops`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowOp {
+    /// Resize the window so its text area is `cols`×`rows` cells.
+    Resize { cols: usize, rows: usize },
+}
 mod perform;
 mod prompt_input;
 pub use prompt_input::{PromptInput, PromptInputContext};
@@ -41,6 +65,7 @@ pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
 
 pub use rerun::{DEFAULT_IGNORE, Ignore, ROW_CHANGED, ROW_REMOVED_ABOVE};
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -278,12 +303,45 @@ pub struct Modes {
     pub sgr_mouse: bool,
     /// Window focus changes should be reported.
     pub focus_events: bool,
+    /// Mode 3 (DECCOLM): the grid is 132 columns wide. Honored only when
+    /// [`Modes::allow_80_132`] is set.
+    pub columns_132: bool,
+    /// Mode 40: programs may switch the 80/132-column mode with DECCOLM.
+    pub allow_80_132: bool,
+    /// Mode 95 (DECNCSM): column-mode switches do not erase the screen.
+    pub no_clear_on_columns: bool,
     /// Wheel events on the alternate screen become cursor keys.
     pub alt_scroll: bool,
     /// Redraws should wait until synchronized output ends or times out.
     pub synchronized_output: bool,
+    /// Mode 2027: use emoji cluster widths even in line editors.
+    pub grapheme_clusters: bool,
     /// Mode 2031: report color-scheme changes with `CSI ? 997 ; 1|2 n`.
     pub color_scheme_updates: bool,
+    /// ANSI mode 2 (KAM): typed input is not sent to the application.
+    pub keyboard_locked: bool,
+    /// Mode 4 (DECSCLM): smooth scrolling, stored for DECRQM.
+    pub smooth_scroll: bool,
+    /// Mode 5 (DECSCNM): reverse video, stored for DECRQM.
+    pub reverse_video: bool,
+    /// Mode 18 (DECPFF): a form feed ends a screen print.
+    pub print_form_feed: bool,
+    /// Mode 19 (DECPEX): printing covers the full screen, not the scroll region.
+    pub print_full_page: bool,
+    /// Mode 41: a tab in the do-wrap position wraps first (xterm's `more(1)` fix).
+    pub more_fix: bool,
+    /// Mode 42 (DECNRCM): national replacement charsets, stored for DECRQM.
+    pub national_charsets: bool,
+    /// Mode 45 (XTREVWRAP): BS/CUB wrap onto soft-wrapped lines (xterm ≥383).
+    pub reverse_wrap: bool,
+    /// Mode 66 (DECNKM): the keypad sends numeric-keypad sequences.
+    pub numeric_keypad: bool,
+    /// Mode 67 (DECBKM): the backarrow key sends BS rather than DEL.
+    pub backarrow_sends_bs: bool,
+    /// Mode 1045 (XTREVWRAP2): BS/CUB wrap anywhere inside the scroll region.
+    pub reverse_wrap_ext: bool,
+    /// Mode 12 (SRM): send-only, input is not echoed locally.
+    pub send_echo: bool,
 }
 
 /// A cell position in terminal history.
@@ -428,7 +486,18 @@ pub struct Terminal {
     /// Positions [`Self::resize_tracking`] moves along with the lines while it runs.
     tracked: Vec<Point>,
     title: Option<String>,
+    /// Icon label set by `OSC 1` (and `OSC 0`, which also sets `title`).
+    icon_title: Option<String>,
     title_changed: bool,
+    /// `CSI 22/23 t` title stack; entries hold the titles that push saved.
+    title_stack: Vec<TitlePair>,
+    /// XTSMTITLE (`CSI > Pm t`): titles are set / reported as hex pairs.
+    title_set_hex: bool,
+    title_query_hex: bool,
+    /// Window state the app feeds for the XTWINOPS reports.
+    window: WindowGeometry,
+    /// Window requests for the app, from supported mutating window ops.
+    window_ops: Vec<WindowOp>,
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
     synchronized_output_started: bool,
@@ -451,8 +520,15 @@ pub struct Terminal {
     reports: Box<Reports>,
 }
 
-/// Rarely used state for conformance reports, boxed to keep `Terminal`'s hot fields in place.
+/// One entry of the `CSI 22/23 t` title stack; `None` fields are titles the
+/// push did not save, so the pop leaves them alone.
 #[derive(Default)]
+struct TitlePair {
+    icon: Option<String>,
+    title: Option<String>,
+}
+
+/// Rarely used state for conformance reports, boxed to keep `Terminal`'s hot fields in place.
 struct Reports {
     /// Whether DECRQCRA rectangle checksums are answered (off by default: they let any
     /// program that writes to the terminal read the screen back).
@@ -461,6 +537,35 @@ struct Reports {
     saved_modes: Vec<(u16, bool)>,
     /// The body of a DECRQSS request (`DCS $ q Pt ST`) while it is being received.
     status_request: Option<Vec<u8>>,
+    /// DECSCL conformance level, 61-64. Levels below 63 silence DECRQM and DECRQSS.
+    conformance_level: u8,
+    /// DECSCL's control-representation parameter, echoed back by DECRQSS.
+    conformance_pc: u16,
+    /// DECRQSS-reportable settings, stored and echoed but not enacted: character
+    /// protection (`"q`), attribute-change extent (`*x`), status display (`$}`),
+    /// status-line type (`$~`) and lines per screen (`*|`).
+    decsca: u16,
+    decsace: u16,
+    decsasd: u16,
+    decssdt: u16,
+    decsnls: u16,
+}
+
+impl Default for Reports {
+    fn default() -> Reports {
+        Reports {
+            checksums: false,
+            saved_modes: Vec::new(),
+            status_request: None,
+            conformance_level: 64,
+            conformance_pc: 0,
+            decsca: 0,
+            decsace: 0,
+            decsasd: 0,
+            decssdt: 0,
+            decsnls: 0,
+        }
+    }
 }
 
 impl Terminal {
@@ -489,12 +594,11 @@ impl Terminal {
     /// of joining into emoji sequences: in the shell's prompt or input (OSC 133), or in a line
     /// editor's output elsewhere (a REPL a command runs, or a shell without those marks). A
     /// sequence the editor moves over or erases one codepoint at a time would otherwise leave
-    /// the screen out of step with its line.
+    /// the screen out of step with its line. Mode 2027 explicitly requests cluster
+    /// widths instead.
     pub(crate) fn per_codepoint_widths(&self) -> bool {
-        match self.shell.zone {
-            Zone::Prompt | Zone::Input => true,
-            Zone::Output | Zone::None => self.shell.line_editor,
-        }
+        !self.modes.grapheme_clusters
+            && (self.shell.line_editor || matches!(self.shell.zone, Zone::Prompt | Zone::Input))
     }
 
     /// Returns whether OSC 133 shell integration marks have been received.
@@ -569,7 +673,7 @@ impl Terminal {
         }
         let mut col = point.col.min(self.cols - 1);
         if col > 0
-            && self.line(point.line).cells[col]
+            && self.padded_line(point.line).cells[col]
                 .flags
                 .contains(Flags::WIDE_SPACER)
         {
@@ -588,7 +692,7 @@ impl Terminal {
         let mut cursor = None;
         let cursor_col = self.cursor.col + usize::from(self.cursor.pending_wrap);
         for line in start_line..=end_line {
-            let cells = &self.line(line).cells;
+            let cells = &self.padded_line(line).cells;
             let from = if line == start_line { start_col } else { 0 };
             for c in from..=cells.len() {
                 if line == point.line && c == col.max(from) {
@@ -1191,6 +1295,7 @@ impl Terminal {
                 show_cursor: true,
                 autowrap: true,
                 alt_scroll: true,
+                send_echo: true,
                 ..Modes::default()
             },
             cursor_shape: CursorShape::Block,
@@ -1204,7 +1309,17 @@ impl Terminal {
             selection: None,
             tracked: Vec::new(),
             title: None,
+            icon_title: None,
             title_changed: false,
+            title_stack: Vec::new(),
+            title_set_hex: false,
+            title_query_hex: false,
+            window: WindowGeometry {
+                size: (cols as u32 * 8, rows as u32 * 16),
+                screen: (1920, 1080),
+                ..WindowGeometry::default()
+            },
+            window_ops: Vec::new(),
             responses: Vec::new(),
             synchronized_output_started: false,
             synchronized_output_ended: false,
@@ -1413,6 +1528,17 @@ impl Terminal {
     /// Returns the latest changed title, or `None` if unchanged since last call.
     ///
     /// An empty string represents a cleared title.
+    /// Feeds the app's real window geometry for the XTWINOPS reports.
+    pub fn set_window_geometry(&mut self, geometry: WindowGeometry) {
+        self.window = geometry;
+    }
+
+    /// Window requests queued by supported window ops; the app applies them
+    /// to the real window (the grid resize is already applied).
+    pub fn take_window_ops(&mut self) -> Vec<WindowOp> {
+        std::mem::take(&mut self.window_ops)
+    }
+
     pub fn take_title(&mut self) -> Option<String> {
         if std::mem::take(&mut self.title_changed) {
             Some(self.title.clone().unwrap_or_default())
@@ -1437,7 +1563,7 @@ impl Terminal {
         self.screen().kitty_flags
     }
 
-    /// Clears mouse, focus and bracketed-paste modes on the primary screen.
+    /// Clears mouse, focus, bracketed-paste and keyboard-lock modes on the primary screen.
     ///
     /// Returns whether a mode changed. Does nothing on the alternate screen.
     pub fn reset_input_modes(&mut self) -> bool {
@@ -1447,11 +1573,13 @@ impl Terminal {
         let changed = self.modes.mouse != MouseMode::Off
             || self.modes.sgr_mouse
             || self.modes.focus_events
-            || self.modes.bracketed_paste;
+            || self.modes.bracketed_paste
+            || self.modes.keyboard_locked;
         self.modes.mouse = MouseMode::Off;
         self.modes.sgr_mouse = false;
         self.modes.focus_events = false;
         self.modes.bracketed_paste = false;
+        self.modes.keyboard_locked = false;
         changed
     }
 
@@ -1489,13 +1617,18 @@ impl Terminal {
         self.display_offset = 0;
     }
 
-    /// Returns the row shown at zero-based viewport row `row`.
+    /// Returns all grid columns at zero-based viewport row `row`. Borrows full-width
+    /// rows and pads shorter history rows in the returned copy.
     ///
     /// # Panics
     ///
     /// May panic if `row` is outside `0..self.rows()`.
-    pub fn viewport_row(&self, row: usize) -> &Row {
-        self.line(self.viewport_to_point(row, 0).line)
+    pub fn viewport_row(&self, row: usize) -> Cow<'_, Row> {
+        if let Some(row) = row.checked_sub(self.display_offset) {
+            Cow::Borrowed(&self.screen().lines[row])
+        } else {
+            self.padded_line(self.viewport_to_point(row, 0).line)
+        }
     }
 
     /// Converts a zero-based viewport cell to an absolute position.
@@ -1518,13 +1651,34 @@ impl Terminal {
         Point { line, col }
     }
 
-    /// Returns a signed viewport row, clamped to retained history and screen.
-    pub fn viewport_row_signed(&self, row: isize) -> &Row {
-        self.line(self.viewport_to_point_signed(row, 0).line)
+    /// Returns a row as in [`Self::viewport_row`], clamping its signed index to retained history and screen.
+    pub fn viewport_row_signed(&self, row: isize) -> Cow<'_, Row> {
+        if (row as usize) < self.rows {
+            self.viewport_row(row as usize)
+        } else {
+            self.padded_line(self.viewport_to_point_signed(row, 0).line)
+        }
     }
 
     fn first_line(&self) -> u64 {
         self.history - self.screen().scrollback.len() as u64
+    }
+
+    /// Projects a stored row to the full grid width without modifying history.
+    fn padded_line(&self, line: u64) -> Cow<'_, Row> {
+        let row = self.line(line);
+        if row.cells.len() == self.cols {
+            Cow::Borrowed(row)
+        } else {
+            Cow::Owned(self.pad_history_row(row))
+        }
+    }
+
+    #[cold]
+    fn pad_history_row(&self, row: &Row) -> Row {
+        let mut row = row.clone();
+        row.pad_to(self.cols);
+        row
     }
 
     fn line(&self, line: u64) -> &Row {
@@ -1613,8 +1767,10 @@ impl Terminal {
             if !alt && reflow {
                 continue;
             }
-            for row in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
-                row.resize(cols);
+            if reflow {
+                for row in &mut screen.lines {
+                    row.resize(cols);
+                }
             }
             // The inactive screen's cursor is the one saved when switching away from it.
             let mut cursor_row = if is_active {
@@ -1645,7 +1801,8 @@ impl Terminal {
                 for _ in self.rows..rows {
                     let at_bottom = cursor_row == screen.lines.len() - 1;
                     if !alt && at_bottom && !screen.scrollback.is_empty() {
-                        let row = screen.scrollback.pop_back().unwrap();
+                        let mut row = screen.scrollback.pop_back().unwrap();
+                        row.pad_to(cols);
                         screen.lines.insert(0, row);
                         self.history -= 1;
                         cursor_row += 1;
@@ -1801,10 +1958,14 @@ impl Terminal {
         };
         from = from.min(self.cols - 1);
         to = to.min(self.cols - 1);
-        let cells = self.cells_of(kind, line);
-        from = from.min(cells.len().saturating_sub(1));
-        to = to.min(cells.len().saturating_sub(1));
-        if from > 0 && cells[from].flags.contains(Flags::WIDE_SPACER) {
+        let (cells, width) = self.selection_row(kind, line);
+        from = from.min(width - 1);
+        to = to.min(width - 1);
+        if from > 0
+            && cells
+                .get(from)
+                .is_some_and(|c| c.flags.contains(Flags::WIDE_SPACER))
+        {
             from -= 1;
         }
         if to + 1 < cells.len() && cells[to].flags.contains(Flags::WIDE) {
@@ -1814,7 +1975,7 @@ impl Terminal {
     }
 
     fn word_boundary(&self, mut point: Point, forward: bool) -> Point {
-        let row = self.line(point.line);
+        let row = self.padded_line(point.line);
         let is_word = |c: char| !c.is_whitespace() && !"\"'`()[]{}<>|,;".contains(c);
         let col = point.col.min(self.cols - 1);
         let is_word = |cell: &Cell| is_word(self.base_char(cell));
@@ -1840,12 +2001,13 @@ impl Terminal {
     /// Returns `None` when no nonempty selection remains in retained history.
     pub fn selection_text(&self) -> Option<String> {
         let (start, end) = self.selection_range()?;
-        let block = self.selection?.kind == SelectionKind::Block;
+        let kind = self.selection?.kind;
+        let block = kind == SelectionKind::Block;
         let mut out = String::new();
+        let blank = Cell::default();
         for line in start.line..=end.line {
             let row = self.line(line);
             let (from, to) = self.selection_columns((start, end), line)?;
-            let cells = self.selection_cells(line);
             let wrapped = self
                 .output_end(line)
                 .map_or(row.wrapped(), |end| end.wrapped);
@@ -1856,12 +2018,12 @@ impl Terminal {
                 Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
             };
             let mut text = String::new();
-            for cell in &cells[from..=to] {
+            for cell in self.selected_cells(kind, line, from, to, &blank) {
                 if !cell.flags.intersects(skip) {
                     self.push_cell_text(cell, &mut text);
                 }
             }
-            if !block && !(wrapped && line != end.line) {
+            if !block && (!wrapped || line == end.line) {
                 text.truncate(text.trim_end().len());
             }
             out.push_str(&text);
@@ -1880,14 +2042,16 @@ impl Terminal {
     /// Returns `None` when no nonempty selection remains in retained history.
     pub fn selection_html(&self) -> Option<String> {
         let (start, end) = self.selection_range()?;
-        let block = self.selection?.kind == SelectionKind::Block;
+        let kind = self.selection?.kind;
+        let block = kind == SelectionKind::Block;
         // HTML strips one newline after `<pre>`; emitting it keeps a leading blank line.
         let mut out = String::from("<pre>\n");
         let mut style = Cell::default();
+        let blank = Cell::default();
         let mut span_open = false;
         for line in start.line..=end.line {
             let (from, to) = self.selection_columns((start, end), line)?;
-            let cells = self.selection_cells(line);
+            let cells = self.selected_cells(kind, line, from, to, &blank);
             let wrapped = self
                 .output_end(line)
                 .map_or(self.line(line).wrapped(), |end| end.wrapped);
@@ -1897,7 +2061,7 @@ impl Terminal {
                 Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
             };
             let mut text = String::new();
-            for cell in &cells[from..=to] {
+            for cell in cells.clone() {
                 if !cell.flags.intersects(skip) {
                     self.push_cell_text(cell, &mut text);
                 }
@@ -1908,7 +2072,7 @@ impl Terminal {
                 text.trim_end().len()
             };
             let mut left = keep;
-            for cell in &cells[from..=to] {
+            for cell in cells {
                 if left == 0 {
                     break;
                 }
@@ -2016,14 +2180,34 @@ impl Terminal {
         })
     }
 
-    fn selection_cells(&self, line: u64) -> &[Cell] {
-        self.output_end(line)
-            .map_or(&self.line(line).cells, |end| &end.cells)
+    /// Stored cells and logical width (output snapshots stop at the recorded boundary).
+    fn selection_row(&self, kind: SelectionKind, line: u64) -> (&[Cell], usize) {
+        self.output_end_of(kind, line).map_or_else(
+            || (&self.line(line).cells[..], self.cols),
+            |end| (&end.cells[..], end.cells.len()),
+        )
     }
 
-    fn cells_of(&self, kind: SelectionKind, line: u64) -> &[Cell] {
-        self.output_end_of(kind, line)
-            .map_or(&self.line(line).cells, |end| &end.cells)
+    /// Selected cells in an inclusive column range. Only rectangular copies include
+    /// default blanks beyond the stored end of a widened history row.
+    fn selected_cells<'a>(
+        &'a self,
+        kind: SelectionKind,
+        line: u64,
+        from: usize,
+        to: usize,
+        blank: &'a Cell,
+    ) -> impl Iterator<Item = &'a Cell> + Clone {
+        let (cells, _) = self.selection_row(kind, line);
+        let end = to + 1;
+        let padding = if kind == SelectionKind::Block {
+            end.saturating_sub(from.max(cells.len()))
+        } else {
+            0
+        };
+        cells[from.min(cells.len())..end.min(cells.len())]
+            .iter()
+            .chain(std::iter::repeat_n(blank, padding))
     }
 
     /// A line or command-output selection's text with SGR sequences for its styles;
@@ -2039,7 +2223,8 @@ impl Terminal {
             let Some((from, to)) = self.columns_of(sel.kind, (start, end), line) else {
                 continue;
             };
-            let cells = &self.cells_of(sel.kind, line)[from..=to];
+            let (cells, _) = self.selection_row(sel.kind, line);
+            let cells = &cells[from.min(cells.len())..(to + 1).min(cells.len())];
             let soft = line != end.line
                 && self
                     .output_end_of(sel.kind, line)
@@ -2757,15 +2942,68 @@ impl Terminal {
         }
     }
 
+    /// One step of BS/CUB. At the do-wrap position a reverse-wraparound mode just
+    /// cancels the wrap — but only while autowrap is on, since the mode needs it
+    /// (xterm's reverse wraparound requires DECAWM); otherwise the step moves
+    /// left, wrapping to the end of the previous line when `reverse_wrap_row`
+    /// allows it.
+    fn cursor_back(&mut self) {
+        if self.cursor.pending_wrap {
+            self.cursor.pending_wrap = false;
+            if !(self.modes.autowrap && (self.modes.reverse_wrap || self.modes.reverse_wrap_ext)) {
+                self.cursor.col = self.cursor.col.saturating_sub(1);
+            }
+            return;
+        }
+        if self.cursor.col > 0 {
+            self.cursor.col -= 1;
+        } else if self.modes.autowrap
+            && let Some(row) = self.reverse_wrap_row()
+        {
+            self.cursor.row = row;
+            self.cursor.col = self.cols - 1;
+        }
+    }
+
+    /// The row reverse wraparound lands on from column zero: mode 1045 wraps
+    /// anywhere inside the scrolling region, top back to bottom; mode 45 only
+    /// when the line above is a soft wrap continuation, as xterm limits it
+    /// since patch 383. Both need autowrap, checked by the caller.
+    fn reverse_wrap_row(&self) -> Option<usize> {
+        let row = self.cursor.row;
+        if self.modes.reverse_wrap_ext {
+            if row == self.scroll_top {
+                return Some(self.scroll_bottom);
+            }
+            return (row > 0).then(|| row - 1);
+        }
+        if self.modes.reverse_wrap {
+            return (row > 0 && self.screen().lines[row - 1].wrapped()).then(|| row - 1);
+        }
+        None
+    }
+
     fn tab(&mut self, n: usize) {
         for _ in 0..n {
+            if self.cursor.pending_wrap {
+                // Mode 41 (the more(1) fix) wraps a pending line before tabbing;
+                // without it the tab is ignored in the do-wrap position.
+                if !(self.modes.more_fix && self.modes.autowrap) {
+                    continue;
+                }
+                self.sync_cursor_row();
+                let row = self.cursor.row;
+                self.lines_mut()[row].set_wrapped(true);
+                self.cursor.col = 0;
+                self.linefeed();
+            }
+            self.cursor.pending_wrap = false;
             let mut col = self.cursor.col + 1;
             while col < self.cols - 1 && !self.tabs[col] {
                 col += 1;
             }
             self.cursor.col = col.min(self.cols - 1);
         }
-        self.cursor.pending_wrap = false;
     }
 
     fn back_tab(&mut self, n: usize) {
@@ -2841,6 +3079,9 @@ impl Terminal {
 
     fn reset(&mut self) {
         let (cols, rows) = (self.cols, self.rows);
+        // RIS returns to 80 columns when DECCOLM widened the grid.
+        let cols = if self.modes.columns_132 { 80 } else { cols };
+        let widened = cols != self.cols;
         let max_scrollback = self.max_scrollback;
         let mut fresh = Terminal::new(cols, rows);
         fresh.shell.progress_changed = self.shell.progress.is_some() || self.shell.progress_changed;
@@ -2855,7 +3096,12 @@ impl Terminal {
         let (enabled, share) = self.command_budget();
         fresh.shell.notifications = self.shell.notifications.reset();
         fresh.shell.runs = self.shell.runs.forget();
+        // Queued window ops are still owed to the window and PTY.
+        fresh.window_ops = std::mem::take(&mut self.window_ops);
         *self = fresh;
+        if widened {
+            self.window_ops.push(WindowOp::Resize { cols, rows });
+        }
         self.set_command_budget(enabled, share);
         self.title_changed = true;
     }

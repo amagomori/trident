@@ -58,6 +58,7 @@ pub fn encode_key(
     mods: ModifiersState,
     app_cursor: bool,
     alt_sends_esc: bool,
+    backarrow_sends_bs: bool,
 ) -> Option<Vec<u8>> {
     let alt = mods.alt_key() && alt_sends_esc;
     let with_alt = |mut bytes: Vec<u8>| {
@@ -74,7 +75,10 @@ pub fn encode_key(
             NamedKey::Tab if mods.shift_key() => Some(b"\x1b[Z".to_vec()),
             NamedKey::Tab => Some(with_alt(b"\t".to_vec())),
             NamedKey::Backspace if mods.control_key() => Some(with_alt(vec![0x08])),
-            NamedKey::Backspace => Some(with_alt(vec![0x7f])),
+            // DECBKM (mode 67) makes the backarrow key send BS rather than DEL.
+            NamedKey::Backspace => {
+                Some(with_alt(vec![if backarrow_sends_bs { 0x08 } else { 0x7f }]))
+            }
             NamedKey::Escape => Some(with_alt(vec![0x1b])),
             NamedKey::Space if mods.control_key() => Some(with_alt(vec![0])),
             NamedKey::Space => Some(with_alt(b" ".to_vec())),
@@ -307,6 +311,7 @@ pub fn encode_kitty_key(
     kind: KeyEventKind,
     flags: u8,
     alt_sends_esc: bool,
+    backarrow_sends_bs: bool,
 ) -> Option<Vec<u8>> {
     let KeyEvent {
         key,
@@ -357,12 +362,28 @@ pub fn encode_kitty_key(
             }
             return match kind {
                 KeyEventKind::Release => None,
-                _ => encode_key(key, base, text, mods, false, alt_sends_esc),
+                _ => encode_key(
+                    key,
+                    base,
+                    text,
+                    mods,
+                    false,
+                    alt_sends_esc,
+                    backarrow_sends_bs,
+                ),
             };
         }
         if let NamedKey::Escape = named {
             return if !disambiguate && !report_all && kind != KeyEventKind::Release {
-                encode_key(key, base, text, mods, false, alt_sends_esc)
+                encode_key(
+                    key,
+                    base,
+                    text,
+                    mods,
+                    false,
+                    alt_sends_esc,
+                    backarrow_sends_bs,
+                )
             } else {
                 Some(kitty_seq(KittyForm::U(27), "", &field(param), None))
             };
@@ -371,11 +392,19 @@ pub fn encode_kitty_key(
             return Some(kitty_seq(form, "", &field(param), None));
         }
         if let NamedKey::Space = named {
-            return encode_text_key(32, event, kind, flags, alt_sends_esc);
+            return encode_text_key(32, event, kind, flags, alt_sends_esc, backarrow_sends_bs);
         }
         return match kind {
             KeyEventKind::Release => None,
-            _ => encode_key(key, base, text, mods, false, alt_sends_esc),
+            _ => encode_key(
+                key,
+                base,
+                text,
+                mods,
+                false,
+                alt_sends_esc,
+                backarrow_sends_bs,
+            ),
         };
     }
 
@@ -387,10 +416,25 @@ pub fn encode_kitty_key(
         },
     };
     match codepoint {
-        Some(c) => encode_text_key(c as u32, event, kind, flags, alt_sends_esc),
+        Some(c) => encode_text_key(
+            c as u32,
+            event,
+            kind,
+            flags,
+            alt_sends_esc,
+            backarrow_sends_bs,
+        ),
         None => match kind {
             KeyEventKind::Release => None,
-            _ => encode_key(key, base, text, mods, false, alt_sends_esc),
+            _ => encode_key(
+                key,
+                base,
+                text,
+                mods,
+                false,
+                alt_sends_esc,
+                backarrow_sends_bs,
+            ),
         },
     }
 }
@@ -403,6 +447,7 @@ fn encode_text_key(
     kind: KeyEventKind,
     flags: u8,
     alt_sends_esc: bool,
+    backarrow_sends_bs: bool,
 ) -> Option<Vec<u8>> {
     let KeyEvent {
         key,
@@ -416,7 +461,15 @@ fn encode_text_key(
     if !report_all && !(disambiguate && combo) {
         return match kind {
             KeyEventKind::Release => None,
-            _ => encode_key(key, base, text, mods, false, alt_sends_esc),
+            _ => encode_key(
+                key,
+                base,
+                text,
+                mods,
+                false,
+                alt_sends_esc,
+                backarrow_sends_bs,
+            ),
         };
     }
     let event_type = if flags & 0b10 != 0 { kind as u8 } else { 1 };
@@ -593,7 +646,7 @@ mod tests {
     }
 
     fn key(k: Key, text: Option<&str>, mods: ModifiersState) -> Option<Vec<u8>> {
-        encode_key(&k, &k, text, mods, false, true)
+        encode_key(&k, &k, text, mods, false, true, false)
     }
 
     fn ch(s: &str) -> Key {
@@ -643,7 +696,7 @@ mod tests {
         assert_eq!(key(ch("é"), Some("é"), none), Some("é".as_bytes().to_vec()));
         let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
         assert_eq!(
-            encode_key(&ch(">"), &ch("."), Some(">"), alt_shift, false, true),
+            encode_key(&ch(">"), &ch("."), Some(">"), alt_shift, false, true, false),
             Some(b"\x1b>".to_vec())
         );
     }
@@ -671,7 +724,8 @@ mod tests {
                 None,
                 none,
                 true,
-                true
+                true,
+                false
             ),
             Some(b"\x1bOA".to_vec())
         );
@@ -787,7 +841,7 @@ mod tests {
             text: None,
             mods,
         };
-        encode_kitty_key(&event, kind, flags, true)
+        encode_kitty_key(&event, kind, flags, true, false)
     }
 
     #[test]
@@ -806,11 +860,11 @@ mod tests {
             };
             let meta = crate::config::OptionAsAlt::Left.sends_esc(left, !left);
             assert_eq!(
-                encode_key(&key, &base, event.text, event.mods, false, meta).as_deref(),
+                encode_key(&key, &base, event.text, event.mods, false, meta, false).as_deref(),
                 Some(legacy)
             );
             assert_eq!(
-                encode_kitty_key(&event, KeyEventKind::Press, 1, meta).as_deref(),
+                encode_kitty_key(&event, KeyEventKind::Press, 1, meta, false).as_deref(),
                 Some(kitty)
             );
         }
@@ -918,7 +972,8 @@ mod tests {
                 },
                 KeyEventKind::Press,
                 flags,
-                true
+                true,
+                false
             ),
             Some(b"\x1b[97;;97u".to_vec())
         );
@@ -932,7 +987,8 @@ mod tests {
                 },
                 KeyEventKind::Press,
                 0b11111,
-                true
+                true,
+                false
             ),
             Some(b"\x1b[97:65;2;65u".to_vec())
         );

@@ -346,14 +346,22 @@ impl Renderer {
         }
     }
 
-    /// Reconfigures the surface for physical-pixel dimensions, ignoring zeros.
+    /// Reconfigures the surface for physical-pixel dimensions, ignoring zeros
+    /// and clamping to the largest surface the device supports.
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
+        let max = self.device.limits().max_texture_dimension_2d;
+        self.config.width = width.min(max);
+        self.config.height = height.min(max);
         self.surface.configure(&self.device, &self.config);
+    }
+
+    /// The surface's current `(width, height)` in physical pixels, capped at
+    /// the device limit.
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
     }
 
     /// Selects synchronized presentation, falling back to a supported mode.
