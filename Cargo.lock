@@ -2801,6 +2801,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "objc2-user-notifications 0.3.2",
  "pdfium-render",
+ "png",
  "portable-pty",
  "resvg",
  "serde",

@@ -5,6 +5,7 @@ use image::ImageFormat;
 /// Returns the encoded image without requiring the pipe to end at its boundary.
 pub(super) fn complete_image(bytes: &[u8], format: ImageFormat) -> Result<&[u8], String> {
     match format {
+        ImageFormat::Png => png(bytes),
         ImageFormat::Jpeg => jpeg(bytes),
         ImageFormat::WebP => webp(bytes),
         _ => Some(bytes),
@@ -15,6 +16,16 @@ pub(super) fn complete_image(bytes: &[u8], format: ImageFormat) -> Result<&[u8],
             super::format_name(format)
         )
     })
+}
+
+fn png(bytes: &[u8]) -> Option<&[u8]> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut decoder = png::Decoder::new(&mut cursor);
+    decoder.set_ignore_text_chunk(true);
+    decoder.set_ignore_iccp_chunk(true);
+    // Pixel decoding can stop after IDAT. Finish through IEND and its CRC.
+    decoder.read_info().ok()?.finish().ok()?;
+    Some(&bytes[..cursor.position() as usize])
 }
 
 fn jpeg(bytes: &[u8]) -> Option<&[u8]> {

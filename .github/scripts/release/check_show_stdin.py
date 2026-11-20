@@ -37,6 +37,8 @@ def parity(name, *options):
 parity("sample.png")
 parity("rotated.jpg", "--width", "3", "--height", "2")
 parity("sample.png", "--fit")
+png = (samples / "sample.png").read_bytes()
+assert show("-", input=png + b"trailing bytes") == show(samples / "sample.png")
 assert b"a=f" in show("-", input=(samples / "animated.webp").read_bytes())
 with tempfile.TemporaryDirectory() as directory:
     Path(directory, "-").write_text("literal dash")
@@ -49,6 +51,10 @@ for data, reason in [(b"", b"empty"), (b"not an image", b"raster image"),
 
 
 def interrupted_streams():
+    # The pixels can be intact even when IEND or its checksum is not.
+    for missing in (1, 2, 3, 4, 12):
+        show("-", input=png[:-missing], status=1, error=b"decode PNG")
+    show("-", input=png[:-1] + bytes([png[-1] ^ 1]), status=1, error=b"decode PNG")
     jpeg = (samples / "sample.jpg").read_bytes()[:675]
     webp = (samples / "animated.webp").read_bytes()[:128]
     show("-", input=jpeg, status=1, error=b"decode JPEG")
