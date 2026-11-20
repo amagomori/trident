@@ -2248,7 +2248,7 @@ impl Terminal {
                 if cell.flags.intersects(skip) {
                     continue;
                 }
-                if !span_open || !cell.same_sgr(&style) {
+                if !span_open || !cell.same_html_style(&style) {
                     if span_open {
                         out.push_str("</span>");
                     }
@@ -2382,8 +2382,8 @@ impl Terminal {
         let Some((start, end)) = self.range_of(sel) else {
             return out;
         };
-        let plain = Cell::default();
-        let mut style = &plain;
+        let plain = Cell::default().sgr(None);
+        let mut style = plain;
         for line in start.line..=end.line {
             let Some((from, to)) = self.columns_of(sel.kind, (start, end), line) else {
                 continue;
@@ -2409,16 +2409,23 @@ impl Terminal {
                 {
                     continue;
                 }
-                if !cell.same_sgr(style) {
-                    cell.push_sgr(&mut out);
-                    style = cell;
+                let color = if cell.flags.contains(Flags::UNDERLINE) {
+                    self.underline_color(cell)
+                } else {
+                    None
+                };
+                let next = cell.sgr(color);
+                if next != style {
+                    out.push_str("\x1b[");
+                    next.push_setting(&mut out);
+                    style = next;
                 }
                 self.push_cell_text(cell, &mut out);
             }
             if !soft {
-                if !style.same_sgr(&plain) {
+                if style != plain {
                     out.push_str("\x1b[0m");
-                    style = &plain;
+                    style = plain;
                 }
                 if line != end.line {
                     out.push('\n');
