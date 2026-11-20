@@ -254,7 +254,6 @@ Trident runs natively on Wayland and on X11 (including XWayland). On Wayland:
   `zwp_primary_selection_v1` protocol, which GNOME, KDE and wlroots compositors
   provide. On a compositor without it, use Ctrl+Shift+C/V and the regular clipboard.
 - The compositor owns window position: Trident can restore its size, not its place.
-- Drops from native Wayland apps aren't supported yet (see above).
 
 ## Hover previews
 
