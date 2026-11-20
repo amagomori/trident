@@ -831,8 +831,9 @@ fn send_chunks(
     tmux: bool,
     wait: &mut impl FnMut(),
 ) -> io::Result<()> {
-    let encoded = BASE64.encode(payload);
-    let chunks = encoded.as_bytes().chunks(CHUNK);
+    // Each full raw chunk ends on a base64 triple, so only the tail is padded.
+    let chunks = payload.chunks(CHUNK / 4 * 3);
+    let mut encoded = [0; CHUNK];
     let count = chunks.len();
     for (i, chunk) in chunks.enumerate() {
         let more = u8::from(i + 1 < count);
@@ -845,7 +846,10 @@ fn send_chunks(
             format!("\x1b_Gm={more};")
         }
         .into_bytes();
-        escape.extend_from_slice(chunk);
+        let len = BASE64
+            .encode_slice(chunk, &mut encoded)
+            .expect("one raw chunk fits the base64 scratch");
+        escape.extend_from_slice(&encoded[..len]);
         escape.extend_from_slice(b"\x1b\\");
         if tmux {
             out.write_all(&tmux_passthrough(&escape))?;

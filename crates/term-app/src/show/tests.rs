@@ -887,6 +887,50 @@ fn tmux_tiles_both_axes_and_pads_partial_cells() {
 }
 
 #[test]
+fn chunked_sends_match_whole_payload_encoding() {
+    let payload: Vec<u8> = (0..=255).cycle().take(9217).collect();
+    for size in [0, 1, 2, 3, 3071, 3072, 3073, 6143, 6144, 6145, 9217] {
+        let encoded = BASE64.encode(&payload[..size]);
+        let chunks = encoded.as_bytes().chunks(4096);
+        let count = chunks.len();
+        for tmux in [false, true] {
+            for gap in [None, Some(75)] {
+                let mut expected = Vec::new();
+                for (i, chunk) in chunks.clone().enumerate() {
+                    let control = match (i, gap) {
+                        (0, None) => "a=T,f=32,o=z,i=7,",
+                        (0, Some(_)) => "a=f,z=75,X=1,f=32,o=z,i=7,",
+                        (_, None) => "",
+                        (_, Some(_)) => "a=f,",
+                    };
+                    let more = u8::from(i + 1 < count);
+                    let chunk = std::str::from_utf8(chunk).unwrap();
+                    let packet = format!("\x1b_G{control}m={more};{chunk}\x1b\\");
+                    if tmux {
+                        expected.extend(tmux_passthrough(packet.as_bytes()));
+                    } else {
+                        expected.extend_from_slice(packet.as_bytes());
+                    }
+                }
+                let mut actual = Vec::new();
+                let mut waits = 0;
+                send_chunks(
+                    &mut actual,
+                    &payload[..size],
+                    "f=32,o=z,i=7",
+                    gap,
+                    tmux,
+                    &mut || waits += 1,
+                )
+                .unwrap();
+                assert_eq!(actual, expected, "size={size} tmux={tmux} gap={gap:?}");
+                assert_eq!(waits, if tmux { count } else { 0 });
+            }
+        }
+    }
+}
+
+#[test]
 fn outside_tmux_escapes_go_straight_to_the_terminal() {
     let mut out = Vec::new();
     write_kitty(&mut out, &noise(300, 300), big_window(), || unreachable!()).unwrap();
