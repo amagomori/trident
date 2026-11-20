@@ -17,11 +17,12 @@ pub fn spawn(
     rx_chan: Channel<Command>,
     worker_replier: Sender<Result<String>>,
     file_drops: crate::FileDrops,
+    targets_tx: Sender<crate::StoreTargets>,
 ) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name(name)
         .spawn(move || {
-            worker_impl(display, rx_chan, worker_replier, file_drops);
+            worker_impl(display, rx_chan, worker_replier, file_drops, targets_tx);
         })
         .ok()
 }
@@ -46,6 +47,7 @@ fn worker_impl(
     rx_chan: Channel<Command>,
     reply_tx: Sender<Result<String>>,
     file_drops: crate::FileDrops,
+    targets_tx: Sender<crate::StoreTargets>,
 ) {
     let (globals, event_queue) = match registry_queue_init(&connection) {
         Ok(data) => data,
@@ -62,6 +64,10 @@ fn worker_impl(
         None => return,
     };
 
+    let _ = targets_tx.send(crate::StoreTargets {
+        clipboard: state.data_device_manager_state.is_some(),
+        primary: state.primary_selection_manager_state.is_some(),
+    });
     loop_handle
         .insert_source(rx_chan, |event, _, state| {
             if let channel::Event::Msg(event) = event {

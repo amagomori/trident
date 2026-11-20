@@ -4022,10 +4022,11 @@ impl App {
 
     fn copy(&mut self, primary: bool) {
         let Some(s) = &self.session else { return };
-        if let Some(text) = s.term.selection_text().filter(|t| !t.is_empty()) {
-            let html = s.term.selection_html();
-            self.clipboard.set(text, html, primary);
-        }
+        self.clipboard.set_selection(
+            primary,
+            || s.term.selection_text(),
+            || s.term.selection_html(),
+        );
     }
 
     fn watch_appearance(&mut self) {

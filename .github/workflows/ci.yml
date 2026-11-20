@@ -35,6 +35,9 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - run: cargo test --doc -p term-core -p term-render
       - run: cargo test --workspace
+      - name: Check native pasteboard selection formats
+        if: runner.os == 'macOS'
+        run: cargo test -p term-app --bin trident macos_primary_leaves_rich_pasteboard_untouched -- --ignored
       - name: Replay tmux image history
         run: |
           if ! command -v tmux >/dev/null; then

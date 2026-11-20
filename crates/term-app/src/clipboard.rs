@@ -1,5 +1,5 @@
-//! System clipboard access. On Linux the primary selection (select to copy, middle-click
-//! to paste) is supported too; elsewhere it falls back to the regular clipboard.
+//! System clipboard access. An unsupported primary write leaves the regular
+//! clipboard untouched.
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
@@ -29,6 +29,26 @@ enum Backend {
     #[cfg(target_os = "linux")]
     Wayland(smithay_clipboard::Clipboard),
     Arboard(arboard::Clipboard),
+}
+
+/// A writable selection always takes plain text and may also take HTML.
+struct SelectionFormats {
+    html: bool,
+}
+
+impl SelectionFormats {
+    fn arboard(primary: bool) -> Option<Self> {
+        (!primary || cfg!(all(unix, not(target_os = "macos")))).then_some(Self { html: true })
+    }
+
+    fn extract(
+        self,
+        text: impl FnOnce() -> Option<String>,
+        html: impl FnOnce() -> Option<String>,
+    ) -> Option<(String, Option<String>)> {
+        let text = text().filter(|text| !text.is_empty())?;
+        Some((text, self.html.then(html).flatten()))
+    }
 }
 
 /// The X11 core protocol guarantees every server accepts requests of at least this size.
@@ -194,6 +214,26 @@ impl Clipboard {
         clipboard.get_text().ok()
     }
 
+    /// Extracts only the selection formats this destination can publish.
+    pub fn set_selection(
+        &mut self,
+        primary: bool,
+        text: impl FnOnce() -> Option<String>,
+        html: impl FnOnce() -> Option<String>,
+    ) {
+        let formats = match &mut self.inner {
+            None => None,
+            Some(Backend::Arboard(_)) => SelectionFormats::arboard(primary),
+            #[cfg(target_os = "linux")]
+            Some(Backend::Wayland(clipboard)) => clipboard
+                .supports_store(primary)
+                .then_some(SelectionFormats { html: false }),
+        };
+        if let Some((text, html)) = formats.and_then(|formats| formats.extract(text, html)) {
+            self.set(text, html, primary);
+        }
+    }
+
     /// Stores `text`, plus `html` as the `text/html` flavor when the backend can
     /// serve more than one format (arboard; the smithay Wayland backend is
     /// text-only, so HTML is dropped there).
@@ -252,6 +292,60 @@ impl Clipboard {
 mod tests {
     use super::*;
     use winit::raw_window_handle::{XcbDisplayHandle, XlibDisplayHandle};
+
+    #[test]
+    fn unavailable_selection_store_never_extracts() {
+        for primary in [false, true] {
+            Clipboard::default().set_selection(primary, || panic!("text"), || panic!("HTML"));
+        }
+    }
+
+    #[test]
+    fn arboard_writes_rich_selections_only_to_supported_targets() {
+        for primary in [false, true] {
+            let formats = SelectionFormats::arboard(primary);
+            if primary && !cfg!(all(unix, not(target_os = "macos"))) {
+                assert!(formats.is_none());
+            } else {
+                let result = formats
+                    .unwrap()
+                    .extract(|| Some("A&B".into()), || Some("A&amp;B".into()));
+                assert_eq!(result, Some(("A&B".into(), Some("A&amp;B".into()))));
+            }
+        }
+    }
+
+    #[test]
+    fn text_only_and_empty_selections_never_extract_html() {
+        let html = || panic!("HTML");
+        let plain = SelectionFormats { html: false }.extract(|| Some("text".into()), html);
+        assert_eq!(plain, Some(("text".into(), None)));
+        for text in [None, Some(String::new())] {
+            assert_eq!(SelectionFormats { html: true }.extract(|| text, html), None);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "replaces the system pasteboard; run on a disposable macOS session"]
+    fn macos_primary_leaves_rich_pasteboard_untouched() {
+        let mut reader = arboard::Clipboard::new().unwrap();
+        let mut clipboard = Clipboard {
+            inner: Some(Backend::Arboard(arboard::Clipboard::new().unwrap())),
+        };
+        clipboard.set_selection(
+            false,
+            || Some("A&B".into()),
+            || Some("<b>A&amp;B</b>".into()),
+        );
+        let html = reader.get().html().unwrap();
+        assert!(html.contains("<b>A&amp;B</b>"));
+        assert_eq!(reader.get_text().unwrap(), "A&B");
+
+        clipboard.set_selection(true, || panic!("text"), || panic!("HTML"));
+        assert_eq!(reader.get().html().unwrap(), html);
+        assert_eq!(reader.get_text().unwrap(), "A&B");
+    }
 
     #[test]
     fn x11_uses_arboard() {
