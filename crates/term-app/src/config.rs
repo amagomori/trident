@@ -16,6 +16,7 @@ pub struct Config {
     pub font_italic: Option<String>,
     pub font_bold_italic: Option<String>,
     pub font_size: f32,
+    pub ligatures: bool,
     pub padding: f32,
     pub scrollback: usize,
     pub command_budget: bool,
@@ -60,6 +61,7 @@ impl Default for Config {
             font_italic: None,
             font_bold_italic: None,
             font_size: 14.0,
+            ligatures: false,
             padding: term_render::PADDING,
             scrollback: 10_000,
             command_budget: true,
@@ -104,6 +106,7 @@ struct Raw {
     font_italic: Option<String>,
     font_bold_italic: Option<String>,
     font_size: Option<f32>,
+    ligatures: Option<bool>,
     padding: Option<f32>,
     scrollback: Option<Scrollback>,
     notify_long_commands_after: Option<u64>,
@@ -669,6 +672,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         visual_bell: raw.visual_bell.unwrap_or(false),
         desktop_notifications: raw.desktop_notifications.unwrap_or(true),
         vsync: raw.vsync.unwrap_or(true),
+        ligatures: raw.ligatures.unwrap_or(false),
         menu_bar_icon: raw.menu_bar_icon.unwrap_or(true),
         auto_secure_input: raw.auto_secure_input.unwrap_or(true),
         hide_mouse_when_typing: raw.hide_mouse_when_typing.unwrap_or(true),
@@ -947,6 +951,14 @@ mod tests {
                 Err(e) => panic!("create {}: {e}", dir.display()),
             }
         }
+    }
+
+    #[test]
+    fn programming_ligatures_are_opt_in() {
+        assert!(!parse_text("").unwrap().ligatures);
+        assert!(parse_text("ligatures = true").unwrap().ligatures);
+        assert!(!parse_text("ligatures = false").unwrap().ligatures);
+        assert!(parse_text("ligatures = 'on'").is_err());
     }
 
     #[test]

@@ -16,6 +16,12 @@ If you started Trident with `--config`, edit that file. Command-line options suc
 `--font-size` take precedence on reload. For changes to `shell`, `term` or `[env]`,
 launch Trident again.
 
+## Why does an arrow appear as two characters?
+
+For operators such as `->`, set `ligatures = true` at the top level of the config and
+move the cursor outside the operator. Try the bundled JetBrains Mono if your font has no
+programming ligatures. See [Fonts](configuration.md#fonts).
+
 ## Why doesn’t a new tab open in my current directory?
 
 The shell must report its directory to Trident. Source the

@@ -7,7 +7,7 @@ use crate::atlas::{Atlas, GlyphKey};
 use crate::damage::{self, Damage};
 use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
-use crate::pipeline;
+use crate::{pipeline, shaping};
 use std::sync::Arc;
 use term_core::colors::Rgb;
 use term_core::{Cell, CursorShape, Flags, Terminal, UnderlineStyle, grapheme};
@@ -78,6 +78,7 @@ pub struct FloatingImage {
 pub struct Renderer {
     /// The blink phase of a focused cursor; false hides it until the next frame.
     pub cursor_visible: bool,
+    ligatures: bool,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -321,6 +322,7 @@ impl Renderer {
             blink_visible: true,
             flash: false,
             cursor_visible: true,
+            ligatures: false,
             row_blinks: Vec::new(),
             rerun: Vec::new(),
             row_lens: Vec::new(),
@@ -399,6 +401,14 @@ impl Renderer {
     /// Glyph rasterizations depend on the font size, so drop them when it changes.
     pub fn clear_glyph_cache(&mut self) {
         self.atlas.clear();
+    }
+
+    /// Enables programming ligatures in grid text and redraws rows on change.
+    pub fn set_ligatures(&mut self, enabled: bool) {
+        if self.ligatures != enabled {
+            self.ligatures = enabled;
+            self.damage.invalidate();
+        }
     }
 
     fn color(&self, rgb: Rgb, alpha: f32) -> [f32; 4] {
@@ -638,7 +648,9 @@ impl Renderer {
                 let tint = mix(term.palette.background, RERUN_COLOR, 0.14);
                 backgrounds.push(self.rect(padding, y, cw * line.cells.len() as f32, ch, tint));
             }
-            for (col, cell) in line.cells.iter().enumerate() {
+            let mut shaped_until = 0;
+            let visible = &line.cells[..line.cells.len().min(term.cols())];
+            for (col, cell) in visible.iter().enumerate() {
                 if cell.flags.contains(Flags::WIDE_SPACER) {
                     continue;
                 }
@@ -658,8 +670,10 @@ impl Renderer {
                     fg = (mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2));
                 }
                 let point = term.viewport_to_point_signed(row, col);
+                let matched =
+                    search.and_then(|s| term_core::search::highlighted(s.matches, point, cell));
                 if let Some(search) = search
-                    && let Some(index) = term_core::search::highlighted(search.matches, point, cell)
+                    && let Some(index) = matched
                 {
                     bg = if search.current == Some(index) {
                         (205, 130, 40)
@@ -668,7 +682,8 @@ impl Renderer {
                     };
                     fg = (255, 255, 255);
                 }
-                if term.is_selected(selection, point) {
+                let selected = term.is_selected(selection, point);
+                if selected {
                     bg = term.palette.selection;
                 }
                 let is_cursor = row >= 0 && cursor == Some((row as usize, col));
@@ -684,11 +699,61 @@ impl Renderer {
                     self.row_blinks[i] = true;
                     !self.blink_visible
                 };
-                if !blinked_off && !cell.flags.contains(Flags::HIDDEN) {
-                    let style = Style::new(
-                        cell.flags.contains(Flags::BOLD),
-                        cell.flags.contains(Flags::ITALIC),
+                let draw =
+                    col >= shaped_until && !blinked_off && !cell.flags.contains(Flags::HIDDEN);
+                let style = Style::new(
+                    cell.flags.contains(Flags::BOLD),
+                    cell.flags.contains(Flags::ITALIC),
+                );
+                if draw && shaping::candidate(cell, self.ligatures) {
+                    let run = shaping::run(
+                        term,
+                        &visible[col..],
+                        fonts,
+                        style,
+                        self.ligatures,
+                        |offset, next| {
+                            if is_cursor
+                                || (row >= 0 && cursor == Some((row as usize, col + offset)))
+                            {
+                                return false;
+                            }
+                            let other = term.viewport_to_point_signed(row, col + offset);
+                            term.is_selected(selection, other) == selected
+                                && search.and_then(|s| {
+                                    term_core::search::highlighted(s.matches, other, next)
+                                }) == matched
+                                && hover.is_none_or(|h| h.contains(point) == h.contains(other))
+                        },
                     );
+                    if let Some(run) = run {
+                        shaped_until = col + run.cols;
+                        let color = self.color(fg, 1.0);
+                        for p in run.glyphs.iter() {
+                            match self.atlas.get_outline(
+                                &run.face,
+                                p,
+                                fonts,
+                                &self.device,
+                                &self.queue,
+                            ) {
+                                Ok(Some(g)) => glyphs.push(Instance {
+                                    pos: [x + p.x + g.left, y + p.y + g.top],
+                                    size: [g.width, g.height],
+                                    uv: [g.x, g.y, g.width, g.height],
+                                    color,
+                                }),
+                                Ok(None) => {}
+                                Err(_) => {
+                                    self.damage.invalidate();
+                                    ok = false;
+                                    break 'rows;
+                                }
+                            }
+                        }
+                    }
+                }
+                if draw && col >= shaped_until {
                     let mut cluster = term.grapheme(cell);
                     let mut base = term.base_char(cell);
                     let mut shaped = None;

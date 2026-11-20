@@ -63,6 +63,7 @@ impl<'a> Source<'a> {
 #[derive(Clone)]
 pub(crate) struct Face {
     pub font: FontArc,
+    pub index: u32,
     pub embolden: bool,
     pub slant: bool,
 }
@@ -76,6 +77,7 @@ impl FontFaces {
     pub fn bundled() -> FontFaces {
         FontFaces(font::BUNDLED.map(|data| Face {
             font: FontArc::try_from_slice(data).expect("bundled font"),
+            index: 0,
             embolden: false,
             slant: false,
         }))
@@ -244,6 +246,7 @@ fn build(candidates: Vec<(Rc<Data>, u32)>) -> Option<FontFaces> {
         };
         faces.push(Face {
             font,
+            index: candidates[p.index].2,
             embolden: p.embolden,
             slant: p.slant,
         });
