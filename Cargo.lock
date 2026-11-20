@@ -2857,6 +2857,7 @@ dependencies = [
  "term-core",
  "ttf-parser",
  "unicode-bidi",
+ "unicode-segmentation",
  "unicode-width",
  "wgpu",
  "x11rb",
