@@ -1,5 +1,5 @@
 use super::*;
-use term_core::images::Image;
+use term_core::images::{Image, PlaceOptions, Rect};
 
 fn image(width: u32, height: u32) -> Image {
     let mut pixels = Vec::new();
@@ -30,6 +30,110 @@ fn kitty(t: &mut Terminal, keys: &str) {
 const CELL: (f32, f32) = (10.0, 20.0);
 
 #[test]
+fn command_budget_preserves_source_bands_on_both_sides_of_gap() {
+    let cell = (10.0, 6.0);
+    for marked in [false, true] {
+        let mut t = Terminal::new(40, 4);
+        t.set_scrollback_limit(32);
+        t.set_command_budget(true, 0.5);
+        t.set_cell_pixel_size(cell.0, cell.1);
+        if marked {
+            t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07img\r\n\x1b]133;C\x07");
+        } else {
+            t.advance(b"$ img\r\n");
+        }
+        t.add_image(1, image(1, 144)).unwrap();
+        t.place_image(1, Default::default()).unwrap();
+        t.advance(&[b'\n'; 24]);
+        t.advance(b"following text");
+
+        assert_eq!(t.image_bytes(), 576);
+        assert_eq!(t.scrollback_len(), if marked { 16 } else { 22 });
+        let text = |t: &Terminal, row| {
+            t.viewport_row(row)
+                .cells
+                .iter()
+                .map(|c| c.c)
+                .collect::<String>()
+        };
+        assert_eq!(text(&t, 3).trim_end(), "following text");
+        // Walk every retained row, including the three live image rows. The green
+        // channel labels each source scanline, so a shifted or stretched tail fails.
+        let mut bands: Vec<Option<u8>> = (0..24).map(Some).collect();
+        if marked {
+            bands.splice(4..11, [None]);
+        }
+        t.scroll_display(isize::MAX);
+        let start = t.viewport_to_point(0, 0).line + 1;
+        for (line, band) in (start..).zip(bands) {
+            t.scroll_to_line(line);
+            let row = (line - t.viewport_to_point(0, 0).line) as usize;
+            let quads = layout(&t, cell, 0.0, 0.0);
+            if band.is_none() {
+                assert_eq!(text(&t, row).trim_end(), "… 7 lines of img output dropped");
+            }
+            for scan in 0..6 {
+                let y = (row * 6 + scan) as f32 + 0.5;
+                let sampled: Vec<_> = quads
+                    .iter()
+                    .filter(|q| (q.pos[1]..q.pos[1] + q.size[1]).contains(&y))
+                    .map(|q| {
+                        let v = q.uv[1] + (y - q.pos[1]) / q.size[1] * (q.uv[3] - q.uv[1]);
+                        let image = t.image(q.image_id).unwrap();
+                        image.pixels[(v * image.height as f32) as usize * 4 + 1]
+                    })
+                    .collect();
+                assert_eq!(
+                    sampled.as_slice(),
+                    band.map(|b| b * 6 + scan as u8).as_slice()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn command_budget_and_erase_display_crop_a_stretched_source_pixel() {
+    let mut t = Terminal::new(40, 4);
+    t.set_scrollback_limit(32);
+    t.set_cell_pixel_size(10.0, 6.0);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07img\r\n\x1b]133;C\x07");
+    t.advance(&[b'\n'; 5]);
+    t.add_image(1, image(1, 3)).unwrap();
+    let opts = PlaceOptions {
+        source: Some(Rect {
+            x: 0,
+            y: 1,
+            width: 1,
+            height: 1,
+        }),
+        rows: 32,
+        y_offset: 2,
+        ..Default::default()
+    };
+    t.place_image(1, opts).unwrap();
+    t.advance(&[b'\n'; 19]);
+    // The anchor was discarded. ED 2 now clips the surviving tail at the
+    // screen bottom: original image rows 16..20 were visible before the clear.
+    t.advance(b"\x1b[2J");
+    assert!(layout(&t, (10.0, 6.0), 0.0, 0.0).is_empty());
+    t.scroll_display(4);
+    let saved = layout(&t, (10.0, 6.0), 0.0, 0.0);
+    let [q] = saved.as_slice() else {
+        panic!("expected a saved tail: {saved:?}")
+    };
+    assert_eq!(q.pos[1] + q.size[1], 24.0);
+    let height = 32.0 * 6.0 - 2.0;
+    let first_pixel = 16.0 * 6.0 - 2.0;
+    let last_pixel = 20.0 * 6.0 - 2.0;
+    let view_top = q.uv[1] + (q.uv[3] - q.uv[1]) * (-q.pos[1] / q.size[1]);
+    // Filtering a fraction of this texel must still clamp to its original center.
+    assert_eq!(q.source_v, [1.0 / 3.0, 2.0 / 3.0]);
+    assert!((view_top - (1.0 + first_pixel / height) / 3.0).abs() < 1e-6);
+    assert!((q.uv[3] - (1.0 + last_pixel / height) / 3.0).abs() < 1e-6);
+}
+
+#[test]
 fn fractional_scroll_keeps_image_just_above_viewport() {
     let mut t = term();
     kitty(&mut t, ",c=1,r=1");
@@ -52,6 +156,7 @@ fn draws_at_pixel_size_on_the_cursor_cell() {
             pos: [6.0 + 30.0, 6.0 + 20.0],
             size: [20.0, 40.0],
             uv: [0.0, 0.0, 1.0, 1.0],
+            source_v: [0.0, 1.0],
         }]
     );
 }

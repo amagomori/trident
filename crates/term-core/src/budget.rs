@@ -328,16 +328,27 @@ impl Terminal {
         }
         let placements = &mut self.primary.placements;
         if !placements.is_empty() {
-            placements.retain(|p| !(cut.start..cut.end).contains(&p.line));
-            for p in placements.iter_mut() {
-                if p.line < cut.start {
-                    let above = (cut.start - p.line) as usize;
-                    if p.rows > above {
-                        p.clipped_rows = Some(p.clipped_rows.unwrap_or(p.rows).min(above));
+            // The row before the drain is overwritten by the placeholder, not retained.
+            let gap = cut.start - 1;
+            let mut retained = Vec::with_capacity(placements.len());
+            for &p in placements.iter() {
+                let end = p.line.saturating_add(p.visible_rows() as u64);
+                if p.line < gap {
+                    let mut head = p;
+                    head.line = cut.map(p.line);
+                    if end > gap {
+                        head.clipped_rows = Some(p.skipped_rows + (gap - p.line) as usize);
                     }
-                    p.line = cut.map(p.line);
+                    retained.push(head);
+                }
+                if end > cut.end {
+                    let mut tail = p;
+                    tail.line = p.line.max(cut.end);
+                    tail.skipped_rows += (tail.line - p.line) as usize;
+                    retained.push(tail);
                 }
             }
+            *placements = retained;
             self.images.generation += 1;
         }
         for point in &mut self.tracked {

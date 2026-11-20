@@ -33,8 +33,10 @@ pub(crate) struct Quad {
     pub layer: Layer,
     pub pos: [f32; 2],
     pub size: [f32; 2],
-    /// The source rectangle as fractions of the image: left, top, right, bottom.
+    /// The visible texture rectangle: left, top, right, bottom.
     pub uv: [f32; 4],
+    /// Unclipped vertical texture bounds for filtering at source-pixel centers.
+    pub source_v: [f32; 2],
 }
 
 /// Lays out the visible placements over a grid of `cell`-sized cells starting at
@@ -56,7 +58,8 @@ pub(crate) fn layout(
         let scale = (cw / p.cell_pixels.0, ch / p.cell_pixels.1);
         let (x_off, y_off) = (p.x_offset as f32 * scale.0, p.y_offset as f32 * scale.1);
         let x = padding + p.col as f32 * cw + x_off;
-        let y = padding + v.row as f32 * ch + y_off + pixel_offset;
+        let relative_y = y_off - p.skipped_rows as f32 * ch;
+        let y = padding + v.row as f32 * ch + relative_y.max(0.0) + pixel_offset;
         let w = if p.fixed_cols {
             p.cols as f32 * cw - x_off
         } else {
@@ -67,10 +70,11 @@ pub(crate) fn layout(
         } else {
             p.display_pixels.1 as f32 * scale.1
         };
-        let clipped_h = p
+        let top = (-relative_y).max(0.0);
+        let bottom = p
             .clipped_rows
             .map_or(h, |rows| h.min(rows as f32 * ch - y_off));
-        if w <= 0.0 || clipped_h <= 0.0 || p.source.width == 0 || p.source.height == 0 {
+        if w <= 0.0 || bottom <= top || p.source.width == 0 || p.source.height == 0 {
             continue;
         }
         let (iw, ih) = (image.width as f32, image.height as f32);
@@ -79,13 +83,14 @@ pub(crate) fn layout(
             image_id: p.image_id,
             layer: Layer::of(p.z),
             pos: [x, y],
-            size: [w, clipped_h],
+            size: [w, bottom - top],
             uv: [
                 s.x as f32 / iw,
-                s.y as f32 / ih,
+                (s.y as f32 + s.height as f32 * (top / h)) / ih,
                 (s.x + s.width) as f32 / iw,
-                (s.y as f32 + s.height as f32 * (clipped_h / h)) / ih,
+                (s.y as f32 + s.height as f32 * (bottom / h)) / ih,
             ],
+            source_v: [s.y as f32 / ih, (s.y + s.height) as f32 / ih],
         });
     }
     // visible_placements is sorted by z, so the layers are already in order.
@@ -98,6 +103,7 @@ struct Instance {
     pos: [f32; 2],
     size: [f32; 2],
     uv: [f32; 4],
+    source_v: [f32; 2],
 }
 
 struct GpuImage {
@@ -137,6 +143,7 @@ impl ImagePipeline {
             0 => Float32x2,
             1 => Float32x2,
             2 => Float32x4,
+            3 => Float32x2,
         ];
         let pipeline = pipeline::alpha_pipeline(
             device,
@@ -228,6 +235,7 @@ impl ImagePipeline {
             pos,
             size: [image.width as f32, image.height as f32],
             uv: [0.0, 0.0, 1.0, 1.0],
+            source_v: [0.0, 1.0],
         }];
         self.write_instances(device, queue);
     }
@@ -244,6 +252,7 @@ impl ImagePipeline {
                 pos: q.pos,
                 size: q.size,
                 uv: q.uv,
+                source_v: q.source_v,
             })
             .collect();
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
