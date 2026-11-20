@@ -4442,6 +4442,10 @@ impl App {
     }
 
     fn hover_link(&self) -> Option<links::Hover> {
+        self.link_at_cell(self.hover_cell()?)?.into_hover()
+    }
+
+    fn hover_cell(&self) -> Option<(isize, usize)> {
         if !self.focused || !links::command_modifier(self.modifiers.state()) {
             return None;
         }
@@ -4483,12 +4487,14 @@ impl App {
         {
             return None;
         }
+        Some((row, col))
+    }
+
+    fn link_at_cell(&self, (row, col): (isize, usize)) -> Option<links::PointerLink> {
+        let s = self.session.as_ref()?;
         let point = s.term.viewport_to_point_signed(row, col);
         if let Some(link) = s.term.link_at(point) {
-            return Some(links::Hover {
-                target: links::Target::Uri(link.uri.clone()),
-                link,
-            });
+            return Some(links::PointerLink::Uri(link));
         }
         let file_link = s.term.file_link_at(point)?;
         let mut cache = s.file_hover.borrow_mut();
@@ -4504,14 +4510,7 @@ impl App {
                 path
             }
         };
-        Some(links::Hover {
-            link: file_link.link(),
-            target: links::Target::File {
-                path: path?,
-                line: file_link.line,
-                column: file_link.column,
-            },
-        })
+        Some(links::PointerLink::File(file_link, path))
     }
 
     fn open_link(&self, target: links::Target) {
@@ -4551,7 +4550,10 @@ impl App {
     }
 
     fn refresh_link(&mut self) {
-        let link = self.hover_link();
+        let cell = self.hover_cell();
+        let hit = cell.and_then(|cell| self.link_at_cell(cell));
+        self.refresh_hover_preview(cell, hit.as_ref());
+        let link = hit.and_then(links::PointerLink::into_hover);
         if let Some(s) = &mut self.session
             && s.hover != link
         {
@@ -4566,7 +4568,6 @@ impl App {
             s.hover = link;
             s.request_frame();
         }
-        self.refresh_hover_preview();
     }
 
     fn report_mouse(&mut self, button: ReportButton, pressed: bool, motion: bool) {
@@ -5799,7 +5800,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if search.dirty {
                     search.refresh(&mut s.term, false);
                     s.window.request_redraw();
-                } else if search.advance(&mut s.term, Some(Instant::now() + search::SLICE)) {
+                } else if search.advance(&mut s.term, Instant::now() + search::SLICE) {
                     s.window.request_redraw();
                 }
                 search.searching()

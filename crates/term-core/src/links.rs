@@ -27,6 +27,8 @@ pub struct FileLink {
     pub line: u32,
     /// Printed one-based column, or `None` when omitted.
     pub column: Option<u32>,
+    /// Some cells of the reference are retained past the visible right edge.
+    pub clipped: bool,
     pub start: Point,
     /// Last cell of the printed reference, inclusive.
     pub end: Point,
@@ -804,6 +806,9 @@ impl Terminal {
                     .path_origin(positions[r.offset..r.offset + r.path.len()].iter().copied()),
                 line: r.line,
                 column: r.column,
+                clipped: positions[r.offset..r.offset + r.len]
+                    .iter()
+                    .any(|p| p.col >= self.cols),
                 start,
                 end,
             })

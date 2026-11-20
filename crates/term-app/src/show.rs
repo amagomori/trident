@@ -202,8 +202,8 @@ fn show(
             write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
         }
         Kind::Pdf => pdf::show(&bytes, options, window, out),
-        Kind::Text => write_text(out, &bytes).map_err(write_err),
-        Kind::DecodedText(text) => write_text(out, text.as_bytes()).map_err(write_err),
+        Kind::Text => write_text(out, &String::from_utf8_lossy(&bytes)).map_err(write_err),
+        Kind::DecodedText(text) => write_text(out, &text).map_err(write_err),
         Kind::Binary(kind) => {
             if let Some(image) = thumbnail::render(path, &bytes, options, window) {
                 return write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err);
@@ -891,34 +891,39 @@ fn tmux_passthrough(escape: &[u8]) -> Vec<u8> {
 
 /// Prints text with control characters made visible (`^[` for ESC), so a file can't
 /// drive the terminal.
-fn write_text(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
-    // CR LF and lone CR (old Mac files, progress logs) both end a line.
-    let text = String::from_utf8_lossy(bytes)
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
-    let mut clean = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let (line, newline) = line.strip_suffix('\n').map_or((line, ""), |l| (l, "\n"));
-        push_printable(&mut clean, line, true);
-        clean.push_str(newline);
+fn write_text(out: &mut impl Write, text: &str) -> io::Result<()> {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        let caret;
+        let replacement: &[u8] = match c {
+            '\t' | '\n' => continue,
+            '\r' if bytes.get(i + 1) == Some(&b'\n') => b"",
+            '\r' => b"\n",
+            '\0'..='\x1f' => {
+                caret = [b'^', c as u8 + b'@'];
+                &caret
+            }
+            '\x7f' => b"^?",
+            '\u{80}'..='\u{9f}' => "�".as_bytes(),
+            _ => continue,
+        };
+        out.write_all(&bytes[start..i])?;
+        out.write_all(replacement)?;
+        start = i + c.len_utf8();
     }
-    if !clean.is_empty() && !clean.ends_with('\n') {
-        clean.push('\n');
+    out.write_all(&bytes[start..])?;
+    if !text.is_empty() && !text.ends_with(['\r', '\n']) {
+        out.write_all(b"\n")?;
     }
-    out.write_all(clean.as_bytes())
+    Ok(())
 }
 
 /// `text` with control characters shown as `^X`, safe to print on a terminal.
 fn printable(text: &str) -> String {
     let mut clean = String::with_capacity(text.len());
-    push_printable(&mut clean, text, false);
-    clean
-}
-
-fn push_printable(clean: &mut String, text: &str, keep_tabs: bool) {
     for c in text.chars() {
         match c {
-            '\t' if keep_tabs => clean.push(c),
             '\x7f' => clean.push_str("^?"),
             c if (c as u32) < 0x20 => {
                 clean.push('^');
@@ -928,6 +933,7 @@ fn push_printable(clean: &mut String, text: &str, keep_tabs: bool) {
             c => clean.push(c),
         }
     }
+    clean
 }
 
 fn window_size() -> Window {
