@@ -146,7 +146,9 @@ Search updates as you type, across scrollback and the screen, and matches across
 lines. It ignores case unless the query has an uppercase letter.
 
 - Enter or Up moves to the next older match. Shift+Enter or Down moves to the next newer one.
-  Search wraps at either end.
+  Search wraps within the newest 10,000 matches. A `+` after the count means the search is
+  still running. Once it finishes, “of newest 10000” means the limit discarded older matches
+  or left older lines unsearched; otherwise the total is exact.
 - Ctrl+R or Alt+R toggles regular expressions. On macOS, Option+R toggles them only with an
   [Option key configured for Meta](configuration.md#key-bindings).
 - Escape closes search and clears highlights without changing the scroll position.
