@@ -1,5 +1,6 @@
-//! The tab bar drawn above the grid: one clickable tab per terminal, each with a close
-//! button, and a `+` button that opens a new tab.
+//! The tab bar drawn above the grid: one clickable tab per terminal and a `+`
+//! button to open a new one. Crowded tabs show their number instead of a title
+//! and close button.
 //!
 //! See [`tab_layout`] for shared drawing and hit-testing geometry.
 
@@ -31,10 +32,21 @@ pub enum TabHit {
 pub struct TabRect {
     pub x: f32,
     pub width: f32,
-    /// The close button: `[x, y, width, height]`.
-    pub close: [f32; 4],
-    /// Title columns that fit between the tab's left edge and its close button.
+    /// The close button's `[x, y, width, height]`, or `None` for a compact tab.
+    pub close: Option<[f32; 4]>,
+    /// Cell columns available to the title, or to the number on a compact tab.
     pub title_columns: usize,
+}
+
+impl TabRect {
+    /// Centers the one-based number in a compact tab.
+    ///
+    /// Keeps the trailing digits when the whole number won't fit.
+    pub(crate) fn compact_number(&self, number: usize, cw: f32) -> (f32, String) {
+        let mut label = number.to_string();
+        label.drain(..label.len().saturating_sub(self.title_columns));
+        (self.x + (self.width - label.len() as f32 * cw) / 2.0, label)
+    }
 }
 
 /// Tab-bar drawing and hit-test geometry; see [`tab_layout`].
@@ -75,15 +87,27 @@ pub fn tab_layout(count: usize, width: f32, cw: f32, ch: f32) -> TabLayout {
         (available / count as f32).min(MAX_TAB_COLUMNS * cw).floor()
     };
     let close_size = ch.min(height);
+    let close_offset = tab_width - close_size - cw * 0.5;
+    // Keep a title cell after the left padding and a selectable center cell.
+    let show_close = close_offset >= 2.0 * cw && close_offset >= (tab_width + cw) * 0.5;
+    let title_space = if show_close {
+        close_offset - cw
+    } else {
+        tab_width
+    };
+    let title_columns = (title_space / cw) as usize;
     let tabs = (0..count)
         .map(|i| {
             let x = i as f32 * tab_width;
-            let close_x = x + tab_width - close_size - cw * 0.5;
-            let title_columns = ((close_x - x - cw) / cw).floor().max(0.0) as usize;
             TabRect {
                 x,
                 width: tab_width,
-                close: [close_x, (height - close_size) / 2.0, close_size, close_size],
+                close: show_close.then_some([
+                    x + close_offset,
+                    (height - close_size) / 2.0,
+                    close_size,
+                    close_size,
+                ]),
                 title_columns,
             }
         })
@@ -126,7 +150,7 @@ impl TabLayout {
             return Some(TabHit::New);
         }
         self.tabs.iter().enumerate().find_map(|(i, tab)| {
-            if inside(tab.close, x, y) {
+            if tab.close.is_some_and(|rect| inside(rect, x, y)) {
                 Some(TabHit::Close(i))
             } else if x >= tab.x && x < tab.x + tab.width {
                 Some(TabHit::Tab(i))
@@ -174,9 +198,57 @@ mod tests {
     }
 
     #[test]
+    fn crowded_tabs_show_their_numbers_and_select_across_the_whole_body() {
+        for width in [400.0, 600.0] {
+            let cw = 10.0;
+            let layout = tab_layout(16, width, cw, 20.0);
+            let y = layout.height / 2.0;
+            for (i, tab) in layout.tabs.iter().enumerate() {
+                assert!(tab.close.is_none());
+                let (x, number) = tab.compact_number(i + 1, cw);
+                assert_eq!(number, (i + 1).to_string());
+                assert!(x >= tab.x && x + number.len() as f32 * cw <= tab.x + tab.width);
+                for dx in [0.0, tab.width / 2.0, tab.width - 0.5] {
+                    assert_eq!(layout.hit(tab.x + dx, y), Some(TabHit::Tab(i)));
+                }
+            }
+            assert_eq!(layout.hit(layout.new[0], y), Some(TabHit::New));
+        }
+    }
+
+    #[test]
+    fn close_hits_follow_drawn_bounds_at_fractional_scale_and_density_threshold() {
+        // At 1.25x the center cell just clears Close on a 75 px tab.
+        for (width, count, normal) in [(268.0, 3, false), (269.0, 3, true), (269.0, 4, false)] {
+            let layout = tab_layout(count, width, 12.5, 25.0);
+            for (i, tab) in layout.tabs.iter().enumerate() {
+                assert_eq!(tab.close.is_some(), normal);
+                assert_eq!(
+                    layout.hit(tab.x + tab.width / 2.0, 22.0),
+                    Some(TabHit::Tab(i))
+                );
+                if let Some([x, y, w, h]) = tab.close {
+                    assert!(x >= tab.x && x + w <= tab.x + tab.width);
+                    for (px, py, expected) in [
+                        (x - 0.25, y, TabHit::Tab(i)),
+                        (x, y, TabHit::Close(i)),
+                        (x + w - 0.25, y + h - 0.25, TabHit::Close(i)),
+                        (x + w, y, TabHit::Tab(i)),
+                        (x, y + h, TabHit::Tab(i)),
+                    ] {
+                        assert_eq!(layout.hit(px, py), Some(expected));
+                    }
+                }
+                assert_eq!(layout.hit(tab.x, 22.0), Some(TabHit::Tab(i)));
+            }
+            assert_eq!(layout.hit(layout.new[0], 22.0), Some(TabHit::New));
+        }
+    }
+
+    #[test]
     fn hit_test_finds_tabs_close_buttons_and_new() {
         let layout = tab_layout(2, 600.0, 10.0, 20.0);
-        let close = layout.tabs[1].close;
+        let close = layout.tabs[1].close.unwrap();
         assert_eq!(layout.hit(5.0, 10.0), Some(TabHit::Tab(0)));
         assert_eq!(
             layout.hit(layout.tabs[1].x + 5.0, 10.0),

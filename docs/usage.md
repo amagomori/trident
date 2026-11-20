@@ -82,6 +82,8 @@ active tab's directory when the shell reports it with OSC 7.
 
 - To switch tabs, click a tab. To close one, click its **×** or middle-click it. To open one,
   click **+**.
+- On Linux, crowded tabs show their number instead of a title and **×**. Click the number
+  to switch tabs; middle-click or use the close-tab shortcut to close one.
 - Closing a tab that's running a program asks first (see `confirm_close`). Closing the last tab
   closes the window.
 - On Linux, to show the tab bar only while a window has two or more tabs, set `tab_bar = "auto"`.
