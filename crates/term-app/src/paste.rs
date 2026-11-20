@@ -20,7 +20,7 @@ pub fn trim(text: &str) -> &str {
 }
 
 /// The confirmation prompt shown in the banner while a paste waits.
-pub fn prompt(text: &str) -> String {
+fn prompt(text: &str) -> String {
     let lines = text
         .replace("\r\n", "\n")
         .split_terminator(['\n', '\r'])
@@ -34,12 +34,29 @@ pub fn prompt(text: &str) -> String {
     format!("{what} Enter pastes, Esc cancels")
 }
 
-/// The banner while a paste waits: its prompt, then any other banner text.
-#[cold]
-pub fn banner(text: &str, other: Option<String>) -> String {
-    match other {
-        Some(other) => format!("{} | {other}", prompt(text)),
-        None => prompt(text),
+/// The clipboard text awaiting confirmation and its precomputed warning.
+pub struct PendingPaste {
+    text: String,
+    prompt: String,
+}
+
+impl PendingPaste {
+    pub fn new(text: String) -> Self {
+        let prompt = prompt(&text);
+        Self { text, prompt }
+    }
+
+    pub fn into_text(self) -> String {
+        self.text
+    }
+
+    /// Compose the warning with the current banner without revisiting the clipboard text.
+    #[cold]
+    pub fn banner(&self, other: Option<String>) -> String {
+        match other {
+            Some(other) => format!("{} | {other}", self.prompt),
+            None => self.prompt.clone(),
+        }
     }
 }
 
@@ -121,6 +138,26 @@ mod tests {
             prompt("x\x03"),
             "Paste text with control characters? Enter pastes, Esc cancels"
         );
+    }
+
+    #[test]
+    fn redraws_reuse_the_prepared_prompt_with_the_current_banner() {
+        for (text, label) in [
+            ("a\nb", "Paste 2 lines?"),
+            ("a\r\nb\r\n", "Paste 2 lines?"),
+            ("a\r\rb", "Paste 3 lines?"),
+            ("  \r\n", "Paste 1 line?"),
+            ("x\x03", "Paste text with control characters?"),
+        ] {
+            let mut pending = PendingPaste::new(text.to_owned());
+            // A redraw must not need the original text, even to count its lines.
+            assert_eq!(std::mem::take(&mut pending.text), text);
+            let prompt = format!("{label} Enter pastes, Esc cancels");
+            for other in [None, Some("Output paused"), Some("Config error"), None] {
+                let expected = other.map_or_else(|| prompt.clone(), |s| format!("{prompt} | {s}"));
+                assert_eq!(pending.banner(other.map(String::from)), expected);
+            }
+        }
     }
 
     #[test]
