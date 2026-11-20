@@ -3310,11 +3310,11 @@ impl App {
         s.window.request_redraw();
     }
 
-    fn set_font_size(&mut self, size: f32) {
-        self.set_pane_font_size(size);
+    fn zoom(&mut self, size: impl Fn(f32) -> f32) {
+        self.set_pane_font_size(size(self.font_size));
         #[cfg(target_os = "macos")]
         for index in self.native_tab_order() {
-            self.with_tab_shown(index, |app| app.set_pane_font_size(size));
+            self.with_tab_shown(index, |app| app.set_pane_font_size(size(app.font_size)));
         }
     }
 
@@ -4124,7 +4124,7 @@ impl App {
                             group_error = Some(e);
                         }
                         if size_changed {
-                            app.set_font_size(app.config.font_size);
+                            app.set_pane_font_size(app.config.font_size);
                         }
                         app.resize_grid();
                         if let Some(s) = &app.session {
@@ -4345,13 +4345,12 @@ impl App {
             Action::Copy => self.copy(false),
             Action::Paste => self.paste(false),
             Action::PastePrimary => self.paste(true),
-            Action::Increase => self.set_font_size(self.font_size + 1.0),
-            Action::Decrease => self.set_font_size(self.font_size - 1.0),
-            Action::Reset => self.set_font_size(if self.options.font_size_override {
-                self.options.font_size
-            } else {
-                self.config.font_size
-            }),
+            Action::Increase => self.zoom(|size| size + 1.0),
+            Action::Decrease => self.zoom(|size| size - 1.0),
+            Action::Reset => {
+                let default = self.options.size(&self.config);
+                self.zoom(|_| default);
+            }
             Action::Send(text) => {
                 if self.search.is_none() {
                     self.write_input(text.as_bytes());
