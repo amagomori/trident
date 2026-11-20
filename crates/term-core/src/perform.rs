@@ -42,7 +42,8 @@ fn dynamic_reply(index: usize) -> &'static [u8] {
 }
 
 pub(super) enum Dcs {
-    Status(u8, Vec<u8>),
+    Status(Vec<u8>),
+    Termcap(crate::xtgettcap::Request),
     Sixel(Box<crate::sixel::Decoder>),
 }
 
@@ -356,7 +357,8 @@ impl Perform for Terminal {
                     arg(params, 1, 0) == 1,
                 ))))
             }
-            (false, 'q', [kind @ (b'$' | b'+')]) => Some(Dcs::Status(*kind, Vec::new())),
+            (false, 'q', [b'$']) => Some(Dcs::Status(Vec::new())),
+            (false, 'q', [b'+']) => Some(Dcs::Termcap(Default::default())),
             _ => None,
         };
     }
@@ -365,7 +367,8 @@ impl Perform for Terminal {
     #[inline(never)]
     fn put(&mut self, byte: u8) {
         match &mut self.reports.dcs {
-            Some(Dcs::Status(_, request)) if request.len() < 16 => request.push(byte),
+            Some(Dcs::Status(request)) if request.len() < 16 => request.push(byte),
+            Some(Dcs::Termcap(request)) => request.push(byte),
             Some(Dcs::Sixel(decoder)) => {
                 if decoder.put(byte).is_none() {
                     self.reports.dcs = None;
@@ -379,8 +382,8 @@ impl Perform for Terminal {
     #[inline(never)]
     fn unhook(&mut self) {
         match self.reports.dcs.take() {
-            Some(Dcs::Status(b'+', request)) => self.report_xterm_setting(&request),
-            Some(Dcs::Status(_, request)) => self.report_setting(&request),
+            Some(Dcs::Status(request)) => self.report_setting(&request),
+            Some(Dcs::Termcap(request)) => request.reply(&mut self.responses),
             Some(Dcs::Sixel(decoder)) => {
                 if let Some(image) = decoder.finish() {
                     self.place_sixel(image);
@@ -395,7 +398,13 @@ impl Perform for Terminal {
     }
 
     fn await_dcs_st(&self) -> bool {
-        matches!(self.reports.dcs, Some(Dcs::Sixel(_)))
+        matches!(self.reports.dcs, Some(Dcs::Sixel(_) | Dcs::Termcap(_)))
+    }
+
+    fn put_ignored(&mut self, byte: u8) {
+        if let Some(Dcs::Termcap(request)) = &mut self.reports.dcs {
+            request.push(byte);
+        }
     }
 
     fn cancel_dcs(&mut self) {
@@ -642,15 +651,6 @@ impl Terminal {
         )
         .unwrap();
         self.responses.extend_from_slice(terminator);
-    }
-
-    fn report_xterm_setting(&mut self, request: &[u8]) {
-        let reply = if request.eq_ignore_ascii_case(b"436F") {
-            "\x1bP1+r436F=323536\x1b\\"
-        } else {
-            "\x1bP0+r\x1b\\"
-        };
-        self.responses.extend_from_slice(reply.as_bytes());
     }
 
     /// `ConEmu` progress (`OSC 9 ; 4 ; state ; percent`): 0 removes it, 1 sets a

@@ -40,6 +40,15 @@ infocmp -x xterm-trident | ssh host -- tic -x /dev/stdin
 For the full capability list, see
 [xterm-trident.terminfo](../crates/term-app/terminfo/xterm-trident.terminfo).
 
+Applications can also query Trident directly over the PTY with XTGETTCAP
+(`DCS + q`), without installing the entry on the remote host. Trident reports
+`Co`, `Tc`, `Smulx`, `setrgbf`, `setrgbb` and `Sync`. For a semicolon-separated
+list of hex-encoded names, it sends one reply per name, in order, as foot does:
+`1+r` and the name on success, or `0+r` and the name if unsupported. Only
+non-boolean successes append `=` and a hex-encoded value; string values retain
+their terminfo parameters. An invalid list, or one exceeding 16 names or 256
+payload bytes, gets a single empty `0+r` reply.
+
 ## Emoji widths in line editors
 
 Trident joins emoji sequences in command output. At a shell prompt or in a line editor, it normally
