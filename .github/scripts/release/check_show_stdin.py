@@ -37,6 +37,7 @@ def parity(name, *options):
 parity("sample.png")
 parity("rotated.jpg", "--width", "3", "--height", "2")
 parity("sample.png", "--fit")
+assert b"a=f" in show("-", input=(samples / "animated.webp").read_bytes())
 with tempfile.TemporaryDirectory() as directory:
     Path(directory, "-").write_text("literal dash")
     assert show("./-", cwd=directory) == b"literal dash\n"
@@ -45,6 +46,22 @@ for data, reason in [(b"", b"empty"), (b"not an image", b"raster image"),
                      ((samples / "corrupt.png").read_bytes(), b"decode PNG"),
                      ((samples / "sample.gif").read_bytes()[:-12], b"decode GIF")]:
     show("-", input=data, status=1, error=reason)
+
+
+def interrupted_streams():
+    jpeg = (samples / "sample.jpg").read_bytes()[:675]
+    webp = (samples / "animated.webp").read_bytes()[:128]
+    show("-", input=jpeg, status=1, error=b"decode JPEG")
+    show("-", input=webp, status=1, error=b"decode WEBP")
+    # EOI in a JPEG comment is not the end of the enclosing image.
+    show("-", input=jpeg[:2] + b"\xff\xfe\x00\x04\xff\xd9" + jpeg[2:],
+         status=1, error=b"decode JPEG")
+    # Even a correctly sized RIFF must contain complete chunk headers.
+    show("-", input=webp[:4] + struct.pack("<I", len(webp) - 8) + webp[8:],
+         status=1, error=b"decode WEBP")
+
+
+interrupted_streams()
 
 # An open writer must not delay a usage error until EOF.
 read_fd, write_fd = os.pipe()
@@ -98,6 +115,7 @@ with tempfile.TemporaryDirectory() as directory:
     try:
         pid = subprocess.check_output([*tmux, "display", "-p", "#{pid}"], text=True).strip()
         env.update(TMUX=f"{socket},{pid},0", TMUX_PANE="%0")
+        interrupted_streams()
         path = samples / "sample.jpg"
         named = show(path)
         subprocess.run([*tmux, "set", "-s", "@trident-image-sequence", "0"], check=True)

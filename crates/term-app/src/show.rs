@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 mod pdf;
 mod png;
+mod stream;
 
 /// Base64 bytes per kitty escape; the protocol allows at most 4096.
 const CHUNK: usize = 4096;
@@ -211,8 +212,9 @@ fn show_stdin(options: &Options, window: Window, out: &mut impl Write) -> Result
         .filter(|format| format.reading_enabled())
         .or_else(|| is_tga(&bytes).then_some(ImageFormat::Tga))
         .ok_or("stdin is not a supported raster image")?;
-    animation::validate_input(&bytes, format)?;
-    show_raster(&bytes, format, options, window, out)
+    let bytes = stream::complete_image(&bytes, format)?;
+    animation::validate_input(bytes, format)?;
+    show_raster(bytes, format, options, window, out)
 }
 
 fn show(
