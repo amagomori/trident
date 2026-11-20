@@ -3,7 +3,7 @@
 //! drawn between them by `z`.
 
 use crate::Preedit;
-use crate::atlas::{Atlas, GlyphKey};
+use crate::atlas::{Atlas, AtlasFull, AtlasGlyph, GlyphKey};
 use crate::damage::{self, Damage};
 use crate::font::{CellMetrics, Fonts, Style};
 use crate::images::{self, ImagePipeline, Layer};
@@ -19,7 +19,7 @@ const RERUN_REMOVED: Rgb = (220, 50, 47);
 /// How strongly the visual bell tints the grid with the foreground color.
 const FLASH_ALPHA: f32 = 0.2;
 /// Drawn before a tab's title while the tab has an unseen bell.
-const BELL_MARK: char = '\u{25cf}';
+const BELL_MARK: &str = "●";
 
 fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
@@ -1255,7 +1255,7 @@ impl Renderer {
         let Some(bar) = self.tab_bar.take() else {
             return true;
         };
-        let ok = self.build_tab_bar(term, fonts, &bar, out);
+        let ok = self.build_tab_bar(term, fonts, &bar, out).is_ok();
         self.tab_bar = Some(bar);
         ok
     }
@@ -1266,7 +1266,7 @@ impl Renderer {
         fonts: &mut Fonts,
         bar: &crate::TabBar,
         out: &mut Vec<Instance>,
-    ) -> bool {
+    ) -> Result<(), AtlasFull> {
         use crate::TabHit;
         let mix = |a: Rgb, b: Rgb, t: f32| {
             let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
@@ -1286,7 +1286,6 @@ impl Renderer {
             out.push(self.rect(x, 0.0, w, height, strip));
         }
         let text_y = ((height - ch) / 2.0).floor();
-        let mut glyphs: Vec<(f32, char, Rgb)> = Vec::new();
         for (i, (tab, title)) in layout.tabs.iter().zip(&bar.titles).enumerate() {
             let active = i == bar.active;
             if active {
@@ -1314,50 +1313,103 @@ impl Renderer {
             let Some([x, y, w, h]) = tab.close else {
                 let (start, number) = tab.compact_number(i + 1, cw);
                 let color = if bell { palette.ansi[3] } else { color };
-                for (col, c) in number.chars().enumerate() {
-                    glyphs.push((start + cw * col as f32, c, color));
+                for col in 0..number.len() {
+                    self.tab_glyph(
+                        fonts,
+                        &number[col..col + 1],
+                        1,
+                        [start + cw * col as f32, text_y],
+                        color,
+                        out,
+                    )?;
                 }
                 continue;
             };
             let skip = if bell {
-                glyphs.push((tab.x + cw, BELL_MARK, palette.ansi[3]));
+                self.tab_glyph(
+                    fonts,
+                    BELL_MARK,
+                    1,
+                    [tab.x + cw, text_y],
+                    palette.ansi[3],
+                    out,
+                )?;
                 2
             } else {
                 0
             };
-            let title = crate::fit_title(title, tab.title_columns.saturating_sub(skip));
-            for (col, c) in title.chars().enumerate() {
-                glyphs.push((tab.x + cw * ((col + skip) as f32 + 1.0), c, color));
+            for (col, g, cells) in
+                crate::tabs::title_clusters(title, tab.title_columns.saturating_sub(skip))
+            {
+                let x = tab.x + cw * (col + skip + 1) as f32;
+                self.tab_glyph(fonts, g, cells as u8, [x, text_y], color, out)?;
             }
             if bar.hover == Some(TabHit::Close(i)) {
                 out.push(self.rect(x, y, w, h, mix(bg, fg, 0.25)));
             }
-            glyphs.push((x + (w - cw) / 2.0, '\u{00d7}', color));
+            self.tab_glyph(fonts, "×", 1, [x + (w - cw) / 2.0, text_y], color, out)?;
         }
         let [x, y, w, h] = layout.new;
         if bar.hover == Some(TabHit::New) {
             out.push(self.rect(x + 2.0, y + 2.0, w - 4.0, h - 4.0, hovered));
         }
-        glyphs.push((x + (w - cw) / 2.0, '+', fg));
+        self.tab_glyph(fonts, "+", 1, [x + (w - cw) / 2.0, text_y], fg, out)?;
         out.push(self.rect(0.0, height - rule, width, rule, hovered));
-        for (x, c, color) in glyphs {
-            let key = GlyphKey {
-                c,
-                style: Style::new(false, false),
-                cells: 1,
-            };
-            match self.atlas.get(key, fonts, &self.device, &self.queue) {
-                Ok(Some(g)) => out.push(Instance {
-                    pos: [x + g.left, text_y + g.top],
-                    size: [g.width, g.height],
-                    uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
-                    color: self.color(color, 1.0),
-                }),
-                Ok(None) => {}
-                Err(_) => return false,
+        Ok(())
+    }
+
+    fn tab_glyph(
+        &mut self,
+        fonts: &mut Fonts,
+        text: &str,
+        cells: u8,
+        [x, y]: [f32; 2],
+        color: Rgb,
+        out: &mut Vec<Instance>,
+    ) -> Result<(), AtlasFull> {
+        let color = self.color(color, 1.0);
+        let mut draw = |g: AtlasGlyph, dx: f32, dy: f32| {
+            out.push(Instance {
+                pos: [x + dx + g.left, y + dy + g.top],
+                size: [g.width, g.height],
+                uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
+                color,
+            });
+        };
+        let style = Style::Regular;
+        let base = text.chars().next().expect("nonempty grapheme");
+        if text.len() > base.len_utf8() {
+            if text.len() <= grapheme::MAX_CHARS * 4
+                && (grapheme::is_emoji_sequence(text) || text.contains('\u{fe0f}'))
+                && let Some(g) =
+                    self.atlas
+                        .get_sequence(text, style, cells, fonts, &self.device, &self.queue)?
+            {
+                draw(g, 0.0, 0.0);
+                return Ok(());
+            }
+            if let Some(run) = shaping::title_cluster(text, u16::from(cells), fonts) {
+                for p in run.glyphs.iter() {
+                    if let Some(g) =
+                        self.atlas
+                            .get_outline(&run.face, p, fonts, &self.device, &self.queue)?
+                    {
+                        draw(g, p.x, p.y);
+                    }
+                }
+                return Ok(());
             }
         }
-        true
+        // If no face can shape the cluster, keep its base in the same span.
+        let key = GlyphKey {
+            c: base,
+            style,
+            cells,
+        };
+        if let Some(g) = self.atlas.get(key, fonts, &self.device, &self.queue)? {
+            draw(g, 0.0, 0.0);
+        }
+        Ok(())
     }
 
     /// Draws the pinned command header; false if the atlas filled up.

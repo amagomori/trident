@@ -4,6 +4,9 @@
 //!
 //! See [`tab_layout`] for shared drawing and hit-testing geometry.
 
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
 /// What the tab bar shows this frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabBar {
@@ -161,17 +164,45 @@ impl TabLayout {
     }
 }
 
-/// `title` cut to `columns` characters, ending in an ellipsis when cut.
+/// Fits whole graphemes in `columns` display cells, including a trailing
+/// ellipsis only when the title would overflow. A standalone zero-width
+/// cluster has no cell to draw in and is omitted.
+///
+/// ```rust
+/// assert_eq!(term_render::fit_title("日記-log", 5), "日記…");
+/// ```
 pub fn fit_title(title: &str, columns: usize) -> String {
-    if title.chars().count() <= columns {
-        return title.into();
-    }
-    if columns == 0 {
-        return String::new();
-    }
-    let mut fitted: String = title.chars().take(columns - 1).collect();
-    fitted.push('\u{2026}');
-    fitted
+    title_clusters(title, columns).map(|(_, g, _)| g).collect()
+}
+
+/// Visible (column, grapheme, cell span) triples, including any ellipsis.
+pub(crate) fn title_clusters(
+    title: &str,
+    columns: usize,
+) -> impl Iterator<Item = (usize, &str, usize)> {
+    let mut graphemes = title
+        .graphemes(true)
+        .filter_map(|g| {
+            let width = g.width();
+            (width > 0).then_some((g, width))
+        })
+        .peekable();
+    let mut column = 0;
+    std::iter::from_fn(move || {
+        let room = columns - column;
+        if room == 0 {
+            return None;
+        }
+        let (g, width) = graphemes.next()?;
+        let start = column;
+        if width > room || (width == room && graphemes.peek().is_some()) {
+            column = columns;
+            Some((start, "…", 1))
+        } else {
+            column += width;
+            Some((start, g, width))
+        }
+    })
 }
 
 #[cfg(test)]
@@ -281,5 +312,24 @@ mod tests {
         assert_eq!(fit_title("vim", 5), "vim");
         assert_eq!(fit_title("cargo build", 6), "cargo\u{2026}");
         assert_eq!(fit_title("x", 0), "");
+    }
+
+    #[test]
+    fn title_clusters_share_the_fit_and_paint_columns() {
+        let layout = |s, cols| title_clusters(s, cols).collect::<Vec<_>>();
+        assert_eq!(
+            layout("日記-log", 5),
+            [(0, "日", 2), (2, "記", 2), (4, "…", 1)]
+        );
+        assert_eq!(layout("a日b", 3), [(0, "a", 1), (1, "…", 1)]);
+        assert_eq!(
+            layout("e\u{301}👩‍💻日", 5),
+            [(0, "e\u{301}", 1), (1, "👩‍💻", 2), (3, "日", 2)]
+        );
+        assert_eq!(layout("e\u{301}", 1), [(0, "e\u{301}", 1)]);
+        assert_eq!(layout("👩‍💻x", 2), [(0, "…", 1)]);
+        assert_eq!(layout("日", 1), [(0, "…", 1)]);
+        assert!(layout("日", 0).is_empty());
+        assert!(layout("\u{301}", 1).is_empty());
     }
 }

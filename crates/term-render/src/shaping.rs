@@ -185,6 +185,24 @@ pub(crate) struct Run {
     pub glyphs: Rc<[Positioned]>,
 }
 
+/// Shapes a single tab-title grapheme within its measured cell span.
+pub(crate) fn title_cluster(text: &str, cols: u16, fonts: &mut Fonts) -> Option<Run> {
+    if text.len() > MAX_INPUT * 4 || text.chars().count() > MAX_INPUT {
+        return None;
+    }
+    let face = fonts.outline_face(text.chars().next()?, Style::Regular)?;
+    fonts.runs.input.clear();
+    fonts.runs.input.extend(text.chars().map(|c| (c, 0)));
+    let glyphs = fonts
+        .runs
+        .layout(&face, cols, false, fonts.metrics, fonts.px)?;
+    Some(Run {
+        face,
+        cols: usize::from(cols),
+        glyphs,
+    })
+}
+
 /// The longest compatible prefix starting at the first cell. A failure leaves
 /// the existing single-cell, builtin and emoji rasterizers in charge.
 pub(crate) fn run(
@@ -315,6 +333,15 @@ mod tests {
             assert_eq!(last.id, r.face.font.glyph_id('X'));
             assert_eq!(last.x, op.len() as f32 * fonts.metrics.width);
         }
+    }
+
+    #[test]
+    fn tab_accent_shapes_to_the_composed_glyph_in_one_cell() {
+        let mut fonts = Fonts::bundled(16.);
+        let run = title_cluster("e\u{301}", 1, &mut fonts).unwrap();
+        assert_eq!(run.glyphs.len(), 1);
+        assert_eq!(run.glyphs[0].id, run.face.font.glyph_id('é'));
+        assert_eq!(run.glyphs[0].x, 0.);
     }
 
     #[test]
