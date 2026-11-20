@@ -546,6 +546,40 @@ fn lines_in(height: u32, scale: f32) -> usize {
     ((height as f32 / line_h) as usize).clamp(1, MAX_LINES)
 }
 
+/// Counts readable entries while retaining only the names that fit the card.
+///
+/// The card has at least one row. On overflow its last row shows the omitted
+/// count instead of a name.
+fn directory_lines(
+    entries: impl Iterator<Item = std::io::Result<String>>,
+    rows: usize,
+) -> (String, Vec<String>) {
+    let mut visible = Vec::with_capacity(rows);
+    let mut total = 0;
+    for name in entries.filter_map(Result::ok) {
+        total += 1;
+        let key = name.to_lowercase();
+        // Insert after equal keys to preserve the directory's encounter order.
+        let index = visible.partition_point(|(prior, _)| prior <= &key);
+        if index < rows {
+            if visible.len() == rows {
+                visible.pop();
+            }
+            visible.insert(index, (key, name));
+        }
+    }
+    let detail = match total {
+        1 => "1 item".to_string(),
+        n => format!("{n} items"),
+    };
+    let mut lines: Vec<_> = visible.into_iter().map(|(_, name)| name).collect();
+    if total > rows {
+        lines.pop();
+        lines.push(format!("… {} more", total - lines.len()));
+    }
+    (detail, lines)
+}
+
 fn content(path: &Path, line: Option<usize>, max: (u32, u32), rows: usize) -> Option<Content> {
     let title = path
         .file_name()
@@ -553,30 +587,17 @@ fn content(path: &Path, line: Option<usize>, max: (u32, u32), rows: usize) -> Op
         .into_owned();
     let meta = path.metadata().ok()?;
     if meta.is_dir() {
-        let mut names: Vec<String> = std::fs::read_dir(path)
-            .ok()?
-            .filter_map(Result::ok)
-            .map(|e| {
-                let mut name = e.file_name().to_string_lossy().into_owned();
-                if e.file_type().is_ok_and(|t| t.is_dir()) {
-                    name.push('/');
-                }
-                name
-            })
-            .collect();
-        names.sort_by_key(|n| n.to_lowercase());
-        let detail = match names.len() {
-            1 => "1 item".to_string(),
-            n => format!("{n} items"),
-        };
-        let more = names.len().saturating_sub(rows);
-        names.truncate(rows);
-        if more > 0 {
-            names.pop();
-            names.push(format!("… {} more", more + 1));
-        }
+        let entries = std::fs::read_dir(path).ok()?.map(|entry| {
+            let entry = entry?;
+            let mut name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                name.push('/');
+            }
+            Ok(name)
+        });
+        let (detail, lines) = directory_lines(entries, rows);
         let body = Body::Lines {
-            lines: names,
+            lines,
             first: None,
             mark: None,
         };
@@ -1796,6 +1817,38 @@ mod tests {
     }
 
     #[test]
+    fn directory_lines_count_successes_and_reserve_the_last_row_only_on_overflow() {
+        let listing = |names: &[Option<&str>], rows| {
+            directory_lines(
+                names.iter().map(|name| {
+                    name.map(str::to_owned)
+                        .ok_or_else(|| std::io::Error::other("unreadable entry"))
+                }),
+                rows,
+            )
+        };
+        let (detail, lines) = listing(&[], 1);
+        assert_eq!(detail, "0 items");
+        assert!(lines.is_empty());
+        let (detail, lines) = listing(&[None, Some("src/"), None], 1);
+        assert_eq!(detail, "1 item");
+        assert_eq!(lines, ["src/"]);
+        let names = [Some("Zulu"), None, Some("β"), Some("Β"), Some("a/")];
+        let (detail, lines) = listing(&names, 4);
+        assert_eq!(detail, "4 items");
+        assert_eq!(lines, ["a/", "Zulu", "β", "Β"]);
+        assert_eq!(listing(&names, 3).1, ["a/", "Zulu", "… 2 more"]);
+        assert_eq!(listing(&names, 1).1, ["… 4 more"]);
+    }
+
+    #[test]
+    fn directory_lines_keep_the_earliest_equal_keys_at_the_cutoff() {
+        let names = ["ZZ", "aA", "Aa", "AA", "aa", "0"];
+        let (_, lines) = directory_lines(names.into_iter().map(|s| Ok(s.to_owned())), 4);
+        assert_eq!(lines, ["0", "aA", "Aa", "… 3 more"]);
+    }
+
+    #[test]
     fn draws_text_and_image_cards() {
         let dir = scratch();
         let style = Style {
@@ -1828,6 +1881,10 @@ mod tests {
 
         let listing = content(&dir, None, body_room(1.0), MAX_LINES).unwrap();
         assert_eq!(listing.detail, "2 items");
+        let Body::Lines { lines, .. } = listing.body else {
+            panic!("lines");
+        };
+        assert_eq!(lines, ["dot.png", "src/"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
