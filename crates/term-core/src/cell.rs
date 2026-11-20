@@ -145,7 +145,7 @@ impl Default for Cell {
 }
 
 impl Cell {
-    const SGR_FLAGS: Flags = Flags::BOLD
+    const HTML_FLAGS: Flags = Flags::BOLD
         .union(Flags::DIM)
         .union(Flags::ITALIC)
         .union(Flags::UNDERLINE)
@@ -154,23 +154,49 @@ impl Cell {
         .union(Flags::HIDDEN)
         .union(Flags::STRIKE);
 
-    /// Whether both cells render with the same SGR attributes and colors.
-    pub(crate) fn same_sgr(&self, other: &Cell) -> bool {
+    pub(crate) fn same_html_style(&self, other: &Cell) -> bool {
         self.fg == other.fg
             && self.bg == other.bg
-            && self.flags.bits() & Self::SGR_FLAGS.bits()
-                == other.flags.bits() & Self::SGR_FLAGS.bits()
+            && self.flags.bits() & Self::HTML_FLAGS.bits()
+                == other.flags.bits() & Self::HTML_FLAGS.bits()
     }
 
-    /// Appends one SGR sequence that resets and then sets this cell's attributes and colors.
-    pub(crate) fn push_sgr(&self, out: &mut String) {
+    pub(crate) fn sgr(&self, underline_color: Option<Color>) -> Sgr {
+        Sgr {
+            flags: Flags(self.flags.0 & Self::HTML_FLAGS.union(Flags::UNDERLINE_STYLE).0),
+            fg: self.fg,
+            bg: self.bg,
+            underline_color,
+        }
+    }
+
+    /// A blank cell that keeps the background of `template`, as erase operations require.
+    pub fn blank(template: &Cell) -> Cell {
+        Cell {
+            bg: template.bg,
+            ..Cell::default()
+        }
+    }
+}
+
+/// SGR state independent of cell storage markers and link-table indices.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Sgr {
+    flags: Flags,
+    fg: Color,
+    bg: Color,
+    underline_color: Option<Color>,
+}
+
+impl Sgr {
+    /// Appends a reset and the active settings, without a CSI introducer.
+    pub(crate) fn push_setting(self, out: &mut String) {
         use std::fmt::Write;
-        out.push_str("\x1b[0");
+        out.push('0');
         for (flag, code) in [
             (Flags::BOLD, ";1"),
             (Flags::DIM, ";2"),
             (Flags::ITALIC, ";3"),
-            (Flags::UNDERLINE, ";4"),
             (Flags::BLINK, ";5"),
             (Flags::INVERSE, ";7"),
             (Flags::HIDDEN, ";8"),
@@ -179,6 +205,19 @@ impl Cell {
             if self.flags.contains(flag) {
                 out.push_str(code);
             }
+        }
+        out.push_str(match self.flags.underline() {
+            None => "",
+            Some(UnderlineStyle::Single) => ";4",
+            Some(UnderlineStyle::Double) => ";21",
+            Some(UnderlineStyle::Curly) => ";4:3",
+            Some(UnderlineStyle::Dotted) => ";4:4",
+            Some(UnderlineStyle::Dashed) => ";4:5",
+        });
+        match self.underline_color {
+            Some(Color::Indexed(n)) => write!(out, ";58:5:{n}").unwrap(),
+            Some(Color::Rgb(r, g, b)) => write!(out, ";58:2::{r}:{g}:{b}").unwrap(),
+            _ => {}
         }
         for (color, base) in [(self.fg, 30), (self.bg, 40)] {
             let _ = match color {
@@ -190,14 +229,6 @@ impl Cell {
             };
         }
         out.push('m');
-    }
-
-    /// A blank cell that keeps the background of `template`, as erase operations require.
-    pub fn blank(template: &Cell) -> Cell {
-        Cell {
-            bg: template.bg,
-            ..Cell::default()
-        }
     }
 }
 

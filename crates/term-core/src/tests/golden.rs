@@ -181,6 +181,57 @@ fn last_command_output_keeps_styles_as_sgr() {
 }
 
 #[test]
+fn last_command_output_round_trips_diagnostic_underlines() {
+    let mut source = Terminal::new(8, 8);
+    source.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07");
+    let colors = ["59", "58;5;197", "58:2::1:2:3"];
+    for shape in 1..=5 {
+        for n in 0..3 {
+            // Reverse every other triplet to change just the shape at its boundary.
+            let color = colors[if shape % 2 == 1 { n } else { 2 - n }];
+            let ch = char::from(b'A' + (shape - 1) * 3 + n as u8);
+            source.advance(format!("\x1b[4:{shape};{color}m{ch}").as_bytes());
+        }
+    }
+    source.advance(b"\x1b[0;1;31mR\x1b[mP\x1b[3;44;4:3;58:5:7m");
+    source.advance("e\u{301}界  \r\n".as_bytes());
+    source.advance(b"X\x1b[m\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+
+    let output = source.last_command_output().unwrap();
+    let (first, last) = output.split_once('\n').unwrap();
+    let mut replay = Terminal::new(8, 8);
+    replay.advance(first.as_bytes());
+    assert_eq!(replay.cursor_position(), Some((2, 4))); // Soft wraps, wide text, trimmed spaces.
+    assert_eq!(replay.cursor.template, Cell::default());
+    replay.advance(b"\r\n");
+    replay.advance(last.as_bytes());
+    assert_eq!(replay.cursor_position(), Some((3, 1)));
+    assert_eq!(replay.cursor.template, Cell::default());
+    for (row, len) in [8, 8, 4, 1].into_iter().enumerate() {
+        for col in 0..len {
+            let a = &source.viewport_row(row + 1).cells[col];
+            let b = &replay.viewport_row(row).cells[col];
+            assert_eq!(source.base_char(a), replay.base_char(b));
+            assert_eq!(source.grapheme(a), replay.grapheme(b));
+            assert_eq!((a.flags, a.fg, a.bg), (b.flags, b.fg, b.bg));
+            assert_eq!(source.underline_color(a), replay.underline_color(b));
+        }
+    }
+}
+
+#[test]
+fn pager_and_clipboard_group_only_the_styles_they_export() {
+    let mut t = Terminal::new(40, 4);
+    t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07");
+    t.advance(b"\x1b[4:3;58:5:7mx\x1b]8;;https://example.org\x07y\x1b]8;;\x07");
+    t.advance(b"\x1b[4:4;58:5:8mz\x1b[m\r\n\x1b]133;D;0\x07");
+    assert!(t.last_command_output().unwrap().contains("xy"));
+    t.select_command_output();
+    assert_eq!(t.selection_text().as_deref(), Some("xyz"));
+    assert!(t.selection_html().unwrap().contains(">xyz</span>"));
+}
+
+#[test]
 fn last_command_output_joins_soft_wraps_and_stops_at_a_partial_line() {
     let mut t = Terminal::new(10, 4);
     t.advance(

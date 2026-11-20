@@ -925,50 +925,9 @@ impl Terminal {
     }
 
     fn sgr_setting(&self) -> String {
-        let t = &self.cursor.template;
-        let mut out = String::from("0");
-        for (flag, code) in [
-            (Flags::BOLD, "1"),
-            (Flags::DIM, "2"),
-            (Flags::ITALIC, "3"),
-            (Flags::BLINK, "5"),
-            (Flags::INVERSE, "7"),
-            (Flags::HIDDEN, "8"),
-            (Flags::STRIKE, "9"),
-        ] {
-            if t.flags.contains(flag) {
-                out.push(';');
-                out.push_str(code);
-            }
-        }
-        match t.flags.underline() {
-            None => {}
-            Some(UnderlineStyle::Single) => out.push_str(";4"),
-            Some(UnderlineStyle::Double) => out.push_str(";21"),
-            Some(style) => {
-                let n = match style {
-                    UnderlineStyle::Curly => 3,
-                    UnderlineStyle::Dotted => 4,
-                    _ => 5,
-                };
-                out.push_str(&format!(";4:{n}"));
-            }
-        }
-        match self.links.underline(t.hyperlink) {
-            Some(Color::Indexed(i)) => out.push_str(&format!(";58:5:{i}")),
-            Some(Color::Rgb(r, g, b)) => out.push_str(&format!(";58:2::{r}:{g}:{b}")),
-            _ => {}
-        }
-        for (color, base, bright) in [(t.fg, 30, 90), (t.bg, 40, 100)] {
-            match color {
-                Color::Indexed(i) if i < 8 => out.push_str(&format!(";{}", base + i as u16)),
-                Color::Indexed(i) if i < 16 => out.push_str(&format!(";{}", bright + i as u16 - 8)),
-                Color::Indexed(i) => out.push_str(&format!(";{};5;{i}", base + 8)),
-                Color::Rgb(r, g, b) => out.push_str(&format!(";{};2;{r};{g};{b}", base + 8)),
-                Color::DefaultFg | Color::DefaultBg => {}
-            }
-        }
-        out.push('m');
+        let cell = &self.cursor.template;
+        let mut out = String::new();
+        cell.sgr(self.underline_color(cell)).push_setting(&mut out);
         out
     }
 
