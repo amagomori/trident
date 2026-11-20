@@ -1156,6 +1156,26 @@ fn selection_html_carries_colors_and_styles() {
 }
 
 #[test]
+fn rich_copy_escapes_styled_graphemes_and_trims_each_hard_line() {
+    let mut t = term(20, 2, "値\x1b[1m<&\u{301}>\x1b[m\u{3000}  \r\ne\u{301}  ");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(1, 19));
+
+    assert_eq!(
+        t.selection_text().as_deref(),
+        Some("値<&\u{301}>\ne\u{301}")
+    );
+    let mut style = String::new();
+    t.push_html_style(&Cell::default(), &mut style);
+    assert_eq!(
+        t.selection_html().unwrap(),
+        format!(
+            "<pre>\n<span style=\"{style}\">値</span><span style=\"{style};font-weight:bold\">&lt;&amp;\u{301}&gt;\n</span><span style=\"{style}\">e\u{301}</span></pre>"
+        )
+    );
+}
+
+#[test]
 fn selection_html_joins_wrapped_lines_and_trims_tail() {
     let mut t = term(5, 4, "hello world\r\nnext");
     t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
