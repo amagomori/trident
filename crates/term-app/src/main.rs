@@ -2744,7 +2744,6 @@ impl App {
         };
         match event {
             WindowEvent::Focused(true) => {
-                self.cancel_prompts();
                 self.select_tab(index);
                 self.window_event(event_loop, id, WindowEvent::Focused(true));
             }
@@ -2788,6 +2787,12 @@ impl App {
     fn select_tab(&mut self, index: usize) {
         if index == self.active_tab || index >= self.tabs.len() {
             return;
+        }
+        #[cfg(target_os = "macos")]
+        self.cancel_prompts();
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.pending_paste = None;
         }
         self.cancel_prompt_click();
         let Some(s) = &mut self.session else { return };
@@ -5668,7 +5673,6 @@ impl ApplicationHandler<UserEvent> for App {
                     .find(|&i| self.tab_window(i).and_then(native_tabs::key) == Some(key))
                 {
                     if index != self.active_tab {
-                        self.cancel_prompts();
                         self.select_tab(index);
                     }
                     if matches!(event, UserEvent::NewTab(_)) {
