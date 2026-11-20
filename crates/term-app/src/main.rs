@@ -1397,6 +1397,8 @@ fn finish_startup_stderr() -> std::io::Result<()> {
 }
 
 fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
+    use winit::keyboard::NamedKey;
+
     let modifiers = u8::from(mods.control_key())
         | (u8::from(mods.shift_key()) << 1)
         | (u8::from(mods.alt_key()) << 2)
@@ -1405,10 +1407,12 @@ fn shortcut_chord(key: Key, mods: ModifiersState) -> Option<config::Chord> {
         Key::Character(c) if c == " " => "space".into(),
         Key::Character(c) => c.to_lowercase(),
         Key::Named(named) => match named {
-            winit::keyboard::NamedKey::ArrowUp => "up".into(),
-            winit::keyboard::NamedKey::ArrowDown => "down".into(),
-            winit::keyboard::NamedKey::ArrowLeft => "left".into(),
-            winit::keyboard::NamedKey::ArrowRight => "right".into(),
+            // Modifier transitions are input, not Command shortcuts.
+            NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super => return None,
+            NamedKey::ArrowUp => "up".into(),
+            NamedKey::ArrowDown => "down".into(),
+            NamedKey::ArrowLeft => "left".into(),
+            NamedKey::ArrowRight => "right".into(),
             _ => format!("{named:?}").to_lowercase(),
         },
         _ => return None,
@@ -7087,6 +7091,26 @@ mod tests {
                 ModifiersState::empty()
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn held_command_only_forms_shortcuts_with_non_modifier_keys() {
+        use winit::keyboard::NamedKey;
+
+        let cmd = ModifiersState::SUPER;
+        for key in [
+            NamedKey::Shift,
+            NamedKey::Control,
+            NamedKey::Alt,
+            NamedKey::Super,
+        ] {
+            assert_eq!(shortcut_chord(Key::Named(key), cmd), None);
+        }
+        let chord = shortcut_chord(Key::Named(NamedKey::ArrowUp), cmd | ModifiersState::ALT);
+        assert_eq!(
+            config::default_bindings_for(true).get(&chord.unwrap()),
+            Some(&Action::LineUp)
         );
     }
 
