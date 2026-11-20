@@ -3,7 +3,7 @@
 
 use term_core::colors::Palette;
 use term_core::search::Match;
-use term_core::{Cell, CursorShape, Flags, Link, Point, Terminal};
+use term_core::{Cell, CursorShape, Flags, Link, Terminal};
 
 /// Shared frame inputs whose changes damage every row.
 #[derive(Clone, PartialEq)]
@@ -19,9 +19,8 @@ struct FrameKey {
     atlas: u64,
     graphemes: u64,
     links: u64,
-    /// Search and hover highlights are keyed by absolute line.
-    top: Option<Point>,
-    current_match: Option<usize>,
+    /// First drawn line and row zero (the partly visible row may clamp to row zero).
+    top: Option<(u64, u64)>,
 }
 
 /// The inputs of one frame's grid that live outside the terminal.
@@ -69,6 +68,7 @@ impl RowHighlight {
 pub(crate) struct Damage {
     key: Option<FrameKey>,
     matches: Vec<Match>,
+    current_match: Option<usize>,
     hover: Option<Link>,
     blink_visible: bool,
     rows: Vec<RowState>,
@@ -102,9 +102,12 @@ impl Damage {
             atlas: frame.atlas,
             graphemes: term.grapheme_releases(),
             links: term.link_releases(),
-            top: (frame.search.is_some() || frame.hover.is_some())
-                .then(|| term.viewport_to_point_signed(first, 0)),
-            current_match: frame.search.and_then(|(_, current)| current),
+            top: (frame.search.is_some() || frame.hover.is_some()).then(|| {
+                (
+                    term.viewport_to_point_signed(first, 0).line,
+                    term.viewport_to_point(0, 0).line,
+                )
+            }),
         };
         let matches = frame.search.map_or(&[][..], |(matches, _)| matches);
         let mut all = self.key.as_ref() != Some(&key)
@@ -159,6 +162,18 @@ impl Damage {
                 damaged[i] = true;
             }
         }
+        let current = frame.search.and_then(|(_, index)| index);
+        let previous = std::mem::replace(&mut self.current_match, current);
+        if !all && previous != current {
+            // The list is unchanged. Distinct indices can share a grapheme's cell range.
+            let previous = previous.and_then(|i| matches.get(i));
+            let current = current.and_then(|i| matches.get(i));
+            for (i, dirty) in damaged.iter_mut().enumerate() {
+                let line = term.viewport_to_point_signed(first + i as isize, 0).line;
+                let touches = |m: &Match| m.start.line <= line && line <= m.end.line;
+                *dirty |= previous.is_some_and(touches) || current.is_some_and(touches);
+            }
+        }
     }
 
     /// Highlight bounds and padding policy for drawn row `i` of the recorded frame.
@@ -205,7 +220,7 @@ pub(crate) fn upload_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use term_core::SelectionKind;
+    use term_core::{Point, SelectionKind};
 
     fn frame(term: &Terminal) -> Frame<'static> {
         Frame {
@@ -524,6 +539,112 @@ mod tests {
         };
         assert_eq!(damaged(&mut damage, &term, &hovering), [0, 1, 2]);
         assert_eq!(damaged(&mut damage, &term, &hovering), [] as [usize; 0]);
+    }
+
+    #[test]
+    fn next_match_damages_only_the_two_focused_rows() {
+        let mut term = Terminal::new(160, 60);
+        term.advance(["hit"; 60].join("\r\n").as_bytes());
+        let matches = term.search("hit", false).unwrap();
+        assert_eq!(matches.len(), 60);
+        let mut damage = Damage::default();
+        let mut f = frame(&term);
+        f.search = Some((&matches, Some(0)));
+        damaged(&mut damage, &term, &f);
+        for i in 1..=40 {
+            f.search = Some((&matches, Some(i)));
+            assert_eq!(damaged(&mut damage, &term, &f), [i - 1, i]);
+        }
+    }
+
+    #[test]
+    fn same_row_focus_moves_preserve_unrelated_damage() {
+        let mut term = Terminal::new(20, 3);
+        term.advance(b"hit hit\r\n\r\n");
+        let matches = term.search("hit", false).unwrap();
+        let mut damage = Damage::default();
+        let mut f = frame(&term);
+        f.search = Some((&matches, Some(0)));
+        damaged(&mut damage, &term, &f);
+        f.search = Some((&matches, Some(1)));
+        assert_eq!(damaged(&mut damage, &term, &f), [0]);
+        term.advance(b"!");
+        f.search = Some((&matches, None));
+        assert_eq!(damaged(&mut damage, &term, &f), [0, 2]);
+        f.search = Some((&matches, Some(0)));
+        assert_eq!(damaged(&mut damage, &term, &f), [0]);
+    }
+
+    #[test]
+    fn moving_between_matches_in_one_grapheme_repaints_its_row() {
+        let mut term = Terminal::new(10, 3);
+        term.advance("e\u{301}".as_bytes());
+        let matches = term.search(".", true).unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], matches[1]);
+        let mut damage = Damage::default();
+        let mut f = frame(&term);
+        f.search = Some((&matches, Some(0)));
+        damaged(&mut damage, &term, &f);
+        f.search = Some((&matches, Some(1)));
+        assert_eq!(damaged(&mut damage, &term, &f), [0]);
+    }
+
+    #[test]
+    fn cached_search_highlights_match_full_paint() {
+        let mut term = Terminal::new(6, 4);
+        for _ in 0..4 {
+            // Each hit spans a wide-wrap placeholder and a wide character.
+            term.advance("aaaaa界\r\n".as_bytes());
+        }
+        let hits = term.search("a界", false).unwrap();
+        assert_eq!(hits.len(), 4);
+        assert!(hits.iter().all(|m| m.start.line + 1 == m.end.line));
+        let mut damage = Damage::default();
+        let mut painted = vec![Vec::new(); term.rows() + 1];
+        let mut check = |term: &Terminal, search: Option<(&[Match], Option<usize>)>| {
+            let f = Frame {
+                search,
+                pixel_offset: 3.0,
+                ..frame(term)
+            };
+            let dirty = damaged(&mut damage, term, &f);
+            for (i, cached) in painted.iter_mut().enumerate() {
+                let row = i as isize - 1;
+                let full: Vec<_> = term
+                    .viewport_row_signed(row)
+                    .cells
+                    .iter()
+                    .enumerate()
+                    .map(|(col, cell)| {
+                        let point = term.viewport_to_point_signed(row, col);
+                        let (matches, current) = search?;
+                        let idx = term_core::search::highlighted(matches, point, cell)?;
+                        Some(Some(idx) == current)
+                    })
+                    .collect();
+                if dirty.contains(&i) {
+                    cached.clone_from(&full);
+                }
+                assert_eq!(*cached, full, "stale search colors in row {row}");
+            }
+            dirty
+        };
+        term.scroll_display(term.scrollback_len() as isize);
+        check(&term, Some((&hits, None)));
+        // At the oldest line the partly visible row -1 and row 0 coincide.
+        assert_eq!(check(&term, Some((&hits, Some(0)))), [0, 1, 2]);
+        term.scroll_display(-1);
+        check(&term, Some((&hits, Some(0))));
+        assert_eq!(check(&term, Some((&hits, Some(1)))), [0, 1, 2, 3]);
+        assert_eq!(check(&term, Some((&hits, Some(3)))), [2, 3]);
+        check(&term, Some((&hits, None)));
+        // Replace the list, then prepend an older hit, shifting the focused index.
+        check(&term, Some((&hits[1..], Some(0))));
+        check(&term, Some((&hits, Some(1))));
+        check(&term, Some((&[], None)));
+        check(&term, Some((&hits, Some(0))));
+        check(&term, None);
     }
 
     fn spans(lens: &[u32], pending: &[bool], offsets: &mut Vec<u32>) -> Vec<(usize, usize)> {
