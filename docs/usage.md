@@ -12,7 +12,7 @@ trident [OPTIONS] [-e COMMAND [ARGS...]]
   --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)
   --font-size <SIZE>  Font size in points (default: 14)
   --scrollback <LINES> History lines (default: 10000; 0 disables; maximum: 1000000)
-  --option-as-alt     On macOS, make Option act as Alt/Meta
+  --option-as-alt     On macOS, make both Option keys act as Alt/Meta
   --copy-on-select    Copy selected text to the clipboard on mouse release
   -e, --command ...   Run this command instead of your shell
   --install-terminfo  Install the xterm-trident terminfo entry with tic
@@ -123,7 +123,8 @@ lines. It ignores case unless the query has an uppercase letter.
 
 - Enter or Up moves to the next older match. Shift+Enter or Down moves to the next newer one.
   Search wraps at either end.
-- Alt+R or Ctrl+R toggles regular expressions.
+- Ctrl+R or Alt+R toggles regular expressions. On macOS, Option+R toggles them only with an
+  [Option key configured for Meta](configuration.md#key-bindings).
 - Escape closes search and clears highlights without changing the scroll position.
 
 ## Selection
@@ -284,7 +285,9 @@ trident show [--width N] [--height N] [--fit] FILE...
 picks the type from the file's contents, not its name:
 
 - Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG) are drawn shrunk to fit
-  the window. GIFs show their first frame.
+  the window. Animated GIF and WebP files play in place in Trident and other terminals
+  that support kitty animation. Trident only schedules animation redraws while the image
+  is visible and playing; drop and hover previews remain still.
 - Text files are printed with control characters made visible.
 - For other files, Trident asks Quick Look on macOS or an installed
   freedesktop thumbnailer on Linux for a preview. For example, on Ubuntu,

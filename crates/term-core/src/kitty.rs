@@ -1,13 +1,13 @@
 //! The kitty graphics protocol: `ESC _ G <control> ; <payload> ESC \` transmits, places,
 //! deletes and queries images (<https://sw.kovidgoyal.net/kitty/graphics-protocol/>).
-//! Shared memory and animation are not supported.
+//! Shared memory is not supported.
 //!
 //! vte drops APC strings, so [`Terminal::advance`] diverts them here before the parser
 //! sees their bodies. Payloads are base64-decoded as they stream in, so a large image never
 //! sits in memory twice.
 
 use super::Terminal;
-use crate::images::{Image, ImageError, MAX_IMAGE_SIDE, PlaceOptions, Rect};
+use crate::images::{FramePatch, Image, ImageError, MAX_IMAGE_SIDE, PlaceOptions, Rect};
 use base64::Engine;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use memchr::memmem;
@@ -144,7 +144,7 @@ impl Control {
                     continue;
                 }
             };
-            c.chunk_only &= matches!(key, b'm' | b'q');
+            c.chunk_only &= matches!(key, b'm' | b'q') || (key == b'a' && value == b"f");
             let num = || std::str::from_utf8(value).ok()?.parse::<u32>().ok();
             let char_value = || match value {
                 [v] => Some(*v),
@@ -372,15 +372,17 @@ impl Terminal {
     /// The control part of the current APC is complete: start or continue a transmission.
     fn apc_command(&mut self) {
         let control = Control::parse(&self.kitty.apc.control[1..]);
-        if !control.chunk_only {
+        if !control.chunk_only
+            || self
+                .kitty
+                .loading
+                .as_ref()
+                .is_some_and(|t| (control.action == b'f') != (t.control.action == b'f'))
+        {
             // A new command abandons a transmission whose last chunk never came.
             self.kitty.loading = None;
         }
-        // Animation frames are not supported, but their temp files are still taken and deleted.
-        let frame_file = control.action == b'f' && control.medium == b't';
-        if self.kitty.loading.is_none()
-            && (frame_file || matches!(control.action, b't' | b'T' | b'q'))
-        {
+        if self.kitty.loading.is_none() && matches!(control.action, b't' | b'T' | b'q' | b'f') {
             let limit = match control.medium {
                 b'f' | b't' | b's' => MAX_PATH,
                 _ => self.images.quota,
@@ -401,14 +403,34 @@ impl Terminal {
             _ if control.invalid => Err("EINVAL:bad control data"),
             b'p' => self.kitty_put(&control),
             b'd' => return self.kitty_delete(&control),
-            // Animation is not supported, so controlling a known image's animation succeeds
-            // silently, as it does in kitty, instead of leaving a reply for kitten to drop.
-            b'a' => match self.resolve_image(&control) {
-                Ok(_) => return,
-                Err(error) => Err(error),
-            },
+            b'a' | b'c' => self.resolve_image(&control).and_then(|id| {
+                if control.action == b'a' {
+                    self.control_animation(
+                        id,
+                        control.width,
+                        control.height,
+                        control.rows,
+                        control.cols,
+                        control.z,
+                    )?;
+                } else {
+                    self.compose_frame(
+                        id,
+                        control.rows,
+                        control.cols,
+                        (control.x_offset, control.y_offset),
+                        control.source,
+                        control.keep_cursor,
+                    )?;
+                }
+                Ok(id)
+            }),
             _ => Err("EINVAL:unsupported action"),
         };
+        // Like kitty, a successful animation control command needs no acknowledgement.
+        if control.action == b'a' && result.is_ok() {
+            return;
+        }
         let id = *result.as_ref().unwrap_or(&control.id);
         self.kitty_reply(&control, id, result.map(|_| ()));
     }
@@ -417,10 +439,6 @@ impl Terminal {
         let mut control = t.control;
         let result = match t.error {
             Some(error) => Err(error),
-            None if control.action == b'f' => {
-                discard_temp_file(&t.data);
-                Err("EINVAL:unsupported action")
-            }
             None => decode_transmission(&control, t.data, self.images.quota),
         };
         let image = match result {
@@ -429,6 +447,25 @@ impl Terminal {
         };
         if control.action == b'q' {
             return self.kitty_reply(&control, control.id, Ok(()));
+        }
+        if control.action == b'f' {
+            let id = match self.resolve_image(&control) {
+                Ok(id) => id,
+                Err(e) => return self.kitty_reply(&control, control.id, Err(e)),
+            };
+            let result = self.add_frame(
+                id,
+                image,
+                FramePatch {
+                    target: control.rows,
+                    base: control.cols,
+                    offset: (control.source.x, control.source.y),
+                    background: control.y_offset,
+                    replace: control.x_offset == 1,
+                    gap: control.z,
+                },
+            );
+            return self.kitty_reply(&control, id, result);
         }
         let id = match control.id {
             0 => self.free_image_id(),
@@ -795,19 +832,10 @@ fn read_file(
     Ok(data)
 }
 
-/// Deletes the `t=t` temp file of a transmission that is refused before it is read.
-#[cfg(unix)]
-fn discard_temp_file(path: &[u8]) {
-    let _ = open_image_file(path, true);
-}
-
 #[cfg(not(unix))]
 fn read_file(_: &[u8], _: bool, _: u32, _: u32, _: usize) -> Result<Vec<u8>, &'static str> {
     Err("EINVAL:file transmission is not supported")
 }
-
-#[cfg(not(unix))]
-fn discard_temp_file(_: &[u8]) {}
 
 #[cfg(test)]
 mod tests;

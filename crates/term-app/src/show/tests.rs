@@ -151,9 +151,60 @@ fn svg_draws_embedded_raster_images() {
 }
 
 #[test]
-fn gif_shows_its_first_frame() {
-    // The second frame is black.
-    assert_eq!(pixel(&decode("sample.gif"), 0, 0), [255, 0, 0, 255]);
+fn show_plays_gif_and_webp_in_one_placement_at_the_file_delays() {
+    for (name, first, second, loops) in [
+        ("sample.gif", 100, 100, true),
+        ("animated.webp", 60, 90, false),
+    ] {
+        let mut bytes = Vec::new();
+        show(&sample(name), &Options::default(), big_window(), &mut bytes).unwrap();
+        let mut t = Terminal::new(80, 24);
+        t.set_cell_pixel_size(10.0, 20.0);
+        for chunk in bytes.chunks(7) {
+            t.advance(chunk);
+        }
+        assert!(t.take_responses().is_empty());
+        let placed = t.visible_placements();
+        assert_eq!(placed.len(), 1);
+        let id = placed[0].placement.image_id;
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        assert_eq!(t.advance_animations(start, 0), Some(at(first)));
+        assert_eq!(&t.image(id).unwrap().pixels[..4], &[255, 0, 0, 255]);
+        assert_eq!(t.advance_animations(at(first), 0), Some(at(first + second)));
+        assert_eq!(&t.image(id).unwrap().pixels[..4], &[0, 0, 0, 255]);
+        assert_eq!(t.advance_animations(at(first + second), 0).is_some(), loops);
+    }
+}
+
+#[test]
+fn show_uploads_lossless_blended_webp_pixels_exactly() {
+    let mut bytes = Vec::new();
+    show(
+        &sample("blended.webp"),
+        &Options::default(),
+        big_window(),
+        &mut bytes,
+    )
+    .unwrap();
+    let mut term = Terminal::new(80, 24);
+    term.advance(&bytes);
+    let id = term.visible_placements()[0].placement.image_id;
+    let start = Instant::now();
+    let next = term.advance_animations(start, 0).unwrap();
+    term.advance_animations(next, 0);
+
+    let frame = term.image(id).unwrap();
+    assert_eq!((frame.width, frame.height), (48, 32));
+    for (i, &pixel) in frame.pixels.as_chunks::<4>().0.iter().enumerate() {
+        let (x, y) = (i % 48, i / 48);
+        let expected = if (2..8).contains(&x) && y < 16 {
+            [255, 0, 0, 255]
+        } else {
+            [1, 127, 255, 255]
+        };
+        assert_eq!(pixel, expected, "at ({x}, {y})");
+    }
 }
 
 #[test]
@@ -553,17 +604,14 @@ fn in_tmux() -> Window {
 fn virtual_replay(image: &Rgba, window: Window) -> (Terminal, Vec<u8>) {
     let mut out = Vec::new();
     let mut chunks = 0;
-    write_placeholders(
-        &mut out,
-        image,
-        window,
-        || chunks += 1,
-        |count| {
-            assert!(count > 0);
-            Ok(TILE_IDS - 1)
-        },
-    )
+    let grid = TileGrid::new(image, window, |count| {
+        assert!(count > 0);
+        Ok(tiles::TILE_IDS - 1)
+    })
     .unwrap();
+    grid.send(&mut out, image, None, &mut || chunks += 1)
+        .unwrap();
+    grid.write_cells(&mut out).unwrap();
     let mut term = Terminal::new(window.cols as usize, window.rows as usize);
     term.set_cell_pixel_size(window.cell_w, window.cell_h);
     let mut rest = out.as_slice();

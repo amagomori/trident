@@ -5,6 +5,22 @@
 use std::{fs, path::Path, process::Command};
 use term_core::Terminal;
 
+fn capture(image: &Path, dir: &Path) -> String {
+    let capture = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tmux_image_history.py"))
+        .arg(env!("CARGO_BIN_EXE_trident"))
+        .arg(image)
+        .arg(dir)
+        .output()
+        .unwrap();
+    assert!(
+        capture.status.success(),
+        "{}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    String::from_utf8(capture.stdout).unwrap()
+}
+
 #[test]
 #[ignore = "requires python3 and tmux; run explicitly on the Linux and macOS CI matrix"]
 fn real_tmux_restores_inline_pixels() {
@@ -13,22 +29,11 @@ fn real_tmux_restores_inline_pixels() {
         let png = fixtures.join(format!("direct-{kind}-pdf.png"));
         let original = image::open(&png).unwrap().to_rgba8();
         let tmp = tempfile::tempdir().unwrap();
-        let capture = Command::new("python3")
-            .arg(fixtures.join("tmux_image_history.py"))
-            .arg(env!("CARGO_BIN_EXE_trident"))
-            .arg(png)
-            .arg(tmp.path())
-            .output()
-            .unwrap();
-        assert!(
-            capture.status.success(),
-            "{}",
-            String::from_utf8_lossy(&capture.stderr)
-        );
+        let frames = capture(&png, tmp.path());
         let mut term = Terminal::new(158, 41);
         term.set_cell_pixel_size(8., 20.);
         let mut recovered = vec![false; original.len() / 4];
-        for frame in std::str::from_utf8(&capture.stdout).unwrap().lines() {
+        for frame in frames.lines() {
             let (name, top) = frame.split_once(' ').unwrap();
             let top: i32 = top.parse().unwrap();
             term.advance(&fs::read(tmp.path().join(name)).unwrap());
@@ -111,4 +116,47 @@ fn real_tmux_restores_inline_pixels() {
             "unrecovered {kind} source pixels"
         );
     }
+}
+
+#[test]
+#[ignore = "requires python3 and tmux; run explicitly on the Linux and macOS CI matrix"]
+fn real_tmux_animates_replayed_placeholder_cells() {
+    use std::time::{Duration, Instant};
+    let tmp = tempfile::tempdir().unwrap();
+    let image = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/animated.webp");
+    let frames = capture(&image, tmp.path());
+    let mut term = Terminal::new(158, 41);
+    term.set_cell_pixel_size(8., 20.);
+    let start = Instant::now();
+    let second = start + Duration::from_millis(60);
+    let mut live_id = None;
+    let mut replayed = false;
+    for frame in frames.lines() {
+        let (name, _) = frame.split_once(' ').unwrap();
+        term.advance(&fs::read(tmp.path().join(name)).unwrap());
+        let visible = term.visible_placements();
+        if name == "live" {
+            let id = visible[0].placement.image_id;
+            live_id = Some(id);
+            assert_eq!(term.advance_animations(start, 0), Some(second));
+            assert_eq!(term.image(id).unwrap().pixels[..4], [255, 0, 0, 255]);
+        } else if name == "out" || name == "exit" {
+            assert!(visible.is_empty());
+            assert_eq!(term.advance_animations(second, 0), None);
+        } else if !visible.is_empty() {
+            let id = live_id.unwrap();
+            assert!(
+                visible
+                    .iter()
+                    .all(|run| run.slice.is_some() && run.placement.image_id == id)
+            );
+            assert_eq!(
+                term.advance_animations(second, 0),
+                Some(second + Duration::from_millis(90))
+            );
+            assert_eq!(term.image(id).unwrap().pixels[..4], [0, 0, 0, 255]);
+            replayed = true;
+        }
+    }
+    assert!(replayed, "no animated image in copy-mode history");
 }

@@ -175,6 +175,9 @@ fn show(
     let (bytes, size) = read_for_show(path).map_err(|e| io_message(&e))?;
     let write_err = |e: io::Error| format!("cannot write output: {}", io_message(&e));
     match detect(&bytes) {
+        Kind::Raster(format @ (ImageFormat::Gif | ImageFormat::WebP)) => {
+            animation::show(&bytes, format, options, window, out)
+        }
         Kind::Raster(format) => {
             let image = decode_raster(&bytes, format, options, window)?;
             write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
@@ -587,6 +590,10 @@ fn decode_raster(
     };
     let image =
         decode().map_err(|e| format!("cannot decode {} image: {e}", format_name(format)))?;
+    Ok(scale_raster(image, options, window))
+}
+
+fn scale_raster(image: image::DynamicImage, options: &Options, window: Window) -> Rgba {
     let (w, h) = target_size(
         (image.width() as f32, image.height() as f32),
         options,
@@ -602,11 +609,11 @@ fn decode_raster(
             image::imageops::FilterType::Triangle,
         )
     };
-    Ok(Rgba {
+    Rgba {
         width: w,
         height: h,
         pixels: image.into_raw(),
-    })
+    }
 }
 
 fn render_svg(
@@ -671,6 +678,10 @@ fn load_fonts(db: &mut resvg::usvg::fontdb::Database) {
     db.set_monospace_family(term_render::BUNDLED_FONT_FAMILY);
 }
 
+mod animation;
+mod tiles;
+use tiles::{TileGrid, reserve_tile_ids};
+
 /// Transmit pixels directly unless tmux needs text cells it can replay from history.
 fn write_kitty(
     out: &mut impl Write,
@@ -679,24 +690,39 @@ fn write_kitty(
     mut wait: impl FnMut(),
 ) -> io::Result<()> {
     if window.tmux {
-        return write_placeholders(out, image, window, wait, reserve_tile_ids);
+        let grid = TileGrid::new(image, window, reserve_tile_ids)?;
+        grid.send(out, image, None, &mut wait)?;
+        grid.write_cells(out)
+    } else {
+        send_direct(out, image, None, None)?;
+        out.write_all(b"\n")
     }
+}
+
+fn send_direct(
+    out: &mut impl Write,
+    image: &Rgba,
+    id: Option<u32>,
+    gap: Option<u32>,
+) -> io::Result<()> {
     let mut compressed = ZlibEncoder::new(Vec::new(), Compression::fast());
     compressed.write_all(&image.pixels)?;
+    let id = id.map(|id| format!("i={id},")).unwrap_or_default();
     send_chunks(
         out,
         &compressed.finish()?,
-        &format!("s={},v={}", image.width, image.height),
+        &format!("{id}s={},v={}", image.width, image.height),
+        gap,
         false,
-        &mut wait,
-    )?;
-    out.write_all(b"\n")
+        &mut || {},
+    )
 }
 
 fn send_chunks(
     out: &mut impl Write,
     compressed: &[u8],
     header: &str,
+    gap: Option<u32>,
     tmux: bool,
     wait: &mut impl FnMut(),
 ) -> io::Result<()> {
@@ -706,7 +732,10 @@ fn send_chunks(
     for (i, chunk) in chunks.enumerate() {
         let more = u8::from(i + 1 < count);
         let mut escape = if i == 0 {
-            format!("\x1b_Ga=T,f=32,o=z,q=2,{header},m={more};")
+            let action = gap.map_or_else(|| "T".into(), |gap| format!("f,z={gap},X=1"));
+            format!("\x1b_Ga={action},f=32,o=z,q=2,{header},m={more};")
+        } else if gap.is_some() {
+            format!("\x1b_Ga=f,m={more};")
         } else {
             format!("\x1b_Gm={more};")
         }
@@ -719,116 +748,6 @@ fn send_chunks(
             wait();
         } else {
             out.write_all(&escape)?;
-        }
-    }
-    Ok(())
-}
-
-// Indexed color avoids tmux RGB quantization. The high ID byte uses a diacritic.
-const TILE_IDS: usize = 240 * 255;
-
-/// Reserves a disjoint sequence across all `show` processes in one tmux server.
-/// Both commands execute in one non-yielding tmux command list. Never recycle an
-/// index: even an evicted tile may still have placeholders in pane history.
-fn reserve_tile_ids(count: usize) -> io::Result<usize> {
-    let counter = "@trident-image-sequence";
-    let increment = format!("#{{e|+|:#{{?{counter},#{{{counter}}},0}},{count}}}");
-    let response = tmux(&[
-        "set",
-        "-sF",
-        counter,
-        &increment,
-        ";",
-        "display",
-        "-p",
-        "#{pid}:#{@trident-image-sequence}",
-    ])
-    .ok_or_else(|| io::Error::other("could not reserve image IDs in tmux"))?;
-    let (pid, end) = response
-        .trim()
-        .split_once(':')
-        .and_then(|(p, e)| Some((p.parse::<usize>().ok()?, e.parse::<usize>().ok()?)))
-        .ok_or_else(|| io::Error::other("tmux did not return an image ID range"))?;
-    if end > TILE_IDS || end < count {
-        return Err(io::Error::other("tmux image ID range exhausted"));
-    }
-    Ok((pid % TILE_IDS + end - count) % TILE_IDS)
-}
-
-/// Use indexed colors (even without RGB passthrough) and the high-ID diacritic.
-/// Each tile fits the protocol's row/column table. Send *all* tiles before the
-/// first text redraw: tmux can discard passthrough while catching up on a redraw.
-fn write_placeholders(
-    out: &mut impl Write,
-    image: &Rgba,
-    window: Window,
-    mut wait: impl FnMut(),
-    reserve: impl FnOnce(usize) -> io::Result<usize>,
-) -> io::Result<()> {
-    use term_core::placeholder::{CHAR, DIACRITICS as MARK};
-    let cell_w = window.cell_w.max(1.0);
-    let cell_h = window.cell_h.max(1.0);
-    let cols = (image.width as f32 / cell_w).ceil() as usize;
-    let rows = (image.height as f32 / cell_h).ceil() as usize;
-    let tile_cols = MARK
-        .len()
-        .min((MAX_SIDE as f32 / cell_w).floor() as usize)
-        .max(1);
-    let tile_rows = MARK
-        .len()
-        .min((MAX_SIDE as f32 / cell_h).floor() as usize)
-        .max(1);
-    let mut next_id = reserve(cols.div_ceil(tile_cols) * rows.div_ceil(tile_rows))?;
-    let mut bands = Vec::new();
-    for top in (0..rows).step_by(tile_rows) {
-        let nr = (rows - top).min(tile_rows);
-        let mut band = Vec::new();
-        for left in (0..cols).step_by(tile_cols) {
-            let nc = (cols - left).min(tile_cols);
-            let x = (left as f32 * cell_w).round() as usize;
-            let y = (top as f32 * cell_h).round() as usize;
-            let width = (((left + nc) as f32 * cell_w).round() as usize - x).min(MAX_SIDE as usize);
-            let height = (((top + nr) as f32 * cell_h).round() as usize - y).min(MAX_SIDE as usize);
-            let stride = image.width as usize * 4;
-            let actual_w = width.min((image.width as usize).saturating_sub(x));
-            let actual_h = height.min((image.height as usize).saturating_sub(y));
-            // Transparent padding keeps fractional last cells at the original pixel size.
-            let zeros = vec![0; width * 4];
-            let mut z = ZlibEncoder::new(Vec::new(), Compression::fast());
-            for row in y..y + actual_h {
-                let off = row * stride + x * 4;
-                z.write_all(&image.pixels[off..off + actual_w * 4])?;
-                z.write_all(&zeros[..(width - actual_w) * 4])?;
-            }
-            for _ in actual_h..height {
-                z.write_all(&zeros)?;
-            }
-            let low = 16 + next_id % 240;
-            let high = 1 + next_id / 240;
-            next_id = (next_id + 1) % TILE_IDS;
-            let id = (high << 24) | low;
-            send_chunks(
-                out,
-                &z.finish()?,
-                &format!("U=1,i={id},c={nc},r={nr},s={width},v={height}"),
-                true,
-                &mut wait,
-            )?;
-            band.push((nc, low, high));
-        }
-        bands.push((nr, band));
-    }
-    // An inherited underline color would select a different virtual placement.
-    out.write_all(b"\x1b[59m")?;
-    for (nr, band) in bands {
-        for row in &MARK[..nr] {
-            for &(nc, low, high) in &band {
-                write!(out, "\x1b[38;5;{low}m")?;
-                for col in &MARK[..nc] {
-                    write!(out, "{CHAR}{row}{col}{}", MARK[high])?;
-                }
-            }
-            out.write_all(b"\x1b[39m\r\n")?;
         }
     }
     Ok(())

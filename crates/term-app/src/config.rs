@@ -37,6 +37,7 @@ pub struct Config {
     pub app_icon: AppIcon,
     pub menu_bar_icon: bool,
     pub auto_secure_input: bool,
+    pub option_as_alt: OptionAsAlt,
     pub hide_mouse_when_typing: bool,
     pub window_columns: Option<usize>,
     pub window_rows: Option<usize>,
@@ -82,6 +83,7 @@ impl Default for Config {
             app_icon: AppIcon::default(),
             menu_bar_icon: true,
             auto_secure_input: true,
+            option_as_alt: OptionAsAlt::None,
             hide_mouse_when_typing: true,
             window_columns: None,
             window_rows: None,
@@ -124,6 +126,7 @@ struct Raw {
     app_icon: Option<String>,
     menu_bar_icon: Option<bool>,
     auto_secure_input: Option<bool>,
+    option_as_alt: OptionAsAlt,
     hide_mouse_when_typing: Option<bool>,
     window_columns: Option<u64>,
     window_rows: Option<u64>,
@@ -269,6 +272,42 @@ impl TabBarMode {
             TabBarMode::Always => true,
             TabBarMode::Auto => tabs > 1,
             TabBarMode::Never => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(rename_all = "lowercase")]
+pub enum OptionAsAlt {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
+}
+
+impl OptionAsAlt {
+    /// Selects Meta for an Alt-modified key. If the side is unknown,
+    /// only `Both` treats it as Meta.
+    pub fn sends_esc(self, left: bool, right: bool) -> bool {
+        match self {
+            Self::None => false,
+            Self::Left => left,
+            Self::Right => right,
+            Self::Both => true,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<OptionAsAlt> for winit::platform::macos::OptionAsAlt {
+    fn from(mode: OptionAsAlt) -> Self {
+        match mode {
+            OptionAsAlt::None => Self::None,
+            OptionAsAlt::Left => Self::OnlyLeft,
+            OptionAsAlt::Right => Self::OnlyRight,
+            OptionAsAlt::Both => Self::Both,
         }
     }
 }
@@ -675,6 +714,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, String> {
         ligatures: raw.ligatures.unwrap_or(false),
         menu_bar_icon: raw.menu_bar_icon.unwrap_or(true),
         auto_secure_input: raw.auto_secure_input.unwrap_or(true),
+        option_as_alt: raw.option_as_alt,
         hide_mouse_when_typing: raw.hide_mouse_when_typing.unwrap_or(true),
         remember_window_size: raw.remember_window_size.unwrap_or(true),
         ..Config::default()
@@ -1256,6 +1296,29 @@ mod tests {
         );
         assert!(parse_text("app_icon = 3").is_err());
         assert!(parse_text("menu_bar_icon = \"no\"").is_err());
+    }
+
+    #[test]
+    fn option_as_alt_selects_only_configured_sides() {
+        assert_eq!(parse_text("").unwrap().option_as_alt, OptionAsAlt::None);
+        for (value, expected) in [
+            ("none", [false, false, false, false]),
+            ("left", [false, true, false, true]),
+            ("right", [false, false, true, true]),
+            ("both", [true, true, true, true]),
+        ] {
+            let mode = parse_text(&format!("option_as_alt = {value:?}"))
+                .unwrap()
+                .option_as_alt;
+            let sides = [(false, false), (true, false), (false, true), (true, true)];
+            assert_eq!(
+                sides.map(|(l, r)| mode.sends_esc(l, r)),
+                expected,
+                "{value}"
+            );
+        }
+        assert!(parse_text("option_as_alt = true").is_err());
+        assert!(parse_text("option_as_alt = \"either\"").is_err());
     }
 
     #[test]

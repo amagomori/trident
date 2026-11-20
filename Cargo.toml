@@ -1,8 +1,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/term-core", "crates/term-render", "crates/term-app", "vendor/vte"]
-exclude = ["vendor/winit"]
+exclude = ["vendor/winit", "vendor/image-webp"]
 default-members = ["crates/term-app"]
+
+[patch.crates-io]
+image-webp = { path = "vendor/image-webp" }
 
 [workspace.package]
 version = "1.0.0"

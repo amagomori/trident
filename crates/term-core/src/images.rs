@@ -21,6 +21,9 @@
 
 use super::Terminal;
 use std::collections::HashMap;
+mod animation;
+pub(crate) use animation::FramePatch;
+use animation::{Frame, Playback};
 
 /// Largest accepted width or height, in pixels.
 pub const MAX_IMAGE_SIDE: u32 = 10_000;
@@ -142,13 +145,20 @@ pub enum ImageError {
 }
 
 struct StoredImage {
-    image: Image,
+    frames: Vec<Frame>,
+    playback: Playback,
     last_used: u64,
-    version: u64,
+}
+
+impl StoredImage {
+    fn bytes(&self) -> usize {
+        self.frames.len() * self.frames[0].image.pixels.len()
+    }
 }
 
 pub(crate) struct ImageStore {
     images: HashMap<u32, StoredImage>,
+    animated: usize,
     pub(crate) virtuals: crate::placeholder::VirtualGrids,
     bytes: usize,
     pub(crate) quota: usize,
@@ -161,6 +171,7 @@ impl ImageStore {
     pub(crate) fn new() -> ImageStore {
         ImageStore {
             images: HashMap::new(),
+            animated: 0,
             virtuals: Default::default(),
             bytes: 0,
             quota: DEFAULT_IMAGE_QUOTA,
@@ -219,8 +230,34 @@ impl Terminal {
         if len == 0 || image.pixels.len() != len {
             return Err(ImageError::InvalidSize);
         }
+        self.reserve_image(id, len)?;
+        self.delete_image(id);
+        let last_used = self.images.tick();
+        self.images.bytes += len;
+        self.images.images.insert(
+            id,
+            StoredImage {
+                frames: vec![Frame {
+                    image,
+                    gap: 0,
+                    version: last_used,
+                }],
+                playback: Playback::default(),
+                last_used,
+            },
+        );
+        self.images.generation += 1;
+        Ok(())
+    }
+
+    /// Make room for the full new size of `id`, keeping its old data until admission succeeds.
+    fn reserve_image(&mut self, id: u32, len: usize) -> Result<(), ImageError> {
         if len > self.images.quota {
             return Err(ImageError::OverQuota);
+        }
+        let old = self.images.images.get(&id).map_or(0, StoredImage::bytes);
+        if self.images.bytes - old <= self.images.quota - len {
+            return Ok(());
         }
         let visible = self.images_on_screen();
         let pinned: usize = self
@@ -228,19 +265,17 @@ impl Terminal {
             .images
             .iter()
             .filter(|(k, _)| **k != id && visible.binary_search(k).is_ok())
-            .map(|(_, s)| s.image.pixels.len())
+            .map(|(_, s)| s.bytes())
             .sum();
-        if pinned + len > self.images.quota {
+        if pinned > self.images.quota - len {
             return Err(ImageError::OverQuota);
         }
-        // Retransmitting an id replaces the image and drops its placements.
-        self.delete_image(id);
-        while self.images.bytes + len > self.images.quota {
+        while self.images.bytes - old > self.images.quota - len {
             let victim = self
                 .images
                 .images
                 .iter()
-                .filter(|(id, _)| visible.binary_search(id).is_err())
+                .filter(|(key, _)| **key != id && visible.binary_search(key).is_err())
                 .min_by_key(|(_, img)| img.last_used)
                 .map(|(&id, _)| id);
             match victim {
@@ -250,29 +285,20 @@ impl Terminal {
                 None => return Err(ImageError::OverQuota),
             }
         }
-        let last_used = self.images.tick();
-        self.images.bytes += len;
-        self.images.images.insert(
-            id,
-            StoredImage {
-                image,
-                last_used,
-                version: last_used,
-            },
-        );
-        self.images.generation += 1;
         Ok(())
     }
 
     /// Returns stored pixels, or `None` for an unknown or evicted ID.
     pub fn image(&self, id: u32) -> Option<&Image> {
-        self.images.images.get(&id).map(|s| &s.image)
+        self.image_with_version(id).map(|(image, _)| image)
     }
 
     /// The image with id `id` and a number that changes whenever that id is given new pixels,
     /// so a renderer can tell a cached copy is stale.
     pub fn image_with_version(&self, id: u32) -> Option<(&Image, u64)> {
-        self.images.images.get(&id).map(|s| (&s.image, s.version))
+        let s = self.images.images.get(&id)?;
+        let frame = &s.frames[s.playback.current];
+        Some((&frame.image, frame.version))
     }
 
     /// Removes an image and all its placements on both screens.
@@ -281,7 +307,8 @@ impl Terminal {
             return false;
         };
         self.images.virtuals.remove(&id);
-        self.images.bytes -= old.image.pixels.len();
+        self.images.animated -= usize::from(old.frames.len() > 1);
+        self.images.bytes -= old.bytes();
         self.primary.placements.retain(|p| p.image_id != id);
         self.alternate.placements.retain(|p| p.image_id != id);
         self.images.generation += 1;
@@ -360,7 +387,8 @@ impl Terminal {
             .get_mut(&image_id)
             .ok_or(ImageError::NotFound)?;
         stored.last_used = clock;
-        let (width, height) = (stored.image.width, stored.image.height);
+        let root = &stored.frames[0].image;
+        let (width, height) = (root.width, root.height);
         let source = opts
             .source
             .map(|r| {

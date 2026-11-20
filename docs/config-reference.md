@@ -30,6 +30,7 @@ See the [configuration guide](configuration.md#config-file) for the file locatio
 | `ligatures` | boolean | `false` | Enable [programming ligatures](configuration.md#fonts) in fonts that support them. |
 | `menu_bar_icon` | boolean | `true` | Show the Trident menu bar item on macOS. |
 | `notify_long_commands_after` | integer | `10` | Notify when a command finishes in an unfocused tab after at least this many seconds. Set to 0 to disable. |
+| `option_as_alt` | string | `"none"` | On macOS, use `"left"`, `"right"` or `"both"` to send Meta with the selected Option keys. Use `"none"` to keep native text entry on both. See [Key bindings](configuration.md#key-bindings). |
 | `padding` | number | `6.0` | Set the space around the grid in logical pixels, from 0 to 1000. |
 | `pager` | string or array of strings | `["less", "-R", "+G"]` | Open the last command’s output with this program. Trident appends the output file path. |
 | `paste_protection` | boolean | `true` | Confirm a paste containing line breaks or control characters outside bracketed paste mode. See [Paste](usage.md#paste). |

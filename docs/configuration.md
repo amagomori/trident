@@ -81,6 +81,12 @@ Trident does not reorder the whole line. Cursor movement and selection use logic
 
 ## Key bindings
 
+On macOS, set `option_as_alt = "left"` to send Meta with Left Option and type
+accents and symbols with Right Option. Use `"right"` to swap sides, `"both"`
+for Meta on either side or `"none"` (the default) for native text on both.
+Changes apply to open tabs. The `--option-as-alt` flag overrides this setting
+with `"both"`. Linux Alt behavior is unchanged.
+
 `[keybindings]` entries are added on top of the platform defaults listed in
 [Usage](usage.md#keyboard-and-mouse).
 
