@@ -1148,6 +1148,14 @@ fn select_all_starts_at_first_retained_row_and_keeps_the_viewport() {
 }
 
 #[test]
+fn select_all_does_not_extend_to_later_wrapped_rows() {
+    let mut t = term(4, 2, "12345678");
+    t.select_all();
+    t.advance(b"9");
+    assert_eq!(t.selection_text().as_deref(), Some("12345678"));
+}
+
+#[test]
 fn select_all_on_an_empty_or_one_character_grid() {
     // The grid clamps requests smaller than 2 x 1 to its minimum size.
     let mut t = Terminal::new(0, 0);

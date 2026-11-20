@@ -1908,7 +1908,7 @@ impl Terminal {
                 line: self.history + self.rows as u64 - 1,
                 col: self.cols - 1,
             },
-            kind: SelectionKind::Line,
+            kind: SelectionKind::Simple,
         });
     }
 
