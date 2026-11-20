@@ -1,7 +1,7 @@
 # Trident's winit patch
 
 This is the published winit 0.30.13 crate with local patches for X11 IME
-translation, Wayland/X11 file drops, and macOS fullscreen. Original licenses
+translation, Wayland/X11 file drops, and macOS fullscreen and keypad input. Original licenses
 and source provenance are retained. Cargo's registry
 cache marker is omitted because this is a path dependency.
 
@@ -49,5 +49,12 @@ and windows outside a transition still use the superclass implementation.
 On a macOS desktop, run
 `python3 .github/scripts/fullscreen_isolation.py target/release/trident`
 from the repository root to exercise both directions.
+
+## macOS JIS keypad separator
+
+Apple's `kVK_JIS_KeypadComma` (0x5f) maps to `NumpadComma` in both scancode
+directions and has numpad location. This lets applications distinguish it
+from the standard comma without changing layout-derived text. On macOS, run
+`cargo test --manifest-path vendor/winit/Cargo.toml --lib jis_keypad_comma`.
 
 Remove these patches when a winit release carrying equivalent fixes is adopted.
