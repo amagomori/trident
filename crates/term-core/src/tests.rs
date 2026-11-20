@@ -20,6 +20,7 @@ fn input_cursor_ignores_visibility_but_tracks_viewport_and_alternate_screen() {
 mod budget;
 mod golden;
 mod row_filter;
+mod sgr_stack;
 
 #[test]
 fn single_prints_use_the_margin_or_physical_edge() {

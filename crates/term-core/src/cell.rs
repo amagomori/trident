@@ -182,10 +182,10 @@ impl Cell {
 /// SGR state independent of cell storage markers and link-table indices.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Sgr {
-    flags: Flags,
-    fg: Color,
-    bg: Color,
-    underline_color: Option<Color>,
+    pub(super) flags: Flags,
+    pub(super) fg: Color,
+    pub(super) bg: Color,
+    pub(super) underline_color: Option<Color>,
 }
 
 impl Sgr {

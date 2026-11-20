@@ -189,6 +189,8 @@ impl Perform for Terminal {
                 }
             }
             ('m', []) => self.sgr(params),
+            ('{', [b'#']) => self.push_sgr(params),
+            ('}', [b'#']) => self.pop_sgr(),
             ('n', []) => match arg(params, 0, 0) {
                 5 => self.responses.extend_from_slice(b"\x1b[0n"),
                 6 => {

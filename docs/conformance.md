@@ -42,6 +42,30 @@ The left/right margin cases pass, including origin-relative movement, reverse wr
 bounded scrolling, and margin reports. The two DECSLPP and DECNCSM failures above also occur
 without horizontal margins. The suite counts DECELF/DECLFKC/DECSMKR as known xterm bugs.
 
+## Saving and restoring text styles
+
+An application can push its current text style with `CSI # {` (XTPUSHSGR), change
+or reset the style, then pop it with `CSI # }` (XTPOPSGR). Without selectors,
+the push saves all SGR attributes, including underline style and color. To save
+only specific attributes, put their numbers before the `#`, separated by
+semicolons: for example, `CSI 30 ; 31 # {` saves only foreground and background.
+
+| Selector | Attribute |
+| --- | --- |
+| 1, 2, 3 | Bold, faint, italic, respectively |
+| 4, 21 | Single/extended underline styles, double underline, respectively |
+| 5, 7, 8, 9 | Blink, inverse, conceal, strike, respectively |
+| 30, 31 | Foreground, background, respectively (not SGR setter numbers) |
+
+A selective pop leaves other attributes, including underline color, alone.
+Unknown selectors are ignored; even an unsupported-only list pushes an entry
+so its pop cannot accidentally unwind an outer style. Neither operation moves
+the cursor or changes hyperlinks or character protection.
+
+The primary and alternate screens share one stack of ten entries. An eleventh
+push discards the oldest entry; popping an empty stack does nothing. SGR 0
+resets the active style without clearing the stack. A full reset (RIS) clears it.
+
 ## XTWINOPS and DECCOLM decisions
 
 `CSI Ps t` (XTWINOPS) lets a program drive the host window manager. Trident follows xterm's
