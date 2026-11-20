@@ -619,7 +619,7 @@ mod tests {
                     .map(|(col, cell)| {
                         let point = term.viewport_to_point_signed(row, col);
                         let (matches, current) = search?;
-                        let idx = term_core::search::highlighted(matches, point, cell)?;
+                        let idx = crate::highlighted_match(matches, current, point, cell)?;
                         Some(Some(idx) == current)
                     })
                     .collect();
