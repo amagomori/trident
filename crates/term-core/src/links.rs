@@ -486,7 +486,7 @@ impl Terminal {
     /// only its suffix, so the first cell alone cannot establish the origin.
     pub fn path_origin(&self, points: impl IntoIterator<Item = Point>) -> DirectoryOrigin {
         let mut indices = points.into_iter().map(|p| {
-            if !self.on_screen_or_history(p) {
+            if !(self.first_line()..self.history + self.rows as u64).contains(&p.line) {
                 return None;
             }
             let row = self.line(p.line);
@@ -1522,6 +1522,18 @@ mod tests {
             t.directory_origin_at(at(0, 2)),
             DirectoryOrigin::Unavailable
         );
+    }
+
+    #[test]
+    fn alternate_file_origin_includes_hidden_suffix() {
+        let mut t = Terminal::new(40, 3);
+        t.advance(b"\x1b[?1049h\x1b]7;file:///a\x07src/main.rs:12\x1b]7;file:///b\x07");
+        let point = Point { line: 0, col: 0 };
+        let original = t.file_link_at(point).unwrap();
+        t.resize(6, 3);
+        let clipped = t.file_link_at(point).unwrap();
+        assert_eq!(clipped.path, original.path);
+        assert_eq!(clipped.origin, original.origin);
     }
 
     #[test]
