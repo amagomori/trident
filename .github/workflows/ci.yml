@@ -42,6 +42,7 @@ jobs:
           fi
           cargo test -p term-app --test tmux_image_history -- --ignored
       - run: python3 -m unittest discover -s .github/scripts/merge-queue
+      - run: python3 -m unittest discover -s .github/scripts/pgrp-qa
       - run: python3 -m unittest discover -s .github/scripts/release
       - name: term-core has no GPU, window or PTY dependencies
         run: |

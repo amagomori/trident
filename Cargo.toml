@@ -38,6 +38,7 @@ shlex = "2"
 tempfile = "3"
 ttf-parser = "0.25"
 harfrust = "0.15"
+unicode-bidi = "0.3"
 unicode-width = "0.2"
 vte = { path = "vendor/vte" }
 wgpu = "30"

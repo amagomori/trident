@@ -427,7 +427,12 @@ impl Terminal {
         } else {
             self.max_scrollback
         };
-        let rows = if history == 0 {
+        let rows = if self.has_partial_width()
+            && self.in_horizontal_margins()
+            && (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row)
+        {
+            self.scroll_bottom - self.scroll_top + 1
+        } else if history == 0 {
             self.rows
         } else {
             self.rows + history
@@ -436,8 +441,9 @@ impl Terminal {
             self.linefeed();
         }
         let col = self.cursor.col.saturating_add(placement.cols);
-        self.cursor.col = col.min(self.cols - 1);
-        self.cursor.pending_wrap = col >= self.cols;
+        let right = self.right_bound();
+        self.cursor.col = col.min(right);
+        self.cursor.pending_wrap = col > right;
     }
 
     /// Placements on the active screen that overlap the viewport, in drawing order (by `z`,
@@ -551,14 +557,15 @@ impl Terminal {
         ids
     }
 
-    /// Moves placements anchored in screen rows `top..=bottom` by `delta` rows as those rows
-    /// scroll, dropping the ones pushed out of the region. With `to_history` the scrolled-out
+    /// Moves placements anchored in the scrolling rows and columns by `delta` rows,
+    /// dropping the ones pushed out of the region. With `to_history` the scrolled-out
     /// rows go to scrollback, so the region keeps its absolute lines and the rows below it
     /// shift instead.
     pub(crate) fn scroll_placements(
         &mut self,
         top: usize,
         bottom: usize,
+        columns: std::ops::Range<usize>,
         delta: isize,
         to_history: bool,
     ) {
@@ -572,7 +579,7 @@ impl Terminal {
                 }
                 return true;
             }
-            if !(top..=bottom).contains(&row) {
+            if !(top..=bottom).contains(&row) || !columns.contains(&p.col) {
                 return true;
             }
             let moved = row + delta;

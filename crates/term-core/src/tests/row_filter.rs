@@ -153,6 +153,35 @@ fn region_moves_and_recycling() {
 }
 
 #[test]
+fn partial_width_scroll_keeps_stationary_and_moving_placeholders() {
+    let mut t = fixture(10, 4);
+    feed(&mut t, &format!("\x1b[1;9H{CHAR}\x1b[3;4H{CHAR}{}", M[1]));
+    feed(&mut t, "\x1b[?69h\x1b[3;7s");
+    assert_eq!(pos(&feed(&mut t, "\x1b[2S")), [(0, 3, 1), (0, 8, 1)]);
+    assert_eq!(pos(&feed(&mut t, "\x1b[T")), [(0, 8, 1), (1, 3, 1)]);
+}
+
+#[test]
+fn split_wraps_and_scan_hints_can_be_cleared_independently() {
+    let mut row = Row::new(10, &Cell::default());
+    row.note_placeholder();
+    row.set_split_wrapped(2, 6, true);
+    row.clear_hidden();
+    assert!(row.split_wrapped(2, 6));
+    assert!(row.may_have_placeholder());
+    let mut same_contents = row.clone();
+    same_contents.no_visible_placeholder();
+    assert_eq!(same_contents, row);
+    same_contents.set_wrapped(false);
+    assert_ne!(same_contents, row);
+    row.set_split_wrapped(2, 6, false);
+    assert_eq!(same_contents, row);
+    assert!(row.may_have_placeholder());
+    row.set_wrapped(true);
+    assert!(row.may_have_placeholder());
+}
+
+#[test]
 fn both_screens_hidden_cells_and_wide_pad() {
     let mut t = fixture(10, 3);
     let primary = feed(&mut t, &format!("p{CHAR}"));
@@ -398,6 +427,8 @@ fn mixed_row_transitions_match_a_full_scan_after_each_step() {
         "\x1b[?1049h",
         "\x1b[?1049l",
         "\x1b[2;4r",
+        "\x1b[?69h\x1b[2;6s",
+        "\x1b[?69l",
         "\x1b[r",
         "\x1b7",
         "\x1b8",

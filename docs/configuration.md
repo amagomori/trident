@@ -64,6 +64,21 @@ Linux and Core Text on macOS. A full face name such as `"Fira Code Retina"` also
   cannot be read is a [config error](#config-errors).
 - Font changes apply on [live reload](#live-reload), at the current font size.
 
+Programming ligatures are off by default. To draw operators such as `->` and `!=` as
+combined symbols, use a font that supports them (such as the bundled JetBrains Mono)
+and add this top-level setting:
+
+```toml
+ligatures = true
+```
+
+The change applies on save. Moving the cursor or a highlight boundary inside an operator
+breaks the ligature there. Copying still returns the original characters.
+
+Arabic letters can join with either setting. Within a run of compatible cells, glyphs
+are drawn in visual order. Spaces, neutral brackets and changes of style separate runs.
+Trident does not reorder the whole line. Cursor movement and selection use logical cells.
+
 ## Key bindings
 
 `[keybindings]` entries are added on top of the platform defaults listed in

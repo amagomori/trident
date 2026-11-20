@@ -10,7 +10,7 @@ from inside the app, which reports still arrive at the "prompt":
   and stays foreground 1 s (like waiting at a prompt) -> probe.py (raw tty, logs input).
   The driver then injects focus out/in, a click and a paste of a marker into the window.
 
-Scenarios and what must hold on both builds (`report` = measured, not pass/fail):
+Scenarios and what must hold on both builds (`report` applies only to mode leaks):
   control     probe enables every mode itself: all reports arrive (proves injection works)
   idle        modes on, exit 0.3 s later            -> no mouse/focus/paste reports
   kill        modes on, SIGKILL 0.3 s later          -> none
@@ -46,6 +46,7 @@ set -m
 cd "$1"
 exec 9<>fifo
 python3 fixture.py "$2"
+printf '%s\n' "$?" > fixture.status
 printf '%s$ ' "$3"
 read -t 1 -u 9 _
 python3 probe.py "$2"
@@ -53,21 +54,32 @@ while :; do read -t 60 -u 9 _; done
 """
 FIXTURE = r"""import os, signal, sys, time
 s = sys.argv[1]
-out = os.fdopen(1, "wb", 0)
 modes = b"MODES"
 flood = b"".join(b"%07d flood line for the KAN-95 shell-return check ..........\n" % i
                  for i in range(4096))
+written = 0
+def emit(data):
+    global written
+    rest = memoryview(data)
+    while rest:
+        n = os.write(1, rest)
+        if n == 0:
+            raise OSError("empty PTY write")
+        written += n
+        rest = rest[n:]
 def burst():
     for _ in range(20 * 1024 * 1024 // len(flood)):
-        out.write(flood)
+        emit(flood)
 if s in ("idle", "kill"):
-    out.write(modes); time.sleep(0.3)
+    emit(modes); time.sleep(0.3)
 elif s in ("flood-kill", "flood-exit"):
-    out.write(modes); burst()
+    emit(modes); burst()
 elif s in ("prompt-2004",):
     burst()
 elif s == "flood-tail":
-    burst(); out.write(modes)
+    burst(); emit(modes)
+with open("fixture.receipt", "w") as receipt:
+    print(s, written, file=receipt)
 if s.endswith("kill"):
     os.kill(os.getpid(), signal.SIGKILL)
 """.replace("MODES", MODES.replace("\033", "\\x1b"))
@@ -197,6 +209,24 @@ def classify(got):
     return leaks, MARK.encode() in got
 
 
+def fixture_evidence(work, scenario):
+    flood = 20 * 1024 * 1024 if scenario.startswith("flood-") or scenario == "prompt-2004" else 0
+    modes = 0 if scenario in ("control", "prompt-2004") else len(MODES.encode())
+    expected = (str(128 + signal.SIGKILL if scenario.endswith("kill") else 0),
+                f"{scenario} {flood + modes}")
+
+    def read(name):
+        path = work / name
+        return path.read_text(errors="replace").strip() if path.exists() else None
+
+    status, receipt = read("fixture.status"), read("fixture.receipt")
+    evidence = {"fixture_status": status, "fixture_receipt": receipt}
+    if (status, receipt) != expected:
+        evidence["fixture_error"] = (f"status={status!r}, receipt={receipt!r}; "
+                                     f"expected {expected[0]!r}, {expected[1]!r}")
+    return evidence
+
+
 def one_run(binary, scenario, env, injector, log):
     work = Path(tempfile.mkdtemp(prefix="k95modes-"))
     os.mkfifo(work / "fifo")
@@ -208,11 +238,15 @@ def one_run(binary, scenario, env, injector, log):
                             env=env, stdout=log, stderr=log)
     try:
         wait_for(work / "ready", 120, proc)
+        evidence = fixture_evidence(work, scenario)
+        if "fixture_error" in evidence:
+            return evidence
         time.sleep(0.3)
         injector.inject(proc.pid)
         (work / "stop").touch()
         wait_for(work / "done", 10, proc)
-        return classify((work / "input.bin").read_bytes())
+        leaks, pasted = classify((work / "input.bin").read_bytes())
+        return dict(evidence, leaks=sorted(leaks), pasted=pasted)
     finally:
         proc.send_signal(signal.SIGTERM)
         try:
@@ -230,6 +264,8 @@ def main():
     ap.add_argument("--scenarios", default=",".join(SCENARIOS))
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
+    if args.runs < 1:
+        ap.error("--runs must be at least 1")
     args.out.mkdir(parents=True, exist_ok=True)
     cfg = Path(tempfile.mkdtemp(prefix="k95cfg-"))
     env = dict(os.environ, XDG_CONFIG_HOME=str(cfg), BASH_SILENCE_DEPRECATION_WARNING="1")
@@ -240,12 +276,18 @@ def main():
     rows, log = [], open(args.out / "app.log", "w")
     try:
         for scenario, label in jobs:
-            leaks, pasted = one_run(builds[label], scenario, env, injector, log)
-            rows.append({"scenario": scenario, "build": label, "leaks": sorted(leaks), "pasted": pasted})
-            print(f"{scenario:12s} {label:4s} reports={','.join(sorted(leaks)) or '-':17s} paste_seen={pasted}", flush=True)
+            result = one_run(builds[label], scenario, env, injector, log)
+            rows.append(dict(result, scenario=scenario, build=label))
+            if "fixture_error" in result:
+                print(f"{scenario:12s} {label:4s} INVALID fixture: {result['fixture_error']}", flush=True)
+                continue
+            print(f"{scenario:12s} {label:4s} reports={','.join(result['leaks']) or '-':17s} "
+                  f"paste_seen={result['pasted']} status={result['fixture_status']} "
+                  f"receipt={result['fixture_receipt']}", flush=True)
     finally:
         log.close()
         injector.close()
+        shutil.rmtree(cfg)
     (args.out / "rows.json").write_text(json.dumps(rows, indent=1))
     failed = False
     print("\nscenario     build  as-expected/runs  (expected reports)")
@@ -253,13 +295,13 @@ def main():
         want, _, gated = SCENARIOS[scenario]
         for label in builds:
             rs = [r for r in rows if r["scenario"] == scenario and r["build"] == label]
-            ok = sum(set(r["leaks"]) == want and r["pasted"] for r in rs)
-            unverified = sum(not r["pasted"] for r in rs)
-            bad = gated and ok < len(rs)
+            verified = [r for r in rs if "fixture_error" not in r and r["pasted"]]
+            ok = sum(set(r["leaks"]) == want for r in verified)
+            bad = len(verified) != len(rs) or (gated and ok < len(rs))
             failed |= bad
             note = "FAIL" if bad else ("report" if not gated else "ok")
             print(f"{scenario:12s} {label:5s}  {ok}/{len(rs)}  ({','.join(sorted(want)) or 'none'})  {note}"
-                  + (f"  [{unverified} runs: paste never arrived, injection unverified]" if unverified else ""))
+                  + (f"  [{len(rs) - len(verified)} unverified runs]" if len(verified) != len(rs) else ""))
     sys.exit(1 if failed else 0)
 
 

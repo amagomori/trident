@@ -27,6 +27,7 @@ See the [configuration guide](configuration.md#config-file) for the file locatio
 | `hide_mouse_when_typing` | boolean | `true` | Hide the pointer while sending keyboard input. Moving the mouse shows it again. |
 | `hover_preview` | boolean | `false` | Preview a file path when holding Cmd (macOS) or Ctrl (Linux) over it. |
 | `keybindings` | table of bindings | [Platform shortcuts](usage.md#keyboard-and-mouse) | Map a chord to an action name or `{ send = "text" }`. Use `"none"` to unbind. See [Key bindings](configuration.md#key-bindings). |
+| `ligatures` | boolean | `false` | Enable [programming ligatures](configuration.md#fonts) in fonts that support them. |
 | `menu_bar_icon` | boolean | `true` | Show the Trident menu bar item on macOS. |
 | `notify_long_commands_after` | integer | `10` | Notify when a command finishes in an unfocused tab after at least this many seconds. Set to 0 to disable. |
 | `padding` | number | `6.0` | Set the space around the grid in logical pixels, from 0 to 1000. |

@@ -292,6 +292,19 @@ fn placement_keys() {
 }
 
 #[test]
+fn split_scroll_moves_kitty_images_with_their_anchor_cells() {
+    let mut t = term();
+    t.advance(&apc("a=t,f=32,s=1,v=1,i=7,q=2", &[0; 4]));
+    t.advance(b"\x1b[?69h\x1b[3;8s\x1b[2;4r");
+    t.advance(b"\x1b[4;1H\x1b_Ga=p,i=7,p=1,C=1,q=2\x1b\\");
+    t.advance(b"\x1b[4;3H\x1b_Ga=p,i=7,p=2,r=2,c=1,q=2\x1b\\");
+    assert_eq!(placements(&t), [(7, 1, 3, 0, 1, 1), (7, 2, 2, 2, 1, 2)]);
+    assert_eq!(t.scrollback_len(), 0);
+    t.advance(b"\x1b[T");
+    assert_eq!(placements(&t)[1].2, 3);
+}
+
+#[test]
 fn kitty_command_between_ed3_and_ed2_keeps_screen() {
     let mut t = term();
     t.advance(&apc("a=t,f=24,s=10,v=20,i=1,q=2", &gradient_rgb(10, 20)));

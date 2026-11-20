@@ -34,3 +34,24 @@ python3 .github/scripts/pgrp-qa/timing.py --main ../t-main/target/release/triden
 All three write `rows.json` with every run into `--out`, and `cpu_ab.py` also writes `summary.json`
 with binary hashes. On Linux, run `cpu_ab.py` both unpinned and with `--taskset 2`, which pins the
 app to one core.
+
+### How to read a modes run
+
+Before injecting input, `modes.py` checks two independent records in the run's fresh directory:
+the foreground job's Bash exit status and the fixture's receipt (scenario name and bytes written
+to the PTY). The fixture closes its receipt after its last write, before any intentional SIGKILL.
+The probe's ready flag alone is not proof that the job ran.
+
+| Scenario | Fixture status | Fixture bytes (before PTY line-ending translation) |
+| --- | ---: | ---: |
+| `control` | 0 | 0 (the probe enables modes) |
+| `idle` / `kill` | 0 / 137 | 40 (mode switches) |
+| `flood-exit` / `flood-kill` | 0 / 137 | 20 MiB + 40 |
+| `prompt-2004` | 0 | 20 MiB (the shell enables paste) |
+| `flood-tail` | 0 | 20 MiB + 40 (mode switches last) |
+
+Missing or mismatched evidence is an invalid workload, not a successful reset: the row in
+`rows.json` has a `fixture_error` instead of mode results, and the script exits nonzero.
+Only the observed **mode leaks** for `flood-tail` are report-only; its fixture and paste marker
+are still required. Run the headless regression checks with
+`python3 -m unittest discover -s .github/scripts/pgrp-qa`.

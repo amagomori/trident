@@ -1,7 +1,9 @@
 //! Glyph atlases packed in shelves (rows of glyphs of similar height): a single-channel
 //! page for text and an RGBA page for color glyphs, created when the first one is drawn.
 
+use crate::family::Face;
 use crate::font::{Fonts, RasterizedGlyph, Style};
+use crate::shaping::{FaceKey, Positioned};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -266,6 +268,7 @@ pub struct Atlas {
     /// Bumped by `clear`, which invalidates every glyph handed out before.
     pub generation: u64,
     glyphs: HashMap<GlyphKey, Option<AtlasGlyph>>,
+    outlines: HashMap<(FaceKey, u16, u32), Option<AtlasGlyph>>,
     /// Emoji sequences shaped to one glyph, by text, then style and cells.
     sequences: HashMap<Box<str>, Vec<SequenceGlyph>>,
 }
@@ -288,6 +291,7 @@ impl Atlas {
             srgb,
             generation: 0,
             glyphs: HashMap::new(),
+            outlines: HashMap::new(),
             sequences: HashMap::new(),
         }
     }
@@ -295,6 +299,7 @@ impl Atlas {
     pub fn clear(&mut self) {
         self.generation += 1;
         self.glyphs.clear();
+        self.outlines.clear();
         self.sequences.clear();
         self.mono.clear();
         if let Some(page) = &mut self.color {
@@ -323,6 +328,32 @@ impl Atlas {
         let raster = fonts.rasterize(key.c, key.style, key.cells as usize);
         let glyph = self.place(raster, device, queue)?;
         self.glyphs.insert(key, glyph);
+        Ok(glyph)
+    }
+
+    pub fn get_outline(
+        &mut self,
+        face: &Face,
+        positioned: &Positioned,
+        fonts: &Fonts,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Option<AtlasGlyph>, AtlasFull> {
+        let key = (face.key(), positioned.id.0, positioned.factor.to_bits());
+        if let Some(glyph) = self.outlines.get(&key) {
+            return Ok(*glyph);
+        }
+        let raster = crate::font::outline(
+            &face.font,
+            positioned.id,
+            fonts.px,
+            positioned.factor,
+            fonts.metrics,
+            face.embolden,
+            face.slant,
+        );
+        let glyph = self.place(raster, device, queue)?;
+        self.outlines.insert(key, glyph);
         Ok(glyph)
     }
 

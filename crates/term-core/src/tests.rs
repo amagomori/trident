@@ -22,6 +22,31 @@ mod golden;
 mod row_filter;
 
 #[test]
+fn single_prints_use_the_margin_or_physical_edge() {
+    for (setup, edge, wrap_to) in [
+        ("", 7, 0),
+        ("\x1b[?69h", 7, 0),
+        ("\x1b[?69h\x1b[3;5s", 4, 2),
+        ("\x1b[?69h\x1b[3;5s", 7, 2),
+        ("\x1b[?69h\x1b[3;5s\x1b[?69l", 7, 0),
+    ] {
+        for (glyph, width) in [("x", 1), ("界", 2)] {
+            let mut t = Terminal::new(8, 3);
+            t.advance(setup.as_bytes());
+            let start = edge + 1 - width;
+            t.advance(format!("\x1b[1;{}H", start + 1).as_bytes());
+            t.advance(glyph.as_bytes());
+            assert_eq!(t.cursor.col, edge);
+            assert!(t.cursor.pending_wrap);
+            t.advance(b"y");
+            assert_eq!(t.primary.lines[1].cells[wrap_to].c, 'y');
+            assert_eq!((t.cursor.row, t.cursor.col), (1, wrap_to + 1));
+            assert!(!t.cursor.pending_wrap);
+        }
+    }
+}
+
+#[test]
 fn scrolling_recycles_rows_as_fresh_blanks() {
     for mode in 0..4 {
         let mut t = Terminal::new(4, 3);

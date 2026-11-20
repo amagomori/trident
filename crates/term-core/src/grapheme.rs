@@ -418,7 +418,7 @@ impl Terminal {
     /// Gives the emoji sequence in the narrow cell `(row, col)` two columns, like a wide
     /// character: in place, or on the next line when it sits in the last column.
     fn widen_sequence(&mut self, row: usize, col: usize) {
-        let cols = self.cols;
+        let cols = self.right_bound() + 1;
         let (insert, template) = (self.modes.insert, self.cursor.template);
         if col + 1 < cols && !self.cursor.pending_wrap && self.cursor.col == col + 1 {
             let line = &mut self.lines_mut()[row];
@@ -444,43 +444,39 @@ impl Terminal {
             // Like a wide character printed in the last column: that cell is left blank and
             // the sequence moves to the start of the next line.
             self.sync_cursor_row();
-            let row = self.cursor.row;
-            let line = &mut self.lines_mut()[row];
-            let possible_placeholder = line.may_have_placeholder();
-            let mut cell = line.cells[col];
+            let mut cell = self.screen().lines[row].cells[col];
+            let possible_placeholder = self.screen().lines[row].may_have_placeholder();
             let mut blank = Cell::blank(&template);
-            blank.flags.insert(Flags::WIDE_WRAP);
+            if !self.has_partial_width() {
+                blank.flags.insert(Flags::WIDE_WRAP);
+            }
+            let line = &mut self.lines_mut()[row];
             line.cells[col] = blank;
             line.touch(col + 1);
-            line.set_wrapped(true);
-            self.cursor.col = 0;
-            self.cursor.pending_wrap = false;
-            self.linefeed();
+            self.wrap_line();
             let row = self.cursor.row;
+            let start = self.cursor.col;
+            let end = self.right_bound() + 1;
             let line = &mut self.lines_mut()[row];
             if insert {
-                crate::insert_printed_cells(line, 0, cols, 2, &template);
+                crate::insert_printed_cells(line, start, end, 2, &template);
                 line.touch_all();
             }
-            crate::clear_wide_pair(&mut line.cells, 0);
-            crate::clear_wide_pair(&mut line.cells, 1);
+            crate::clear_wide_pair(&mut line.cells, start);
+            crate::clear_wide_pair(&mut line.cells, start + 1);
             cell.flags.insert(Flags::WIDE);
             let mut spacer = cell;
             spacer.c = ' ';
             spacer.flags.remove(Flags::WIDE | Flags::GRAPHEME);
             spacer.flags.insert(Flags::WIDE_SPACER);
-            line.cells[0] = cell;
+            line.cells[start] = cell;
             if possible_placeholder {
                 line.note_placeholder();
             }
-            line.cells[1] = spacer;
-            line.touch(2);
-            if cols == 2 {
-                self.cursor.col = 1;
-                self.cursor.pending_wrap = true;
-            } else {
-                self.cursor.col = 2;
-            }
+            line.cells[start + 1] = spacer;
+            line.touch(start + 2);
+            self.cursor.col = (start + 2).min(end - 1);
+            self.cursor.pending_wrap = start + 2 == end;
         }
     }
 

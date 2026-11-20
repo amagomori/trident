@@ -214,34 +214,34 @@ pub struct Row {
     /// `u8::MAX` means not known. Writers to `cells` must call `touch` or `touch_all`;
     /// `put_char` relies on `Terminal::sync_cursor_row`.
     occupied: u8,
-    /// Hidden cells and placeholder hints share the existing cold allocation slot.
-    extras: Option<Box<RowExtras>>,
+    /// Rare row state is boxed to keep full-width scrolling compact.
+    extra: Option<Box<RowExtra>>,
 }
 
 #[derive(Debug, Default)]
-struct RowExtras {
-    hidden: Option<Hidden>,
+struct RowExtra {
+    /// Inclusive margins where text wrapped without joining the entire rows.
+    split_wraps: Vec<(usize, usize)>,
+    /// Cells cut off when narrowing, restored on widening.
+    cells: Vec<Cell>,
+    /// The last cell of the row is a `PAD` blank standing in for a wide character that no
+    /// longer fits; the character itself is the start of `cells`.
+    padded: bool,
     hidden_may_have_placeholder: bool,
     // Cleared by shared layout only after decoding the entire visible row.
     possible_placeholder: AtomicBool,
 }
 
-impl Clone for RowExtras {
+impl Clone for RowExtra {
     fn clone(&self) -> Self {
         Self {
-            hidden: self.hidden.clone(),
+            split_wraps: self.split_wraps.clone(),
+            cells: self.cells.clone(),
+            padded: self.padded,
             hidden_may_have_placeholder: self.hidden_may_have_placeholder,
             possible_placeholder: self.possible_placeholder.load(Ordering::Relaxed).into(),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Hidden {
-    cells: Vec<Cell>,
-    /// The last cell of the row is a `PAD` blank standing in for a wide character that no
-    /// longer fits; the character itself is the start of `cells`.
-    padded: bool,
 }
 
 /// Bounds and scan hints do not change a row's contents.
@@ -251,33 +251,45 @@ impl PartialEq for Row {
             && self.flags == other.flags
             && self.prompt_col == other.prompt_col
             && self.output_col == other.output_col
-            && self.hidden() == other.hidden()
+            && self.extra_contents() == other.extra_contents()
     }
 }
 
 impl Eq for Row {}
 
 impl Row {
+    fn extra_contents(&self) -> (&[(usize, usize)], &[Cell], bool) {
+        self.extra
+            .as_ref()
+            .map_or((&[], &[], false), |e| (&e.split_wraps, &e.cells, e.padded))
+    }
+
+    fn prune_extra(&mut self) {
+        if let Some(e) = &mut self.extra
+            && e.split_wraps.is_empty()
+            && e.cells.is_empty()
+            && !*e.possible_placeholder.get_mut()
+        {
+            self.extra = None;
+        }
+    }
+
     #[cold]
     pub(crate) fn note_placeholder(&mut self) {
-        let extras = self.extras.get_or_insert_with(Default::default);
-        *extras.possible_placeholder.get_mut() = true;
+        let extra = self.extra.get_or_insert_with(Default::default);
+        *extra.possible_placeholder.get_mut() = true;
     }
 
     pub(crate) fn may_have_placeholder(&self) -> bool {
-        self.extras
+        self.extra
             .as_ref()
             .is_some_and(|e| e.possible_placeholder.load(Ordering::Relaxed))
     }
 
     pub(crate) fn no_visible_placeholder(&self) {
-        if let Some(extras) = &self.extras {
-            extras.possible_placeholder.store(false, Ordering::Relaxed);
+        if let Some(extra) = &self.extra {
+            extra.possible_placeholder.store(false, Ordering::Relaxed);
         }
-    }
-
-    fn hidden(&self) -> Option<&Hidden> {
-        self.extras.as_ref()?.hidden.as_ref()
     }
 
     /// Blank the row in place, keeping its allocation unless it is oversized.
@@ -301,14 +313,14 @@ impl Row {
         self.flags = RowFlags::default();
         self.prompt_col = 0;
         self.output_col = 0;
-        self.extras = None;
+        self.extra = None;
     }
 
     pub(crate) fn erase(&mut self, blank: Row) {
         self.cells = blank.cells;
         self.occupied = blank.occupied;
         self.set_wrapped(false);
-        self.extras = blank.extras;
+        self.extra = blank.extra;
     }
 
     /// The line continues on the next row because it soft-wrapped.
@@ -318,10 +330,35 @@ impl Row {
 
     /// Sets whether the logical line continues onto the next physical row.
     pub fn set_wrapped(&mut self, wrapped: bool) {
+        if let Some(extra) = &mut self.extra {
+            extra.split_wraps.clear();
+            self.prune_extra();
+        }
         if wrapped {
             self.flags.insert(RowFlags::WRAPPED);
         } else {
             self.flags.remove(RowFlags::WRAPPED);
+        }
+    }
+
+    pub(crate) fn split_wrapped(&self, left: usize, right: usize) -> bool {
+        self.extra
+            .as_ref()
+            .is_some_and(|e| e.split_wraps.contains(&(left, right)))
+    }
+
+    pub(crate) fn set_split_wrapped(&mut self, left: usize, right: usize, wrapped: bool) {
+        self.flags.remove(RowFlags::WRAPPED);
+        if let Some(extra) = &mut self.extra {
+            extra.split_wraps.retain(|&(l, r)| r < left || l > right);
+        }
+        if wrapped {
+            self.extra
+                .get_or_insert_with(Default::default)
+                .split_wraps
+                .push((left, right));
+        } else {
+            self.prune_extra();
         }
     }
 
@@ -358,7 +395,7 @@ impl Row {
             prompt_col: 0,
             output_col: 0,
             occupied: 0,
-            extras: None,
+            extra: None,
         }
     }
 
@@ -370,7 +407,7 @@ impl Row {
             prompt_col: 0,
             output_col: 0,
             occupied: u8::MAX,
-            extras: None,
+            extra: None,
         };
         if possible {
             row.note_placeholder();
@@ -382,17 +419,13 @@ impl Row {
     pub(crate) fn take_cells(&mut self) -> Vec<Cell> {
         self.touch_all();
         let mut cells = std::mem::take(&mut self.cells);
-        if let Some(extras) = &mut self.extras
-            && let Some(hidden) = extras.hidden.take()
-        {
+        if let Some(extra) = &mut self.extra {
+            extra.split_wraps.clear();
             // A negative scan while narrow says nothing about the restored suffix.
-            *extras.possible_placeholder.get_mut() |=
-                std::mem::take(&mut extras.hidden_may_have_placeholder);
-            let Hidden {
-                cells: mut hidden,
-                padded,
-            } = hidden;
-            if padded {
+            *extra.possible_placeholder.get_mut() |=
+                std::mem::take(&mut extra.hidden_may_have_placeholder);
+            let mut hidden = std::mem::take(&mut extra.cells);
+            if std::mem::take(&mut extra.padded) {
                 let pad = cells.pop().unwrap_or_default();
                 if !pad.flags.contains(Flags::PAD) {
                     // The stand-in was overwritten, so the wide character it covered is gone.
@@ -402,6 +435,7 @@ impl Row {
                 }
             }
             cells.append(&mut hidden);
+            self.prune_extra();
         }
         cells
     }
@@ -442,12 +476,10 @@ impl Row {
                 hidden.truncate(used);
             }
             if wide_at_edge || !hidden.is_empty() {
-                let extras = self.extras.get_or_insert_with(Default::default);
-                extras.hidden_may_have_placeholder = *extras.possible_placeholder.get_mut();
-                extras.hidden = Some(Hidden {
-                    cells: hidden,
-                    padded: wide_at_edge,
-                });
+                let extra = self.extra.get_or_insert_with(Default::default);
+                extra.hidden_may_have_placeholder = *extra.possible_placeholder.get_mut();
+                extra.cells = hidden;
+                extra.padded = wide_at_edge;
             }
         } else {
             let mut blank = Cell::default();
@@ -461,13 +493,11 @@ impl Row {
 
     /// Forgets the cells past the right edge, for when the line is erased to its end.
     pub fn clear_hidden(&mut self) {
-        if let Some(extras) = &mut self.extras
-            && *extras.possible_placeholder.get_mut()
-        {
-            extras.hidden = None;
-            extras.hidden_may_have_placeholder = false;
-        } else {
-            self.extras = None;
+        if let Some(extra) = &mut self.extra {
+            extra.cells = Vec::new();
+            extra.padded = false;
+            extra.hidden_may_have_placeholder = false;
+            self.prune_extra();
         }
     }
 
@@ -485,7 +515,7 @@ impl Row {
     }
 
     pub(crate) fn has_hidden(&self) -> bool {
-        self.hidden().is_some()
+        self.extra.as_ref().is_some_and(|e| !e.cells.is_empty())
     }
 
     /// The column of the first hidden cell, a blank standing in for an overwritten wide
@@ -498,7 +528,7 @@ impl Row {
             flags: Flags(0),
             hyperlink: 0,
         };
-        let h = self.hidden()?;
+        let h = self.extra.as_deref()?;
         let pad_intact = self
             .cells
             .last()
@@ -532,7 +562,7 @@ impl Row {
 
     /// Marks the links the row references and returns how many were not marked yet.
     pub(crate) fn mark_hyperlinks(&self, used: &mut [bool]) -> usize {
-        let hidden = self.hidden().map_or(&[][..], |h| &h.cells[..]);
+        let hidden = self.extra.as_deref().map_or(&[][..], |h| &h.cells[..]);
         let mut marked = 0;
         for cells in [&self.cells[..], hidden] {
             // Neighbouring cells mostly share a link, so only a change of index is looked up.
@@ -554,19 +584,15 @@ impl Row {
     pub(crate) fn hyperlinks_mut(&mut self) -> impl Iterator<Item = &mut u16> {
         self.cells
             .iter_mut()
-            .chain(
-                self.extras
-                    .iter_mut()
-                    .filter_map(|e| e.hidden.as_mut())
-                    .flat_map(|h| h.cells.iter_mut()),
-            )
+            .chain(self.extra.iter_mut().flat_map(|h| h.cells.iter_mut()))
             .map(|c| &mut c.hyperlink)
     }
 
     pub(crate) fn is_blank(&self) -> bool {
         self.cells.iter().all(|c| *c == Cell::default())
             && self
-                .hidden()
+                .extra
+                .as_ref()
                 .is_none_or(|h| h.cells.iter().all(|c| *c == Cell::default()))
     }
 
