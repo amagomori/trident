@@ -277,6 +277,40 @@ fn kitty_named(named: NamedKey) -> Option<KittyForm> {
     })
 }
 
+/// Maps a logical keypad key after the platform has applied Num Lock.
+fn kitty_keypad(key: &Key) -> Option<KittyForm> {
+    let code = match key.as_ref() {
+        Key::Character(s) => match s.as_bytes() {
+            [digit @ b'0'..=b'9'] => 57399 + u32::from(digit - b'0'),
+            b"." => 57409,
+            b"/" => 57410,
+            b"*" => 57411,
+            b"-" => 57412,
+            b"+" => 57413,
+            b"=" => 57415,
+            b"," => 57416,
+            _ => return None,
+        },
+        Key::Named(NamedKey::Enter) => 57414,
+        Key::Named(NamedKey::ArrowLeft) => 57417,
+        Key::Named(NamedKey::ArrowRight) => 57418,
+        Key::Named(NamedKey::ArrowUp) => 57419,
+        Key::Named(NamedKey::ArrowDown) => 57420,
+        Key::Named(NamedKey::PageUp) => 57421,
+        Key::Named(NamedKey::PageDown) => 57422,
+        Key::Named(NamedKey::Home) => 57423,
+        Key::Named(NamedKey::End) => 57424,
+        Key::Named(NamedKey::Insert) => 57425,
+        Key::Named(NamedKey::Delete) => 57426,
+        // Winit exposes XKB's KP_Begin (unlocked keypad 5) as a native keysym.
+        Key::Unidentified(winit::keyboard::NativeKey::Xkb(0xff9d)) => {
+            return Some(KittyForm::Tilde(57427));
+        }
+        _ => return None,
+    };
+    Some(KittyForm::U(code))
+}
+
 /// Returns the kitty key number and modifier bit for a standalone modifier.
 ///
 /// Only a known right location overrides the default left-hand number.
@@ -339,6 +373,20 @@ pub fn encode_kitty_key(
         (m, e) => format!("{m}:{e}"),
     };
     let param = kitty_modifier_param(mods);
+
+    if location == KeyLocation::Numpad
+        && (report_all
+            || (disambiguate
+                && (!matches!(key, Key::Character(_)) || text_key_combo(mods, alt_sends_esc))))
+        && let Some(form) = kitty_keypad(key)
+    {
+        let text = if report_all && kind != KeyEventKind::Release {
+            kitty_associated_text(text, flags)
+        } else {
+            None
+        };
+        return Some(kitty_seq(form, "", &field(param), text.as_deref()));
+    }
 
     if let Key::Named(named) = key {
         // Modifier keys themselves are reported only under report-all.
@@ -444,6 +492,23 @@ pub fn encode_kitty_key(
     }
 }
 
+fn text_key_combo(mods: ModifiersState, alt_sends_esc: bool) -> bool {
+    mods.control_key() || mods.super_key() || (mods.alt_key() && alt_sends_esc)
+}
+
+fn kitty_associated_text(text: Option<&str>, flags: u8) -> Option<String> {
+    if flags & 0b10000 == 0 {
+        return None;
+    }
+    text.filter(|t| !t.is_empty() && t.chars().all(|c| !c.is_control()))
+        .map(|t| {
+            t.chars()
+                .map(|c| (c as u32).to_string())
+                .collect::<Vec<_>>()
+                .join(":")
+        })
+}
+
 /// Encodes a text-producing key under the kitty flags: `CSI u` form when the
 /// event is escape-encoded, plain text otherwise.
 fn encode_text_key(
@@ -463,7 +528,7 @@ fn encode_text_key(
     } = *event;
     let disambiguate = flags & 0b1 != 0;
     let report_all = flags & 0b1000 != 0;
-    let combo = mods.control_key() || mods.super_key() || (mods.alt_key() && alt_sends_esc);
+    let combo = text_key_combo(mods, alt_sends_esc);
     if !report_all && !(disambiguate && combo) {
         return match kind {
             KeyEventKind::Release => None,
@@ -493,17 +558,7 @@ fn encode_text_key(
         key_field.push(':');
         key_field.push_str(&s.chars().next().map(|c| c as u32).unwrap_or(0).to_string());
     }
-    let text = if flags & 0b10000 != 0 {
-        text.filter(|t| !t.is_empty() && t.chars().all(|c| !c.is_control()))
-            .map(|t| {
-                t.chars()
-                    .map(|c| (c as u32).to_string())
-                    .collect::<Vec<_>>()
-                    .join(":")
-            })
-    } else {
-        None
-    };
+    let text = kitty_associated_text(text, flags);
     Some(kitty_seq(
         KittyForm::U(0),
         &key_field,
@@ -1018,6 +1073,169 @@ mod tests {
         assert_eq!(
             encode_kitty_key(&event, KeyEventKind::Press, 2, true, false),
             None
+        );
+    }
+
+    #[test]
+    fn kitty_keypad_reports_logical_identity_and_events() {
+        use KeyEventKind::{Press, Release, Repeat};
+        use NamedKey::*;
+        let keys = [
+            ch("0"),
+            ch("1"),
+            ch("2"),
+            ch("3"),
+            ch("4"),
+            ch("5"),
+            ch("6"),
+            ch("7"),
+            ch("8"),
+            ch("9"),
+            ch("."),
+            ch("/"),
+            ch("*"),
+            ch("-"),
+            ch("+"),
+            Key::Named(Enter),
+            ch("="),
+            ch(","),
+            Key::Named(ArrowLeft),
+            Key::Named(ArrowRight),
+            Key::Named(ArrowUp),
+            Key::Named(ArrowDown),
+            Key::Named(PageUp),
+            Key::Named(PageDown),
+            Key::Named(Home),
+            Key::Named(End),
+            Key::Named(Insert),
+            Key::Named(Delete),
+        ];
+        for (code, key) in (57399..).zip(keys) {
+            for (mods, param) in [(ModifiersState::empty(), 1), (ModifiersState::CONTROL, 5)] {
+                let event = KeyEvent {
+                    key: &key,
+                    base: &Key::Named(Home),
+                    location: KeyLocation::Numpad,
+                    text: None,
+                    mods,
+                };
+                for (kind, field) in [
+                    (
+                        Press,
+                        if param == 1 {
+                            String::new()
+                        } else {
+                            format!(";{param}")
+                        },
+                    ),
+                    (Repeat, format!(";{param}:2")),
+                    (Release, format!(";{param}:3")),
+                ] {
+                    assert_eq!(
+                        encode_kitty_key(&event, kind, 10, true, false).unwrap(),
+                        format!("\x1b[{code}{field}u").as_bytes(),
+                        "{key:?} {kind:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_keypad_respects_text_and_negotiated_flags() {
+        use KeyEventKind::{Press, Release, Repeat};
+        use KeyLocation::{Numpad, Standard};
+        let check = |key: &Key,
+                     location,
+                     text: Option<&str>,
+                     mods,
+                     flags,
+                     kind,
+                     expected: Option<&[u8]>| {
+            let event = KeyEvent {
+                key,
+                base: key,
+                location,
+                text,
+                mods,
+            };
+            assert_eq!(
+                encode_kitty_key(&event, kind, flags, true, false).as_deref(),
+                expected,
+                "{key:?} {location:?} {kind:?} flags={flags}"
+            );
+        };
+        let none = ModifiersState::empty();
+        let ctrl = ModifiersState::CONTROL;
+        let enter = Key::Named(NamedKey::Enter);
+        let home = Key::Named(NamedKey::Home);
+        let begin = Key::Unidentified(winit::keyboard::NativeKey::Xkb(0xff9d));
+        let one = ch("1");
+
+        check(&enter, Numpad, None, none, 1, Repeat, Some(b"\x1b[57414u"));
+        check(&enter, Numpad, None, none, 1, Release, None);
+        check(&enter, Standard, None, none, 1, Press, Some(b"\r"));
+        check(&enter, Standard, None, none, 10, Press, Some(b"\x1b[13u"));
+        check(&enter, Numpad, None, none, 2, Press, Some(b"\r"));
+        check(
+            &home,
+            Numpad,
+            None,
+            ctrl,
+            3,
+            Release,
+            Some(b"\x1b[57423;5:3u"),
+        );
+        check(&begin, Numpad, None, none, 3, Press, Some(b"\x1b[57427~"));
+
+        check(&one, Numpad, Some("1"), none, 3, Repeat, Some(b"1"));
+        check(&one, Numpad, None, none, 3, Release, None);
+        check(
+            &one,
+            Numpad,
+            None,
+            ctrl,
+            3,
+            Repeat,
+            Some(b"\x1b[57400;5:2u"),
+        );
+        check(&one, Numpad, None, ctrl, 2, Press, Some(b"1"));
+        check(
+            &one,
+            Numpad,
+            Some("xy"),
+            none,
+            26,
+            Repeat,
+            Some(b"\x1b[57400;1:2;120:121u"),
+        );
+        check(
+            &one,
+            Numpad,
+            Some("1"),
+            none,
+            26,
+            Release,
+            Some(b"\x1b[57400;1:3u"),
+        );
+        check(
+            &one,
+            Numpad,
+            Some("\x01"),
+            none,
+            26,
+            Press,
+            Some(b"\x1b[57400u"),
+        );
+        check(&one, Standard, None, none, 8, Press, Some(b"\x1b[49u"));
+        check(
+            &ch("x"),
+            Numpad,
+            Some("1"),
+            none,
+            24,
+            Press,
+            Some(b"\x1b[120;;49u"),
         );
     }
 
