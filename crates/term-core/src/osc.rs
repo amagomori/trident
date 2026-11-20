@@ -46,12 +46,22 @@ impl ClipboardRequest {
 }
 
 /// The directory a shell reported with OSC 7 (`file://host/path`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct WorkingDirectory {
     /// The host part of the URL; empty when the shell left it out.
     pub host: String,
     /// The percent-decoded absolute path.
     pub path: String,
+}
+
+/// The OSC 7 report in effect when a retained cell was printed.
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+pub enum DirectoryOrigin {
+    #[default]
+    Unreported,
+    Reported(std::sync::Arc<WorkingDirectory>),
+    /// The origin was lost or is ambiguous. Do not substitute another directory.
+    Unavailable,
 }
 
 /// Which selection an OSC 52 `Pc` parameter names: `Some(true)` for primary, `Some(false)`
@@ -136,8 +146,26 @@ impl Terminal {
     }
 
     pub(crate) fn osc_working_directory(&mut self, url: &[u8]) {
-        if let Some(cwd) = parse_file_url(url) {
-            self.shell.cwd = Some(cwd);
+        if let Some(cwd) = parse_file_url(url)
+            && self.working_directory() != Some(&cwd)
+        {
+            self.shell.cwd = Some(cwd.into());
+            if self.alt_active {
+                self.observe_alternate_directory();
+            }
+            self.sync_directory_origin();
+        }
+    }
+
+    pub(crate) fn observe_alternate_directory(&mut self) {
+        let Some(cwd) = &self.shell.cwd else { return };
+        let origin = &mut self.shell.alternate_origin;
+        match origin {
+            DirectoryOrigin::Unreported => *origin = DirectoryOrigin::Reported(cwd.clone()),
+            DirectoryOrigin::Reported(first) if first != cwd => {
+                *origin = DirectoryOrigin::Unavailable;
+            }
+            _ => {}
         }
     }
 
@@ -149,7 +177,7 @@ impl Terminal {
 
     /// The working directory the shell last reported with OSC 7.
     pub fn working_directory(&self) -> Option<&WorkingDirectory> {
-        self.shell.cwd.as_ref()
+        self.shell.cwd.as_deref()
     }
 }
 

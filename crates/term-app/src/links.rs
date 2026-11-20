@@ -82,25 +82,34 @@ pub fn open(uri: String) {
     });
 }
 
-/// The file a printed path names: `~/` is the home directory and a relative path is tried
-/// against each of `bases` in turn. Only regular files count, so ports, times and
-/// directories are never links.
-pub fn resolve(path: &str, bases: &[PathBuf], home: Option<&Path>) -> Option<PathBuf> {
-    if path.chars().any(char::is_control) {
+/// Only unreported output may borrow the foreground process's directory.
+/// A remote, deleted or forgotten origin must never select a local namesake.
+pub fn with_file_base<T>(
+    origin: &term_core::DirectoryOrigin,
+    process: impl FnOnce() -> Option<PathBuf>,
+    resolve: impl FnOnce(Option<&Path>) -> Option<T>,
+) -> Option<T> {
+    use term_core::DirectoryOrigin::*;
+    let base = match origin {
+        Reported(cwd) => Some(crate::local_working_directory(Some(cwd))?),
+        Unreported => process(),
+        Unavailable => return None,
+    };
+    resolve(base.as_deref())
+}
+
+pub fn resolve_file(
+    link: &term_core::FileLink,
+    process: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if link.path.chars().any(char::is_control) {
         return None;
     }
-    let candidates: Vec<PathBuf> = if let Some(rest) = path.strip_prefix("~/") {
-        home.map(|home| home.join(rest)).into_iter().collect()
-    } else if Path::new(path).is_absolute() {
-        vec![PathBuf::from(path)]
-    } else {
-        bases
-            .iter()
-            .filter(|base| base.is_absolute())
-            .map(|base| base.join(path))
-            .collect()
-    };
-    candidates.into_iter().find(|p| p.is_file())
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    with_file_base(&link.origin, process, |base| {
+        crate::hover_preview::resolve(&link.path, base, home.as_deref())
+            .filter(|path| path.is_file())
+    })
 }
 
 /// Editors that run inside a terminal, so they get a new Trident window.
@@ -413,33 +422,26 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(dir.join("src/main.rs"), "").unwrap();
         std::fs::write(other.join("notes.md"), "").unwrap();
-        let bases = [PathBuf::from("relative"), dir.clone(), other.clone()];
-        assert_eq!(
-            resolve("src/main.rs", &bases, None),
-            Some(dir.join("src/main.rs"))
-        );
-        assert_eq!(
-            resolve("./src/main.rs", &bases, None),
-            Some(dir.join("./src/main.rs"))
-        );
-        assert_eq!(
-            resolve("notes.md", &bases, None),
-            Some(other.join("notes.md"))
-        );
+        let link = |path: &str| term_core::FileLink {
+            path: path.into(),
+            line: 1,
+            column: None,
+            start: term_core::Point { line: 0, col: 0 },
+            end: term_core::Point { line: 0, col: 1 },
+            origin: term_core::DirectoryOrigin::Unreported,
+        };
+        let resolve = |path: &str| resolve_file(&link(path), || Some(dir.clone()));
+        assert_eq!(resolve("src/main.rs"), Some(dir.join("src/main.rs")));
+        assert_eq!(resolve("./src/main.rs"), Some(dir.join("./src/main.rs")));
+        assert_eq!(resolve("notes.md"), None);
         let absolute = dir.join("src/main.rs");
         assert_eq!(
-            resolve(absolute.to_str().unwrap(), &[], None),
+            resolve_file(&link(absolute.to_str().unwrap()), || None),
             Some(absolute)
         );
-        assert_eq!(
-            resolve("~/src/main.rs", &[], Some(&dir)),
-            Some(dir.join("src/main.rs"))
-        );
-        assert_eq!(resolve("~/src/main.rs", &[], None), None);
-        assert_eq!(resolve("src", &bases, None), None);
-        assert_eq!(resolve("missing.rs", &bases, None), None);
-        assert_eq!(resolve("src/main.rs", &bases[..1], None), None);
-        assert_eq!(resolve("src/main.rs\n", &bases, None), None);
+        assert_eq!(resolve("src"), None);
+        assert_eq!(resolve("missing.rs"), None);
+        assert_eq!(resolve("src/main.rs\n"), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

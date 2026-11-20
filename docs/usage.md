@@ -103,9 +103,14 @@ Hold Cmd (macOS) or Ctrl (Linux) over a link to underline it, and click to open 
 - While you hold the key over an OSC 8 hyperlink, its real target shows at the bottom-left by
   default. It moves if needed to leave Find, the pinned command header and linked text readable.
   Characters outside printable ASCII show percent-encoded, and a long target is cut in the middle.
-- A file reference is a link only when the file exists. Relative paths are tried against the
-  shell's directory (OSC 7), then the foreground program's working directory. `~/` is your home
+- A file reference is a link only when the file exists. Relative paths use the directory reported by OSC 7
+  when the path was printed, even after scrolling or resizing. Only output without a report
+  uses the foreground program's working directory. `~/` is your home
   directory.
+- tmux can redraw old text without its original directory when you resize or enter copy mode.
+  Once two different directories have been in effect on the alternate screen, Trident refuses
+  to preview or open newly printed plain paths there. Even fresh output can look identical to
+  a repaint. Paths whose cells remain intact still use their original directory.
 - Clicking a file reference opens it at that line in `editor` from the config file, filling in its
   `{file}`, `{line}` and `{column}` arguments. If no argument names the file, it's appended.
 - Without `editor`, Trident uses `$VISUAL` or `$EDITOR` (from `[env]` first) with that editor's
@@ -271,9 +276,8 @@ path in the output to see a small card next to it:
 
 Paths are found in `ls` columns, `git status` and `git diff` output, compiler and traceback
 locations, and quoted names. Unquoted paths can contain single spaces; two or more spaces
-separate columns. Ctrl-click or Cmd-click opens links. Relative paths use the directory
-the shell last reported with OSC 7, falling back to the foreground program's or shell's working
-directory. Trident skips previews while the shell reports a directory on another host, as over ssh.
+separate columns. Ctrl-click or Cmd-click opens links. Previews use the same historical directory as file links.
+Output with a remote or no-longer-existing directory does not preview a local namesake.
 PDF previews require `pdftoppm` from poppler-utils on Linux and use Quick Look on macOS.
 
 ## View files

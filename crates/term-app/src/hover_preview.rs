@@ -2,10 +2,8 @@
 //! small card with an image thumbnail, a PDF's first page, the first lines of a text file or
 //! a directory listing. Opt-in with `hover_preview = true` in the config.
 //!
-//! Relative paths resolve against the directory the shell last reported with OSC 7, else
-//! the working directory of the foreground program or the shell; a shell reporting another
-//! host turns previews off. The UI thread only gathers the hovered row's text; a worker thread reads the file
-//! and draws the card.
+//! Relative paths use the OSC 7 origin of their printed cells. A worker checks
+//! that origin, reads the file and draws the card away from the UI thread.
 
 use crate::{App, UserEvent, links};
 use std::ffi::OsString;
@@ -18,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use term_core::colors::Rgb;
 use term_core::images::Image;
-use term_core::{Flags, Link, Point, Row, Terminal};
+use term_core::{DirectoryOrigin, Flags, Link, Point, Row, Terminal};
 use term_render::FloatingImage;
 
 /// Paths longer than this are not looked for.
@@ -316,15 +314,46 @@ pub fn resolve(text: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<Pa
     path.metadata().is_ok().then_some(path)
 }
 
+fn printed_candidates(
+    term: &Terminal,
+    row: isize,
+    col: usize,
+) -> (u64, Vec<(Candidate, DirectoryOrigin)>) {
+    let (first, chars) = line_text(term, row);
+    let line = term.viewport_to_point_signed(first, 0).line;
+    let cols = term.cols();
+    let candidates = candidates_at(&chars, (row - first) as usize * cols + col)
+        .into_iter()
+        .map(|candidate| {
+            let first = chars.partition_point(|&(_, col, _)| col < candidate.start);
+            let points = chars[first..]
+                .iter()
+                .take_while(|&&(_, col, _)| col < candidate.end)
+                .map(|&(_, col, _)| Point {
+                    line: line + (col / cols) as u64,
+                    col: col % cols,
+                });
+            let origin = term.path_origin(points);
+            (candidate, origin)
+        })
+        .collect();
+    (line, candidates)
+}
+
 /// The first candidate naming a file that exists, and its path.
-pub fn resolve_first<'a>(
-    candidates: &'a [Candidate],
-    cwd: Option<&Path>,
+fn resolve_first<'a>(
+    candidates: impl IntoIterator<Item = (&'a Candidate, &'a DirectoryOrigin)>,
+    process: impl FnOnce() -> Option<PathBuf>,
     home: Option<&Path>,
 ) -> Option<(&'a Candidate, PathBuf)> {
-    candidates
-        .iter()
-        .find_map(|c| Some((c, resolve(&c.text, cwd, home)?)))
+    let process = std::cell::LazyCell::new(process);
+    candidates.into_iter().find_map(|(c, origin)| {
+        links::with_file_base(
+            origin,
+            || (*process).clone(),
+            |cwd| Some((c, resolve(&c.text, cwd, home)?)),
+        )
+    })
 }
 
 /// Where the shell said it is, with OSC 7.
@@ -925,10 +954,9 @@ struct Job {
     /// The first row of the hovered line; candidate columns count on across its rows.
     line: u64,
     cols: usize,
-    candidates: Vec<Candidate>,
+    candidates: Vec<(Candidate, DirectoryOrigin)>,
     /// The file a hovered OSC 8 link names, byte for byte.
     link: Option<PathBuf>,
-    cwd: Option<PathBuf>,
     /// Whose working directory relative paths start at without OSC 7.
     process: Option<u32>,
     style: Style,
@@ -937,14 +965,18 @@ struct Job {
 }
 
 fn build(job: &Job, latest: &AtomicU64) -> Option<(Candidate, Image)> {
-    let cwd = job
-        .cwd
-        .clone()
-        .or_else(|| job.process.and_then(process_cwd));
+    let process = || job.process.and_then(process_cwd);
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let (candidate, path) = match &job.link {
-        Some(path) => (job.candidates.first()?, path.clone()),
-        None => resolve_first(&job.candidates, cwd.as_deref(), home.as_deref())?,
+        Some(path) => {
+            let (candidate, origin) = job.candidates.first()?;
+            links::with_file_base(origin, || None, |_| Some((candidate, path.clone())))?
+        }
+        None => resolve_first(
+            job.candidates.iter().map(|(c, origin)| (c, origin)),
+            process,
+            home.as_deref(),
+        )?,
     };
     if latest.load(Ordering::Relaxed) != job.generation {
         return None;
@@ -981,9 +1013,8 @@ impl std::fmt::Debug for Ready {
 struct Key {
     pane: u64,
     line: u64,
-    candidates: Vec<Candidate>,
+    candidates: Vec<(Candidate, DirectoryOrigin)>,
     link: Option<PathBuf>,
-    cwd: Option<PathBuf>,
     room: (u32, u32),
 }
 
@@ -1024,10 +1055,6 @@ impl App {
             return None;
         }
         let s = self.session.as_ref()?;
-        let cwd = match s.term.working_directory() {
-            Some(reported) => Some(crate::local_working_directory(Some(reported))?),
-            None => None,
-        };
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         let pad = self.config.padding * s.window.scale_factor() as f32;
         if crate::pointer_in_search_bar(self.search.is_some(), self.mouse_pos, s.grid_px(), cell)
@@ -1055,17 +1082,20 @@ impl App {
                 };
                 let text = path.to_string_lossy().into_owned();
                 link_path = Some(path);
-                vec![Candidate {
-                    text,
-                    start: col,
-                    end: col,
-                    line: None,
-                }]
+                vec![(
+                    Candidate {
+                        text,
+                        start: col,
+                        end: col,
+                        line: None,
+                    },
+                    s.term.directory_origin_at(link.start),
+                )]
             }
             None => {
-                let (first, chars) = line_text(&s.term, row);
-                line = s.term.viewport_to_point_signed(first, 0).line;
-                candidates_at(&chars, (row - first) as usize * s.term.cols() + col)
+                let (first, candidates) = printed_candidates(&s.term, row, col);
+                line = first;
+                candidates
             }
         };
         if candidates.is_empty() {
@@ -1087,7 +1117,6 @@ impl App {
             cols: s.term.cols(),
             candidates,
             link: link_path,
-            cwd,
             process: None,
             style: Style {
                 fg: s.term.palette.foreground,
@@ -1107,7 +1136,6 @@ impl App {
             line: job.line,
             candidates: job.candidates.clone(),
             link: job.link.clone(),
-            cwd: job.cwd.clone(),
             room: job.room,
         });
         if preview.pending == key {
@@ -1401,19 +1429,83 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn resolve_in<'a>(found: &'a [Candidate], dir: &Path) -> Option<(&'a Candidate, PathBuf)> {
+        resolve_first(
+            found.iter().map(|c| (c, &DirectoryOrigin::Unreported)),
+            || Some(dir.into()),
+            None,
+        )
+    }
+
+    #[test]
+    fn preview_and_open_use_the_printed_origin() {
+        let a = scratch();
+        let b = a.with_extension("b");
+        std::fs::create_dir_all(b.join("src")).unwrap();
+        let file = "src/main.rs";
+        std::fs::write(b.join(file), "other file").unwrap();
+        let mut term = Terminal::new(40, 6);
+        let report =
+            |host: &str, path: &Path| format!("\x1b]7;file://{host}{}\x07", path.display());
+        let printed = "src/main.rs:7:3\r\n";
+        term.advance(
+            format!(
+                "{printed}{}{printed}{}{printed}{}{printed}",
+                report("", &a),
+                report("elsewhere.invalid", &b),
+                report("", &b)
+            )
+            .as_bytes(),
+        );
+        let check = |term: &Terminal, row, col, expected: Option<PathBuf>| {
+            let link = term
+                .file_link_at(term.viewport_to_point_signed(row, col))
+                .unwrap();
+            assert_eq!(links::resolve_file(&link, || Some(b.clone())), expected);
+            let (_, candidates) = printed_candidates(term, row, col);
+            let preview = resolve_first(
+                candidates.iter().map(|(c, origin)| (c, origin)),
+                || Some(b.clone()),
+                None,
+            );
+            assert_eq!(preview.map(|(_, path)| path), expected);
+        };
+        check(&term, 0, 2, Some(b.join(file))); // No report yet.
+        check(&term, 1, 2, Some(a.join(file)));
+        check(&term, 2, 2, None);
+        check(&term, 3, 2, Some(b.join(file)));
+
+        // A multiplexer repaints the same bytes without the original report.
+        let mut mux = Terminal::new(40, 6);
+        mux.advance(format!("\x1b[?1049h{}{printed}{}", report("", &a), report("", &b)).as_bytes());
+        check(&mux, 0, 2, Some(a.join(file)));
+        mux.advance(b"\x1b[1;5Hmain.rs");
+        check(&mux, 0, 2, None); // First path cell is still from A.
+        mux.advance(format!("\x1b[H{printed}").as_bytes());
+        check(&mux, 0, 2, None);
+        mux.advance(format!("\x1b[?1049l{printed}").as_bytes());
+        check(&mux, 0, 2, Some(b.join(file)));
+
+        std::fs::remove_file(a.join(file)).unwrap();
+        check(&term, 1, 2, None);
+        std::fs::remove_dir_all(&a).unwrap();
+        check(&term, 1, 2, None);
+        std::fs::remove_dir_all(b).unwrap();
+    }
+
     #[test]
     fn first_existing_candidate_wins() {
         let dir = scratch();
         let line = "error: src/main.rs:3:1: oops";
         let found = candidates_at(&chars(line), at(line, "main"));
-        let (candidate, path) = resolve_first(&found, Some(&dir), None).unwrap();
+        let (candidate, path) = resolve_in(&found, &dir).unwrap();
         assert_eq!(candidate.text, "src/main.rs");
         assert_eq!(candidate.line, Some(3));
         assert_eq!(path, dir.join("src/main.rs"));
 
         let diff = "+++ b/src/main.rs";
         let found = candidates_at(&chars(diff), at(diff, "main"));
-        let (candidate, _) = resolve_first(&found, Some(&dir), None).unwrap();
+        let (candidate, _) = resolve_in(&found, &dir).unwrap();
         assert_eq!(candidate.text, "src/main.rs");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1446,7 +1538,7 @@ mod tests {
             let start = line.find(name).unwrap();
             for col in start..start + name.len() {
                 let found = candidates_at(&chars(line), col);
-                let (candidate, path) = resolve_first(&found, Some(&dir), None).unwrap();
+                let (candidate, path) = resolve_in(&found, &dir).unwrap();
                 assert_eq!(path, file, "{line} at {col}");
                 assert_eq!(candidate.line, number);
                 assert_eq!(
@@ -1471,7 +1563,7 @@ mod tests {
         term.advance(format!(r#"  File "{name}", line 25, in main"#).as_bytes());
         let (_, chars) = line_text(&term, 1);
         let found = candidates_at(&chars, 11);
-        let (candidate, path) = resolve_first(&found, Some(&dir), None).unwrap();
+        let (candidate, path) = resolve_in(&found, &dir).unwrap();
         assert_eq!((candidate.start, candidate.end), (8, 8 + name.len()));
         let Body::Lines { lines, first, mark } =
             content(&path, candidate.line, (400, 200), 5).unwrap().body

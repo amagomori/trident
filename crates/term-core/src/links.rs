@@ -1,6 +1,6 @@
 //! OSC 8 links and plain-text URL/file references in retained output.
 
-use crate::{Cell, Color, Flags, Point, Terminal};
+use crate::{Cell, Color, DirectoryOrigin, Flags, Point, Terminal};
 
 /// A link and its inclusive cell ranges; obtained with [`Terminal::link_at`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +21,8 @@ pub struct Link {
 pub struct FileLink {
     /// Printed path, not resolved against the shell's working directory.
     pub path: String,
+    /// Common origin of the printed path, or unavailable when its cells disagree.
+    pub origin: DirectoryOrigin,
     /// One-based source line number as printed.
     pub line: u32,
     /// Printed one-based column, or `None` when omitted.
@@ -107,9 +109,9 @@ impl Link {
     }
 }
 
-/// OSC 8 `(id, uri)` pairs with SGR 58 underline color and character protection, indexed from 1,
-/// stored in one buffer. A cell's `hyperlink` indexes it; protection alone uses reserved
-/// indices, and an entry with an empty URI carries an underline color. Recently seen
+/// OSC 8 links and cell metadata (underline color, protection and OSC 7
+/// origin), indexed from 1. A cell's `hyperlink` indexes it; reserved indices retain protection
+/// bits and flag discarded origins. Recently seen
 /// pairs are found through a small direct-mapped cache, so repeated links share
 /// an index without a per-sequence hash-table probe; a pair evicted from the
 /// cache may be stored again under a new index. Indices no cell references are
@@ -140,19 +142,24 @@ impl Protection {
     pub(super) fn contains(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
-
-    // The three highest indices encode protection without allocating a table entry.
-    fn bare_index(self) -> u16 {
-        u16::from(self.0).wrapping_neg()
-    }
 }
 
-const MAX_ENTRY: u16 = u16::MAX - 3;
+const MAX_ENTRY: u16 = u16::MAX - 7;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 struct Extras {
     underline: Option<Color>,
     protection: Protection,
+    origin: DirectoryOrigin,
+}
+
+impl Extras {
+    // Reserved indices preserve protection and distinguish lost from absent
+    // provenance even when all ordinary table entries are in use.
+    fn reduced_index(&self) -> u16 {
+        let lost = u16::from(self.origin != DirectoryOrigin::Unreported);
+        (lost << 2 | u16::from(self.protection.0)).wrapping_neg()
+    }
 }
 
 struct Span {
@@ -182,7 +189,7 @@ struct Slot {
     tag: u32,
 }
 
-fn recent_slot(id: &[u8], uri: &[u8], extras: Extras) -> Slot {
+fn recent_slot(id: &[u8], uri: &[u8], extras: &Extras) -> Slot {
     const K: u64 = 0x517c_c1b7_2722_0a95;
     let color = match extras.underline {
         None => 0,
@@ -194,7 +201,11 @@ fn recent_slot(id: &[u8], uri: &[u8], extras: Extras) -> Slot {
     let mut hash =
         (id.len() as u64 ^ color.rotate_left(17) ^ u64::from(extras.protection.0).rotate_left(9))
             .wrapping_mul(K);
-    for part in [id, uri] {
+    let directory = match &extras.origin {
+        DirectoryOrigin::Reported(cwd) => Some(cwd.path.as_bytes()),
+        _ => None,
+    };
+    for part in [id, uri].into_iter().chain(directory) {
         let (words, rest) = part.as_chunks::<8>();
         for word in words {
             hash = (hash.rotate_left(5) ^ u64::from_le_bytes(*word)).wrapping_mul(K);
@@ -210,6 +221,22 @@ fn recent_slot(id: &[u8], uri: &[u8], extras: Extras) -> Slot {
 }
 
 impl LinkTable {
+    /// Whether trimming this cell loses neither text nor rendition. An OSC 7
+    /// origin alone does not turn trailing spaces into visible content.
+    pub(crate) fn is_blank(&self, cell: &Cell) -> bool {
+        let index = cell.hyperlink;
+        *cell
+            == (Cell {
+                hyperlink: index,
+                ..Cell::default()
+            })
+            && (index == 0
+                || index == 4u16.wrapping_neg()
+                || self.spans.get(index as usize - 1).is_some_and(|s| {
+                    s.uri_len == 0 && s.extras.underline.is_none() && s.extras.protection.0 == 0
+                }))
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.spans.len()
     }
@@ -242,14 +269,19 @@ impl LinkTable {
     fn extras(&self, index: u16) -> Extras {
         if index > MAX_ENTRY {
             Extras {
-                protection: Protection(index.wrapping_neg() as u8),
+                protection: Protection(index.wrapping_neg() as u8 & 3),
+                origin: if index.wrapping_neg() & 4 != 0 {
+                    DirectoryOrigin::Unavailable
+                } else {
+                    DirectoryOrigin::Unreported
+                },
                 underline: None,
             }
         } else {
             index
                 .checked_sub(1)
                 .and_then(|i| self.spans.get(i as usize))
-                .map(|s| s.extras)
+                .map(|s| s.extras.clone())
                 .unwrap_or_default()
         }
     }
@@ -258,17 +290,17 @@ impl LinkTable {
         self.extras(index).protection
     }
 
-    fn matches(&self, index: u16, id: &[u8], uri: &[u8], extras: Extras) -> bool {
-        self.get(index) == Some((id, uri)) && self.extras(index) == extras
+    fn matches(&self, index: u16, id: &[u8], uri: &[u8], extras: &Extras) -> bool {
+        self.get(index) == Some((id, uri)) && self.spans[index as usize - 1].extras == *extras
     }
 
-    fn find(&self, id: &[u8], uri: &[u8], extras: Extras, slot: Slot) -> Option<u16> {
+    fn find(&self, id: &[u8], uri: &[u8], extras: &Extras, slot: Slot) -> Option<u16> {
         let entry = *self.recent.get(slot.at)?;
         let index = entry as u16;
         (entry >> 16 == slot.tag && self.matches(index, id, uri, extras)).then_some(index)
     }
 
-    fn position(&mut self, id: &[u8], uri: &[u8], extras: Extras, slot: Slot) -> Option<u16> {
+    fn position(&mut self, id: &[u8], uri: &[u8], extras: &Extras, slot: Slot) -> Option<u16> {
         let index = (1..=self.len() as u16).find(|&index| self.matches(index, id, uri, extras))?;
         self.recent[slot.at] = slot.tag << 16 | index as u32;
         Some(index)
@@ -314,7 +346,7 @@ impl LinkTable {
                 bytes.extend_from_slice(&self.bytes[span.start..span.start + len]);
                 span.start = start;
             } else {
-                // An entry without a URI always has an underline color, so a freed span never matches.
+                // Cleared entries have no metadata, so an empty URI cannot match them.
                 *span = Span {
                     start: 0,
                     id_len: 0,
@@ -342,10 +374,10 @@ impl LinkTable {
         for index in 1..=old.len() as u16 {
             if used[index as usize] {
                 let (id, uri) = old.get(index).unwrap();
-                let extras = old.extras(index);
-                remap[index as usize] = *kept
-                    .entry((id, uri, extras))
-                    .or_insert_with(|| self.insert(id, uri, extras, recent_slot(id, uri, extras)));
+                let extras = &old.spans[index as usize - 1].extras;
+                remap[index as usize] = *kept.entry((id, uri, extras)).or_insert_with(|| {
+                    self.insert(id, uri, extras.clone(), recent_slot(id, uri, extras))
+                });
             }
         }
         remap
@@ -354,7 +386,7 @@ impl LinkTable {
 
 impl Terminal {
     /// The index cells store for the OSC 8 link `(id, uri)` underlined in `underline`.
-    /// Without a link or color, or when the table is full, only protection is retained.
+    /// When the table is full, retain protection and mark any reported origin unavailable.
     pub(crate) fn intern_link(
         &mut self,
         id: &[u8],
@@ -369,6 +401,7 @@ impl Terminal {
             Extras {
                 underline,
                 protection,
+                origin: self.current_directory_origin(),
             },
             limit,
         )
@@ -376,11 +409,14 @@ impl Terminal {
 
     fn intern_extras(&mut self, id: &[u8], uri: &[u8], extras: Extras, limit: usize) -> u16 {
         let limit = limit.min(usize::from(MAX_ENTRY));
-        if uri.is_empty() && extras.underline.is_none() {
-            return extras.protection.bare_index();
+        if uri.is_empty()
+            && extras.underline.is_none()
+            && !matches!(extras.origin, DirectoryOrigin::Reported(_))
+        {
+            return extras.reduced_index();
         }
-        let slot = recent_slot(id, uri, extras);
-        if let Some(index) = self.links.find(id, uri, extras, slot) {
+        let slot = recent_slot(id, uri, &extras);
+        if let Some(index) = self.links.find(id, uri, &extras, slot) {
             return index;
         }
         if self.links.needs_release(limit) {
@@ -393,7 +429,7 @@ impl Terminal {
             self.release_links(keep);
             if self.links.is_full(limit) {
                 self.compact_links();
-                if let Some(index) = self.links.position(id, uri, extras, slot) {
+                if let Some(index) = self.links.position(id, uri, &extras, slot) {
                     return index;
                 }
             }
@@ -406,9 +442,70 @@ impl Terminal {
             self.links.next_release = (4 * live).max(cells / CELLS_PER_ENTRY);
         }
         if self.links.is_full(limit) {
-            return extras.protection.bare_index();
+            return extras.reduced_index();
         }
         self.links.insert(id, uri, extras, slot)
+    }
+
+    fn current_directory_origin(&self) -> DirectoryOrigin {
+        if self.alt_active {
+            return self.shell.alternate_origin.clone();
+        }
+        self.shell
+            .cwd
+            .clone()
+            .map_or(DirectoryOrigin::Unreported, DirectoryOrigin::Reported)
+    }
+
+    /// A cursor restore restores rendition, not the shell's working directory.
+    pub(crate) fn sync_directory_origin(&mut self) {
+        let index = self.cursor.template.hyperlink;
+        let mut extras = self.links.extras(index);
+        let origin = self.current_directory_origin();
+        if extras.origin != origin {
+            extras.origin = origin;
+            let (id, uri) = self.links.get(index).unwrap_or_default();
+            let (id, uri) = (id.to_vec(), uri.to_vec());
+            self.cursor.template.hyperlink =
+                self.intern_extras(&id, &uri, extras, MAX_ENTRY.into());
+        }
+    }
+
+    /// Returns the printed cell's origin, or unavailable outside retained text.
+    pub fn directory_origin_at(&self, point: Point) -> DirectoryOrigin {
+        if self.on_screen_or_history(point)
+            && let Some(cell) = self.line(point.line).cells.get(point.col)
+        {
+            self.links.extras(cell.hyperlink).origin
+        } else {
+            DirectoryOrigin::Unavailable
+        }
+    }
+
+    /// Common origin of the cells spelling a path. A partial repaint may replace
+    /// only its suffix, so the first cell alone cannot establish the origin.
+    pub fn path_origin(&self, points: impl IntoIterator<Item = Point>) -> DirectoryOrigin {
+        let mut indices = points.into_iter().map(|p| {
+            if !(self.first_line()..self.history + self.rows as u64).contains(&p.line) {
+                return None;
+            }
+            let row = self.line(p.line);
+            row.cells
+                .get(p.col)
+                .or_else(|| row.hidden_cells().nth(p.col - row.cells.len()))
+                .map(|c| c.hyperlink)
+        });
+        let Some(Some(first)) = indices.next() else {
+            return DirectoryOrigin::Unavailable;
+        };
+        let origin = self.links.extras(first).origin;
+        if indices
+            .all(|index| index.is_some_and(|i| i == first || self.links.extras(i).origin == origin))
+        {
+            origin
+        } else {
+            DirectoryOrigin::Unavailable
+        }
     }
 
     pub(super) fn set_protection(&mut self, kind: Protection, on: bool) {
@@ -481,7 +578,7 @@ impl Terminal {
                     marked += row.mark_hyperlinks(&mut used);
                 } else {
                     row.hyperlinks_mut()
-                        .for_each(|index| *index = self.links.protection(*index).bare_index());
+                        .for_each(|index| *index = self.links.extras(*index).reduced_index());
                 }
             }
         }
@@ -651,6 +748,8 @@ impl Terminal {
             let (start, end) = self.text_span(&positions, r.offset, r.len);
             (start <= point && point <= end).then(|| FileLink {
                 path: r.path.to_owned(),
+                origin: self
+                    .path_origin(positions[r.offset..r.offset + r.path.len()].iter().copied()),
                 line: r.line,
                 column: r.column,
                 start,
@@ -1399,6 +1498,93 @@ mod tests {
             Terminal::new(8, 2)
                 .file_link_at(Point { line: 5, col: 0 })
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn directory_origin_moves_with_text_and_expires_with_history() {
+        let mut t = Terminal::new(24, 3);
+        t.set_scrollback_limit(8);
+        t.advance(b"\x1b]7;file:///a\x07long/src.rs:7\r\n\x1b]7;file:///b\x07next.rs:8\r\n\r\n");
+        let at = |line, col| Point { line, col };
+        t.resize(8, 3);
+        let old = t.file_link_at(at(1, 2)).unwrap();
+        assert_eq!(old.start, at(0, 0));
+        assert!(matches!(&old.origin, DirectoryOrigin::Reported(cwd) if cwd.path == "/a"));
+        t.resize(24, 3);
+        assert_eq!(t.file_link_at(at(0, 2)).unwrap().origin, old.origin);
+        assert!(
+            matches!(t.directory_origin_at(at(1, 2)), DirectoryOrigin::Reported(cwd) if cwd.path == "/b")
+        );
+        t.advance(b"\r\n".repeat(12).as_slice());
+        assert!(t.file_link_at(at(0, 2)).is_none());
+        assert_eq!(
+            t.directory_origin_at(at(0, 2)),
+            DirectoryOrigin::Unavailable
+        );
+    }
+
+    #[test]
+    fn alternate_file_origin_includes_hidden_suffix() {
+        let mut t = Terminal::new(40, 3);
+        t.advance(b"\x1b[?1049h\x1b]7;file:///a\x07src/main.rs:12\x1b]7;file:///b\x07");
+        let point = Point { line: 0, col: 0 };
+        let original = t.file_link_at(point).unwrap();
+        t.resize(6, 3);
+        let clipped = t.file_link_at(point).unwrap();
+        assert_eq!(clipped.path, original.path);
+        assert_eq!(clipped.origin, original.origin);
+    }
+
+    #[test]
+    fn alternate_directory_ambiguity_outlives_cursor_and_preserved_screen_restores() {
+        let mut t = Terminal::new(36, 4);
+        let origin = |t: &Terminal, row| t.directory_origin_at(Point { line: row, col: 0 });
+        t.advance(b"\x1b[?47hx\r\n");
+        assert_eq!(origin(&t, 0), DirectoryOrigin::Unreported);
+        t.advance(b"\x1b]7;file:///a\x07\x1b]7;file:///a\x07a\x1b7");
+        assert!(matches!(origin(&t, 1), DirectoryOrigin::Reported(cwd) if cwd.path == "/a"));
+        t.advance(b"\x1b]7;file://remote/a\x07\x1b8\r\nb");
+        assert_eq!(origin(&t, 2), DirectoryOrigin::Unavailable);
+        t.advance(b"\x1b[?47l\x1b]7;file:///a\x07\x1b[?47h\x1b[Hc");
+        assert_eq!(origin(&t, 0), DirectoryOrigin::Unavailable);
+        t.advance(b"\x1b[?1047l\x1b[?1049h\x1b[Hd");
+        assert!(matches!(origin(&t, 0), DirectoryOrigin::Reported(cwd) if cwd.path == "/a"));
+    }
+
+    #[test]
+    fn directory_origin_does_not_make_padding_text() {
+        let mut t = Terminal::new(30, 4);
+        t.advance(b"\x1b]7;file:///a\x07foo           \r\nbar\r\n");
+        for cols in [30, 5, 24] {
+            t.resize(cols, 4);
+            assert_eq!(t.search("foo$", true).unwrap().len(), 1);
+            assert_eq!(t.search("bar$", true).unwrap()[0].start.line, 1);
+        }
+        // An OSC 8 link on a space is not just a directory report.
+        t.advance(b"baz\x1b]8;;https://example.com\x07 \x1b]8;;\x07");
+        assert_eq!(t.search("baz $", true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn restoring_rendition_does_not_restore_an_old_directory() {
+        let mut t = Terminal::new(30, 3);
+        t.advance(b"\x1b]7;file:///a\x07a.rs:1 \x1b7\x1b]7;file:///b\x07\x1b8b.rs:1 \x1b[!pc.rs:1");
+        for (col, path) in [(1, "/a"), (8, "/b"), (15, "/b")] {
+            assert!(
+                matches!(t.directory_origin_at(Point{line:0,col}), DirectoryOrigin::Reported(cwd) if cwd.path == path)
+            );
+        }
+    }
+
+    #[test]
+    fn evicted_directory_metadata_is_not_unreported() {
+        let mut t = Terminal::new(20, 1);
+        t.advance(b"\x1b]7;file:///a\x07foo.rs:1\r\n");
+        t.release_links(0);
+        assert_eq!(
+            t.file_link_at(Point { line: 0, col: 0 }).unwrap().origin,
+            DirectoryOrigin::Unavailable
         );
     }
 

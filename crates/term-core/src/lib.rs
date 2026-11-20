@@ -35,7 +35,7 @@ use margins::{LrMode, shift_cells};
 mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
-pub use osc::{ClipboardRequest, WorkingDirectory};
+pub use osc::{ClipboardRequest, DirectoryOrigin, WorkingDirectory};
 
 /// Window geometry the app feeds in for the XTWINOPS reports (ops 11/13/15/19).
 #[derive(Clone, Copy, Debug, Default)]
@@ -111,7 +111,9 @@ struct ShellState {
     notifications: notifications::Notifications,
     progress: Option<Progress>,
     progress_changed: bool,
-    cwd: Option<WorkingDirectory>,
+    cwd: Option<std::sync::Arc<WorkingDirectory>>,
+    /// A full-screen program may replay its history without replaying OSC 7.
+    alternate_origin: DirectoryOrigin,
     clipboard: Vec<ClipboardRequest>,
 }
 
@@ -1282,6 +1284,7 @@ impl Terminal {
                 progress: None,
                 progress_changed: false,
                 cwd: None,
+                alternate_origin: DirectoryOrigin::Unreported,
                 clipboard: Vec::new(),
             }),
             reports: Box::default(),
@@ -1789,7 +1792,7 @@ impl Terminal {
             }
             if reflow {
                 for row in &mut screen.lines {
-                    row.resize(cols);
+                    row.resize_trimming(cols, |cell| self.links.is_blank(cell));
                 }
             }
             // The inactive screen's cursor is the one saved when switching away from it.
@@ -2871,7 +2874,7 @@ impl Terminal {
             .primary
             .lines
             .iter()
-            .rposition(|r| !r.is_blank())
+            .rposition(|r| !r.is_blank(&self.links))
             .map_or(0, |r| r + 1);
         for p in &self.primary.placements {
             let end = p.line.saturating_add(p.visible_rows() as u64);
@@ -3120,6 +3123,7 @@ impl Terminal {
                 self.cursor.pending_wrap = false;
             }
         }
+        self.sync_directory_origin();
         self.cursor.row = self.cursor.row.min(self.rows - 1);
         self.cursor.col = self.cursor.col.min(self.cols - 1);
         self.print_state.allow_join();
@@ -3137,6 +3141,11 @@ impl Terminal {
                 self.save_cursor();
             }
             self.alt_active = true;
+            if clear {
+                self.shell.alternate_origin = DirectoryOrigin::Unreported;
+            }
+            self.observe_alternate_directory();
+            self.sync_directory_origin();
         }
         // Clears the alternate buffer: after switching on entry, before switching back on exit.
         if clear {
@@ -3146,8 +3155,13 @@ impl Terminal {
         }
         if !enable {
             self.alt_active = false;
+            if clear {
+                self.shell.alternate_origin = DirectoryOrigin::Unreported;
+            }
             if save_cursor {
                 self.restore_cursor();
+            } else {
+                self.sync_directory_origin();
             }
         }
         self.selection = None;

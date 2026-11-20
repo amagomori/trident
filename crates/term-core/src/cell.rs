@@ -128,7 +128,7 @@ pub struct Cell {
     pub bg: Color,
     /// Rendition attributes and wide/grapheme storage markers.
     pub flags: Flags,
-    /// Terminal-owned link, underline color and protection index; zero means no entry.
+    /// Terminal-owned link, underline color, protection and directory origin; zero means none.
     pub hyperlink: u16,
 }
 
@@ -457,6 +457,10 @@ impl Row {
     ///
     /// Panics if a nonempty row is narrowed to zero columns.
     pub fn resize(&mut self, cols: usize) {
+        self.resize_trimming(cols, |c| *c == Cell::default());
+    }
+
+    pub(crate) fn resize_trimming(&mut self, cols: usize, blank: impl Fn(&Cell) -> bool) {
         let mut cells = self.take_cells();
         if cells.len() > cols {
             let wide_at_edge = cells[cols - 1].flags.contains(Flags::WIDE);
@@ -469,10 +473,7 @@ impl Row {
                 });
             }
             if !self.wrapped() {
-                let used = hidden
-                    .iter()
-                    .rposition(|c| *c != Cell::default())
-                    .map_or(0, |i| i + 1);
+                let used = hidden.iter().rposition(|c| !blank(c)).map_or(0, |i| i + 1);
                 hidden.truncate(used);
             }
             if wide_at_edge || !hidden.is_empty() {
@@ -591,12 +592,12 @@ impl Row {
             .map(|c| &mut c.hyperlink)
     }
 
-    pub(crate) fn is_blank(&self) -> bool {
-        self.cells.iter().all(|c| *c == Cell::default())
+    pub(crate) fn is_blank(&self, links: &crate::links::LinkTable) -> bool {
+        self.cells.iter().all(|c| links.is_blank(c))
             && self
                 .extra
                 .as_ref()
-                .is_none_or(|h| h.cells.iter().all(|c| *c == Cell::default()))
+                .is_none_or(|h| h.cells.iter().all(|c| links.is_blank(c)))
     }
 
     /// Returns visible test text without wide-character spacer cells.
