@@ -157,13 +157,21 @@ lines. It ignores case unless the query has an uppercase letter.
   but stop at a hard line break.
 - While a program such as vim, tmux or htop uses the mouse, hold Shift to select text. For a
   rectangle, hold Shift+Alt (Shift+Option on macOS).
-- tmux sometimes redraws wrapped pane text as separate screen rows, including in copy-mode
-  history. Trident cannot distinguish those rows from hard breaks. Use tmux's own copy mode
-  instead of Shift-selection when you need the pane's original line breaks.
 - Shift-click extends the current selection, keeping its anchor and shape.
 - Rectangular copies keep spaces and put each screen row on its own line.
 - Selecting doesn't copy to the clipboard unless you launch with `--copy-on-select`. On Linux,
   selecting always sets the primary selection.
+
+### Wrapped text in tmux
+
+When tmux draws a wrapped word containing a wide character, or redraws history in copy mode,
+it can send the rows without indicating a soft wrap. Trident then treats the boundary as a
+hard line break, so double-click and triple-click selection stop there.
+
+On a full redraw, tmux 3.8 can send the padding before a wrapped wide character as a literal
+space. Trident keeps that space: it splits the word on double-click and appears in a copied
+line. To copy the pane's original text and line breaks, select and copy with tmux's own copy
+mode instead of holding Shift to select in Trident.
 
 ## Click to move the cursor
 
