@@ -133,6 +133,46 @@ fn a_full_height_image_keeps_its_visible_bands_without_hiding_following_text() {
 }
 
 #[test]
+fn command_budget_keeps_the_same_three_live_sixel_bands_as_unmarked_output() {
+    for marked in [false, true] {
+        let mut t = Terminal::new(40, 4);
+        t.set_scrollback_limit(32);
+        t.set_command_budget(true, 0.5);
+        t.set_cell_pixel_size(8., 6.);
+        if marked {
+            t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07img\r\n\x1b]133;C\x07");
+        } else {
+            t.advance(b"$ img\r\n");
+        }
+        t.advance(b"\x1bP7q#1;2;100;0;0");
+        for _ in 0..21 {
+            t.advance(b"~-");
+        }
+        t.advance(b"#2;2;0;100;0~-#3;2;0;0;100~-#4;2;100;100;0~\x1b\\following text");
+
+        assert_eq!(t.scrollback_len(), if marked { 16 } else { 22 });
+        assert_eq!(t.viewport_row(3).text(), "following text");
+        let placements = t.visible_placements();
+        let [v] = placements.as_slice() else {
+            panic!("expected one visible image fragment, got {placements:?}");
+        };
+        let p = v.placement;
+        assert!(v.row <= 0);
+        assert_eq!(v.row + p.visible_rows() as isize, 3);
+        let first = p.source.y as usize + (p.skipped_rows + (-v.row) as usize) * 6;
+        let img = t.image(p.image_id).unwrap();
+        assert_eq!((img.width, img.height), (1, 144));
+        for (band, color) in [[0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255]]
+            .into_iter()
+            .enumerate()
+        {
+            let top = first + band * 6;
+            assert_eq!(&img.pixels.as_chunks::<4>().0[top..top + 6], &[color; 6]);
+        }
+    }
+}
+
+#[test]
 fn output_outside_scroll_margins_clips_at_the_bottom() {
     for (start, row, height, cursor) in [(1, 0, 48, 3), (5, 4, 16, 5), (6, 5, 16, 5)] {
         let mut t = Terminal::new(5, 6);
