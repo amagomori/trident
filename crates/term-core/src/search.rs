@@ -37,8 +37,8 @@ pub struct SearchJob {
     chunks: Vec<std::ops::Range<usize>>,
     total: usize,
     text: Vec<u8>,
-    points: Vec<(Point, Point)>,
-    eager: bool,
+    /// After a miss, try the literal batch filter on the next lines.
+    last_missed: bool,
     /// The query is a literal without newlines, so lines can be tested many at a time.
     batch: bool,
 }
@@ -79,7 +79,7 @@ impl SearchJob {
                 self.next = None;
                 break;
             }
-            if self.batch && !self.eager && unbatched == 0 {
+            if self.batch && self.last_missed && unbatched == 0 {
                 let n = budget.min(BATCH_LINES);
                 match self.skip_batch(term, next, n, first, last) {
                     Some(scanned) => {
@@ -138,65 +138,34 @@ impl SearchJob {
     }
 
     fn scan(&mut self, term: &Terminal, logical_start: u64, logical_end: u64, last: u64) {
-        let Self {
-            re,
-            found,
-            chunks,
-            total,
-            text,
-            points,
-            eager,
-            ..
-        } = self;
-        text.clear();
-        let has_points = *eager;
-        if has_points {
-            points.clear();
-        }
+        self.text.clear();
         for line in logical_start..=logical_end {
-            push_line(text, term, line, last);
-            if has_points {
-                for (col, cell) in line_columns(term, line, last) {
-                    push_points(points, term, line, col, cell);
-                }
-            }
+            push_line(&mut self.text, term, line, last);
         }
-        if !has_points {
-            if !re.is_match(text) {
-                *eager = false;
-                return;
-            }
-            points.clear();
-            for line in logical_start..=logical_end {
-                for (col, cell) in line_columns(term, line, last) {
-                    push_points(points, term, line, col, cell);
-                }
-            }
-        }
-        let offset = found.len();
-        let limit = offset + MATCH_LIMIT - *total;
-        let remaining = limit - offset;
+        let mut cell_at = endpoint_cursor(term, logical_start..=logical_end, last);
+        let offset = self.found.len();
+        let remaining = MATCH_LIMIT - self.total;
         let mut oldest = 0;
-        for m in re.find_iter(text) {
+        for m in self.re.find_iter(&self.text) {
             if m.is_empty() {
                 continue;
             }
             let matched = Match {
-                start: points[m.start()].0,
-                end: points[m.end() - 1].1,
+                start: cell_at(m.start()).start,
+                end: cell_at(m.end() - 1).end,
             };
-            if found.len() < limit {
-                found.push(matched);
+            if self.found.len() < offset + remaining {
+                self.found.push(matched);
             } else {
-                found[offset + oldest] = matched;
+                self.found[offset + oldest] = matched;
                 oldest = (oldest + 1) % remaining;
             }
         }
-        found[offset..].rotate_left(oldest);
-        *eager = found.len() > offset;
-        if *eager {
-            chunks.push(offset..found.len());
-            *total += found.len() - offset;
+        self.found[offset..].rotate_left(oldest);
+        self.last_missed = self.found.len() == offset;
+        if !self.last_missed {
+            self.chunks.push(offset..self.found.len());
+            self.total += self.found.len() - offset;
         }
     }
 
@@ -211,19 +180,33 @@ impl SearchJob {
     }
 }
 
-fn push_points(
-    points: &mut Vec<(Point, Point)>,
+/// Map nondecreasing byte offsets to inclusive cell bounds. Keep the current cell:
+/// even distinct regex matches can fall within the same grapheme.
+fn endpoint_cursor(
     term: &Terminal,
-    line: u64,
-    col: usize,
-    cell: &Cell,
-) {
-    let start = Point { line, col };
-    let end = Point {
-        line,
-        col: col + usize::from(cell.flags.contains(Flags::WIDE)),
-    };
-    points.extend(std::iter::repeat_n((start, end), term.cell_text_len(cell)));
+    lines: std::ops::RangeInclusive<u64>,
+    last: u64,
+) -> impl FnMut(usize) -> Match + '_ {
+    let cells = lines.flat_map(move |line| {
+        line_columns(term, line, last).map(move |(col, cell)| (Point { line, col }, cell))
+    });
+    let mut cells = cells
+        .scan(0, |past, (start, cell)| {
+            *past += term.cell_text_len(cell);
+            Some((*past, start, cell))
+        })
+        .peekable();
+    move |byte| loop {
+        let &(past, start, cell) = cells.peek().expect("match offset lies in the line text");
+        if byte < past {
+            let end = Point {
+                col: start.col + usize::from(cell.flags.contains(Flags::WIDE)),
+                ..start
+            };
+            return Match { start, end };
+        }
+        cells.next();
+    }
 }
 
 /// First line of the logical line that ends at `end`.
@@ -393,8 +376,7 @@ impl Terminal {
             chunks: Vec::new(),
             total: 0,
             text: Vec::new(),
-            points: Vec::new(),
-            eager: true,
+            last_missed: false,
             batch: !regex && !query.contains('\n'),
         })
     }
@@ -544,6 +526,33 @@ mod tests {
         assert!(t.search("(?-u:.)", true).is_err());
         assert!(t.search(r"(?-u:\xc3)", true).is_err());
         assert_eq!(t.search("(?s).", true).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn multiple_matches_can_share_a_wide_grapheme() {
+        let mut t = Terminal::new(4, 3);
+        t.advance("abc界\u{301}\u{301}z".as_bytes());
+        let wide = Match {
+            start: Point { line: 1, col: 0 },
+            end: Point { line: 1, col: 1 },
+        };
+        for (query, regex) in [("\u{301}", false), (r"\p{M}", true)] {
+            assert_eq!(t.search(query, regex).unwrap(), [wide, wide]);
+        }
+        assert_eq!(
+            t.search("c界\u{301}", false).unwrap(),
+            [Match {
+                start: Point { line: 0, col: 2 },
+                ..wide
+            }]
+        );
+        assert_eq!(
+            t.search(r"\p{M}z", true).unwrap(),
+            [Match {
+                end: Point { line: 1, col: 2 },
+                ..wide
+            }]
+        );
     }
 
     #[test]
