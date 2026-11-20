@@ -1645,7 +1645,7 @@ struct App {
     scroll_accum: f64,
     clipboard: clipboard::Clipboard,
     /// Clipboard text waiting for the user to confirm (paste protection).
-    pending_paste: Option<String>,
+    pending_paste: Option<paste::PendingPaste>,
     /// Set while a window close waits for confirmation, with the running program's name.
     pending_close: Option<Option<String>>,
     error: Option<String>,
@@ -1681,7 +1681,7 @@ struct WindowGroup {
     pending_close_tab: Option<u64>,
     pending_close_window: Option<Vec<u64>>,
     pending_close: Option<Option<String>>,
-    pending_paste: Option<String>,
+    pending_paste: Option<paste::PendingPaste>,
     held_at_focus: HeldAtFocus,
     mouse_pos: PhysicalPosition<f64>,
     left_down: bool,
@@ -3587,7 +3587,7 @@ impl App {
             (None, banner) => banner,
         };
         let banner = match &self.pending_paste {
-            Some(text) => Some(paste::banner(text, banner)),
+            Some(paste) => Some(paste.banner(banner)),
             None => banner,
         };
         let banner = match &self.pending_close {
@@ -3749,7 +3749,7 @@ impl App {
         if self.pending_paste.is_some() {
             return;
         }
-        let Some(text) = self.clipboard.get(primary) else {
+        let Some(mut text) = self.clipboard.get(primary) else {
             return;
         };
         if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
@@ -3759,23 +3759,20 @@ impl App {
             return;
         }
         let Some(s) = &self.session else { return };
-        let text = if self.config.trim_paste {
-            paste::trim(&text)
-        } else {
-            &text
-        };
+        if self.config.trim_paste {
+            text.truncate(paste::trim(&text).len());
+        }
         if self.config.paste_protection
-            && paste::needs_confirmation(text, s.term.modes.bracketed_paste)
+            && paste::needs_confirmation(&text, s.term.modes.bracketed_paste)
         {
-            let text = text.to_owned();
             self.cancel_prompt_click();
-            self.pending_paste = Some(text);
+            self.pending_paste = Some(paste::PendingPaste::new(text));
             if let Some(s) = &self.session {
                 s.window.request_redraw();
             }
             return;
         }
-        self.send_paste(text);
+        self.send_paste(&text);
     }
 
     fn send_paste(&mut self, text: &str) {
@@ -3793,9 +3790,9 @@ impl App {
             Key::Named(NamedKey::Escape) => false,
             _ => return,
         };
-        if let Some(text) = self.pending_paste.take() {
+        if let Some(paste) = self.pending_paste.take() {
             if confirmed {
-                self.send_paste(&text);
+                self.send_paste(&paste.into_text());
             }
             // `write_input` only redraws for a view change, so clear the banner here.
             if let Some(s) = &self.session {
