@@ -20,7 +20,11 @@ def capture(flags, path):
     while not reply.endswith(b"u"):
         reply.extend(os.read(0, 64))
     assert reply == f"\x1b[?{flags}u".encode(), reply
-    os.write(1, b"\x1b]2;keypad-ready\x07")
+    os.write(1, b"\x1b[?1004h\x1b]2;keypad-ready\x07")
+    focus = bytearray()
+    while not focus.endswith(b"\x1b[I"):
+        focus.extend(os.read(0, 64))
+    os.write(1, b"\x1b[?1004l\x1b]2;keypad-focused\x07")
     data = bytearray()
     while b"\x1b[17~" not in data:
         data.extend(os.read(0, 1024))
@@ -35,11 +39,13 @@ def check(binary, directory, flags, expected, keys):
     app = subprocess.Popen([binary, "-e", sys.executable, str(Path(__file__).resolve()),
                             "--capture", str(flags), str(path)], env=env)
     try:
-        window = subprocess.check_output(
-            ["xdotool", "search", "--sync", "--onlyvisible", "--all", "--pid", str(app.pid),
-             "--name", "^keypad-ready$"], timeout=15, text=True).splitlines()[-1]
-        subprocess.run(["xdotool", "windowfocus", "--sync", window, *keys, "key", "F6"],
-                       check=True, timeout=10)
+        search = ["xdotool", "search", "--sync", "--onlyvisible", "--all", "--pid", str(app.pid)]
+        window = subprocess.check_output([*search, "--name", "^keypad-ready$"],
+                                         timeout=15, text=True).splitlines()[-1]
+        subprocess.run(["xdotool", "windowfocus", "--sync", window], check=True, timeout=10)
+        subprocess.run([*search, "--name", "^keypad-focused$"], check=True,
+                       stdout=subprocess.DEVNULL, timeout=10)
+        subprocess.run(["xdotool", *keys, "key", "F6"], check=True, timeout=10)
         assert app.wait(timeout=10) == 0
         actual = path.read_bytes()
         assert actual == expected, f"flags={flags}: {actual!r} != {expected!r}"
