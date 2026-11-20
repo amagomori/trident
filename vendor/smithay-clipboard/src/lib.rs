@@ -49,6 +49,14 @@ pub struct Clipboard {
     request_sender: Sender<worker::Command>,
     request_receiver: Receiver<Result<String>>,
     clipboard_thread: Option<std::thread::JoinHandle<()>>,
+    store_targets: Option<StoreTargets>,
+    store_targets_rx: Receiver<StoreTargets>,
+}
+
+#[derive(Default)]
+struct StoreTargets {
+    clipboard: bool,
+    primary: bool,
 }
 
 impl Clipboard {
@@ -70,10 +78,29 @@ impl Clipboard {
 
         let name = String::from("smithay-clipboard");
         let file_drops = FileDrops::default();
-        let clipboard_thread =
-            worker::spawn(name, connection, rx_chan, clipboard_reply_sender, file_drops.clone());
+        let (targets_tx, store_targets_rx) = mpsc::channel();
+        let clipboard_thread = worker::spawn(
+            name, connection, rx_chan, clipboard_reply_sender, file_drops.clone(), targets_tx,
+        );
 
-        Self { request_receiver, request_sender, clipboard_thread, file_drops }
+        Self {
+            request_receiver, request_sender, clipboard_thread, file_drops,
+            store_targets: None, store_targets_rx,
+        }
+    }
+
+    /// Returns whether the worker bound the manager for this selection.
+    ///
+    /// The first query waits for registry initialization. Seat focus and the
+    /// input serial still determine whether the compositor accepts a store.
+    pub fn supports_store(&mut self, primary: bool) -> bool {
+        if self.clipboard_thread.as_ref().is_none_or(|worker| worker.is_finished()) {
+            return false;
+        }
+        let targets = self.store_targets.get_or_insert_with(|| {
+            self.store_targets_rx.recv().unwrap_or_default()
+        });
+        if primary { targets.primary } else { targets.clipboard }
     }
 
     /// Receives copy-only `text/uri-list` drops on the given Wayland surface.
