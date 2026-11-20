@@ -1,21 +1,24 @@
 """Exercise the release CLI with the real bundled PDFium (no display required)."""
 import base64
+import fcntl
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
+import termios
 import zlib
 
 binary = Path(sys.argv[1]).resolve()
 samples = Path(__file__).resolve().parents[3] / "crates/term-app/samples"
 
 
-def show(*args, error=None):
+def show(*args, error=None, stdin=subprocess.DEVNULL):
     env = os.environ.copy()
     env.pop("TMUX", None)
     result = subprocess.run([binary, "show", *args], env=env, capture_output=True,
-                            stdin=subprocess.DEVNULL, start_new_session=True, timeout=20)
+                            stdin=stdin, start_new_session=True, timeout=20)
     if error:
         assert result.returncode == 1 and not result.stdout and error in result.stderr, result
         return
@@ -44,4 +47,34 @@ for x, y, rgb in [(100, 64, (255, 0, 0)), (480, 64, (0, 255, 0)),
     assert pages[2][2][pos:pos + 4] == bytes((*rgb, 255))  # embedded raster quadrants
 show("--page", "2-4", sample, error=b"pages 1-3")
 show(samples / "locked.pdf", error=b"password-protected PDF")
-print("PDF content, dimensions, page ranges and errors passed")
+
+
+def check_tall(width, height, *options):
+    master, slave = os.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 158, width, height))
+        bands = show(*options, samples.parent / "tests/fixtures/tall.pdf", stdin=slave)
+    finally:
+        os.close(master)
+        os.close(slave)
+    cell_h = height // 40
+    page_h = cell_h * 39 if options else width * 5
+    page_w = round(page_h / 5)
+    top = 0
+    for w, h, rgba in bands:
+        assert w == page_w and w * h <= 16 * 1024 * 1024
+        assert top % cell_h == 0, "a band would leave a gap before the next one"
+        # The left edge contains full-width TOP, MIDDLE and BOTTOM color bars.
+        for y in range(h):
+            pt = 2000 * (top + y + 0.5) / page_h
+            if 1 < pt < 179 or 911 < pt < 1089 or 1821 < pt < 1999:
+                rgb = (255, 0, 0) if pt < 180 else (0, 255, 0) if pt < 1090 else (0, 0, 255)
+                assert rgba[4*w*y:4*w*y+4] == bytes((*rgb, 255)), (top, y, rgb)
+        top += h
+    assert top == page_h
+
+
+check_tall(1264, 760)
+check_tall(1896, 1080)
+check_tall(1896, 1080, "--fit")
+print("PDF content, dimensions, tall-page bands, page ranges and errors passed")

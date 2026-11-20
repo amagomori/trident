@@ -1,7 +1,9 @@
 //! PDF support is loaded only when `show` encounters a PDF.
 
 use super::{Options, Rgba, Window, target_size};
-use pdfium_render::prelude::{Pdfium, PdfiumError, PdfiumInternalError};
+use pdfium_render::prelude::{
+    PdfBitmap, PdfRenderConfig, Pdfium, PdfiumError, PdfiumInternalError,
+};
 use std::ops::RangeInclusive;
 use std::sync::LazyLock;
 
@@ -89,19 +91,39 @@ pub(super) fn show(
         let error = |e| format!("cannot render PDF page {n}: {e}");
         let page = pages.get(n - 1).map_err(error)?;
         let (width, height) = target_size((page.width().value, page.height().value), &size, window);
-        if width * height > 16 * 1024 * 1024 {
-            return Err(format!(
-                "PDF page {n} exceeds 16 megapixels; use a smaller --width or --fit"
-            ));
-        }
-        let bitmap = page
-            .render(width as i32, height as i32, None)
-            .map_err(error)?;
-        output(Rgba {
-            width,
-            height,
-            pixels: bitmap.as_rgba_bytes(),
+        let band = band_height(width, height, window.cell_h).ok_or_else(|| {
+            format!(
+                "one cell row of PDF page {n} exceeds 16 megapixels; use --fit or a smaller --width"
+            )
         })?;
+        for top in (0..height).step_by(band as usize) {
+            let config = PdfRenderConfig::new()
+                .set_target_size(width as i32, height as i32)
+                .set_origin(0, -(top as i32));
+            let height = band.min(height - top);
+            let mut bitmap =
+                PdfBitmap::empty(width as i32, height as i32, Default::default()).map_err(error)?;
+            page.render_into_bitmap_with_config(&mut bitmap, &config)
+                .map_err(error)?;
+            output(Rgba {
+                width,
+                height,
+                pixels: bitmap.as_rgba_bytes(),
+            })?;
+        }
     }
     Ok(())
+}
+
+/// Caps each bitmap at 16 megapixels without shrinking the page. Interior
+/// bands end on cell rows so the next placement starts on the next text line.
+fn band_height(width: u32, height: u32, cell_h: f32) -> Option<u32> {
+    let limit = (16 * 1024 * 1024) / width;
+    if height <= limit {
+        return Some(height);
+    }
+    let cell_h = cell_h.max(1.0);
+    let rows = (limit as f32 / cell_h).floor();
+    let pixels = (rows * cell_h).floor() as u32;
+    (pixels > 0).then_some(pixels)
 }
