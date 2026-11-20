@@ -493,6 +493,7 @@ struct TabWindow {
     size: PhysicalSize<u32>,
     renderer: Renderer,
     fonts: Fonts,
+    font_size: f32,
     ime_cursor_area: Option<[f32; 4]>,
     redraw_at: Option<(Instant, Instant)>,
     target: Option<Instant>,
@@ -2621,6 +2622,7 @@ impl App {
         let fonts = Fonts::new(&self.faces, self.font_size * window.scale_factor() as f32);
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
         Ok(TabWindow {
+            font_size: self.font_size,
             window,
             size,
             renderer,
@@ -2697,6 +2699,7 @@ impl App {
             return;
         };
         s.swap_pane(&mut pane);
+        std::mem::swap(&mut self.font_size, &mut pane.window.font_size);
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
         std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
@@ -2715,6 +2718,7 @@ impl App {
         self.pending_paste = pending_paste;
         self.focused = focused;
         self.search = search;
+        std::mem::swap(&mut self.font_size, &mut pane.window.font_size);
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
         std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
         std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
@@ -2767,7 +2771,7 @@ impl App {
             }),
             WindowEvent::Moved(_) => self.with_tab_shown(index, App::note_normal_frame),
             WindowEvent::ScaleFactorChanged { .. } => {
-                self.with_tab_shown(index, |app| app.set_font_size(app.font_size))
+                self.with_tab_shown(index, |app| app.set_pane_font_size(app.font_size))
             }
             WindowEvent::RedrawRequested => self.with_tab_shown(index, |app| {
                 if !app.occluded
@@ -2808,6 +2812,7 @@ impl App {
         s.renderer.forget_frame();
         #[cfg(target_os = "macos")]
         {
+            std::mem::swap(&mut self.font_size, &mut pane.window.font_size);
             std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
             std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
             std::mem::swap(&mut self.normal_frame, &mut pane.window.normal_frame);
@@ -3293,26 +3298,20 @@ impl App {
     }
 
     fn set_font_size(&mut self, size: f32) {
+        self.set_pane_font_size(size);
+        #[cfg(target_os = "macos")]
+        for index in self.native_tab_order() {
+            self.with_tab_shown(index, |app| app.set_pane_font_size(size));
+        }
+    }
+
+    fn set_pane_font_size(&mut self, size: f32) {
         self.font_size = size.clamp(4.0, 200.0);
         let Some(s) = &mut self.session else { return };
         s.fonts
             .set_size(self.font_size * s.window.scale_factor() as f32);
         s.renderer.clear_glyph_cache();
-        #[cfg(target_os = "macos")]
-        for pane in self.tabs.iter_mut().flatten() {
-            let tab = &mut pane.window;
-            tab.fonts
-                .set_size(self.font_size * tab.window.scale_factor() as f32);
-            tab.renderer.clear_glyph_cache();
-        }
         self.resize_grid();
-        // A tab torn out into its own window stays visible, so its grid follows the font now.
-        #[cfg(target_os = "macos")]
-        for index in 0..self.tabs.len() {
-            if self.tabs[index].is_some() {
-                self.with_tab_shown(index, App::resize_grid);
-            }
-        }
     }
 
     fn output_ready(&mut self) {
@@ -4097,9 +4096,19 @@ impl App {
             self.watch_appearance();
             self.apply_config_shown(font_changed, size_changed, next_vsync_off)?;
             if size_changed {
-                self.set_font_size(self.config.font_size);
+                self.set_pane_font_size(self.config.font_size);
             }
             self.resize_grid();
+            #[cfg(target_os = "macos")]
+            for index in 0..self.tabs.len() {
+                self.with_tab_shown(index, |app| {
+                    if size_changed {
+                        app.set_pane_font_size(app.config.font_size);
+                    } else {
+                        app.resize_grid();
+                    }
+                });
+            }
             #[cfg(target_os = "linux")]
             {
                 let mut group_error = None;
@@ -4197,7 +4206,7 @@ impl App {
             #[cfg(target_os = "macos")]
             for pane in self.tabs.iter_mut().flatten() {
                 let tab = &mut pane.window;
-                let px = size * tab.window.scale_factor() as f32;
+                let px = tab.font_size * tab.window.scale_factor() as f32;
                 tab.fonts = Fonts::new(&self.faces, px);
                 tab.renderer.clear_glyph_cache();
             }
@@ -5345,7 +5354,7 @@ impl App {
             }
             #[cfg(target_os = "macos")]
             WindowEvent::Moved(_) => self.note_normal_frame(),
-            WindowEvent::ScaleFactorChanged { .. } => self.set_font_size(self.font_size),
+            WindowEvent::ScaleFactorChanged { .. } => self.set_pane_font_size(self.font_size),
             WindowEvent::Focused(focused) => {
                 if !focused {
                     self.cancel_prompt_click();

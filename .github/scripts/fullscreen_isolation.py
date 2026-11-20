@@ -136,8 +136,13 @@ def exercise(process, directory, new_window):
         raise AssertionError("\n".join(errors))
     if new_window:
         menu(new_b)
+        before_zoom = {name: grid(name) for name in (a, new_a, new_b)}
+        ax('keystroke "=" using command down')
+        until(lambda: grid(new_b), lambda size: size != before_zoom[new_b], "zoom had no effect")
         ax('keystroke "w" using {command down, shift down}')
         until(names, lambda n: n == [new_a], "Close Window did not leave the other group intact")
+        if any(grid(name) != before_zoom[name] for name in (a, new_a)):
+            raise AssertionError("zoom resized a PTY in the other group")
         ax('keystroke "w" using command down')
         until(names, lambda n: n == [a], "surviving tab did not become key")
         ax('keystroke "w" using command down')
