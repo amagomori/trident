@@ -5509,6 +5509,7 @@ impl App {
                         if let Some(bytes) = input::encode_kitty_key(
                             &input::KeyEvent {
                                 key: &event.logical_key,
+                                location: event.location,
                                 base: &base,
                                 text: event.text.as_deref(),
                                 mods: self.modifiers.state(),
@@ -5575,6 +5576,7 @@ impl App {
                     input::encode_kitty_key(
                         &input::KeyEvent {
                             key: &event.logical_key,
+                            location: event.location,
                             base: &base,
                             text: event.text.as_deref(),
                             mods: self.modifiers.state(),
