@@ -1,7 +1,10 @@
 //! Preview a ZIP's central directory without opening or inflating any member.
 
 use super::{human_size, printable};
-use rawzip::{FileReader, RECOMMENDED_BUFFER_SIZE, ZipLocator};
+use rawzip::{
+    FileReader, RECOMMENDED_BUFFER_SIZE, ZipFileHeaderRecord, ZipLocator,
+    extra_fields::ExtraFieldId,
+};
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -49,13 +52,7 @@ pub(crate) fn listing(path: &Path, file: &File, rows: usize) -> Option<Listing> 
         } else {
             human_size(entry.uncompressed_size_hint())
         };
-        let path = String::from_utf8_lossy(entry.file_path().as_bytes());
-        let mut chars = path.chars();
-        let mut name: String = chars.by_ref().take(120).collect();
-        if chars.next().is_some() {
-            name.push('…');
-        }
-        lines.push(format!("{size:>10}  {}", printable(&name)));
+        lines.push(format!("{size:>10}  {}", member_name(&entry)));
     }
     if lines.len() as u64 != count {
         return None;
@@ -65,4 +62,61 @@ pub(crate) fn listing(path: &Path, file: &File, rows: usize) -> Option<Listing> 
         header: format!("ZIP · {count} {noun}"),
         lines,
     })
+}
+
+fn member_name(entry: &ZipFileHeaderRecord<'_>) -> String {
+    let raw = entry.file_path().as_bytes();
+    if entry.flags().is_utf8() {
+        return clipped(String::from_utf8_lossy(raw).chars());
+    }
+    // Info-ZIP can pair a legacy name with its UTF-8 spelling. Its CRC
+    // ties that spelling to the name actually stored in the directory.
+    if let Some((_, [1, field @ ..])) = entry
+        .extra_fields()
+        .find(|(id, _)| *id == ExtraFieldId::INFO_ZIP_UNICODE_PATH)
+        && let Some((expected, name)) = field.split_first_chunk::<4>()
+        && rawzip::crc32(raw) == u32::from_le_bytes(*expected)
+        && let Ok(name) = std::str::from_utf8(name)
+    {
+        return clipped(name.chars());
+    }
+    clipped(raw.iter().copied().map(oem_cp::Cp437::from).map(char::from))
+}
+
+fn clipped(mut chars: impl Iterator<Item = char>) -> String {
+    let mut name: String = chars.by_ref().take(120).collect();
+    if chars.next().is_some() {
+        name.push('…');
+    }
+    printable(&name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rawzip::{Header, ZipArchive, ZipArchiveWriter};
+
+    #[test]
+    fn displays_utf8_and_verified_unicode_paths() {
+        let mut writer = ZipArchiveWriter::new(Vec::new());
+        writer.new_dir("café/").create().unwrap();
+        let mut field = vec![1];
+        field.extend(rawzip::crc32(b"legacy/").to_le_bytes());
+        field.extend("日本/".as_bytes());
+        for name in ["legacy/", "changed/"] {
+            writer
+                .new_dir(name)
+                .extra_field(ExtraFieldId::INFO_ZIP_UNICODE_PATH, &field, Header::CENTRAL)
+                .unwrap()
+                .create()
+                .unwrap();
+        }
+        let data = writer.finish().unwrap();
+        let archive = ZipArchive::from_slice(&data).unwrap();
+        let names: Vec<_> = archive
+            .entries()
+            .map(|e| member_name(&e.unwrap()))
+            .collect();
+        assert_eq!(names, ["café/", "日本/", "changed/"]);
+    }
 }

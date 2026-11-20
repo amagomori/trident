@@ -491,11 +491,11 @@ fn zip_contents_are_bounded_and_not_extracted() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("SAMPLE.ZIP");
-    // Give a member a control byte in both its local and central headers.
+    // This unflagged CP437 name also contains a terminal control byte.
     let mut archive = std::fs::read(sample("sample.zip")).unwrap();
     for i in 0..archive.len() {
         if archive[i..].starts_with(b"README.txt") {
-            archive[i] = 0x1b;
+            archive[i..i + 2].copy_from_slice(&[0x1b, 0x82]);
         }
     }
     std::fs::write(&path, archive).unwrap();
@@ -512,7 +512,7 @@ fn zip_contents_are_bounded_and_not_extracted() {
     .unwrap();
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        "ZIP · first 1 of 4 entries\n  30 bytes  ^[EADME.txt\n"
+        "ZIP · first 1 of 4 entries\n  30 bytes  ^[éADME.txt\n"
     );
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
