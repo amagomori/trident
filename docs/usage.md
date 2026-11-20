@@ -143,6 +143,9 @@ lines. It ignores case unless the query has an uppercase letter.
   but stop at a hard line break.
 - While a program such as vim, tmux or htop uses the mouse, hold Shift to select text. For a
   rectangle, hold Shift+Alt (Shift+Option on macOS).
+- tmux sometimes redraws wrapped pane text as separate screen rows, including in copy-mode
+  history. Trident cannot distinguish those rows from hard breaks. Use tmux's own copy mode
+  instead of Shift-selection when you need the pane's original line breaks.
 - Shift-click extends the current selection, keeping its anchor and shape.
 - Rectangular copies keep spaces and put each screen row on its own line.
 - Selecting doesn't copy to the clipboard unless you launch with `--copy-on-select`. On Linux,

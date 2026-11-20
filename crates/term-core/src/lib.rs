@@ -2786,6 +2786,7 @@ impl Terminal {
             line.touch_all();
         }
         let line = &mut self.lines_mut()[row];
+        line.overwrite_margin(col + width);
         clear_wide_pair(&mut line.cells, col);
         if width == 2 {
             clear_wide_pair(&mut line.cells, col + 1);

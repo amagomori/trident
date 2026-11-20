@@ -328,6 +328,15 @@ impl Row {
         self.flags.contains(RowFlags::WRAPPED)
     }
 
+    /// Widening an unreflowed wrapped row extends its edge with synthetic padding.
+    /// Once a repaint replaces that padding through the new margin, only an actual
+    /// autowrap at the new width can join the next row.
+    pub(crate) fn overwrite_margin(&mut self, end: usize) {
+        if end == self.cells.len() && self.cells[end - 1].flags.contains(Flags::WIDE_WRAP) {
+            self.flags.remove(RowFlags::WRAPPED);
+        }
+    }
+
     /// Sets whether the logical line continues onto the next physical row.
     pub fn set_wrapped(&mut self, wrapped: bool) {
         if let Some(extra) = &mut self.extra {
