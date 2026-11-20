@@ -21,6 +21,7 @@ mod budget;
 mod golden;
 mod row_filter;
 mod sgr_stack;
+mod xtgettcap;
 
 #[test]
 fn single_prints_use_the_margin_or_physical_edge() {

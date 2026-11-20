@@ -391,12 +391,11 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                     State::Escape
                 }
             },
-            0x7F => (),
             0x9C => {
                 performer.unhook();
                 self.state = State::Ground
             },
-            _ => (),
+            byte => performer.put_ignored(byte),
         }
     }
 
@@ -902,6 +901,9 @@ pub trait Perform {
     /// Pass bytes as part of a device control string to the handle chosen in
     /// `hook`. C0 controls will also be passed to the handler.
     fn put(&mut self, _byte: u8) {}
+
+    /// Notify strict DCS handlers of otherwise ignored DEL and high bytes.
+    fn put_ignored(&mut self, _byte: u8) {}
 
     /// Called when a device control string is terminated.
     ///

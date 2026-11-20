@@ -59,6 +59,14 @@ jobs:
             exit 1
           fi
       - run: cargo build --release --workspace
+      - name: Query the shipped terminfo capabilities over a PTY
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get install -y libxkbcommon-x11-0 libegl1 libgl1-mesa-dri
+            xvfb-run -a /usr/bin/python3 .github/scripts/check_xtgettcap.py target/release/trident
+          else
+            /usr/bin/python3 .github/scripts/check_xtgettcap.py target/release/trident
+          fi
       - run: python3 .github/scripts/release/check_show_stdin.py target/release/trident
       - name: PDF viewer with the release PDFium
         run: |

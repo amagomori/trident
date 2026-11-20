@@ -128,6 +128,10 @@ impl Perform for Writer<'_> {
         self.term.await_dcs_st()
     }
 
+    fn put_ignored(&mut self, byte: u8) {
+        self.term.put_ignored(byte);
+    }
+
     fn cancel_dcs(&mut self) {
         self.flush();
         self.term.cancel_dcs();
