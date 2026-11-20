@@ -54,7 +54,7 @@ struct RowState {
 pub(crate) struct Damage {
     key: Option<FrameKey>,
     matches: Vec<Match>,
-    current_match: Option<Match>,
+    current_match: Option<usize>,
     hover: Option<Link>,
     blink_visible: bool,
     rows: Vec<RowState>,
@@ -140,14 +140,15 @@ impl Damage {
                 damaged[i] = true;
             }
         }
-        let current = frame
-            .search
-            .and_then(|(matches, index)| matches.get(index?).copied());
+        let current = frame.search.and_then(|(_, index)| index);
         let previous = std::mem::replace(&mut self.current_match, current);
         if !all && previous != current {
+            // The list is unchanged. Distinct indices can share a grapheme's cell range.
+            let previous = previous.and_then(|i| matches.get(i));
+            let current = current.and_then(|i| matches.get(i));
             for (i, dirty) in damaged.iter_mut().enumerate() {
                 let line = term.viewport_to_point_signed(first + i as isize, 0).line;
-                let touches = |m: Match| m.start.line <= line && line <= m.end.line;
+                let touches = |m: &Match| m.start.line <= line && line <= m.end.line;
                 *dirty |= previous.is_some_and(touches) || current.is_some_and(touches);
             }
         }
@@ -519,6 +520,21 @@ mod tests {
         f.search = Some((&matches, None));
         assert_eq!(damaged(&mut damage, &term, &f), [0, 2]);
         f.search = Some((&matches, Some(0)));
+        assert_eq!(damaged(&mut damage, &term, &f), [0]);
+    }
+
+    #[test]
+    fn moving_between_matches_in_one_grapheme_repaints_its_row() {
+        let mut term = Terminal::new(10, 3);
+        term.advance("e\u{301}".as_bytes());
+        let matches = term.search(".", true).unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], matches[1]);
+        let mut damage = Damage::default();
+        let mut f = frame(&term);
+        f.search = Some((&matches, Some(0)));
+        damaged(&mut damage, &term, &f);
+        f.search = Some((&matches, Some(1)));
         assert_eq!(damaged(&mut damage, &term, &f), [0]);
     }
 
