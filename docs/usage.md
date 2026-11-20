@@ -53,6 +53,7 @@ Query the mode with `CSI ? 2027 $ p`: the reply is `CSI ? 2027 ; 1 $ y` when set
 | Action | macOS | Linux |
 | --- | --- | --- |
 | Copy selection | Cmd+C | Ctrl+Shift+C (selecting also sets the primary selection) |
+| Copy a visible link target | Cmd+Shift+L | Ctrl+Shift+L |
 | Search scrollback | Cmd+F | Ctrl+Shift+F |
 | Select a rectangle | Option-drag | Alt-drag |
 | Extend the current selection | Shift-click or Shift-drag | same |
@@ -95,6 +96,13 @@ window has two tabs, and you can drag tabs to reorder them or into their own win
 Windows**.
 
 ## Links
+
+To copy a link without opening it, press Cmd+Shift+L (macOS) or Ctrl+Shift+L
+(Linux). Type the letter on the link; if several share that letter, type the
+next one shown. Pieces of the same named hyperlink share a label. Review the
+target, then press Enter to copy the full URI to the regular clipboard, or
+Escape to leave it unchanged. This never opens files or copies the caption.
+As with hover previews, the displayed URI may be shortened and percent-encoded.
 
 Hold Cmd (macOS) or Ctrl (Linux) over a link to underline it, and click to open it. Trident links:
 

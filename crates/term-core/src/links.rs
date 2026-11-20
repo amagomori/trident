@@ -687,41 +687,7 @@ impl Terminal {
             });
         }
         let (text, positions) = self.logical_text(first, last);
-        for (offset, _) in text.char_indices() {
-            let tail = &text[offset..];
-            let Some(scheme) = ["https://", "http://", "ftp://", "file://", "mailto:"]
-                .iter()
-                .find(|s| {
-                    tail.get(..s.len())
-                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(s))
-                })
-            else {
-                continue;
-            };
-            let single_quoted = text[..offset].ends_with('\'');
-            let mut uri = tail
-                .split(|c: char| {
-                    c.is_whitespace()
-                        || matches!(c, '"' | '<' | '>')
-                        || (single_quoted && c == '\'')
-                })
-                .next()
-                .unwrap_or("");
-            while let Some(c) = uri.chars().last() {
-                let trim = ".,;:!?\"'<>".contains(c)
-                    || [(')', '('), (']', '['), ('}', '{')]
-                        .iter()
-                        .any(|&(close, open)| {
-                            c == close && uri.matches(close).count() > uri.matches(open).count()
-                        });
-                if !trim {
-                    break;
-                }
-                uri = &uri[..uri.len() - c.len_utf8()];
-            }
-            if uri.len() <= scheme.len() {
-                continue;
-            }
+        for (offset, uri, _) in plain_uris(&text) {
             let (start, end) = self.text_span(&positions, offset, uri.len());
             let link = Link {
                 uri: uri.to_owned(),
@@ -735,6 +701,92 @@ impl Terminal {
             }
         }
         None
+    }
+
+    /// Enumerates OSC 8 links and complete plain URLs in the current viewport,
+    /// in reading order. A shared OSC 8 id and URI get one entry across pieces.
+    pub fn visible_links(&self) -> Vec<Link> {
+        let top = self.viewport_to_point(0, 0).line;
+        let bottom = top + self.rows as u64 - 1;
+        let mut found: Vec<Link> = Vec::new();
+        let mut named = std::collections::HashMap::new();
+        let mut first = top;
+        while first <= bottom {
+            let mut last = first;
+            while last < bottom && self.line(last).wrapped() {
+                last += 1;
+            }
+            let mut runs = Vec::new();
+            let mut cells = (first..=last)
+                .flat_map(|line| {
+                    self.line(line)
+                        .cells
+                        .iter()
+                        .enumerate()
+                        .map(move |(col, cell)| {
+                            (Point { line, col }, self.links.get(cell.hyperlink))
+                        })
+                })
+                .peekable();
+            while let Some((start, entry)) = cells.next() {
+                let Some(key @ (id, uri)) = entry.filter(|(_, uri)| !uri.is_empty()) else {
+                    continue;
+                };
+                let mut end = start;
+                while let Some((p, _)) = cells.next_if(|(_, other)| *other == Some(key)) {
+                    end = p;
+                }
+                runs.push((start, end));
+                let Ok(uri) = std::str::from_utf8(uri) else {
+                    continue; // A lossy replacement would copy a different target.
+                };
+                if !id.is_empty() {
+                    let index = *named.entry(key).or_insert(found.len());
+                    if let Some(previous) = found.get_mut(index) {
+                        previous.pieces.push((start, end));
+                        continue;
+                    }
+                }
+                found.push(Link {
+                    uri: uri.to_owned(),
+                    start,
+                    end,
+                    pieces: Vec::new(),
+                    osc8: true,
+                });
+            }
+            let (text, positions) = self.logical_text(first, last);
+            // A clipped token can contain another scheme; don't treat that suffix
+            // as a complete URL. Resume at the first unambiguous delimiter.
+            let mut consumed =
+                if first == top && top > self.first_line() && self.line(top - 1).wrapped() {
+                    text.find(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>'))
+                        .unwrap_or(text.len())
+                } else {
+                    0
+                };
+            while let Some((relative, uri, open_end)) = plain_uris(&text[consumed..]).next() {
+                let offset = consumed + relative;
+                consumed = offset + uri.len();
+                if open_end && self.line(last).wrapped() {
+                    break; // Never offer a truncated URL at the bottom of the viewport.
+                }
+                let (start, end) = self.text_span(&positions, offset, uri.len());
+                let overlap = runs.partition_point(|(_, e)| *e < start);
+                if start <= end && runs.get(overlap).is_none_or(|(s, _)| *s > end) {
+                    found.push(Link {
+                        uri: uri.to_owned(),
+                        start,
+                        end,
+                        pieces: Vec::new(),
+                        osc8: false,
+                    });
+                }
+            }
+            first = last + 1;
+        }
+        found.sort_by_key(|link| link.start);
+        found
     }
 
     /// The `path:line` reference printed under `point`, for opening in an editor.
@@ -833,10 +885,75 @@ impl Terminal {
     }
 }
 
+/// Byte offset, unquoted URI and whether the token reaches the end of the text.
+fn plain_uris(text: &str) -> impl Iterator<Item = (usize, &str, bool)> {
+    text.char_indices().filter_map(|(offset, _)| {
+        let tail = &text[offset..];
+        let scheme = ["https://", "http://", "ftp://", "file://", "mailto:"]
+            .into_iter()
+            .find(|s| {
+                tail.get(..s.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(s))
+            })?;
+        let quoted = text[..offset].ends_with('\'');
+        let token = tail
+            .split(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '<' | '>') || (quoted && c == '\'')
+            })
+            .next()?;
+        let mut uri = token;
+        while let Some(c) = uri.chars().last() {
+            if !(".,;:!?\"'<>".contains(c)
+                || [(')', '('), (']', '['), ('}', '{')]
+                    .iter()
+                    .any(|&(close, open)| {
+                        c == close && uri.matches(close).count() > uri.matches(open).count()
+                    }))
+            {
+                break;
+            }
+            uri = &uri[..uri.len() - c.len_utf8()];
+        }
+        (uri.len() > scheme.len()).then_some((offset, uri, token.len() == tail.len()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn visible_links_group_shared_pieces_but_not_captions_or_partial_urls() {
+        let mut t = Terminal::new(24, 6);
+        t.advance(b"\x1b]8;id=x;https://build/42\x07build\x1b]8;;\x07 ");
+        t.advance(b"\x1b]8;;https://other\x07https://caption\x1b]8;;\x07\r\n");
+        t.advance(b"https://example.org/soft-wrapped.\r\n");
+        t.advance(b"\x1b]8;id=x;https://build/42\x07again\x1b]8;;\x07");
+        let links = t.visible_links();
+        assert_eq!(
+            links.iter().map(|l| l.uri.as_str()).collect::<Vec<_>>(),
+            [
+                "https://build/42",
+                "https://other",
+                "https://example.org/soft-wrapped"
+            ]
+        );
+        assert_eq!(links[0].pieces[0].0, Point { line: 3, col: 0 });
+        assert_eq!(links[2].end.line, 2);
+
+        let mut t = Terminal::new(12, 2);
+        t.advance(b"https://long/https://inner/path/abcdefghijklmnop\r\nhttp://yes");
+        assert_eq!(
+            t.visible_links()
+                .iter()
+                .map(|l| l.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["http://yes"]
+        );
+        t.scroll_display(100);
+        assert!(t.visible_links().is_empty());
+    }
 
     #[test]
     fn cell_size() {

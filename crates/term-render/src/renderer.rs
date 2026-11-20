@@ -99,6 +99,7 @@ pub struct Renderer {
     floating_image: Option<FloatingImage>,
     /// The hovered OSC 8 link's URI, shown in a corner of the window.
     link_target: Option<String>,
+    link_badges: Option<Vec<(term_core::Point, char)>>,
     /// Instances in each region this frame.
     lens: [u32; 4],
     /// The grid area images are clipped to: x, y, width, height in physical pixels.
@@ -308,6 +309,7 @@ impl Renderer {
             floating,
             floating_image: None,
             link_target: None,
+            link_badges: None,
             lens: [0; 4],
             image_clip: [0; 4],
             srgb: format.is_srgb(),
@@ -345,6 +347,14 @@ impl Renderer {
     pub fn set_link_target(&mut self, uri: Option<&str>) {
         if self.link_target.as_deref() != uri {
             self.link_target = uri.map(crate::link_target::sanitize);
+        }
+    }
+
+    /// Keyboard link labels at absolute grid cells. An empty slice means the
+    /// user has selected a target and is reviewing it before copying.
+    pub fn set_link_badges(&mut self, badges: Option<&[(term_core::Point, char)]>) {
+        if self.link_badges.as_deref() != badges {
+            self.link_badges = badges.map(<[_]>::to_vec);
         }
     }
 
@@ -1105,6 +1115,26 @@ impl Renderer {
         }
 
         self.link_target_start = overlays.len() as u32;
+        if let Some(badges) = self.link_badges.take() {
+            let top = term.viewport_to_point(0, 0).line;
+            for &(point, c) in &badges {
+                let Some(row) = point
+                    .line
+                    .checked_sub(top)
+                    .filter(|&r| r < term.rows() as u64)
+                else {
+                    continue;
+                };
+                let x = padding + point.col as f32 * cw;
+                let y = padding + pixel_offset + row as f32 * ch;
+                overlays.push(self.rect(x, y, cw, ch, term.palette.foreground));
+                if !self.link_text(term, fonts, std::iter::once(c), [x, y], &mut overlays) {
+                    ok = false;
+                    break;
+                }
+            }
+            self.link_badges = Some(badges);
+        }
         if let Some(text) = self.link_target.take() {
             if !self.draw_link_target(
                 term,
@@ -1150,7 +1180,15 @@ impl Renderer {
         } = fonts.metrics;
         let (width, height) = (self.config.width as f32, self.area_height() as f32);
         let columns = ((width / cw).floor() as usize).saturating_sub(2);
-        let text = crate::link_target::elide(text, columns);
+        let prompt = if self.link_badges.is_some() && columns > 16 {
+            "Enter: copy  "
+        } else {
+            ""
+        };
+        let text = format!(
+            "{prompt}{}",
+            crate::link_target::elide(text, columns - prompt.len())
+        );
         let strip_width = ((text.chars().count() + 2) as f32 * cw).min(width);
         let top = term.viewport_to_point(0, 0).line;
         let card = self.floating_image.as_ref().map(|f| {
@@ -1175,7 +1213,19 @@ impl Renderer {
             return true;
         };
         out.push(self.rect(x, y, strip_width, ch, term.palette.foreground));
-        for (i, c) in text.chars().enumerate() {
+        self.link_text(term, fonts, text.chars(), [x + cw, y], out)
+    }
+
+    fn link_text(
+        &mut self,
+        term: &Terminal,
+        fonts: &mut Fonts,
+        text: impl Iterator<Item = char>,
+        [x, y]: [f32; 2],
+        out: &mut Vec<Instance>,
+    ) -> bool {
+        let cw = fonts.metrics.width;
+        for (i, c) in text.enumerate() {
             let key = GlyphKey {
                 c,
                 style: Style::new(false, false),
@@ -1183,7 +1233,7 @@ impl Renderer {
             };
             match self.atlas.get(key, fonts, &self.device, &self.queue) {
                 Ok(Some(g)) => out.push(Instance {
-                    pos: [x + (i + 1) as f32 * cw + g.left, y + g.top],
+                    pos: [x + i as f32 * cw + g.left, y + g.top],
                     size: [g.width, g.height],
                     uv: [g.x, g.y, if g.color { -g.width } else { g.width }, g.height],
                     color: self.color(term.palette.background, 1.0),
