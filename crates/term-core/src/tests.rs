@@ -1203,6 +1203,22 @@ fn tmux_redraw_without_a_soft_wrap_keeps_rows_separate() {
 }
 
 #[test]
+fn repainting_wide_glyph_padding_preserves_the_original_wrap() {
+    for resized in [false, true] {
+        let mut t = term(4, 2, "\x1b[?1049habc界");
+        if resized {
+            t.resize(6, 2);
+            t.resize(4, 2);
+        }
+        t.advance(b"\x1b[1;4Hd");
+        for kind in [SelectionKind::Word, SelectionKind::Line] {
+            t.start_selection(t.viewport_to_point(0, 0), kind);
+            assert_eq!(t.selection_text().as_deref(), Some("abcd界"));
+        }
+    }
+}
+
+#[test]
 fn repainting_the_widened_margin_only_wraps_if_a_print_continues() {
     for margin in ["xy", "界"] {
         let mut t = term(2, 2, "\x1b[?1049habcd");
