@@ -18,6 +18,7 @@ notify.workspace = true
 arboard.workspace = true
 base64.workspace = true
 flate2.workspace = true
+zlib-rs = { version = "0.6", default-features = false, features = ["std"] }
 gif = "0.14"
 image = { workspace = true, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
 memchr.workspace = true

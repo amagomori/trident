@@ -141,7 +141,7 @@ impl TileGrid {
     ) -> io::Result<()> {
         for tile in self.bands.iter().flatten() {
             let id = tile.id();
-            let mut header = format!("i={id},s={},v={}", tile.width, tile.height);
+            let mut header = format!("f=32,o=z,q=2,i={id},s={},v={}", tile.width, tile.height);
             if gap.is_none() {
                 write!(header, ",U=1,c={},r={}", tile.cols, tile.rows).unwrap();
             }

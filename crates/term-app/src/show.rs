@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod pdf;
+mod png;
 
 /// Base64 bytes per kitty escape; the protocol allows at most 4096.
 const CHUNK: usize = 4096;
@@ -185,8 +186,16 @@ fn show(
             animation::show(&bytes, format, options, window, out)
         }
         Kind::Raster(format) => {
-            let image = decode_raster(&bytes, format, options, window)?;
-            write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
+            let image = read_raster(&bytes, format)?;
+            let size = raster_size(&image, options, window);
+            if format == ImageFormat::Png && !window.tmux && png::can_forward(&bytes, size) {
+                send_chunks(out, &bytes, "f=100,q=2", None, false, &mut || {})
+                    .and_then(|()| out.write_all(b"\n"))
+                    .map_err(write_err)
+            } else {
+                let image = sized_rgba(image, size);
+                write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
+            }
         }
         Kind::Svg => {
             let image = render_svg(&bytes, path, options, window)?;
@@ -599,6 +608,10 @@ fn decode_raster(
     options: &Options,
     window: Window,
 ) -> Result<Rgba, String> {
+    read_raster(bytes, format).map(|image| scale_raster(image, options, window))
+}
+
+fn read_raster(bytes: &[u8], format: ImageFormat) -> Result<image::DynamicImage, String> {
     let decode = || {
         let mut decoder =
             image::ImageReader::with_format(io::Cursor::new(bytes), format).into_decoder()?;
@@ -607,17 +620,23 @@ fn decode_raster(
         image.apply_orientation(orientation);
         Ok::<_, image::ImageError>(image)
     };
-    let image =
-        decode().map_err(|e| format!("cannot decode {} image: {e}", format_name(format)))?;
-    Ok(scale_raster(image, options, window))
+    decode().map_err(|e| format!("cannot decode {} image: {e}", format_name(format)))
 }
 
-fn scale_raster(image: image::DynamicImage, options: &Options, window: Window) -> Rgba {
-    let (w, h) = target_size(
+fn raster_size(image: &image::DynamicImage, options: &Options, window: Window) -> (u32, u32) {
+    target_size(
         (image.width() as f32, image.height() as f32),
         options,
         window,
-    );
+    )
+}
+
+fn scale_raster(image: image::DynamicImage, options: &Options, window: Window) -> Rgba {
+    let size = raster_size(&image, options, window);
+    sized_rgba(image, size)
+}
+
+fn sized_rgba(image: image::DynamicImage, (w, h): (u32, u32)) -> Rgba {
     let image = if (w, h) == (image.width(), image.height()) {
         image.into_rgba8()
     } else {
@@ -744,7 +763,7 @@ fn send_direct(
     send_chunks(
         out,
         &compressed.finish()?,
-        &format!("{id}s={},v={}", image.width, image.height),
+        &format!("f=32,o=z,q=2,{id}s={},v={}", image.width, image.height),
         gap,
         false,
         &mut || {},
@@ -753,20 +772,20 @@ fn send_direct(
 
 fn send_chunks(
     out: &mut impl Write,
-    compressed: &[u8],
+    payload: &[u8],
     header: &str,
     gap: Option<u32>,
     tmux: bool,
     wait: &mut impl FnMut(),
 ) -> io::Result<()> {
-    let encoded = BASE64.encode(compressed);
+    let encoded = BASE64.encode(payload);
     let chunks = encoded.as_bytes().chunks(CHUNK);
     let count = chunks.len();
     for (i, chunk) in chunks.enumerate() {
         let more = u8::from(i + 1 < count);
         let mut escape = if i == 0 {
             let action = gap.map_or_else(|| "T".into(), |gap| format!("f,z={gap},X=1"));
-            format!("\x1b_Ga={action},f=32,o=z,q=2,{header},m={more};")
+            format!("\x1b_Ga={action},{header},m={more};")
         } else if gap.is_some() {
             format!("\x1b_Ga=f,m={more};")
         } else {
