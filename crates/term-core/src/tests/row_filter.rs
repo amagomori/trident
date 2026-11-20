@@ -153,6 +153,17 @@ fn region_moves_and_recycling() {
 }
 
 #[test]
+fn rectangle_copy_preserves_placeholder_slices_on_new_rows() {
+    let mut t = fixture(10, 4);
+    let source = feed(&mut t, &format!("\x1b[1;2H{CHAR}{}{CHAR}", M[1]));
+    let copied = feed(&mut t, "\x1b[1;2;1;3;1;3;5;1$v");
+    assert_eq!(pos(&copied), [(0, 1, 2), (2, 4, 2)]);
+    assert_eq!(copied[1].slice, source[0].slice);
+    let remaining = feed(&mut t, "\x1b[1;2;1;3$z");
+    assert_eq!(remaining, copied[1..]);
+}
+
+#[test]
 fn partial_width_scroll_keeps_stationary_and_moving_placeholders() {
     let mut t = fixture(10, 4);
     feed(&mut t, &format!("\x1b[1;9H{CHAR}\x1b[3;4H{CHAR}{}", M[1]));

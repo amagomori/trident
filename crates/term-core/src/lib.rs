@@ -29,6 +29,7 @@ mod kitty;
 mod links;
 mod margins;
 pub mod placeholder;
+mod rect;
 pub use links::{FileLink, Link};
 use margins::{LrMode, shift_cells};
 mod notifications;
@@ -63,6 +64,7 @@ mod prompt_input;
 pub use prompt_input::{PromptInput, PromptInputContext};
 mod reflow;
 mod rerun;
+mod xcolor;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
@@ -541,17 +543,20 @@ struct Reports {
     checksums: bool,
     /// DEC private modes saved with XTSAVE (`CSI ? Pm s`) for XTRESTORE (`CSI ? Pm r`).
     saved_modes: Vec<(u16, bool)>,
-    /// The body of a DECRQSS request (`DCS $ q Pt ST`) while it is being received.
-    status_request: Option<Vec<u8>>,
+    /// The body and intermediate of a DCS status request while it is being received.
+    status_request: Option<(u8, Vec<u8>)>,
     /// DECSCL conformance level, 61-64. Levels below 63 silence DECRQM and DECRQSS.
     conformance_level: u8,
     /// DECSCL's control-representation parameter, echoed back by DECRQSS.
     conformance_pc: u16,
-    /// DECRQSS-reportable settings, stored and echoed but not enacted: character
-    /// protection (`"q`), attribute-change extent (`*x`), status display (`$}`),
-    /// status-line type (`$~`) and lines per screen (`*|`).
-    decsca: u16,
+    /// DECSACE attribute-change extent (2 selects a rectangle, 0/1 a stream).
     decsace: u16,
+    /// Protection kinds seen since reset; skips row scans on ordinary erases.
+    protection_used: links::Protection,
+    /// Ordinary ED, EL and ECH honor ISO protection after SPA, until a soft reset.
+    ordinary_erase_mask: links::Protection,
+    /// DECRQSS-reportable settings stored but not enacted: status display,
+    /// status-line type and lines per screen.
     decsasd: u16,
     decssdt: u16,
     decsnls: u16,
@@ -565,7 +570,8 @@ impl Default for Reports {
             status_request: None,
             conformance_level: 64,
             conformance_pc: 0,
-            decsca: 0,
+            protection_used: Default::default(),
+            ordinary_erase_mask: Default::default(),
             decsace: 0,
             decsasd: 0,
             decssdt: 0,
@@ -1448,8 +1454,12 @@ impl Terminal {
     }
 
     /// Switches the palette; with mode 2031 set, a dark/light change is reported.
-    pub fn set_palette(&mut self, palette: colors::Palette) {
+    pub fn set_palette(&mut self, mut palette: colors::Palette) {
         let changed = palette.is_dark() != self.palette.is_dark();
+        palette.dynamic_base[0] = palette.foreground;
+        palette.dynamic_base[1] = palette.background;
+        palette.dynamic_base[2] = palette.cursor;
+        palette.dynamic_base[7] = palette.selection;
         self.palette = palette;
         if changed && self.modes.color_scheme_updates {
             self.report_color_scheme();
@@ -2594,14 +2604,17 @@ impl Terminal {
         self.put_char_cells(c, true)
     }
 
+    fn map_character(&self, c: char) -> char {
+        match self.charsets[self.active_charset] {
+            Charset::DecSpecial => dec_special(c),
+            Charset::Uk if c == '#' => '£',
+            _ => c,
+        }
+    }
+
     #[inline(always)]
     fn put_char_cells(&mut self, c: char, track: bool) {
-        let c = match self.charsets[self.active_charset] {
-            Charset::DecSpecial => dec_special(c),
-            Charset::Uk if c == '#' => '\u{a3}',
-            Charset::Uk => c,
-            Charset::Ascii => c,
-        };
+        let c = self.map_character(c);
         let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if width == 0 {
             self.print_state.disarm_clear();
@@ -2744,7 +2757,6 @@ impl Terminal {
             self.erase_placements(row, row, from, to);
         }
         let blank = Cell::blank(&self.cursor.template);
-        let to = to.min(self.cols);
         let line = &mut self.lines_mut()[row];
         let mut to = to.min(line.cells.len());
         if from >= to {
@@ -2783,7 +2795,12 @@ impl Terminal {
         self.lines_mut()[row] = blank;
     }
 
-    fn erase_display(&mut self, mode: u16) {
+    fn erase_display(&mut self, mode: u16, protected: links::Protection) {
+        if mode <= 2 && self.has_protected_cells(0..self.rows, protected) {
+            self.print_state.disarm_clear();
+            self.selective_erase('J', mode, protected);
+            return;
+        }
         let (row, col) = (self.cursor.row, self.cursor.col);
         if mode < 2 {
             self.print_state.disarm_clear();
@@ -2871,7 +2888,11 @@ impl Terminal {
         }
     }
 
-    fn erase_line(&mut self, mode: u16) {
+    fn erase_line(&mut self, mode: u16, protected: links::Protection) {
+        if self.has_protected_cells(self.cursor.row..self.cursor.row + 1, protected) {
+            self.selective_erase('K', mode, protected);
+            return;
+        }
         let (row, col) = (self.cursor.row, self.cursor.col);
         match mode {
             0 => {
@@ -3126,6 +3147,22 @@ impl Terminal {
         fresh.recycled_memory_freed = self.recycled_memory_freed;
         fresh.cell_pixels = self.cell_pixels;
         fresh.palette = self.palette.clone();
+        let palette = &mut fresh.palette;
+        palette.ansi_overrides = [None; 256];
+        palette.special = [None; 5];
+        for (index, dynamic) in palette.dynamic.iter().enumerate() {
+            if dynamic.is_none() {
+                continue;
+            }
+            match index {
+                0 => palette.foreground = palette.dynamic_base[0],
+                1 => palette.background = palette.dynamic_base[1],
+                2 => palette.cursor = palette.dynamic_base[2],
+                7 => palette.selection = palette.dynamic_base[7],
+                _ => {}
+            }
+        }
+        palette.dynamic = [None; 10];
         fresh.images = self.images.reset();
         fresh.parser = std::mem::take(&mut self.parser);
         fresh.reports.checksums = self.reports.checksums;

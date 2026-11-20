@@ -282,6 +282,117 @@ fn configured_palette_resolves_colors_and_osc_queries() {
     assert_eq!(term.take_responses(), b"\x1b]10;rgb:0404/0505/0606\x07\x1b]11;rgb:0101/0202/0303\x07\x1b]12;rgb:0707/0808/0909\x1b\\");
 }
 
+#[test]
+fn osc_colors_accept_xterm_specs_and_reset() {
+    let mut term = Terminal::new(80, 24);
+    term.advance(b"\x1b]4;1;#fff;2;rgb:f0f0/0000/0000;3;rgbi:0.5/0.5/0.5;4;CIEXYZ:0.5/0.5/0.5\x07");
+    term.advance(b"\x1b]4;1;?;2;?;3;?;4;?\x1b\\");
+    assert_eq!(
+        term.take_responses(),
+        b"\x1b]4;1;rgb:f0f0/f0f0/f0f0\x1b\\\x1b]4;2;rgb:f0f0/0000/0000\x1b\\\x1b]4;3;rgb:c1c1/bbbb/bbbb\x1b\\\x1b]4;4;rgb:dddd/b5b5/a0a0\x1b\\"
+    );
+    assert_eq!(term.palette.resolve(crate::Color::Indexed(2)), (0xf0, 0, 0));
+    for (spec, expected) in [
+        ("#f00f00f00", "f0f0/f0f0/f0f0"),
+        ("rgbi:1/1/1", "ffff/ffff/ffff"),
+        ("rgbi:0.5/0.5/0.5", "c1c1/bbbb/bbbb"),
+        ("CIEXYZ:1/1/1", "ffff/ffff/ffff"),
+        ("CIEXYZ:0.5/0.5/0.5", "dddd/b5b5/a0a0"),
+        ("CIEuvY:1/1/1", "ffff/ffff/ffff"),
+        ("CIEuvY:0.5/0.5/0.5", "ffff/a3a3/aeae"),
+        ("CIExyY:1/1/1", "ffff/ffff/ffff"),
+        ("CIExyY:0.5/0.5/0.5", "f7f7/b3b3/0e0e"),
+        ("CIELab:1/1/1", "6c6c/6767/6767"),
+        ("CIELab:0.5/0.5/0.5", "5252/4f4f/4f4f"),
+        ("CIELuv:1/1/1", "1616/1414/0e0e"),
+        ("CIELuv:0.5/0.5/0.5", "0e0e/1313/0e0e"),
+        ("TekHVC:1/1/1", "1a1a/1313/0f0f"),
+        ("TekHVC:0.5/0.5/0.5", "1111/1313/0e0e"),
+    ] {
+        term.advance(format!("\x1b]4;5;{spec};5;?\x07").as_bytes());
+        assert_eq!(
+            term.take_responses(),
+            format!("\x1b]4;5;rgb:{expected}\x07").as_bytes()
+        );
+    }
+    term.advance(b"\x1b]104;2\x07");
+    assert_eq!(
+        term.palette.resolve(crate::Color::Indexed(2)),
+        crate::colors::indexed(2)
+    );
+}
+
+#[test]
+fn osc_color_preserves_full_channels_after_xyz_conversion() {
+    for (spec, expected) in [
+        ("CIELab:100/0/0", "ffff/ffff/ffff"),
+        ("CIEXYZ:0.9496644/1/1.4060403", "ffff/ffff/ffff"),
+        ("CIEXYZ:0.3202571/0.6805464/0.1429719", "0000/ffff/0000"),
+        ("CIEXYZ:0.6294073/0.3194536/1.2630684", "ffff/0000/ffff"),
+    ] {
+        let mut term = Terminal::new(80, 24);
+        term.advance(format!("\x1b]4;5;{spec};5;?\x07").as_bytes());
+        assert_eq!(
+            term.take_responses(),
+            format!("\x1b]4;5;rgb:{expected}\x07").as_bytes(),
+            "{spec}"
+        );
+    }
+}
+
+#[test]
+fn xterm_color_setting_report() {
+    let mut term = Terminal::new(80, 24);
+    term.advance(b"\x1bP+q436F\x1b\\");
+    assert_eq!(term.take_responses(), b"\x1bP1+r436F=323536\x1b\\");
+}
+
+#[test]
+fn osc_special_and_dynamic_colors() {
+    let mut term = Terminal::new(80, 24);
+    term.advance(b"\x1b]4;256;#aaaabbbbcccc\x07\x1b]4;256;?\x07");
+    term.advance(b"\x1b]5;0;#ddddeeeeffff\x07\x1b]5;0;?\x07");
+    term.advance(b"\x1b]10;#fff;#000;?\x07");
+    assert_eq!(
+        term.take_responses(),
+        b"\x1b]4;256;rgb:aaaa/bbbb/cccc\x07\x1b]5;0;rgb:dddd/eeee/ffff\x07\x1b]12;rgb:c0c0/caca/f5f5\x07"
+    );
+    assert_eq!(term.palette.foreground, (0xf0, 0xf0, 0xf0));
+    assert_eq!(term.palette.background, (0, 0, 0));
+    term.advance(b"\x1b]105;0\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07");
+    assert_eq!(term.palette.foreground, crate::colors::FOREGROUND);
+    assert_eq!(term.palette.background, crate::colors::BACKGROUND);
+    assert_eq!(term.palette.cursor, crate::colors::CURSOR);
+    term.advance(b"\x1b]10;#fff;#fff;#fff;#fff;#fff;#fff;#fff;#fff;#fff;#fff\x07");
+    for code in 110..120 {
+        term.advance(format!("\x1b]{code}\x07").as_bytes());
+    }
+    assert!(term.palette.dynamic.iter().all(Option::is_none));
+    term.advance(b"\x1b]5;0;#fff;1;#fff;2;#fff;3;#fff;4;#fff\x07\x1b]105\x07");
+    assert!(term.palette.special.iter().all(Option::is_none));
+    term.advance(b"\x1b]4;1;#fff\x07\x1b]10;#fff\x07");
+    term.advance(b"\x1bc");
+    assert_eq!(term.palette.foreground, crate::colors::FOREGROUND);
+    assert_eq!(
+        term.palette.resolve(crate::Color::Indexed(1)),
+        term.palette.ansi[1]
+    );
+    assert!(term.palette.dynamic.iter().all(Option::is_none));
+    term.advance(b"\x1b]4;1;red;2;#fff\x07\x1b]10;red;#000\x07");
+    assert_eq!(term.palette.ansi_overrides[1], None);
+    assert_eq!(
+        term.palette.resolve(crate::Color::Indexed(2)),
+        (0xf0, 0xf0, 0xf0)
+    );
+    assert_eq!(term.palette.background, (0, 0, 0));
+    assert_eq!(term.palette.foreground, crate::colors::FOREGROUND);
+    term.advance(b"\x1b]4;256;#fff\x07\x1b]4;1;#fff\x07\x1b]104\x07");
+    assert_eq!(term.palette.special[0], None);
+    assert_eq!(term.palette.ansi_overrides[1], None);
+    term.advance(b"\x1b]10;#fff\x07\x1b]110;\x07");
+    assert_eq!(term.palette.foreground, crate::colors::FOREGROUND);
+}
+
 fn term(cols: usize, rows: usize, input: &str) -> Terminal {
     let mut t = Terminal::new(cols, rows);
     t.advance(input.as_bytes());

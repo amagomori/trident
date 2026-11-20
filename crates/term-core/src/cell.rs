@@ -128,7 +128,7 @@ pub struct Cell {
     pub bg: Color,
     /// Rendition attributes and wide/grapheme storage markers.
     pub flags: Flags,
-    /// Terminal-owned link/underline-color index; zero means no entry.
+    /// Terminal-owned link, underline color and protection index; zero means no entry.
     pub hyperlink: u16,
 }
 
@@ -571,8 +571,11 @@ impl Row {
                 let index = cell.hyperlink;
                 if index != last {
                     last = index;
-                    if index != 0 && !used[index as usize] {
-                        used[index as usize] = true;
+                    if index != 0
+                        && let Some(mark) = used.get_mut(index as usize)
+                        && !*mark
+                    {
+                        *mark = true;
                         marked += 1;
                     }
                 }

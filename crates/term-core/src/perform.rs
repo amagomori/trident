@@ -1,11 +1,12 @@
+use super::links::Protection;
 use super::{
     Charset, Color, CursorShape, Flags, LrMode, MouseMode, Progress, Terminal, TitlePair,
-    UnderlineStyle, WindowOp,
+    UnderlineStyle, WindowOp, xcolor,
 };
 use vte::{Params, Perform};
 
 /// The first value of each parameter, with 0 / missing replaced by `default`.
-fn arg(params: &Params, index: usize, default: u16) -> u16 {
+pub(super) fn arg(params: &Params, index: usize, default: u16) -> u16 {
     match params.iter().nth(index).and_then(|p| p.first()) {
         Some(&0) | None => default,
         Some(&v) => v,
@@ -14,6 +15,30 @@ fn arg(params: &Params, index: usize, default: u16) -> u16 {
 
 /// DA1 reply: VT220 with ANSI color.
 const DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+const DYNAMIC_REPLIES: [&[u8]; 10] = [
+    b"10", b"11", b"12", b"13", b"14", b"15", b"16", b"17", b"18", b"19",
+];
+
+fn decimal(value: &[u8]) -> Option<usize> {
+    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(value.iter().fold(0usize, |n, &d| {
+        n.saturating_mul(10).saturating_add(usize::from(d - b'0'))
+    }))
+}
+
+fn dynamic_code(value: &[u8]) -> Option<usize> {
+    decimal(value).and_then(|code| (10..20).contains(&code).then(|| code - 10))
+}
+
+fn reset_dynamic_code(value: &[u8]) -> Option<usize> {
+    decimal(value).and_then(|code| (110..120).contains(&code).then(|| code - 110))
+}
+
+fn dynamic_reply(index: usize) -> &'static [u8] {
+    DYNAMIC_REPLIES[index]
+}
 
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
@@ -25,6 +50,7 @@ impl Perform for Terminal {
         self.print_state.disarm_clear();
         match byte {
             0x07 => self.bell = true,
+            0x96 | 0x97 => self.set_protection(Protection::ISO, byte == 0x96),
             0x08 => self.cursor_back(),
             0x09 => self.tab(1),
             0x0a..=0x0c => {
@@ -93,8 +119,25 @@ impl Perform for Terminal {
             ('G', []) | ('`', []) => self.move_col(self.address_col(n(0) - 1)),
             ('H', []) | ('f', []) => self.goto(n(0) - 1, n(1) - 1),
             ('I', []) => self.tab(n(0)),
-            ('J', []) | ('J', [b'?']) => self.erase_display(arg(params, 0, 0)),
-            ('K', []) | ('K', [b'?']) => self.erase_line(arg(params, 0, 0)),
+            ('J' | 'K', [] | [b'?']) => {
+                // Like xterm, DEC selective erase also honors ISO protected areas.
+                let protected = if private {
+                    Protection::EITHER
+                } else {
+                    self.reports.ordinary_erase_mask
+                };
+                let mode = arg(params, 0, 0);
+                if action == 'J' {
+                    self.erase_display(mode, protected);
+                } else {
+                    self.erase_line(mode, protected);
+                }
+            }
+            ('q', [b'"']) => {
+                if let n @ 0..=2 = arg(params, 0, 0) {
+                    self.set_protection(Protection::DEC, n == 1);
+                }
+            }
             ('L', []) => self.insert_lines(n(0)),
             ('M', []) => self.delete_lines(n(0)),
             ('P', []) => self.delete_chars(n(0)),
@@ -102,7 +145,12 @@ impl Perform for Terminal {
             ('T', []) => self.scroll_down(self.scroll_top, self.scroll_bottom, n(0)),
             ('X', []) => {
                 let (row, col) = (self.cursor.row, self.cursor.col);
-                self.erase_cells(row, col, col + n(0));
+                let end = (col + n(0)).min(self.cols);
+                if self.reports.ordinary_erase_mask.contains(Protection::ISO) {
+                    self.erase_unprotected(row, col..end, Protection::ISO, false);
+                } else {
+                    self.erase_cells(row, col, end);
+                }
             }
             ('Z', []) => self.back_tab(n(0)),
             ('b', []) => {
@@ -167,6 +215,18 @@ impl Perform for Terminal {
             }
             ('t', []) => self.window_op(params),
             ('t', [b'>']) => self.title_modes(params),
+            ('v' | 'x' | 'z' | '{' | 'r' | 't', [b'$']) if self.reports.conformance_level >= 64 => {
+                self.edit_rectangle(params, action)
+            }
+            ('x', [b'*']) if self.reports.conformance_level >= 64 => {
+                let extent = arg(params, 0, 0);
+                if extent <= 2 {
+                    self.reports.decsace = extent;
+                }
+            }
+            ('}' | '~', [b'\'']) if self.reports.conformance_level >= 64 => {
+                self.edit_columns(n(0), action == '}')
+            }
             ('y', [b'*']) if self.reports.checksums => self.report_rect_checksum(params),
             ('s', []) if self.lr_margin_mode != LrMode::Off => {
                 let right = arg(params, 1, 0) as usize;
@@ -185,6 +245,8 @@ impl Perform for Terminal {
             ('u', [b'=']) => self.kitty_set(arg(params, 0, 0), arg(params, 1, 1)),
             ('p', [b'!']) => {
                 // DECSTR soft reset.
+                self.reports.decsace = 0;
+                self.reports.ordinary_erase_mask = Protection::default();
                 self.modes.show_cursor = true;
                 self.modes.origin = false;
                 self.lr_margin_mode = LrMode::Off;
@@ -199,7 +261,6 @@ impl Perform for Terminal {
                 self.modes.more_fix = false;
                 self.modes.reverse_wrap = false;
                 self.modes.reverse_wrap_ext = false;
-                self.reports.decsca = 0;
                 self.reports.decsasd = 0;
                 self.cursor.template = Default::default();
                 self.charsets = [Charset::Ascii; 2];
@@ -212,8 +273,6 @@ impl Perform for Terminal {
             ('p', [b'"']) => self.set_conformance(params),
             // Stored-and-echoed DECRQSS settings (see `Reports`): the values are
             // kept for the request reply without being enacted.
-            ('q', [b'"']) => self.reports.decsca = arg(params, 0, 0),
-            ('x', [b'*']) => self.reports.decsace = arg(params, 0, 0),
             ('}', [b'$']) => self.reports.decsasd = arg(params, 0, 0),
             ('~', [b'$']) => self.reports.decssdt = arg(params, 0, 0),
             ('|', [b'*']) => self.reports.decsnls = arg(params, 0, 0),
@@ -225,6 +284,7 @@ impl Perform for Terminal {
         self.sync_cursor_row();
         self.print_state.disarm_clear();
         match (byte, intermediates) {
+            (b'V' | b'W', []) => self.set_protection(Protection::ISO, byte == b'V'),
             (b'7', []) => self.save_cursor(),
             (b'8', []) => self.restore_cursor(),
             (b'8', [b'#']) => {
@@ -279,14 +339,15 @@ impl Perform for Terminal {
     #[inline(never)]
     fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.reports.status_request =
-            (!ignore && intermediates == b"$" && action == 'q').then(Vec::new);
+            (!ignore && matches!(intermediates, [b'$'] | [b'+']) && action == 'q')
+                .then(|| (intermediates[0], Vec::new()));
     }
 
     #[cold]
     #[inline(never)]
     fn put(&mut self, byte: u8) {
-        if let Some(request) = &mut self.reports.status_request
-            && request.len() < 8
+        if let Some((_, request)) = &mut self.reports.status_request
+            && request.len() < 16
         {
             request.push(byte);
         }
@@ -295,8 +356,12 @@ impl Perform for Terminal {
     #[cold]
     #[inline(never)]
     fn unhook(&mut self) {
-        if let Some(request) = self.reports.status_request.take() {
-            self.report_setting(&request);
+        if let Some((intermediate, request)) = self.reports.status_request.take() {
+            if intermediate == b'+' {
+                self.report_xterm_setting(&request);
+            } else {
+                self.report_setting(&request);
+            }
         }
     }
 
@@ -357,18 +422,23 @@ impl Perform for Terminal {
                     self.title_changed = true;
                 }
             }
-            [code @ (b"10" | b"11" | b"12"), b"?"] => {
-                let (r, g, b) = match *code {
-                    b"11" => self.palette.background,
-                    b"12" => self.palette.cursor,
-                    _ => self.palette.foreground,
-                };
-                let reply = format!(
-                    "\x1b]{};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}",
-                    String::from_utf8_lossy(code)
-                );
-                self.responses.extend_from_slice(reply.as_bytes());
-                self.responses.extend_from_slice(terminator);
+            [b"4", rest @ ..] if rest.len() >= 2 && rest.len() % 2 == 0 => {
+                self.osc_indexed_colors(rest, terminator);
+            }
+            [b"5", rest @ ..] if rest.len() >= 2 && rest.len() % 2 == 0 => {
+                self.osc_special_colors(rest, terminator);
+            }
+            [code, specs @ ..] if dynamic_code(code).is_some() && !specs.is_empty() => {
+                self.osc_dynamic_colors(dynamic_code(code).unwrap(), specs, terminator);
+            }
+            [b"104", indexes @ ..] => self.reset_indexed_colors(indexes),
+            [b"105", indexes @ ..] => self.reset_special_colors(indexes),
+            [code, rest @ ..] => {
+                if let Some(code) = reset_dynamic_code(code)
+                    && rest.iter().all(|field| field.is_empty())
+                {
+                    self.reset_dynamic_color(code);
+                }
             }
             _ => {}
         }
@@ -378,6 +448,174 @@ impl Perform for Terminal {
 }
 
 impl Terminal {
+    fn osc_indexed_colors(&mut self, args: &[&[u8]], terminator: &[u8]) {
+        for pair in args.as_chunks::<2>().0 {
+            let Some(index) = decimal(pair[0]) else {
+                return;
+            };
+            if pair[1] == b"?" {
+                let Some(color) = self.indexed_color(index) else {
+                    return;
+                };
+                self.report_osc_color(b"4", Some(index), color, terminator);
+            } else if let Some(color) = xcolor::parse(pair[1]) {
+                if index < 256 {
+                    self.palette.ansi_overrides[index] = Some(color);
+                } else if (256..261).contains(&index) {
+                    self.palette.special[index - 256] = Some(color);
+                }
+            }
+        }
+    }
+
+    fn osc_special_colors(&mut self, args: &[&[u8]], terminator: &[u8]) {
+        for pair in args.as_chunks::<2>().0 {
+            let Some(index) = decimal(pair[0]) else {
+                return;
+            };
+            if index >= 5 {
+                continue;
+            }
+            if pair[1] == b"?" {
+                self.report_osc_color(b"5", Some(index), self.special_color(index), terminator);
+            } else if let Some(color) = xcolor::parse(pair[1]) {
+                self.palette.special[index] = Some(color);
+            }
+        }
+    }
+
+    fn osc_dynamic_colors(&mut self, code: usize, specs: &[&[u8]], terminator: &[u8]) {
+        for (offset, spec) in specs.iter().enumerate() {
+            let code = code + offset;
+            if code >= 10 {
+                return;
+            }
+            if spec.is_empty() {
+                continue;
+            }
+            if *spec == b"?" {
+                self.report_osc_color(
+                    dynamic_reply(code),
+                    None,
+                    self.dynamic_color(code),
+                    terminator,
+                );
+            } else if let Some(color) = xcolor::parse(spec) {
+                self.set_dynamic_color(code, color);
+            }
+        }
+    }
+
+    fn indexed_color(&self, index: usize) -> Option<crate::colors::Rgb> {
+        match index {
+            0..=255 => Some(self.palette.ansi_overrides[index].unwrap_or_else(|| {
+                if index < 16 {
+                    self.palette.ansi[index]
+                } else {
+                    crate::colors::indexed(index as u8)
+                }
+            })),
+            256..=260 => Some(self.special_color(index - 256)),
+            _ => None,
+        }
+    }
+
+    fn special_color(&self, index: usize) -> crate::colors::Rgb {
+        self.palette.special[index].unwrap_or(self.palette.foreground)
+    }
+
+    fn dynamic_color(&self, index: usize) -> crate::colors::Rgb {
+        self.palette.dynamic[index].unwrap_or(match index {
+            0 => self.palette.foreground,
+            1 => self.palette.background,
+            2 => self.palette.cursor,
+            _ => self.palette.dynamic_base[index],
+        })
+    }
+
+    fn set_dynamic_color(&mut self, index: usize, color: crate::colors::Rgb) {
+        self.palette.dynamic[index] = Some(color);
+        match index {
+            0 => self.palette.foreground = color,
+            1 => self.palette.background = color,
+            2 => self.palette.cursor = color,
+            7 => self.palette.selection = color,
+            _ => {}
+        }
+    }
+
+    fn reset_indexed_colors(&mut self, indexes: &[&[u8]]) {
+        if indexes.is_empty() || indexes == [b""] {
+            self.palette.ansi_overrides = [None; 256];
+            self.palette.special = [None; 5];
+            return;
+        }
+        for index in indexes {
+            let Some(index) = decimal(index) else { return };
+            if index < 256 {
+                self.palette.ansi_overrides[index] = None;
+            } else if (256..261).contains(&index) {
+                self.palette.special[index - 256] = None;
+            } else {
+                return;
+            }
+        }
+    }
+
+    fn reset_special_colors(&mut self, indexes: &[&[u8]]) {
+        if indexes.is_empty() || indexes == [b""] {
+            self.palette.special = [None; 5];
+            return;
+        }
+        for index in indexes {
+            let Some(index) = decimal(index) else { return };
+            if index >= 5 {
+                return;
+            }
+            self.palette.special[index] = None;
+        }
+    }
+
+    fn reset_dynamic_color(&mut self, index: usize) {
+        self.palette.dynamic[index] = None;
+        let color = self.palette.dynamic_base[index];
+        match index {
+            0 => self.palette.foreground = color,
+            1 => self.palette.background = color,
+            2 => self.palette.cursor = color,
+            7 => self.palette.selection = color,
+            _ => {}
+        }
+    }
+
+    fn report_osc_color(
+        &mut self,
+        command: &[u8],
+        index: Option<usize>,
+        color: crate::colors::Rgb,
+        terminator: &[u8],
+    ) {
+        let (r, g, b) = color;
+        let mut reply = format!("\x1b]{}", String::from_utf8_lossy(command));
+        if let Some(index) = index {
+            reply.push_str(&format!(";{index}"));
+        }
+        reply.push_str(&format!(
+            ";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}"
+        ));
+        self.responses.extend_from_slice(reply.as_bytes());
+        self.responses.extend_from_slice(terminator);
+    }
+
+    fn report_xterm_setting(&mut self, request: &[u8]) {
+        let reply = if request.eq_ignore_ascii_case(b"436F") {
+            "\x1bP1+r436F=323536\x1b\\"
+        } else {
+            "\x1bP0+r\x1b\\"
+        };
+        self.responses.extend_from_slice(reply.as_bytes());
+    }
+
     /// `ConEmu` progress (`OSC 9 ; 4 ; state ; percent`): 0 removes it, 1 sets a
     /// percentage, 2 marks an error, 3 is indeterminate and 4 paused. An error or pause
     /// without a percentage keeps the last one; percentages over 100 count as 100.
@@ -610,6 +848,15 @@ impl Terminal {
         }
         let setting = match request {
             b"m" => Some(self.sgr_setting()),
+            b"\"q" => Some(format!(
+                "{}\"q",
+                u8::from(
+                    self.links
+                        .protection(self.cursor.template.hyperlink)
+                        .contains(Protection::DEC)
+                )
+            )),
+            b"*x" => Some(format!("{}*x", self.reports.decsace)),
             b"s" if self.reports.conformance_level >= 64 => Some(format!(
                 "{};{}s",
                 self.scroll_left + 1,
@@ -624,8 +871,6 @@ impl Terminal {
                 "{};{}\"p",
                 self.reports.conformance_level, self.reports.conformance_pc
             )),
-            b"\"q" => Some(format!("{}\"q", self.reports.decsca)),
-            b"*x" => Some(format!("{}*x", self.reports.decsace)),
             b"$}" => Some(format!("{}$}}", self.reports.decsasd)),
             b"$~" => Some(format!("{}$~", self.reports.decssdt)),
             b"*|" => Some(format!("{}*|", self.reports.decsnls)),
@@ -1016,7 +1261,7 @@ impl Terminal {
         self.reset_lr_margins();
         self.goto(0, 0);
         if !self.modes.no_clear_on_columns {
-            self.erase_display(2);
+            self.erase_display(2, Protection::default());
         }
     }
 

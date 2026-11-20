@@ -1,0 +1,25 @@
+size=7x3 active=primary
+cursor row=2 col=6 visible=true shape=block pending_wrap=true
+cursor attributes: fg=default-fg bg=default-bg flags=[]
+scroll_region=0..=2 history=0 display_offset=0
+primary:
+  row 0 wrap=false text="a界 cdef"
+    cells 0..1: fg=default-fg bg=default-bg flags=[]
+    cells 1..2: fg=default-fg bg=default-bg flags=[wide]
+    cells 2..3: fg=default-fg bg=default-bg flags=[wide-spacer]
+    cells 3..7: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="12界 c67"
+    cells 0..2: fg=default-fg bg=default-bg flags=[]
+    cells 2..3: fg=default-fg bg=default-bg flags=[wide]
+    cells 3..4: fg=default-fg bg=default-bg flags=[wide-spacer]
+    cells 4..7: fg=default-fg bg=default-bg flags=[]
+  row 2 wrap=false text="AB234FG"
+    cells 0..7: fg=default-fg bg=default-bg flags=[]
+scrollback (oldest first):
+alternate:
+  row 0 wrap=false text="       "
+    cells 0..7: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="       "
+    cells 0..7: fg=default-fg bg=default-bg flags=[]
+  row 2 wrap=false text="       "
+    cells 0..7: fg=default-fg bg=default-bg flags=[]
