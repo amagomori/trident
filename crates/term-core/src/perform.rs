@@ -409,7 +409,7 @@ impl Perform for Terminal {
         match params {
             [b"1337", body] => self.iterm_file(body),
             [b"52", targets, data] => self.osc_clipboard(targets, data, bell_terminated),
-            [b"7", rest @ ..] if !rest.is_empty() => self.osc_working_directory(&rest.join(&b';')),
+            [b"7", rest @ ..] => self.osc_working_directory(&rest.join(&b';')),
             [b"8", attributes, rest @ ..] if !rest.is_empty() => {
                 let uri = match rest {
                     [uri] => std::borrow::Cow::Borrowed(*uri),

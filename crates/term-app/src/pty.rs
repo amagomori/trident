@@ -5,6 +5,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -26,6 +27,27 @@ fn inherited_working_directory(
     current
         .filter(|dir| dir != std::path::Path::new("/"))
         .or(home)
+}
+
+/// The ordinary launch directory and, only for an explicit new tab/window without
+/// OSC 7, the foreground shell directory to try first.
+pub struct SpawnDirectory {
+    pub fallback: Option<PathBuf>,
+    pub shell: Option<PathBuf>,
+}
+
+impl From<Option<PathBuf>> for SpawnDirectory {
+    fn from(fallback: Option<PathBuf>) -> Self {
+        Self {
+            fallback,
+            shell: None,
+        }
+    }
+}
+
+fn searchable_directory(path: &Path) -> bool {
+    // Resolving the final dot requires search permission on the directory itself.
+    path.is_absolute() && path.join(".").is_dir()
 }
 
 /// Output the reader thread queues before it waits for the UI, once it also holds
@@ -550,13 +572,14 @@ fn shell_name(program: &str) -> Option<&str> {
 
 impl Pty {
     /// Starts `command` (the user's login shell when empty). `wake` is called from the
-    /// reader thread when output is ready, and with `true` once the shell exits. It starts in
-    /// `cwd` when given, else in this process's directory (`$HOME` when that is `/`).
+    /// reader thread when output is ready, and with `true` once the shell exits. An inferred
+    /// shell directory is best effort; otherwise the launch directory defaults to this
+    /// process's directory (`$HOME` when that is `/`).
     #[allow(clippy::too_many_arguments)]
     pub fn spawn<S: AsRef<std::ffi::OsStr>>(
         command: &[S],
         env: &std::collections::BTreeMap<String, String>,
-        cwd: Option<&std::path::Path>,
+        cwd: impl Into<SpawnDirectory>,
         cols: usize,
         rows: usize,
         cell: (f32, f32),
@@ -581,10 +604,8 @@ impl Pty {
         for (key, value) in env {
             cmd.env(key, value);
         }
-        if let Some(dir) = cwd
-            .map(std::path::PathBuf::from)
-            .or_else(default_working_directory)
-        {
+        let cwd = cwd.into();
+        if let Some(dir) = cwd.fallback.or_else(default_working_directory) {
             cmd.cwd(dir);
         }
         // portable-pty starts the default shell as a login shell, with argv[0] `-<basename>`.
@@ -592,10 +613,17 @@ impl Pty {
             let shell = cmd.get_shell();
             format!("-{}", shell.rsplit('/').next().unwrap_or(&shell))
         });
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| format!("cannot start shell: {e}"))?;
+        let child = if let Some(dir) = cwd.shell.filter(|dir| searchable_directory(dir)) {
+            let mut preferred = cmd.clone();
+            preferred.cwd(&dir);
+            match pair.slave.spawn_command(preferred) {
+                Err(_) if !searchable_directory(&dir) => pair.slave.spawn_command(cmd),
+                result => result,
+            }
+        } else {
+            pair.slave.spawn_command(cmd)
+        }
+        .map_err(|e| format!("cannot start shell: {e}"))?;
         drop(pair.slave);
         let shell_pid = child.process_id();
         #[cfg(unix)]
@@ -819,6 +847,21 @@ impl Pty {
     /// The shell's process id.
     pub fn shell_pid(&self) -> Option<u32> {
         self.child.as_ref()?.process_id()
+    }
+
+    /// Only inherit the tracked PTY child's directory, never a foreground job's.
+    pub fn foreground_shell_directory(&self) -> Option<PathBuf> {
+        let pid = i32::try_from(self.shell_pid()?).ok()?;
+        if self.foreground_process()? != pid {
+            return None;
+        }
+        let args = crate::close_confirm::process_args(pid)?;
+        if !is_idle_shell(&args) || shell_name(&crate::close_confirm::process_name(pid)?).is_none()
+        {
+            return None;
+        }
+        let dir = crate::close_confirm::process_working_directory(pid)?;
+        (self.foreground_process() == Some(pid)).then_some(dir)
     }
 
     /// The process group of a program running in the foreground instead of the shell.
@@ -1249,6 +1292,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn running_program_is_reported_only_away_from_the_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().canonicalize().unwrap().join("nested project");
+        std::fs::create_dir(&project).unwrap();
         let mut pty = Pty::spawn(
             &[
                 "bash".to_string(),
@@ -1258,7 +1304,7 @@ mod tests {
                 "-i".to_string(),
             ],
             &Default::default(),
-            None,
+            Some(dir.path().to_owned()),
             80,
             24,
             (8.0, 16.0),
@@ -1279,14 +1325,25 @@ mod tests {
             }
         };
         wait_for(&mut pty, false);
+        pty.write(b"cd 'nested project'\r");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pty.foreground_shell_directory().as_ref() != Some(&project) {
+            assert!(
+                Instant::now() < deadline,
+                "shell did not report its new directory"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         pty.write(b"sleep 30\r");
         let group = wait_for(&mut pty, true).unwrap();
+        assert!(pty.foreground_shell_directory().is_none());
         assert_eq!(
             crate::close_confirm::process_name(group).as_deref(),
             Some("sleep")
         );
         pty.write(b"\x03");
         wait_for(&mut pty, false);
+        assert_eq!(pty.foreground_shell_directory(), Some(project));
     }
 
     #[cfg(unix)]
@@ -1300,7 +1357,7 @@ mod tests {
                 "pwd; sleep 5".into(),
             ],
             &Default::default(),
-            Some(&dir),
+            Some(dir.clone()),
             80,
             24,
             (8.0, 16.0),
@@ -1316,6 +1373,37 @@ mod tests {
             seen.extend_from_slice(&pty.take_output().bytes);
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removed_shell_directory_at_spawn_uses_the_launch_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let shell = tempfile::tempdir_in(&root).unwrap();
+        let cwd = SpawnDirectory {
+            fallback: Some(root.path().to_owned()),
+            shell: Some(shell.path().to_owned()),
+        };
+        shell.close().unwrap();
+        let mut pty = Pty::spawn(
+            &["/bin/sh", "-c", "pwd -P > started-in"],
+            &Default::default(),
+            cwd,
+            80,
+            24,
+            (8.0, 16.0),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(pty.exit_code(Duration::from_secs(10)), Some(0));
+        assert!(pty.foreground_shell_directory().is_none());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("started-in"))
+                .unwrap()
+                .trim_end(),
+            root.path().canonicalize().unwrap().to_str().unwrap()
+        );
     }
 
     #[cfg(unix)]
@@ -1963,6 +2051,7 @@ mod tests {
                 .running_program()
                 .and_then(crate::close_confirm::process_name);
             if name.as_deref() == Some("sleep") {
+                assert!(pty.foreground_shell_directory().is_none());
                 break;
             }
             assert!(Instant::now() < deadline, "sleep never counted as running");

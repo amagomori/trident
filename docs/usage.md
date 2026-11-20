@@ -83,7 +83,8 @@ locally, and X10 mouse mode reports button presses but no wheel input.
 ## Tabs
 
 Every tab runs its own shell, which keeps running in the background. A new tab starts in the
-active tab's directory when the shell reports it with OSC 7.
+active tab's directory when the shell reports it with OSC 7. Without a report, New Tab and
+New Window use the directory of the original local shell if it is recognized and in the foreground.
 
 - To switch tabs, click a tab. To close one, click its **×** or middle-click it. To open one,
   click **+**.

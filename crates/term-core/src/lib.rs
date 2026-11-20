@@ -111,6 +111,7 @@ struct ShellState {
     notifications: notifications::Notifications,
     progress: Option<Progress>,
     progress_changed: bool,
+    cwd_report_seen: bool,
     cwd: Option<std::sync::Arc<WorkingDirectory>>,
     /// A full-screen program may replay its history without replaying OSC 7.
     alternate_origin: DirectoryOrigin,
@@ -1289,6 +1290,7 @@ impl Terminal {
                 notifications: Default::default(),
                 progress: None,
                 progress_changed: false,
+                cwd_report_seen: false,
                 cwd: None,
                 alternate_origin: DirectoryOrigin::Unreported,
                 clipboard: Vec::new(),
@@ -3307,6 +3309,7 @@ impl Terminal {
         let mut fresh = Terminal::new(cols, rows);
         fresh.mouse_reporting_changed = true;
         fresh.shell.progress_changed = self.shell.progress.is_some() || self.shell.progress_changed;
+        fresh.shell.cwd_report_seen = self.shell.cwd_report_seen;
         fresh.max_scrollback = max_scrollback;
         fresh.shrunk = self.shrunk || !self.primary.scrollback.is_empty();
         fresh.recycled_memory_freed = self.recycled_memory_freed;
