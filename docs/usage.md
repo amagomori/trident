@@ -170,6 +170,8 @@ lines. It ignores case unless the query has an uppercase letter.
 - Rectangular copies keep spaces and put each screen row on its own line.
 - Selecting doesn't copy to the clipboard unless you launch with `--copy-on-select`. On Linux,
   selecting always sets the primary selection.
+- On X11, if the HTML is too large for the X server, Trident copies the plain text without
+  formatting. If the plain text itself is too large, the selection keeps its previous contents.
 
 ### Wrapped text in tmux
 

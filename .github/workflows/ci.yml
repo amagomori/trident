@@ -35,6 +35,11 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - run: cargo test --doc -p term-core -p term-render
       - run: cargo test --workspace
+      - name: Check oversized X11 clipboard copies
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v xclip >/dev/null; then sudo apt-get install -y xclip; fi
+          xvfb-run -a cargo test -p term-app --bin trident x11_oversized_html_replaces_rich_selection_with_plain_text -- --ignored
       - name: Check native pasteboard selection formats
         if: runner.os == 'macOS'
         run: cargo test -p term-app --bin trident macos_primary_leaves_rich_pasteboard_untouched -- --ignored
