@@ -17,8 +17,6 @@ NAMES = ["Co", "Tc", "Smulx", "setrgbf", "setrgbb", "Sync"]
 def probe(directory):
     assert os.isatty(0) and os.isatty(1)
     tty.setraw(0)
-    source = Path(__file__).resolve().parents[2] / "crates/term-app/terminfo/xterm-trident.terminfo"
-    subprocess.run(["/usr/bin/tic", "-x", "-o", directory, source], check=True)
     os.environ["TERMINFO"] = str(directory)
     curses.setupterm("xterm-trident", 1)
 
@@ -62,6 +60,8 @@ if __name__ == "__main__":
         (directory / "result").write_text(result)
     else:
         with tempfile.TemporaryDirectory() as tmp:
+            source = Path(__file__).resolve().parents[2] / "crates/term-app/terminfo/xterm-trident.terminfo"
+            subprocess.run(["/usr/bin/tic", "-x", "-o", tmp, source], check=True)
             subprocess.run([sys.argv[1], "-e", sys.executable, Path(__file__).resolve(),
                             "--child", tmp], check=True, timeout=45)
             result = (Path(tmp) / "result").read_text()
