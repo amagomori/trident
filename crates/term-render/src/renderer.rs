@@ -1269,6 +1269,14 @@ impl Renderer {
             }
             let color = if active { fg } else { dim };
             let bell = bar.bells.get(i).copied().unwrap_or(false);
+            let Some([x, y, w, h]) = tab.close else {
+                let (start, number) = tab.compact_number(i + 1, cw);
+                let color = if bell { palette.ansi[3] } else { color };
+                for (col, c) in number.chars().enumerate() {
+                    glyphs.push((start + cw * col as f32, c, color));
+                }
+                continue;
+            };
             let skip = if bell {
                 glyphs.push((tab.x + cw, BELL_MARK, palette.ansi[3]));
                 2
@@ -1279,7 +1287,6 @@ impl Renderer {
             for (col, c) in title.chars().enumerate() {
                 glyphs.push((tab.x + cw * ((col + skip) as f32 + 1.0), c, color));
             }
-            let [x, y, w, h] = tab.close;
             if bar.hover == Some(TabHit::Close(i)) {
                 out.push(self.rect(x, y, w, h, mix(bg, fg, 0.25)));
             }
