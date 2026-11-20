@@ -82,7 +82,7 @@ trident --install-terminfo     # optional: install the xterm-trident terminfo en
   selection.
 - Shell integration through OSC 133 lets you jump between prompts and marks output that changed
   since the last run.
-- You can display inline images through the kitty graphics protocol, receive desktop notifications
+- You can display inline images with kitty graphics or iTerm2’s `imgcat`, receive desktop notifications
   and drop files.
 - Trident bundles JetBrains Mono and supports color emoji and font fallback.
 - Configuration reloads when you save, and bundled themes can follow the OS appearance.
@@ -90,12 +90,13 @@ trident --install-terminfo     # optional: install the xterm-trident terminfo en
 ## Configuration
 
 Trident reads `~/.config/trident/config.toml`, or `$XDG_CONFIG_HOME/trident/config.toml` when set. Every
-entry is optional. For all settings, see [Configuration](docs/configuration.md).
+entry is optional. See the [configuration reference](docs/config-reference.md) for types and defaults.
 
 ## Documentation
 
 - [Usage](docs/usage.md) covers commands, shortcuts and everyday tasks.
 - [Configuration](docs/configuration.md) describes settings, key bindings, shell integration and themes.
+- [FAQ](docs/faq.md) answers common setup and troubleshooting questions.
 - [Development](docs/development.md) covers building, testing, releases and performance measurement.
 - [Conformance](docs/conformance.md) lists vttest and esctest results.
 

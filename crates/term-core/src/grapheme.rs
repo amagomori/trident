@@ -5,7 +5,7 @@
 //! `Cell::c`, flagged `Flags::GRAPHEME`. Combining marks keep the base
 //! character's
 //! width. Recognized emoji sequences can widen that cell to two columns; line
-//! editing instead preserves per-codepoint widths to match the shell's cursor.
+//! editing preserves per-codepoint widths unless the editor requests mode 2027.
 
 use std::collections::HashMap;
 
@@ -418,7 +418,7 @@ impl Terminal {
     /// Gives the emoji sequence in the narrow cell `(row, col)` two columns, like a wide
     /// character: in place, or on the next line when it sits in the last column.
     fn widen_sequence(&mut self, row: usize, col: usize) {
-        let cols = self.cols;
+        let cols = self.right_bound() + 1;
         let (insert, template) = (self.modes.insert, self.cursor.template);
         if col + 1 < cols && !self.cursor.pending_wrap && self.cursor.col == col + 1 {
             let line = &mut self.lines_mut()[row];
@@ -444,39 +444,35 @@ impl Terminal {
             // Like a wide character printed in the last column: that cell is left blank and
             // the sequence moves to the start of the next line.
             self.sync_cursor_row();
-            let row = self.cursor.row;
-            let line = &mut self.lines_mut()[row];
-            let mut cell = line.cells[col];
+            let mut cell = self.screen().lines[row].cells[col];
             let mut blank = Cell::blank(&template);
-            blank.flags.insert(Flags::WIDE_WRAP);
+            if !self.has_partial_width() {
+                blank.flags.insert(Flags::WIDE_WRAP);
+            }
+            let line = &mut self.lines_mut()[row];
             line.cells[col] = blank;
             line.touch(col + 1);
-            line.set_wrapped(true);
-            self.cursor.col = 0;
-            self.cursor.pending_wrap = false;
-            self.linefeed();
+            self.wrap_line();
             let row = self.cursor.row;
+            let start = self.cursor.col;
+            let end = self.right_bound() + 1;
             let line = &mut self.lines_mut()[row];
             if insert {
-                crate::insert_printed_cells(line, 0, cols, 2, &template);
+                crate::insert_printed_cells(line, start, end, 2, &template);
                 line.touch_all();
             }
-            crate::clear_wide_pair(&mut line.cells, 0);
-            crate::clear_wide_pair(&mut line.cells, 1);
+            crate::clear_wide_pair(&mut line.cells, start);
+            crate::clear_wide_pair(&mut line.cells, start + 1);
             cell.flags.insert(Flags::WIDE);
             let mut spacer = cell;
             spacer.c = ' ';
             spacer.flags.remove(Flags::WIDE | Flags::GRAPHEME);
             spacer.flags.insert(Flags::WIDE_SPACER);
-            line.cells[0] = cell;
-            line.cells[1] = spacer;
-            line.touch(2);
-            if cols == 2 {
-                self.cursor.col = 1;
-                self.cursor.pending_wrap = true;
-            } else {
-                self.cursor.col = 2;
-            }
+            line.cells[start] = cell;
+            line.cells[start + 1] = spacer;
+            line.touch(start + 2);
+            self.cursor.col = (start + 2).min(end - 1);
+            self.cursor.pending_wrap = start + 2 == end;
         }
     }
 
@@ -621,6 +617,33 @@ mod tests {
             Some("\u{1f469}\u{200d}\u{1f4bb}")
         );
         assert_eq!(t.base_char(&row.cells[2]), '|');
+    }
+
+    #[test]
+    fn grapheme_mode_overrides_editor_widths_until_reset() {
+        let mut t = Terminal::new(20, 2);
+        t.set_line_editing(Some(0));
+        let emoji = "👩🏽\u{200d}💻";
+        for (mode, reply, col) in [
+            ("", 2, 6),
+            ("\x1b[?2027h", 1, 2),
+            ("\x1b[?2027s\x1b[?2027l", 2, 6),
+            ("\x1b[?2027r", 1, 2),
+        ] {
+            t.advance(format!("\r\x1b[2K{mode}\x1b[?2027$p{emoji}\x1b[6n").as_bytes());
+            assert_eq!(
+                t.take_responses(),
+                format!("\x1b[?2027;{reply}$y\x1b[1;{}R", col + 1).as_bytes()
+            );
+            if reply == 1 {
+                let cells = &t.viewport_row(0).cells;
+                assert_eq!(t.grapheme(&cells[0]), Some(emoji));
+                assert!(cells[0].flags.contains(Flags::WIDE));
+                assert!(cells[1].flags.contains(Flags::WIDE_SPACER));
+            }
+        }
+        t.advance(b"\x1bc\x1b[?2027$p");
+        assert_eq!(t.take_responses(), b"\x1b[?2027;2$y");
     }
 
     #[test]

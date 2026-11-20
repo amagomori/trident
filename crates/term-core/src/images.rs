@@ -64,6 +64,9 @@ pub struct PlaceOptions {
     pub x_offset: u32,
     /// Vertical pixel offset inside the anchor cell.
     pub y_offset: u32,
+    /// Destination size in pixels at placement time, before rounding to cell spans.
+    /// Defaults to the source rectangle size on axes without an explicit cell count.
+    pub display_pixels: Option<(u32, u32)>,
     /// Part of the image to show; `None` shows all of it.
     pub source: Option<Rect>,
     /// Negative draws below text, zero or more above it; higher draws on top.
@@ -96,6 +99,8 @@ pub struct Placement {
     pub source: Rect,
     /// Drawing order: negative below text, nonnegative above text.
     pub z: i32,
+    /// Destination pixel size before cell rounding, at placement time.
+    pub display_pixels: (u32, u32),
     /// Cell dimensions when placed, used to scale pixel-sized axes and offsets.
     pub cell_pixels: (f32, f32),
     /// Width was explicitly specified in cells rather than inferred from pixels.
@@ -146,6 +151,7 @@ pub(crate) struct ImageStore {
     pub(crate) quota: usize,
     clock: u64,
     pub(crate) generation: u64,
+    pub(crate) multipart: Option<Box<crate::iterm::Transfer>>,
 }
 
 impl ImageStore {
@@ -156,6 +162,7 @@ impl ImageStore {
             quota: DEFAULT_IMAGE_QUOTA,
             clock: 0,
             generation: 0,
+            multipart: None,
         }
     }
 
@@ -179,7 +186,7 @@ impl ImageStore {
 
 /// The number of `cell`-pixel cells `px` pixels after `offset` cover.
 fn span(px: u32, offset: u32, cell: f32) -> usize {
-    (((px + offset) as f32 / cell.max(1.0)).ceil() as usize).max(1)
+    ((px.saturating_add(offset) as f32 / cell.max(1.0)).ceil() as usize).max(1)
 }
 
 /// Placements are stored with `line` relative to a per-screen base: absolute for the primary
@@ -364,17 +371,19 @@ impl Terminal {
             });
         let (cell_w, cell_h) = self.cell_pixels;
         let base = self.placement_base(self.alt_active);
+        let display_pixels = opts.display_pixels.unwrap_or((source.width, source.height));
         let placement = Placement {
+            display_pixels,
             image_id,
             placement_id: opts.placement_id,
             line: self.history + self.cursor.row as u64,
             col: self.cursor.col,
             cols: match opts.cols {
-                0 => span(source.width, opts.x_offset, cell_w),
+                0 => span(display_pixels.0, opts.x_offset, cell_w),
                 n => n,
             },
             rows: match opts.rows {
-                0 => span(source.height, opts.y_offset, cell_h),
+                0 => span(display_pixels.1, opts.y_offset, cell_h),
                 n => n,
             },
             clipped_rows: None,
@@ -396,6 +405,34 @@ impl Terminal {
         });
         self.images.generation += 1;
         Ok(placement)
+    }
+
+    pub(crate) fn advance_image_cursor(&mut self, placement: &Placement) {
+        // Like kitty: the cursor ends on the image's last row, just past its right edge.
+        // Without scrollback an image whose top scrolls off is dropped, so stop short of
+        // that; with it, linefeeds past screen plus scrollback only push out blank lines.
+        let history = if self.alt_active {
+            0
+        } else {
+            self.max_scrollback
+        };
+        let rows = if self.has_partial_width()
+            && self.in_horizontal_margins()
+            && (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row)
+        {
+            self.scroll_bottom - self.scroll_top + 1
+        } else if history == 0 {
+            self.rows
+        } else {
+            self.rows + history
+        };
+        for _ in 1..placement.rows.min(rows) {
+            self.linefeed();
+        }
+        let col = self.cursor.col.saturating_add(placement.cols);
+        let right = self.right_bound();
+        self.cursor.col = col.min(right);
+        self.cursor.pending_wrap = col > right;
     }
 
     /// Placements on the active screen that overlap the viewport, in drawing order (by `z`,
@@ -480,14 +517,15 @@ impl Terminal {
         primary.chain(alt).map(|p| p.image_id).collect()
     }
 
-    /// Moves placements anchored in screen rows `top..=bottom` by `delta` rows as those rows
-    /// scroll, dropping the ones pushed out of the region. With `to_history` the scrolled-out
+    /// Moves placements anchored in the scrolling rows and columns by `delta` rows,
+    /// dropping the ones pushed out of the region. With `to_history` the scrolled-out
     /// rows go to scrollback, so the region keeps its absolute lines and the rows below it
     /// shift instead.
     pub(crate) fn scroll_placements(
         &mut self,
         top: usize,
         bottom: usize,
+        columns: std::ops::Range<usize>,
         delta: isize,
         to_history: bool,
     ) {
@@ -501,7 +539,7 @@ impl Terminal {
                 }
                 return true;
             }
-            if !(top..=bottom).contains(&row) {
+            if !(top..=bottom).contains(&row) || !columns.contains(&p.col) {
                 return true;
             }
             let moved = row + delta;

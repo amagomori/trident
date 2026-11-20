@@ -448,7 +448,7 @@ impl Terminal {
             return None;
         }
         let (first, last) = self.logical_line(point.line);
-        let index = self.line(point.line).cells[point.col].hyperlink;
+        let index = self.line(point.line).cells.get(point.col)?.hyperlink;
         if self
             .links
             .get(index)

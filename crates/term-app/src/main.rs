@@ -28,6 +28,8 @@ mod frame_clock;
 mod hover_preview;
 mod ime;
 mod input;
+#[cfg(target_os = "linux")]
+mod ipc;
 mod latency;
 mod osc_notify;
 mod paste;
@@ -209,6 +211,10 @@ enum UserEvent {
     Output(u64),
     /// The PTY of the tab with this pane id exited.
     Exit(u64),
+    /// A second `trident` run forwarded a new-window request: its working
+    /// directory, environment and `-e` command words (byte-exact).
+    #[cfg(target_os = "linux")]
+    OpenWindow(Option<PathBuf>, Vec<(String, String)>, Vec<OsString>),
     PagerFailed(String),
     #[cfg(target_os = "macos")]
     Presented,
@@ -1600,6 +1606,10 @@ struct App {
     /// keeps its own tabs and interaction state.
     #[cfg(target_os = "linux")]
     windows: Vec<WindowGroup>,
+    /// The socket a later `trident` run uses to ask this process for a window,
+    /// exported to shells as `TRIDENT_SOCKET`.
+    #[cfg(target_os = "linux")]
+    ipc_socket: Option<PathBuf>,
 }
 
 /// Everything `App` keeps per window on Linux: the live session and tabs plus the input
@@ -1786,6 +1796,8 @@ impl App {
             exit_presentation: ExitPresentation::default(),
             #[cfg(target_os = "linux")]
             windows: Vec::new(),
+            #[cfg(target_os = "linux")]
+            ipc_socket: None,
         }
     }
 
@@ -1862,9 +1874,8 @@ impl App {
             0,
             self.options.command(&self.config, true),
             self.options.working_directory.as_deref(),
-            spawn_cols,
-            spawn_rows,
-            spawn_cell,
+            &[],
+            (spawn_cols, spawn_rows, spawn_cell),
         )?;
         let attrs = Window::default_attributes()
             .with_title("Trident")
@@ -1929,12 +1940,19 @@ impl App {
         let mut term = Terminal::new(cols, rows);
         self.appearance = window.theme().or(self.appearance);
         #[cfg(target_os = "linux")]
-        if let Some(theme) = self
-            .appearance_watch
-            .as_mut()
-            .and_then(|watch| watch.initial(INITIAL_APPEARANCE_WAIT))
         {
-            self.appearance = theme;
+            if let Some(theme) = self
+                .appearance_watch
+                .as_mut()
+                .and_then(|watch| watch.initial(INITIAL_APPEARANCE_WAIT))
+            {
+                self.appearance = theme;
+            }
+            // The Wayland CSD frame and the X11 _GTK_THEME_VARIANT hint track the
+            // palette's theme; fixed palettes keep the platform default.
+            if self.config.themes.automatic() {
+                window.set_theme(decoration_theme(self.appearance));
+            }
         }
         term.set_palette(self.config.themes.palette(self.appearance).clone());
         configure_term(
@@ -2038,29 +2056,45 @@ impl App {
     }
 
     /// Starts the shell for the tab with pane id `id`, its events tagged with that id.
-    fn spawn_pty(
+    fn spawn_pty<S: AsRef<std::ffi::OsStr>>(
         &self,
         id: u64,
-        command: &[String],
+        command: &[S],
         cwd: Option<&std::path::Path>,
-        cols: usize,
-        rows: usize,
-        cell: (f32, f32),
+        env_overlay: &[(String, String)],
+        grid: (usize, usize, (f32, f32)),
     ) -> Result<Pty, String> {
         let proxy = self.proxy.clone();
         let command_proxy = self.proxy.clone();
-        let mut env = self.config.env.clone();
+        // A forwarded request carries the requester's environment. It sits
+        // under the configured `[env]` — same precedence as an inherited
+        // variable — and never over the terminal's own variables.
+        let mut env: std::collections::BTreeMap<String, String> = env_overlay
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION"
+                )
+            })
+            .cloned()
+            .collect();
+        env.extend(self.config.env.clone());
         if !env.contains_key("TERM") {
             let term = terminfo::term(&self.config.term, &self.config.env);
             env.insert("TERM".into(), term.into());
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(socket) = &self.ipc_socket {
+            env.insert(ipc::SOCKET_ENV.into(), socket.display().to_string());
         }
         let mut pty = Pty::spawn(
             command,
             &env,
             cwd,
-            cols,
-            rows,
-            cell,
+            grid.0,
+            grid.1,
+            grid.2,
             move |exited| {
                 let _ = proxy.send_event(if exited {
                     UserEvent::Exit(id)
@@ -2265,9 +2299,18 @@ impl App {
 
     /// Opens a new window inside this process instead of spawning a child: a winit
     /// window, a PTY on a fresh pane id, and a `WindowGroup` pushed to `windows`.
-    /// The window becomes the app's current one through its `Focused` event.
+    /// `cwd`, `env` and `command` come from a forwarded request when another
+    /// `trident` run asked for the window; a keyboard shortcut passes `None` and
+    /// empty values. The window becomes the app's current one through its
+    /// `Focused` event.
     #[cfg(target_os = "linux")]
-    fn new_window(&mut self, event_loop: &ActiveEventLoop) {
+    fn new_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        cwd: Option<PathBuf>,
+        env: Vec<(String, String)>,
+        command: Vec<OsString>,
+    ) {
         let Some(s) = &self.session else { return };
         let attrs = Window::default_attributes()
             .with_title("Trident")
@@ -2283,20 +2326,22 @@ impl App {
             }
         });
         window.set_ime_allowed(true);
-        let cwd = local_working_directory(s.term.working_directory())
+        let cwd = cwd
+            .filter(|dir| dir.is_dir())
+            .or_else(|| local_working_directory(s.term.working_directory()))
             .or_else(|| self.options.working_directory.clone());
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         let (cols, rows) = (s.term.cols(), s.term.rows());
         self.next_pane += 1;
         let id = self.next_pane;
-        let pty = match self.spawn_pty(
-            id,
-            self.options.command(&self.config, false),
-            cwd.as_deref(),
-            cols,
-            rows,
-            cell,
-        ) {
+        let shell: Vec<OsString> = self
+            .options
+            .command(&self.config, false)
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let command: &[OsString] = if command.is_empty() { &shell } else { &command };
+        let pty = match self.spawn_pty(id, command, cwd.as_deref(), &env, (cols, rows, cell)) {
             Ok(pty) => pty,
             Err(error) => {
                 diag!("trident: new window: {error}");
@@ -2384,9 +2429,8 @@ impl App {
             id,
             self.options.command(&self.config, false),
             working_directory.as_deref(),
-            cols,
-            rows,
-            cell,
+            &[],
+            (cols, rows, cell),
         ) {
             Ok(pty) => pty,
             Err(error) => {
@@ -3799,6 +3843,12 @@ impl App {
     /// Applies the automatic theme's current palette to the shown window's
     /// terminals, when automatic theming is on.
     fn apply_appearance_shown(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.config.themes.automatic()
+            && let Some(s) = &self.session
+        {
+            s.window.set_theme(decoration_theme(self.appearance));
+        }
         if self.config.themes.automatic()
             && let Some(s) = &mut self.session
         {
@@ -4036,7 +4086,7 @@ impl App {
             #[cfg(not(target_os = "macos"))]
             Action::SelectTab(index) => self.select_tab(shortcut_tab(index, self.tabs.len())),
             #[cfg(target_os = "linux")]
-            Action::NewWindow => self.new_window(event_loop),
+            Action::NewWindow => self.new_window(event_loop, None, Vec::new(), Vec::new()),
             #[cfg(target_os = "macos")]
             Action::NewWindow => {
                 let working_directory = self
@@ -5353,6 +5403,19 @@ impl App {
     }
 }
 
+/// The decoration theme matching `palette(appearance)`: light only on an
+/// explicit Light, dark otherwise. Winit's Linux backends have no "system"
+/// value — X11 writes `dark` for `None` and Wayland falls back to light — so
+/// `None` must not reach `set_theme` or the frame splits from the palette.
+#[cfg(target_os = "linux")]
+fn decoration_theme(appearance: Option<Theme>) -> Option<Theme> {
+    Some(if appearance == Some(Theme::Light) {
+        Theme::Light
+    } else {
+        Theme::Dark
+    })
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.session.is_some() {
@@ -5453,6 +5516,10 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::PagerFailed(error) => self.show_pager_error(error),
             UserEvent::HoverPreview(ready) => self.hover_preview_ready(ready),
+            #[cfg(target_os = "linux")]
+            UserEvent::OpenWindow(cwd, env, command) => {
+                self.new_window(event_loop, cwd, env, command)
+            }
             UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
                 self.output_ready()
             }
@@ -5749,6 +5816,52 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--install-terminfo") {
         std::process::exit(terminfo::install());
     }
+    #[cfg(target_os = "linux")]
+    if let Some(socket) = std::env::var_os(ipc::SOCKET_ENV) {
+        // A Trident process already runs: hand it this window's working
+        // directory, environment and `-e` command, and exit. Options a forwarded
+        // window cannot honor — another config file, font, scrollback and the
+        // like — start a standalone process instead.
+        // `-e`'s words keep their raw bytes (non-UTF-8 arguments survive the
+        // hop); the options ahead of it still parse as text, and anything the
+        // forwarded window cannot honor — another config file, font,
+        // scrollback and the like — starts a standalone process instead.
+        let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        let split = args
+            .iter()
+            .position(|arg| arg == "-e" || arg == "--command");
+        let (head, command): (&[OsString], Vec<OsString>) = match split {
+            Some(at) => (&args[..at], args[at + 1..].to_vec()),
+            None => (&args, Vec::new()),
+        };
+        let request = head
+            .iter()
+            .map(|arg| arg.clone().into_string())
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+            .and_then(|head| parse_args_from(head).ok())
+            .filter(|options| {
+                options.config_path == config::default_path()
+                    && !options.font_size_override
+                    && options.scrollback.is_none()
+                    && options.font.is_none()
+                    && !options.copy_on_select
+                    && options.window_cells.is_none()
+                    // `-e` without a command is a parse error, not a request.
+                    && (split.is_none() || !command.is_empty())
+            });
+        if request.is_some() {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let env = std::env::vars_os()
+                .filter_map(|(key, value)| {
+                    Some((key.into_string().ok()?, value.into_string().ok()?))
+                })
+                .collect::<Vec<_>>();
+            if ipc::forward(std::path::Path::new(&socket), &cwd, &env, &command) {
+                return;
+            }
+        }
+    }
     let options = match parse_args() {
         Ok(o) => Options {
             working_directory: working_directory.filter(|dir| dir.is_dir()),
@@ -5769,12 +5882,40 @@ fn main() {
     };
     let mut app = App::new(options, event_loop.create_proxy());
     app.startup_stderr = startup_stderr;
+    #[cfg(target_os = "linux")]
+    {
+        let socket = ipc::socket_path();
+        if let Some(listener) = ipc::listen(&socket) {
+            let proxy = event_loop.create_proxy();
+            std::thread::spawn(move || {
+                for mut stream in listener.incoming().flatten() {
+                    // The socket sits in a shared runtime dir: take requests
+                    // only from processes owned by this user.
+                    if !ipc::same_user(&stream) {
+                        continue;
+                    }
+                    let Some((cwd, env, command)) = ipc::read_request(&mut stream) else {
+                        continue;
+                    };
+                    if proxy
+                        .send_event(UserEvent::OpenWindow(cwd, env, command))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+            app.ipc_socket = Some(socket);
+        }
+    }
     let run = event_loop.run_app(&mut app);
     let code = app.pager_exit_code;
     let error = app.error.take();
     // Dropping the app reaps every tab's command, killing one that ignores SIGHUP.
     drop(app);
     remove_on_exit();
+    #[cfg(target_os = "linux")]
+    let _ = std::fs::remove_file(ipc::socket_path());
     if let Err(e) = run {
         diag!("trident: {e}");
         std::process::exit(1);

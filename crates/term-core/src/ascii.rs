@@ -21,6 +21,7 @@ impl Terminal {
     fn put_ascii_run(&mut self, mut bytes: &[u8]) {
         if !self.modes.autowrap
             || self.modes.insert
+            || self.has_partial_width()
             || self.charsets[self.active_charset] != Charset::Ascii
         {
             for &b in bytes {
@@ -122,6 +123,10 @@ impl Perform for Writer<'_> {
     }
 
     #[inline]
+    fn raw_osc_limit(&self, code: &[u8]) -> Option<usize> {
+        self.term.raw_osc_limit(code)
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         self.flush();
         self.term.osc_dispatch(params, bell_terminated);

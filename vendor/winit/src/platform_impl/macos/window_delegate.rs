@@ -15,7 +15,7 @@ use objc2_app_kit::{
     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
     NSColor, NSDraggingDestination, NSFilenamesPboardType, NSPasteboard,
     NSRequestUserAttentionType, NSScreen, NSView, NSWindowButton, NSWindowDelegate,
-    NSWindowFullScreenButton, NSWindowLevel, NSWindowOcclusionState, NSWindowOrderingMode,
+    NSWindow, NSWindowFullScreenButton, NSWindowLevel, NSWindowOcclusionState, NSWindowOrderingMode,
     NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
@@ -342,6 +342,12 @@ declare_class!(
             } else {
                 self.restore_state_from_fullscreen();
             }
+        }
+
+        #[method(windowDidFailToExitFullScreen:)]
+        fn window_did_fail_to_exit_fullscreen(&self, _: Option<&AnyObject>) {
+            self.ivars().in_fullscreen_transition.set(false);
+            self.ivars().target_fullscreen.replace(None);
         }
 
         // Invoked when the occlusion state of the window changes
@@ -673,6 +679,18 @@ fn new_window(
 }
 
 impl WindowDelegate {
+    /// None before delegate installation, or for windows that do not belong to winit.
+    pub(super) fn fullscreen_transition(window: &NSWindow) -> Option<bool> {
+        // SAFETY: NSWindow exposes a weak delegate; the retained result keeps it live.
+        let delegate = unsafe { window.delegate() }?;
+        if !delegate.is_kind_of::<Self>() {
+            return None;
+        }
+        // SAFETY: The delegate is a WindowDelegate as checked above.
+        let delegate: Retained<Self> = unsafe { Retained::cast(delegate) };
+        Some(delegate.ivars().in_fullscreen_transition.get())
+    }
+
     pub(super) fn new(
         app_delegate: &ApplicationDelegate,
         attrs: WindowAttributes,

@@ -200,6 +200,7 @@ fn shell_integration_output_ends_before_missing_newline_marker() {
         t.advance(format!("\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;D;0\x07{marker}                    \r\x1b]133;A\x07$ ").as_bytes());
         t.select_command_output();
         assert_eq!(t.selection_text().as_deref(), Some("abc"));
+        assert!(t.selection_html().unwrap().ends_with("\">abc</span></pre>"));
     }
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07abc\x1b]133;A\x07$ ");
@@ -765,6 +766,18 @@ struct Case {
 fn cases() -> Vec<Case> {
     let inputs: &[(&str, usize, usize, &[u8])] = &[
         ("empty", 5, 2, b""),
+        (
+            "horizontal_region_scroll", 7, 4,
+            b"A11111a\r\nB22222b\r\nC33333c\r\nD44444d\x1b[?69h\x1b[2;6s\x1b[2;4r\x1b[?6h\x1b[3;1H123456",
+        ),
+        (
+            "horizontal_region_wide", 6, 3,
+            "L####R\r\nM####S\r\nN####T\x1b[?69h\x1b[2;5s\x1b[1;5H界ab🇨🇦".as_bytes(),
+        ),
+        (
+            "horizontal_region_edits", 7, 3,
+            b"abcdefg\r\nhijklmn\r\nopqrstu\x1b[?69h\x1b[2;6s\x1b[1;3H\x1b[2@\x1b[2;4H\x1b[2P\x1b[3;1H\x1b[M\x1b[2;2H\x1b[L",
+        ),
         ("printable_trailing_spaces", 6, 2, b"ab  "),
         ("utf8", 8, 2, "caf\u{e9}".as_bytes()),
         ("combining_mark", 6, 2, "e\u{301}x".as_bytes()),
@@ -828,6 +841,12 @@ fn cases() -> Vec<Case> {
         ),
         ("emoji_skin_tone", 6, 2, "\u{1f44d}\u{1f3fd}x".as_bytes()),
         (
+            "emoji_mode_in_input",
+            5,
+            3,
+            "\x1b]133;B\x07\x1b[?2027h👨\u{200d}👩\u{200d}👧👍🏽x\x1b[?2027l👍🏽y".as_bytes(),
+        ),
+        (
             "emoji_tag_sequence",
             6,
             2,
@@ -840,6 +859,12 @@ fn cases() -> Vec<Case> {
         ("tab", 12, 2, b"a\tb"),
         ("pending_wrap", 4, 2, b"abcd"),
         ("soft_wrap", 4, 3, b"abcdef"),
+        ("split_wrapped_bs", 8, 3, b"\x1b[?69h\x1b[3;6s\x1b[1;3HabcdE\r\x1b[?45h\x08X"),
+        ("split_scrolled_cub", 8, 2, b"\x1b[?69h\x1b[3;6s\x1b[1;3HabcdefghI\x1b[?45h\x1b[2DX"),
+        ("split_unwrapped_cub", 8, 2, b"\x1b[?69h\x1b[3;6s\x1b[2;3H\x1b[?45h\x1b[DX"),
+        ("split_ext_screen_edge", 8, 3, b"\x1b[?69h\x1b[3;6s\x1b[2;1H\x1b[?1045h\x08X"),
+        ("split_pending_cub", 8, 2, b"\x1b[?69h\x1b[3;6s\x1b[2;3Habcd\x1b[?1045h\x1b[6DX"),
+        ("split_more_fix_tab", 14, 2, b"\x1b[?69;41h\x1b[10;13s\x1b[1;10Habcd\tX"),
         ("reverse_wrap", 4, 3, b"abcdef\r\x1b[?45h\x08X"),
         ("reverse_wrap_unwrapped", 4, 3, b"\x1b[?45hab\x1b[2;1H\x08X"),
         ("reverse_wrap_ext", 4, 3, b"\x1b[?1045hab\x1b[2;1H\x08X"),
@@ -1582,6 +1607,14 @@ fn golden_conformance_reports() {
         ),
         ("DECRQCRA clamps", b"\x1b[6;0;9;9;99;99*y"),
         ("DECXCPR", b"\x1b[2;3H\x1b[?6n"),
+        (
+            "SCOSC ignores parameters with DECLRMM off",
+            b"\x1b[2;3H\x1b[3s\x1b[H\x1b[u\x1b[6n\x1b[3;2H\x1b[3;4s\x1b[H\x1b[u\x1b[6n",
+        ),
+        (
+            "DECSLRM does not overwrite SCOSC",
+            b"\x1b[?69h\x1b[1;2H\x1b[2;3s\x1bP$qs\x1b\\\x1b[?69l\x1b[u\x1b[6n",
+        ),
         ("printer, UDK, keyboard", b"\x1b[?15n\x1b[?25n\x1b[?26n"),
         ("locator", b"\x1b[?53n\x1b[?55n\x1b[?56n"),
         ("macros, DECCKSR", b"\x1b[?62n\x1b[?63;7n"),
@@ -1605,6 +1638,10 @@ fn golden_conformance_reports() {
         ),
         ("DECRQM KAM", b"\x1b[2h\x1b[2$p\x1b[2l\x1b[2$p"),
         ("DECRQSS SGR default", b"\x1bP$qm\x1b\\"),
+        (
+            "DECLRMM, DECSLRM and CPR",
+            b"\x1b[?69h\x1b[2;3s\x1b[4;2s\x1b[?69$p\x1bP$qs\x1b\\\x1b[?6h\x1b[9;9H\x1b[6n\x1b[?6n\x1b[?69l\x1bP$qs\x1b\\\x1b[?69$p\x1b[?6l",
+        ),
         (
             "DECRQSS SGR styled",
             b"\x1b[1;3;4:3;7;31;104m\x1bP$qm\x1b\\\x1b[38;5;200;48;2;1;2;3m\x1bP$qm\x1b\\\x1b[m",

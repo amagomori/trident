@@ -40,6 +40,14 @@ infocmp -x xterm-trident | ssh host -- tic -x /dev/stdin
 For the full capability list, see
 [xterm-trident.terminfo](../crates/term-app/terminfo/xterm-trident.terminfo).
 
+## Emoji widths in line editors
+
+Trident joins emoji sequences in command output. At a shell prompt or in a line editor, it normally
+counts each code point separately to match the editor’s cursor. An editor that counts joined emoji
+as two columns can send `CSI ? 2027 h` to use those widths and `CSI ? 2027 l` to restore the default.
+Query the mode with `CSI ? 2027 $ p`: the reply is `CSI ? 2027 ; 1 $ y` when set, or `2` instead of
+`1` when reset. Changing the mode does not reflow existing text.
+
 ## Keyboard and mouse
 
 | Action | macOS | Linux |
@@ -100,9 +108,10 @@ Hold Cmd (macOS) or Ctrl (Linux) over a link to underline it, and click to open 
   own line syntax:
   - Supported editors: vim, nvim, nano, emacs, helix, micro, kakoune, VS Code, Cursor, Sublime Text,
     Zed and TextMate.
-  - `ed` opens at the top of the file, and `red` starts in the file's directory because it
-    restricts editing to that directory. Any other editor gets `+line file`.
+  - `ed` and `red` open at the top of the file. Any other editor gets `+line file`.
   - Quoted words in the variable, such as an editor path with spaces, stay one argument.
+- Whether set in the config or the environment, `red` starts in the file's directory and receives
+  only the filename because it rejects paths containing `/`.
 - Terminal editors such as vim, nano and `emacs -nw` open in a new Trident window. GUI editors run
   directly.
 - With no editor set at all, the file goes to `open` or `xdg-open`, which can't jump to the line.
@@ -163,7 +172,9 @@ could then read what you copied.
 ## Close confirmation
 
 If a program such as vim, ssh or a build is running, closing the window shows a confirmation banner
-with the program's name. Press Enter or close again to confirm, or Escape to keep the window open.
+with the program's name. Press Enter to close the window or Escape to keep it open.
+Closing again also confirms for the last window in a Trident process. On Linux, if another window
+in the same process is open, closing again repeats the prompt instead.
 Commands started with `-e` also require confirmation unless the command is a shell at its prompt.
 At an idle shell prompt, the window closes without confirmation.
 
@@ -200,9 +211,10 @@ A stream of bells (`yes $'\a'`) flashes once until it pauses for a quarter secon
 
 ## App icons
 
-`app_icon` picks the Dock icon on macOS and the window icon on Linux from eight variants:
-`tide`, the default, `lagoon`, `dusk`, `reef`, `kelp`, `midnight`, `golden` and `sunset`,
-all case-insensitive. On macOS, the same icon also shows in the menu bar, with a menu that brings
+`app_icon` sets the Dock icon on macOS or the window icon on X11 (including XWayland).
+Native Wayland uses the installed desktop icon instead. The eight variants are `tide` (the
+default), `lagoon`, `dusk`, `reef`, `kelp`, `midnight`, `golden` and `sunset`, all
+case-insensitive. On macOS, the same icon also shows in the menu bar, with a menu that brings
 the window forward or quits. To hide it, set `menu_bar_icon = false`. Both settings apply when the
 config reloads. An unknown name logs a warning and uses `tide`.
 
@@ -221,17 +233,39 @@ doesn't run.
 On Linux, drops work from X11 apps. On a Wayland desktop, run `env -u WAYLAND_DISPLAY trident` to
 accept drops from X11 apps. Drops from native Wayland apps aren't supported.
 
+## Wayland notes
+
+Trident runs natively on Wayland and on X11 (including XWayland). On Wayland:
+
+- When `theme` follows the OS appearance (`theme = "auto"` or a `light`/`dark`
+  pair), client-side decorations and the X11 `_GTK_THEME_VARIANT` hint track the
+  desktop's color scheme through the `org.freedesktop.appearance` portal. A window
+  opened with a fixed theme uses the platform's default decorations. Switching from
+  automatic to fixed on config reload changes the terminal palette but does not
+  reset the existing window's decorations.
+- Fractional scaling works; moving the window between monitors re-renders at the new
+  scale.
+- The window icon comes from the installed `trident.desktop` entry and icon theme, not
+  the `app_icon` setting.
+- Primary selection (select-to-copy, middle-click paste) uses the
+  `zwp_primary_selection_v1` protocol, which GNOME, KDE and wlroots compositors
+  provide. On a compositor without it, use Ctrl+Shift+C/V and the regular clipboard.
+- The compositor owns window position: Trident can restore its size, not its place.
+- Drops from native Wayland apps aren't supported yet (see above).
+
 ## Hover previews
 
 With `hover_preview = true` in the config, hold Ctrl (Cmd on macOS) with the pointer over a file
 path in the output to see a small card next to it:
 
 - Images show a thumbnail, and PDFs show their first page.
-- Text files show their first lines, or the lines around `path:line` when a line is given.
+- Text files show their first lines, or highlight the referenced line in locations such as
+  `path:line:column` and Python's `File "notes.txt", line 25`.
 - Directories list their entries.
 
 Paths are found in `ls` columns, `git status` and `git diff` output, compiler and traceback
-locations, and quoted names. Ctrl-click or Cmd-click opens links. Relative paths use the directory
+locations, and quoted names. Unquoted paths can contain single spaces; two or more spaces
+separate columns. Ctrl-click or Cmd-click opens links. Relative paths use the directory
 the shell last reported with OSC 7, falling back to the foreground program's or shell's working
 directory. Trident skips previews while the shell reports a directory on another host, as over ssh.
 PDF previews require `pdftoppm` from poppler-utils on Linux and use Quick Look on macOS.
@@ -252,7 +286,12 @@ picks the type from the file's contents, not its name:
 - Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG) are drawn shrunk to fit
   the window. GIFs show their first frame.
 - Text files are printed with control characters made visible.
-- Other files get a one-line summary, such as `ELF executable, 16.2 KiB`.
+- For other files, Trident asks Quick Look on macOS or an installed
+  freedesktop thumbnailer on Linux for a preview. For example, on Ubuntu,
+  `ffmpegthumbnailer` previews videos, `gnome-font-viewer` previews fonts, and
+  `libgsf-bin` extracts embedded Office thumbnails. If no helper can preview
+  the file within five seconds, you get the usual summary, such as
+  `ELF executable, 16.2 KiB`.
 
 A missing, unreadable or corrupt file prints an error, and the command exits with status 1. For
 sample files, see `crates/term-app/samples`.

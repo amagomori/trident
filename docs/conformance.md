@@ -26,21 +26,20 @@ $VTRUN --idle 400 --key '1\r' --key '\r' --key '\r' --key '0\r' -- vttest
 
 ## esctest results
 
-With xterm expectations at VT level 4, 352 tests pass and 176 fail; the suite marks 39 tests as
+With xterm expectations at VT level 4, 414 tests pass and 114 fail; the suite marks 39 tests as
 known xterm bugs. The failures group under these tickets:
 
 | Failures | Cause | Ticket |
 | --- | --- | --- |
-| 56 | Left/right margins (DECLRMM, DECSLRM), origin mode | [KAN-136](https://jarettforzano.atlassian.net/browse/KAN-136) |
-| 62 | VT420 rectangle and column ops, character protection (DECSCA, DECSED, DECSEL) | [KAN-137](https://jarettforzano.atlassian.net/browse/KAN-137) |
+| 54 | VT420 rectangle and column ops, character protection (DECSCA, DECSED, DECSEL) | [KAN-137](https://jarettforzano.atlassian.net/browse/KAN-137) |
 | 47 | OSC 4/10-19 color spec formats, special colors (OSC 5/105) | [KAN-138](https://jarettforzano.atlassian.net/browse/KAN-138) |
+| 2 | DECRQSS for DECSLPP; VT level 4 honors DECNCSM instead of clearing on DECCOLM | [KAN-139](https://jarettforzano.atlassian.net/browse/KAN-139) |
 | 7 | XTWINOPS window-manager ops refused by policy (table below) | intentional |
 | 4 | DA1/DA2: Trident reports a VT220 (`CSI ? 62 ; 22 c`, `CSI > 0 ; 10 ; 1 c`), not xterm's VT420 | intentional |
 
-KAN-139's group is done: XTWINOPS window ops, the title stack, DECSLPP and DECCOLM pass. KAN-140's
-group is done too: reverse wraparound (45/1045), the more(1) fix (41), DECSCL and DECRQM/DECRQSS
-pass. The three DECELF/DECLFKC/DECSMKR DECRQSS replies stay unimplemented, as in xterm (the suite
-counts them as known bugs).
+The left/right margin cases pass, including origin-relative movement, reverse wraparound,
+bounded scrolling, and margin reports. The two DECSLPP and DECNCSM failures above also occur
+without horizontal margins. The suite counts DECELF/DECLFKC/DECSMKR as known xterm bugs.
 
 ## XTWINOPS and DECCOLM decisions
 
