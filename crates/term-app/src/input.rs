@@ -1,7 +1,7 @@
 //! Encoding of keyboard and mouse input into the byte sequences terminal programs expect.
 
 use term_core::MouseMode;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 
 /// xterm's modifier parameter: 1 + shift + 2*alt + 4*ctrl.
 fn modifier_param(mods: ModifiersState) -> u8 {
@@ -277,23 +277,27 @@ fn kitty_named(named: NamedKey) -> Option<KittyForm> {
     })
 }
 
-/// Modifier keys and their kitty key number plus modifier bit.
-fn kitty_modifier(named: NamedKey) -> Option<(u32, u8)> {
+/// Returns the kitty key number and modifier bit for a standalone modifier.
+///
+/// Only a known right location overrides the default left-hand number.
+fn kitty_modifier(named: NamedKey, location: KeyLocation) -> Option<(u32, u8)> {
+    let right = location == KeyLocation::Right;
     Some(match named {
-        NamedKey::Shift => (57441, 1),
-        NamedKey::Control => (57442, 4),
-        NamedKey::Alt | NamedKey::AltGraph => (57443, 2),
-        NamedKey::Super => (57444, 8),
+        NamedKey::Shift => (if right { 57447 } else { 57441 }, 1),
+        NamedKey::Control => (if right { 57448 } else { 57442 }, 4),
+        NamedKey::Alt => (if right { 57449 } else { 57443 }, 2),
+        NamedKey::Super => (if right { 57450 } else { 57444 }, 8),
+        NamedKey::AltGraph => (57443, 2),
         NamedKey::Hyper => (57445, 16),
         NamedKey::Meta => (57446, 32),
         _ => return None,
     })
 }
 
-/// One key event for the kitty encoder: the logical key, the same key
-/// ignoring modifiers, the text it produced and the active modifiers.
+/// A key event for the kitty encoder, including its platform-reported location.
 pub struct KeyEvent<'a> {
     pub key: &'a Key,
+    pub location: KeyLocation,
     pub base: &'a Key,
     pub text: Option<&'a str>,
     pub mods: ModifiersState,
@@ -318,6 +322,7 @@ pub fn encode_kitty_key(
         base,
         text,
         mods,
+        location,
     } = *event;
     let disambiguate = flags & 0b1 != 0;
     let report_events = flags & 0b10 != 0;
@@ -337,7 +342,7 @@ pub fn encode_kitty_key(
 
     if let Key::Named(named) = key {
         // Modifier keys themselves are reported only under report-all.
-        if let Some((num, bit)) = kitty_modifier(*named) {
+        if let Some((num, bit)) = kitty_modifier(*named, location) {
             if !report_all {
                 return None;
             }
@@ -454,6 +459,7 @@ fn encode_text_key(
         base,
         text,
         mods,
+        ..
     } = *event;
     let disambiguate = flags & 0b1 != 0;
     let report_all = flags & 0b1000 != 0;
@@ -864,6 +870,7 @@ mod tests {
     fn kitty(k: Key, mods: ModifiersState, kind: KeyEventKind, flags: u8) -> Option<Vec<u8>> {
         let event = KeyEvent {
             key: &k,
+            location: KeyLocation::Standard,
             base: &k,
             text: None,
             mods,
@@ -881,6 +888,7 @@ mod tests {
             let key = ch(logical);
             let event = KeyEvent {
                 key: &key,
+                location: KeyLocation::Standard,
                 base: &base,
                 text: Some(logical),
                 mods: ModifiersState::ALT,
@@ -946,6 +954,74 @@ mod tests {
     }
 
     #[test]
+    fn kitty_sided_modifiers_preserve_other_held_bits() {
+        use KeyEventKind::{Press, Release, Repeat};
+        use KeyLocation::{Left, Numpad, Right, Standard};
+
+        for (named, left, right, held, press, release) in [
+            (NamedKey::Shift, 57441, 57447, ModifiersState::CONTROL, 6, 5),
+            (NamedKey::Control, 57442, 57448, ModifiersState::ALT, 7, 3),
+            (NamedKey::Alt, 57443, 57449, ModifiersState::SUPER, 11, 9),
+            (NamedKey::Super, 57444, 57450, ModifiersState::SHIFT, 10, 2),
+        ] {
+            let key = Key::Named(named);
+            for (location, code) in [
+                (Left, left),
+                (Right, right),
+                (Standard, left),
+                (Numpad, left),
+            ] {
+                let event = KeyEvent {
+                    key: &key,
+                    location,
+                    base: &key,
+                    text: None,
+                    mods: held,
+                };
+                let encode = |kind, flags| encode_kitty_key(&event, kind, flags, true, false);
+                for (kind, flags, expected) in [
+                    (Press, 10, format!("\x1b[{code};{press}u")),
+                    (Repeat, 10, format!("\x1b[{code};{press}:2u")),
+                    (Release, 10, format!("\x1b[{code};{release}:3u")),
+                    (Press, 8, format!("\x1b[{code};{press}u")),
+                    (Repeat, 8, format!("\x1b[{code};{press}u")),
+                ] {
+                    assert_eq!(
+                        encode(kind, flags),
+                        Some(expected.into_bytes()),
+                        "{named:?} {location:?} {kind:?} {flags}"
+                    );
+                }
+                assert_eq!(encode(Release, 8), None);
+                for kind in [Press, Repeat, Release] {
+                    assert_eq!(encode(kind, 2), None);
+                }
+                assert_eq!(encode_key(&key, &key, None, held, false, true, false), None);
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_right_alt_graph_keeps_its_logical_encoding() {
+        let key = Key::Named(NamedKey::AltGraph);
+        let event = KeyEvent {
+            key: &key,
+            location: KeyLocation::Right,
+            base: &key,
+            text: None,
+            mods: ModifiersState::empty(),
+        };
+        assert_eq!(
+            encode_kitty_key(&event, KeyEventKind::Press, 10, true, false).as_deref(),
+            Some(b"\x1b[57443;3u".as_slice())
+        );
+        assert_eq!(
+            encode_kitty_key(&event, KeyEventKind::Press, 2, true, false),
+            None
+        );
+    }
+
+    #[test]
     fn kitty_events_report_release_and_repeat() {
         let none = ModifiersState::empty();
         // Flag 0b10 alone: releases get event sub-fields where an escape form exists.
@@ -993,6 +1069,7 @@ mod tests {
             encode_kitty_key(
                 &KeyEvent {
                     key: &ch("a"),
+                    location: KeyLocation::Standard,
                     base: &ch("a"),
                     text: Some("a"),
                     mods: none,
@@ -1008,6 +1085,7 @@ mod tests {
             encode_kitty_key(
                 &KeyEvent {
                     key: &ch("A"),
+                    location: KeyLocation::Standard,
                     base: &ch("a"),
                     text: Some("A"),
                     mods: ModifiersState::SHIFT,
