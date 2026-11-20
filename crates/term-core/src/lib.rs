@@ -2094,6 +2094,7 @@ impl Terminal {
         let mut style = Cell::default();
         let blank = Cell::default();
         let mut span_open = false;
+        let mut text = String::new();
         for line in start.line..=end.line {
             let (from, to) = self.selection_columns((start, end), line)?;
             let cells = self.selected_cells(kind, line, from, to, &blank);
@@ -2105,20 +2106,19 @@ impl Terminal {
             } else {
                 Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
             };
-            let mut text = String::new();
+            text.clear();
             for cell in cells.clone() {
                 if !cell.flags.intersects(skip) {
                     self.push_cell_text(cell, &mut text);
                 }
             }
-            let keep = if block || (wrapped && line != end.line) {
-                text.len()
+            let mut remaining = if block || (wrapped && line != end.line) {
+                text.as_str()
             } else {
-                text.trim_end().len()
+                text.trim_end()
             };
-            let mut left = keep;
             for cell in cells {
-                if left == 0 {
+                if remaining.is_empty() {
                     break;
                 }
                 if cell.flags.intersects(skip) {
@@ -2134,14 +2134,10 @@ impl Terminal {
                     span_open = true;
                     style = *cell;
                 }
-                let mut cell_text = String::new();
-                self.push_cell_text(cell, &mut cell_text);
+                let bytes = self.cell_text_len(cell).min(remaining.len());
+                let (cell_text, tail) = remaining.split_at(bytes);
+                remaining = tail;
                 for c in cell_text.chars() {
-                    let len = c.len_utf8();
-                    if len > left {
-                        break;
-                    }
-                    left -= len;
                     match c {
                         '&' => out.push_str("&amp;"),
                         '<' => out.push_str("&lt;"),
