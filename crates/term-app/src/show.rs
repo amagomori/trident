@@ -5,6 +5,7 @@
 //! thumbnail when available, or a one-line summary.
 
 mod thumbnail;
+pub(crate) mod zip;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -89,7 +90,8 @@ pub fn usage() -> String {
          Shows files in the terminal. Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM,\n\
          TGA and SVG, told apart by their contents) are drawn with the kitty graphics\n\
          protocol, shrunk to fit the window; PDF pages fill its width. Text files are\n\
-         printed. Other files get a system thumbnail or a one-line summary.\n\n\
+         printed. ZIP archives (.zip) list their entries without extraction. Other files\n\
+         get a system thumbnail or a one-line summary.\n\n\
          OPTIONS:\n  \
            --width N    Draw images N columns wide\n  \
            --height N   Draw images N rows tall (with --width: fit inside both)\n  \
@@ -179,7 +181,15 @@ fn show(
     window: Window,
     out: &mut impl Write,
 ) -> Result<(), String> {
-    let (bytes, size) = read_for_show(path).map_err(|e| io_message(&e))?;
+    let file = std::fs::File::open(path).map_err(|e| io_message(&e))?;
+    if let Some(zip) = zip::listing(path, &file, window.rows.saturating_sub(2) as usize) {
+        writeln!(out, "{}", zip.header).map_err(write_err)?;
+        for line in zip.lines {
+            writeln!(out, "{line}").map_err(write_err)?;
+        }
+        return Ok(());
+    }
+    let (bytes, size) = read_for_show(file).map_err(|e| io_message(&e))?;
     match detect(&bytes) {
         Kind::Raster(format @ (ImageFormat::Gif | ImageFormat::WebP)) => {
             animation::show(&bytes, format, options, window, out)
@@ -210,9 +220,8 @@ fn write_err(e: io::Error) -> String {
 
 /// Large videos and Office archives only need a header for classification.
 /// Their native thumbnailer reads the original path, not this buffer.
-fn read_for_show(path: &Path) -> io::Result<(Vec<u8>, u64)> {
+fn read_for_show(mut file: std::fs::File) -> io::Result<(Vec<u8>, u64)> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
     let size = file.metadata()?.len();
     let mut bytes = Vec::new();
     if size > 1024 * 1024 {

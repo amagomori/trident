@@ -474,6 +474,71 @@ fn text_detection_checks_the_whole_file() {
 }
 
 #[test]
+fn zip_contents_are_bounded_and_not_extracted() {
+    let mut out = Vec::new();
+    show(
+        &sample("sample.zip"),
+        &Options::default(),
+        big_window(),
+        &mut out,
+    )
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.starts_with("ZIP · 4 entries\n"));
+    assert!(text.contains("30 bytes  README.txt\n"));
+    assert!(text.contains("dir  artwork/\n"));
+    assert!(text.ends_with("bytes  artwork/vector study.svg\n"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("SAMPLE.ZIP");
+    // Give a member a control byte in both its local and central headers.
+    let mut archive = std::fs::read(sample("sample.zip")).unwrap();
+    for i in 0..archive.len() {
+        if archive[i..].starts_with(b"README.txt") {
+            archive[i] = 0x1b;
+        }
+    }
+    std::fs::write(&path, archive).unwrap();
+    let mut out = Vec::new();
+    show(
+        &path,
+        &Options::default(),
+        Window {
+            rows: 3,
+            ..big_window()
+        },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "ZIP · first 1 of 4 entries\n  30 bytes  ^[EADME.txt\n"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn zip_previews_leave_other_files_to_the_normal_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("not-an-archive.zip");
+    for bytes in [b"ordinary text\n".as_slice(), b"PK\x03\x04\0truncated"] {
+        std::fs::write(&path, bytes).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(zip::listing(&path, &file, 10).is_none());
+        assert_eq!(read_for_show(file).unwrap().0, bytes);
+    }
+    let file = std::fs::File::open(sample("sample.zip")).unwrap();
+    assert!(zip::listing(Path::new("document.docx"), &file, 10).is_none());
+
+    let mut empty = [0; 22];
+    empty[..4].copy_from_slice(b"PK\x05\x06");
+    std::fs::write(&path, empty).unwrap();
+    let mut out = Vec::new();
+    show(&path, &Options::default(), big_window(), &mut out).unwrap();
+    assert_eq!(out, "ZIP · 0 entries\n".as_bytes());
+}
+
+#[test]
 fn binaries_get_a_summary() {
     let mut out = Vec::new();
     show(
@@ -503,7 +568,7 @@ fn large_video_reads_only_its_header_for_the_system_thumbnailer() {
     let mut file = tempfile::NamedTempFile::new().unwrap();
     file.write_all(b"\0\0\0\x18ftypmp42").unwrap();
     file.as_file().set_len(1024 * 1024 * 1024).unwrap();
-    let (bytes, size) = read_for_show(file.path()).unwrap();
+    let (bytes, size) = read_for_show(file.reopen().unwrap()).unwrap();
     assert_eq!(size, 1024 * 1024 * 1024);
     assert!(bytes.len() <= 64 * 1024);
     assert_eq!(detect(&bytes), Kind::Binary("MP4/QuickTime media".into()));

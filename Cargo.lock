@@ -2232,6 +2232,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rawzip"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac9999039f74cd73c03158cddfe4362991703c74efe5ce5c8073026f80a5e48c"
+
+[[package]]
 name = "read-fonts"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2802,6 +2808,7 @@ dependencies = [
  "objc2-user-notifications 0.3.2",
  "pdfium-render",
  "portable-pty",
+ "rawzip",
  "resvg",
  "serde",
  "shlex",

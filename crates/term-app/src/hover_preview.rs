@@ -562,6 +562,17 @@ fn content(path: &Path, line: Option<usize>, max: (u32, u32), rows: usize) -> Op
     }
     let size = crate::show::size_label(meta.len());
     let file = std::fs::File::open(path).ok()?;
+    if let Some(zip) = crate::show::zip::listing(path, &file, rows) {
+        return Some(Content {
+            title,
+            detail: zip.header,
+            body: Body::Lines {
+                lines: zip.lines,
+                first: None,
+                mark: None,
+            },
+        });
+    }
     let mut bytes = Vec::new();
     let cap = if meta.len() <= MAX_BYTES {
         MAX_BYTES
@@ -1625,6 +1636,18 @@ mod tests {
             (lines, first, mark),
             (vec!["a    b".to_string()], None, None)
         );
+    }
+
+    #[test]
+    fn zip_card_shows_members_within_its_row_budget() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/sample.zip");
+        let zip = content(&path, None, body_room(1.0), 2).unwrap();
+        assert_eq!(zip.detail, "ZIP · first 2 of 4 entries");
+        let Body::Lines { lines, first, mark } = zip.body else {
+            panic!("listing");
+        };
+        assert_eq!((first, mark), (None, None));
+        assert_eq!(lines, ["  30 bytes  README.txt", "       dir  artwork/"]);
     }
 
     #[test]

@@ -7,6 +7,7 @@ raster format, plus files for the failure cases. Requires Pillow.
 
 import io
 import struct
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from PIL import Image
 
@@ -60,3 +61,13 @@ open("png-named.jpg", "wb").write(open("sample.png", "rb").read())
 
 png = open("sample.png", "rb").read()
 open("corrupt.png", "wb").write(png[: len(png) // 2])
+
+# A reproducible ZIP listing with directory, nested and space-containing names.
+with ZipFile("sample.zip", "w") as archive:
+    for name, data in [
+        ("README.txt", b"Trident file preview samples.\n"),
+        ("artwork/", b""),
+        ("artwork/quadrants.png", png),
+        ("artwork/vector study.svg", open("sample.svg", "rb").read()),
+    ]:
+        archive.writestr(ZipInfo(name), data, compress_type=ZIP_DEFLATED)
