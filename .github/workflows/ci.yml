@@ -59,4 +59,4 @@ jobs:
           esac
           .github/scripts/release/pdfium.sh "$platform" "$RUNNER_TEMP/pdfium"
           cp "$RUNNER_TEMP"/pdfium/lib/libpdfium.* target/release/
-          python3 .github/scripts/release/check_pdf.py target/release/trident
+          python3 .github/scripts/release/check_pdf.py target/release/trident --tmux

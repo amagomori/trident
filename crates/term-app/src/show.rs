@@ -180,7 +180,6 @@ fn show(
     out: &mut impl Write,
 ) -> Result<(), String> {
     let (bytes, size) = read_for_show(path).map_err(|e| io_message(&e))?;
-    let write_err = |e: io::Error| format!("cannot write output: {}", io_message(&e));
     match detect(&bytes) {
         Kind::Raster(format @ (ImageFormat::Gif | ImageFormat::WebP)) => {
             animation::show(&bytes, format, options, window, out)
@@ -193,9 +192,7 @@ fn show(
             let image = render_svg(&bytes, path, options, window)?;
             write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
         }
-        Kind::Pdf => pdf::show(&bytes, options, window, |image| {
-            write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
-        }),
+        Kind::Pdf => pdf::show(&bytes, options, window, out),
         Kind::Text => write_text(out, &bytes).map_err(write_err),
         Kind::DecodedText(text) => write_text(out, text.as_bytes()).map_err(write_err),
         Kind::Binary(kind) => {
@@ -205,6 +202,10 @@ fn show(
             writeln!(out, "{kind}, {}", human_size(size)).map_err(write_err)
         }
     }
+}
+
+fn write_err(e: io::Error) -> String {
+    format!("cannot write output: {}", io_message(&e))
 }
 
 /// Large videos and Office archives only need a header for classification.
@@ -705,15 +706,29 @@ fn write_kitty(
     out: &mut impl Write,
     image: &Rgba,
     window: Window,
-    mut wait: impl FnMut(),
+    wait: impl FnMut(),
 ) -> io::Result<()> {
+    if let Some(grid) = transmit_image(out, image, window, wait)? {
+        grid.write_cells(out)?;
+    }
+    Ok(())
+}
+
+/// Returns tmux cells to write after transmitting all pixels for a page.
+fn transmit_image(
+    out: &mut impl Write,
+    image: &Rgba,
+    window: Window,
+    mut wait: impl FnMut(),
+) -> io::Result<Option<TileGrid>> {
     if window.tmux {
         let grid = TileGrid::new(image, window, reserve_tile_ids)?;
         grid.send(out, image, None, &mut wait)?;
-        grid.write_cells(out)
+        Ok(Some(grid))
     } else {
         send_direct(out, image, None, None)?;
-        out.write_all(b"\n")
+        out.write_all(b"\n")?;
+        Ok(None)
     }
 }
 

@@ -1,17 +1,20 @@
 """Exercise the release CLI with the real bundled PDFium (no display required)."""
 import base64
 import fcntl
+import hashlib
 import os
 from pathlib import Path
 import re
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import zlib
 
 binary = Path(sys.argv[1]).resolve()
 samples = Path(__file__).resolve().parents[3] / "crates/term-app/samples"
+fixtures = samples.parent / "tests/fixtures"
 
 
 def show(*args, error=None, stdin=subprocess.DEVNULL):
@@ -53,7 +56,7 @@ def check_tall(width, height, *options):
     master, slave = os.openpty()
     try:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 158, width, height))
-        bands = show(*options, samples.parent / "tests/fixtures/tall.pdf", stdin=slave)
+        bands = show(*options, fixtures / "tall.pdf", stdin=slave)
     finally:
         os.close(master)
         os.close(slave)
@@ -72,9 +75,39 @@ def check_tall(width, height, *options):
                 assert rgba[4*w*y:4*w*y+4] == bytes((*rgb, 255)), (top, y, rgb)
         top += h
     assert top == page_h
+    digest = hashlib.sha256()
+    for _, _, rgba in bands:
+        digest.update(rgba)
+    return digest.digest()
+
+
+def check_wide_tmux(expected):
+    """Check every band reaches the outer PTY despite tmux redraws."""
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run([sys.executable, fixtures / "tmux_image_history.py", binary,
+                        fixtures / "tall.pdf", tmp], check=True, stdout=subprocess.DEVNULL)
+        live = (Path(tmp) / "live").read_bytes()
+    digest = hashlib.sha256()
+    encoded = bytearray()
+    rows_left = 9480
+    for header, chunk in re.findall(rb"\x1b_G([^;]+);([^\x1b]+)\x1b\\", live):
+        if not encoded:
+            width, height = map(int, re.search(rb"s=(\d+),v=(\d+)", header).groups())
+            assert width == 1896
+        encoded.extend(chunk)
+        if b"m=0" in header:
+            rgba = zlib.decompress(base64.b64decode(encoded))
+            assert len(rgba) == width * height * 4
+            rows = min(height, rows_left)
+            digest.update(memoryview(rgba)[:rows * width * 4])
+            rows_left -= rows
+            encoded.clear()
+    assert not encoded and not rows_left and digest.digest() == expected
 
 
 check_tall(1264, 760)
-check_tall(1896, 1080)
+wide = check_tall(1896, 1080)
+if "--tmux" in sys.argv[2:]:
+    check_wide_tmux(wide)
 check_tall(1896, 1080, "--fit")
 print("PDF content, dimensions, tall-page bands, page ranges and errors passed")

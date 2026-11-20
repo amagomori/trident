@@ -1,9 +1,10 @@
 //! PDF support is loaded only when `show` encounters a PDF.
 
-use super::{Options, Rgba, Window, target_size};
+use super::{Options, Rgba, Window, target_size, tmux_wait, transmit_image, write_err};
 use pdfium_render::prelude::{
     PdfBitmap, PdfRenderConfig, Pdfium, PdfiumError, PdfiumInternalError,
 };
+use std::io::Write;
 use std::ops::RangeInclusive;
 use std::sync::LazyLock;
 
@@ -55,7 +56,7 @@ pub(super) fn show(
     bytes: &[u8],
     options: &Options,
     window: Window,
-    mut output: impl FnMut(Rgba) -> Result<(), String>,
+    out: &mut impl Write,
 ) -> Result<(), String> {
     static PDFIUM: LazyLock<Result<Pdfium, String>> = LazyLock::new(load);
     let pdfium = PDFIUM.as_ref().map_err(Clone::clone)?;
@@ -96,6 +97,7 @@ pub(super) fn show(
                 "one cell row of PDF page {n} exceeds 16 megapixels; use --fit or a smaller --width"
             )
         })?;
+        let mut grids = Vec::new();
         for top in (0..height).step_by(band as usize) {
             let config = PdfRenderConfig::new()
                 .set_target_size(width as i32, height as i32)
@@ -105,11 +107,21 @@ pub(super) fn show(
                 PdfBitmap::empty(width as i32, height as i32, Default::default()).map_err(error)?;
             page.render_into_bitmap_with_config(&mut bitmap, &config)
                 .map_err(error)?;
-            output(Rgba {
+            let image = Rgba {
                 width,
                 height,
                 pixels: bitmap.as_rgba_bytes(),
-            })?;
+            };
+            if let Some(grid) =
+                transmit_image(out, &image, window, tmux_wait(window)).map_err(write_err)?
+            {
+                grids.push(grid);
+            }
+        }
+        // A cell redraw can discard subsequent passthroughs. Keep only the
+        // placement metadata, not the pixels, until all bands are transmitted.
+        for grid in grids {
+            grid.write_cells(out).map_err(write_err)?;
         }
     }
     Ok(())
