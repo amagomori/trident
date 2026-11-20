@@ -29,6 +29,7 @@ bytemuck = { version = "1", features = ["derive"] }
 flate2 = "1"
 image = { version = "0.25", default-features = false }
 libc = "0.2"
+libm = "0.2"
 memchr = "2"
 memmap2 = "0.9"
 objc2-core-foundation = "0.3"

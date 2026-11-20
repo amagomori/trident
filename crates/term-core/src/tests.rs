@@ -323,6 +323,30 @@ fn osc_colors_accept_xterm_specs_and_reset() {
 }
 
 #[test]
+fn osc_color_matches_xterm_noncanonical_specs() {
+    for (spec, rgb @ (r, g, b)) in [
+        ("CIELab:30/10/20", (0x00, 0x55, 0x73)),
+        ("CIELuv:60/20/-30", (0xf3, 0x13, 0xed)),
+        ("TekHVC:120/70/80", (0x00, 0xc9, 0x49)),
+        ("CIELab:50/0/0", (0x83, 0x7d, 0x7e)),
+        ("rgbi:0.3/0.3/0.3", (0x9e, 0x98, 0x98)),
+    ] {
+        let mut term = Terminal::new(80, 24);
+        term.advance(format!("\x1b]4;5;{spec};5;?\x07").as_bytes());
+        assert_eq!(
+            term.palette.resolve(crate::Color::Indexed(5)),
+            rgb,
+            "{spec}"
+        );
+        assert_eq!(
+            term.take_responses(),
+            format!("\x1b]4;5;rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07").as_bytes(),
+            "{spec}"
+        );
+    }
+}
+
+#[test]
 fn osc_color_preserves_full_channels_after_xyz_conversion() {
     for (spec, expected) in [
         ("CIELab:100/0/0", "ffff/ffff/ffff"),
