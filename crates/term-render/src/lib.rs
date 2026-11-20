@@ -41,25 +41,90 @@ pub use renderer::{FloatingImage, PADDING, Renderer};
 pub use tabs::{TabBar, TabHit, TabLayout, TabRect, fit_title, tab_bar_height, tab_layout};
 
 /// Search-bar text and match highlighting for [`Renderer::render`].
-///
-/// All text positions below are display-cell columns, not UTF-8 byte offsets.
 pub struct SearchOverlay<'a> {
     /// Matches sorted by ascending absolute cell position.
     pub matches: &'a [term_core::search::Match],
     /// Active index into `matches`, or `None` when none is selected.
     pub current: Option<usize>,
-    /// Query text, including any IME composition already inserted for display.
-    pub input: &'a str,
+    /// Committed query and transient composition.
+    pub input: SearchInput<'a>,
     /// Match count, mode or error text for the fixed right-hand region.
     pub status: &'a str,
-    /// Half-open composition column range within `input`.
-    pub preedit: std::ops::Range<usize>,
-    /// Insertion column within `input`, including any composition prefix.
-    pub cursor: usize,
+}
+
+/// Text in the Find input, without the synthetic one-cell caret.
+#[derive(Clone, Copy)]
+pub struct SearchInput<'a> {
+    pub query: &'a str,
+    /// Composition appended to the query. Without an IME cursor, Find shows
+    /// its caret at the end.
+    pub preedit: Preedit<'a>,
+}
+
+impl SearchInput<'_> {
+    /// Computes visible input columns and the physical IME candidate anchor.
+    /// Window and cell dimensions use physical pixels, as in [`search_layout`].
+    pub fn layout(
+        self,
+        status_columns: usize,
+        width: f32,
+        height: f32,
+        cw: f32,
+        ch: f32,
+    ) -> SearchLayout {
+        let start = preedit::columns(self.query, self.query.len());
+        let text = self.preedit.text;
+        let end = start + preedit::columns(text, text.len());
+        let cursor = self
+            .preedit
+            .cursor
+            .map_or(end, |(byte, _)| start + preedit::columns(text, byte));
+        search_layout(
+            cursor,
+            start..end + usize::from(!text.is_empty()),
+            status_columns,
+            width,
+            height,
+            cw,
+            ch,
+        )
+    }
+
+    /// Visible glyphs: bar column, scalar, raster width and composition underline.
+    fn glyphs(self, layout: &SearchLayout) -> impl Iterator<Item = (usize, char, usize, bool)> {
+        let glyphs = preedit::glyphs(self.query.chars().chain(self.preedit.text.chars()))
+            .take_while(|g| g.base_column < layout.input.end)
+            .filter_map(|g| {
+                // Insert the caret between cells, never between a mark and its base.
+                let shift = usize::from(g.base_column >= layout.cursor);
+                let base = g.base_column + shift;
+                let pen = g.column + shift;
+                if (g.width == 0 && base == pen)
+                    || base < layout.input.start
+                    || pen + g.width > layout.input.end
+                {
+                    return None;
+                }
+                Some((
+                    layout.prefix_columns + (pen - layout.input.start),
+                    g.character,
+                    g.width,
+                    layout.preedit.contains(&base),
+                ))
+            });
+        glyphs.chain(std::iter::once((
+            layout.prefix_columns + (layout.cursor - layout.input.start),
+            '▏',
+            1,
+            layout.preedit.contains(&layout.cursor),
+        )))
+    }
 }
 
 /// Shared search-bar drawing and IME candidate geometry from [`search_layout`].
 pub struct SearchLayout {
+    cursor: usize,
+    preedit: std::ops::Range<usize>,
     /// Number of columns reserved for the search prefix.
     pub prefix_columns: usize,
     /// Half-open visible column range within the query text.
@@ -107,6 +172,8 @@ pub fn search_layout(
     };
     let start = end.saturating_sub(input_columns);
     SearchLayout {
+        cursor,
+        preedit,
         prefix_columns,
         input: start..start + input_columns,
         status_column,
@@ -122,6 +189,91 @@ pub fn search_layout(
 
 #[cfg(test)]
 mod search_tests {
+    use super::{Preedit, SearchInput};
+
+    #[test]
+    fn committed_input_anchors_in_display_cells() {
+        for (query, x) in [("日本語", 120.0), ("e\u{301}", 70.0), ("abc", 90.0)] {
+            let input = SearchInput {
+                query,
+                preedit: Preedit {
+                    text: "",
+                    cursor: None,
+                },
+            };
+            assert_eq!(input.layout(15, 800.0, 100.0, 10.0, 20.0).cursor_area[0], x);
+        }
+    }
+
+    #[test]
+    fn byte_caret_splits_composition_but_not_base_and_accent() {
+        let input = SearchInput {
+            query: "語",
+            preedit: Preedit {
+                text: "日e\u{301}本",
+                cursor: Some((4, 9)),
+            },
+        };
+        let layout = input.layout(15, 800.0, 100.0, 10.25, 20.5);
+        assert_eq!(layout.cursor_area, [112.75, 79.5, 10.25, 20.5]);
+        assert_eq!(
+            input.glyphs(&layout).collect::<Vec<_>>(),
+            [
+                (6, '語', 2, false),
+                (8, '日', 2, true),
+                (10, 'e', 1, true),
+                (11, '\u{301}', 0, true),
+                (12, '本', 2, true),
+                (11, '▏', 1, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn clipping_omits_wide_glyph_and_its_marks_at_either_edge() {
+        let status = "invalid regex  [regex]";
+        let left = SearchInput {
+            query: "日\u{3099}a",
+            preedit: Preedit {
+                text: "",
+                cursor: None,
+            },
+        };
+        let layout = left.layout(
+            status.len(),
+            (10 + status.len()) as f32 * 10.0,
+            40.0,
+            10.0,
+            20.0,
+        );
+        assert_eq!(layout.input, 1..4);
+        assert_eq!(layout.status_column, 10);
+        assert_eq!(
+            left.glyphs(&layout).collect::<Vec<_>>(),
+            [(7, 'a', 1, false), (8, '▏', 1, false)]
+        );
+        let right = SearchInput {
+            query: "",
+            preedit: Preedit {
+                text: "日\u{3099}本",
+                cursor: Some((0, 3)),
+            },
+        };
+        let layout = right.layout(
+            status.len(),
+            (9 + status.len()) as f32 * 10.0,
+            40.0,
+            10.0,
+            20.0,
+        );
+        assert_eq!(layout.input, 0..2);
+        assert_eq!(layout.status_column, 9);
+        assert_eq!(
+            right.glyphs(&layout).collect::<Vec<_>>(),
+            [(6, '▏', 1, true)]
+        );
+    }
+
     #[test]
     fn cursor_tracks_bottom_bar_and_horizontal_scroll_in_physical_pixels() {
         assert_eq!(

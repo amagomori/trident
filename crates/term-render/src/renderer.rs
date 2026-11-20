@@ -934,9 +934,7 @@ impl Renderer {
         }
 
         if let Some(search) = search {
-            let layout = crate::search_layout(
-                search.cursor,
-                search.preedit.clone(),
+            let layout = search.input.layout(
                 search.status.chars().count(),
                 self.config.width as f32,
                 self.area_height() as f32,
@@ -949,34 +947,28 @@ impl Renderer {
                 .chars()
                 .take(layout.prefix_columns)
                 .enumerate()
-                .map(|(i, c)| (i, c, false));
-            let input = search
-                .input
-                .chars()
-                .enumerate()
-                .skip(layout.input.start)
-                .take(layout.input.len())
-                .map(|(i, c)| {
-                    (
-                        layout.prefix_columns + i - layout.input.start,
-                        c,
-                        search.preedit.contains(&i),
-                    )
-                });
+                .map(|(i, c)| (i, c, 1, false));
+            let input = search.input.glyphs(&layout);
             let status = search
                 .status
                 .chars()
                 .take(layout.status_columns)
                 .enumerate()
-                .map(|(i, c)| (layout.status_column + i, c, false));
-            for (i, c, preedit) in prefix.chain(input).chain(status) {
-                if preedit {
-                    overlays.push(self.rect(i as f32 * cw, y + ch - 2.0, cw, 1.0, (255, 255, 255)));
+                .map(|(i, c)| (layout.status_column + i, c, 1, false));
+            for (i, c, cells, preedit) in prefix.chain(input).chain(status) {
+                if preedit && cells > 0 {
+                    overlays.push(self.rect(
+                        i as f32 * cw,
+                        y + ch - 2.0,
+                        cells as f32 * cw,
+                        1.0,
+                        (255, 255, 255),
+                    ));
                 }
                 let key = GlyphKey {
                     c,
                     style: Style::new(false, false),
-                    cells: 1,
+                    cells: cells as u8,
                 };
                 match self.atlas.get(key, fonts, &self.device, &self.queue) {
                     Ok(Some(g)) => overlays.push(Instance {

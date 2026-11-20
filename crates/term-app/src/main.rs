@@ -3431,7 +3431,6 @@ impl App {
             return;
         }
         s.redraw_pending = false;
-        let input = self.search.as_ref().map(search::Search::input);
         let status = self.search.as_ref().map(search::Search::status);
         let search = self
             .search
@@ -3439,10 +3438,8 @@ impl App {
             .map(|search| term_render::SearchOverlay {
                 matches: &search.matches,
                 current: search.current,
-                input: input.as_deref().unwrap_or_default(),
+                input: search.input(),
                 status: status.as_deref().unwrap_or_default(),
-                preedit: search.preedit_columns(),
-                cursor: search.cursor_column(),
             });
         let target = s
             .target
@@ -4336,16 +4333,16 @@ impl App {
         let m = s.fonts.metrics;
         let size = s.grid_px();
         let mut area = if let Some(search) = &self.search {
-            term_render::search_layout(
-                search.cursor_column(),
-                search.preedit_columns(),
-                search.status().chars().count(),
-                size.width as f32,
-                size.height as f32,
-                m.width,
-                m.height,
-            )
-            .cursor_area
+            search
+                .input()
+                .layout(
+                    search.status().chars().count(),
+                    size.width as f32,
+                    size.height as f32,
+                    m.width,
+                    m.height,
+                )
+                .cursor_area
         } else {
             let (row, col) = s
                 .term
