@@ -288,6 +288,159 @@ fn output_places_the_image_in_a_terminal() {
 }
 
 #[test]
+fn native_pngs_send_original_bytes_and_place_identically() {
+    for path in [
+        sample("png-named.jpg"),
+        sample("../../../assets/icons/tide-256.png"),
+        sample("../../../assets/social-preview.png"),
+    ] {
+        let bytes = std::fs::read(&path).unwrap();
+        let mut wire = Vec::new();
+        let options = Options::default();
+        let window = big_window();
+        show(&path, &options, window, &mut wire).unwrap();
+        let text = std::str::from_utf8(&wire).unwrap();
+        let frames: Vec<_> = text
+            .strip_suffix('\n')
+            .unwrap()
+            .split_terminator("\x1b\\")
+            .collect();
+        let mut payload = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            let (control, chunk) = frame.split_once(';').unwrap();
+            let prefix = if i == 0 {
+                "\x1b_Ga=T,f=100,q=2,"
+            } else {
+                "\x1b_G"
+            };
+            assert_eq!(
+                control,
+                format!("{prefix}m={}", u8::from(i + 1 < frames.len()))
+            );
+            assert!(chunk.len() <= CHUNK);
+            BASE64.decode_vec(chunk, &mut payload).unwrap();
+        }
+        assert_eq!(payload, bytes);
+
+        let image = decode_raster(&bytes, ImageFormat::Png, &options, window).unwrap();
+        let mut legacy = Vec::new();
+        write_kitty(&mut legacy, &image, window, || unreachable!()).unwrap();
+        let state = |wire: &[u8]| {
+            let mut term = Terminal::new(200, 60);
+            term.set_cell_pixel_size(window.cell_w, window.cell_h);
+            term.advance(b"start here: ");
+            // The transfer can cross arbitrary remote PTY packet boundaries.
+            for packet in wire.strip_suffix(b"\n").unwrap().chunks(31) {
+                term.advance(packet);
+            }
+            term.advance(b"\r\n");
+            assert!(term.take_responses().is_empty());
+            let placements = term.visible_placements();
+            assert_eq!(placements.len(), 1);
+            let p = placements[0].placement;
+            let received = term.image(p.image_id).unwrap();
+            assert_eq!(
+                (received.width, received.height),
+                (image.width, image.height)
+            );
+            assert_eq!(received.pixels, image.pixels);
+            (
+                placements[0].row,
+                p.col,
+                p.cols,
+                p.rows,
+                term.cursor_position(),
+            )
+        };
+        assert_eq!(state(&wire), state(&legacy));
+    }
+}
+
+#[test]
+fn ineligible_pngs_keep_the_previous_output_or_error() {
+    fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut bytes = (data.len() as u32).to_be_bytes().to_vec();
+        bytes.extend(kind);
+        bytes.extend(data);
+        let mut crc = flate2::Crc::new();
+        crc.update(&bytes[4..]);
+        bytes.extend(crc.sum().to_be_bytes());
+        bytes
+    }
+    let png = std::fs::read(sample("sample.png")).unwrap();
+    let (ihdr, rest) = png.split_at(33);
+    let (idat, iend) = rest.split_at(rest.len() - 12);
+    let data = &idat[8..idat.len() - 4];
+    let mut bad_adler = data.to_vec();
+    *bad_adler.last_mut().unwrap() ^= 1;
+    let mut frame = [0; 26];
+    frame[4..12].copy_from_slice(&ihdr[16..24]);
+    // Adam7's first pass covers the only pixel of a 1x1 interlaced RGB image.
+    let interlaced = chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 1]);
+    let mut one_pixel = ZlibEncoder::new(Vec::new(), Compression::fast());
+    one_pixel.write_all(&[0, 1, 2, 3]).unwrap();
+    let cases = [
+        [ihdr, &chunk(b"tEXt", b"title\0old"), idat, iend].concat(),
+        [ihdr, idat, &chunk(b"tEXt", b"title\0old"), iend].concat(),
+        [
+            ihdr,
+            &chunk(b"acTL", &[0, 0, 0, 1, 0, 0, 0, 0]),
+            &chunk(b"fcTL", &frame),
+            idat,
+            iend,
+        ]
+        .concat(),
+        [
+            &ihdr[..8],
+            &interlaced,
+            &chunk(b"IDAT", &one_pixel.finish().unwrap()),
+            iend,
+        ]
+        .concat(),
+        [ihdr, &chunk(b"IDAT", &bad_adler), iend].concat(),
+        [ihdr, &chunk(b"IDAT", &data[..data.len() - 4]), iend].concat(),
+        [ihdr, idat, &chunk(b"IDAT", b"extra"), iend].concat(),
+        [ihdr, idat, &iend[..8]].concat(),
+        [ihdr, idat, &chunk(b"IEND", b"x")].concat(),
+        [png.as_slice(), b"extra"].concat(),
+        [ihdr, &idat[..10]].concat(),
+    ];
+    let path = tempfile::NamedTempFile::new().unwrap();
+    let compare = |bytes: &[u8], options: Options| {
+        std::fs::write(path.path(), bytes).unwrap();
+        let mut expected = Vec::new();
+        let result =
+            decode_raster(bytes, ImageFormat::Png, &options, big_window()).and_then(|img| {
+                write_kitty(&mut expected, &img, big_window(), || {}).map_err(write_err)
+            });
+        let mut actual = Vec::new();
+        assert_eq!(
+            show(path.path(), &options, big_window(), &mut actual),
+            result
+        );
+        assert_eq!(actual, expected);
+    };
+    for bytes in cases {
+        compare(&bytes, Options::default());
+    }
+    for image in [
+        image::DynamicImage::new_luma8(8, 8),
+        image::DynamicImage::new_rgb16(8, 8),
+    ] {
+        let mut bytes = io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ImageFormat::Png).unwrap();
+        compare(bytes.get_ref(), Options::default());
+    }
+    compare(
+        &png,
+        Options {
+            width: Some(2),
+            ..Options::default()
+        },
+    );
+}
+
+#[test]
 fn large_images_are_sent_in_chunks() {
     let image = Rgba {
         width: 300,

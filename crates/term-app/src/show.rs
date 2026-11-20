@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod pdf;
+mod png;
 
 /// Base64 bytes per kitty escape; the protocol allows at most 4096.
 const CHUNK: usize = 4096;
@@ -186,7 +187,13 @@ fn show(
         }
         Kind::Raster(format) => {
             let image = decode_raster(&bytes, format, options, window)?;
-            write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
+            if format == ImageFormat::Png && !window.tmux && png::can_forward(&bytes, &image) {
+                send_chunks(out, &bytes, "f=100,q=2", None, false, &mut || {})
+                    .and_then(|()| out.write_all(b"\n"))
+                    .map_err(write_err)
+            } else {
+                write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
+            }
         }
         Kind::Svg => {
             let image = render_svg(&bytes, path, options, window)?;
@@ -744,7 +751,7 @@ fn send_direct(
     send_chunks(
         out,
         &compressed.finish()?,
-        &format!("{id}s={},v={}", image.width, image.height),
+        &format!("f=32,o=z,q=2,{id}s={},v={}", image.width, image.height),
         gap,
         false,
         &mut || {},
@@ -753,20 +760,20 @@ fn send_direct(
 
 fn send_chunks(
     out: &mut impl Write,
-    compressed: &[u8],
+    payload: &[u8],
     header: &str,
     gap: Option<u32>,
     tmux: bool,
     wait: &mut impl FnMut(),
 ) -> io::Result<()> {
-    let encoded = BASE64.encode(compressed);
+    let encoded = BASE64.encode(payload);
     let chunks = encoded.as_bytes().chunks(CHUNK);
     let count = chunks.len();
     for (i, chunk) in chunks.enumerate() {
         let more = u8::from(i + 1 < count);
         let mut escape = if i == 0 {
             let action = gap.map_or_else(|| "T".into(), |gap| format!("f,z={gap},X=1"));
-            format!("\x1b_Ga={action},f=32,o=z,q=2,{header},m={more};")
+            format!("\x1b_Ga={action},{header},m={more};")
         } else if gap.is_some() {
             format!("\x1b_Ga=f,m={more};")
         } else {
