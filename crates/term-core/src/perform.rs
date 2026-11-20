@@ -628,15 +628,19 @@ impl Terminal {
         color: crate::colors::Rgb,
         terminator: &[u8],
     ) {
+        use std::io::Write;
+
         let (r, g, b) = color;
-        let mut reply = format!("\x1b]{}", String::from_utf8_lossy(command));
+        self.responses.extend_from_slice(b"\x1b]");
+        self.responses.extend_from_slice(command);
         if let Some(index) = index {
-            reply.push_str(&format!(";{index}"));
+            write!(self.responses, ";{index}").unwrap();
         }
-        reply.push_str(&format!(
+        write!(
+            self.responses,
             ";rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}"
-        ));
-        self.responses.extend_from_slice(reply.as_bytes());
+        )
+        .unwrap();
         self.responses.extend_from_slice(terminator);
     }
 
