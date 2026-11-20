@@ -46,12 +46,22 @@ impl ClipboardRequest {
 }
 
 /// The directory a shell reported with OSC 7 (`file://host/path`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct WorkingDirectory {
     /// The host part of the URL; empty when the shell left it out.
     pub host: String,
     /// The percent-decoded absolute path.
     pub path: String,
+}
+
+/// The OSC 7 report in effect when a retained cell was printed.
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+pub enum DirectoryOrigin {
+    #[default]
+    Unreported,
+    Reported(std::sync::Arc<WorkingDirectory>),
+    /// Metadata was discarded. Do not substitute another directory.
+    Unavailable,
 }
 
 /// Which selection an OSC 52 `Pc` parameter names: `Some(true)` for primary, `Some(false)`
@@ -136,8 +146,11 @@ impl Terminal {
     }
 
     pub(crate) fn osc_working_directory(&mut self, url: &[u8]) {
-        if let Some(cwd) = parse_file_url(url) {
-            self.shell.cwd = Some(cwd);
+        if let Some(cwd) = parse_file_url(url)
+            && self.working_directory() != Some(&cwd)
+        {
+            self.shell.cwd = Some(cwd.into());
+            self.sync_directory_origin();
         }
     }
 
@@ -149,7 +162,7 @@ impl Terminal {
 
     /// The working directory the shell last reported with OSC 7.
     pub fn working_directory(&self) -> Option<&WorkingDirectory> {
-        self.shell.cwd.as_ref()
+        self.shell.cwd.as_deref()
     }
 }
 

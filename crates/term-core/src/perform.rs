@@ -270,6 +270,7 @@ impl Perform for Terminal {
                 self.modes.reverse_wrap_ext = false;
                 self.reports.decsasd = 0;
                 self.cursor.template = Default::default();
+                self.sync_directory_origin();
                 self.charsets = [Charset::Ascii; 2];
                 self.active_charset = 0;
                 self.scroll_top = 0;

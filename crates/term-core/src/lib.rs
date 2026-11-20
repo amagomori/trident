@@ -35,7 +35,7 @@ use margins::{LrMode, shift_cells};
 mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
-pub use osc::{ClipboardRequest, WorkingDirectory};
+pub use osc::{ClipboardRequest, DirectoryOrigin, WorkingDirectory};
 
 /// Window geometry the app feeds in for the XTWINOPS reports (ops 11/13/15/19).
 #[derive(Clone, Copy, Debug, Default)]
@@ -111,7 +111,7 @@ struct ShellState {
     notifications: notifications::Notifications,
     progress: Option<Progress>,
     progress_changed: bool,
-    cwd: Option<WorkingDirectory>,
+    cwd: Option<std::sync::Arc<WorkingDirectory>>,
     clipboard: Vec<ClipboardRequest>,
 }
 
@@ -3100,6 +3100,7 @@ impl Terminal {
                 self.cursor.pending_wrap = false;
             }
         }
+        self.sync_directory_origin();
         self.cursor.row = self.cursor.row.min(self.rows - 1);
         self.cursor.col = self.cursor.col.min(self.cols - 1);
         self.print_state.allow_join();

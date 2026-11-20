@@ -1251,23 +1251,6 @@ fn spawn_window(
     open_window("new window", args, working_directory, cells, None);
 }
 
-/// Where a relative `path:line` may live: the shell's OSC 7 directory, then the
-/// foreground process's working directory (no OSC 7, or a build tool run elsewhere).
-fn file_link_bases(s: &Session) -> Vec<PathBuf> {
-    let mut bases: Vec<PathBuf> = local_working_directory(s.term.working_directory())
-        .into_iter()
-        .collect();
-    if let Some(dir) = s
-        .pty
-        .foreground_process()
-        .and_then(close_confirm::process_working_directory)
-        && !bases.contains(&dir)
-    {
-        bases.push(dir);
-    }
-    bases
-}
-
 fn same_host(a: &str, b: &str) -> bool {
     let short = |name: &str| {
         name.split('.')
@@ -4471,11 +4454,11 @@ impl App {
         let path = match &*cache {
             Some((cached, path)) if *cached == file_link => path.clone(),
             _ => {
-                let path = links::resolve(
-                    &file_link.path,
-                    &file_link_bases(s),
-                    std::env::var_os("HOME").map(PathBuf::from).as_deref(),
-                );
+                let path = links::resolve_file(&file_link, || {
+                    s.pty
+                        .foreground_process()
+                        .and_then(close_confirm::process_working_directory)
+                });
                 *cache = Some((file_link.clone(), path.clone()));
                 path
             }
