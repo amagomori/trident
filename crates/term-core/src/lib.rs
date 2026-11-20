@@ -64,6 +64,7 @@ mod prompt_input;
 pub use prompt_input::{PromptInput, PromptInputContext};
 mod reflow;
 mod rerun;
+mod sgr_stack;
 mod sixel;
 mod xcolor;
 mod xtgettcap;
@@ -568,6 +569,7 @@ struct Reports {
     checksums: bool,
     /// DEC private modes saved with XTSAVE (`CSI ? Pm s`) for XTRESTORE (`CSI ? Pm r`).
     saved_modes: Vec<(u16, bool)>,
+    sgr_stack: sgr_stack::SgrStack,
     /// Active device control string, if its payload is recognized.
     dcs: Option<perform::Dcs>,
     /// DECSCL conformance level, 61-64. Levels below 63 silence DECRQM and DECRQSS.
@@ -592,6 +594,7 @@ impl Default for Reports {
         Reports {
             checksums: false,
             saved_modes: Vec::new(),
+            sgr_stack: Default::default(),
             dcs: None,
             conformance_level: 64,
             conformance_pc: 0,
