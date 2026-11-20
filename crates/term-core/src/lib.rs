@@ -2021,9 +2021,26 @@ impl Terminal {
     ///
     /// Returns `None` when no nonempty selection remains in retained history.
     pub fn selection_text(&self) -> Option<String> {
-        let (start, end) = self.selection_range()?;
+        self.collect_selection_text(None)
+    }
+
+    /// Returns the selected logical line as plain text, joining soft wraps.
+    ///
+    /// Returns `None` for missing, empty, rectangular, or multiline selections,
+    /// or if the selected text exceeds `max_bytes` UTF-8 bytes before trimming
+    /// trailing whitespace. Oversized selections are not collected in full.
+    pub fn selected_single_line(&self, max_bytes: usize) -> Option<String> {
+        self.collect_selection_text(Some(max_bytes))
+            .filter(|text| !text.is_empty())
+    }
+
+    fn collect_selection_text(&self, single_line_limit: Option<usize>) -> Option<String> {
         let kind = self.selection?.kind;
         let block = kind == SelectionKind::Block;
+        if block && single_line_limit.is_some() {
+            return None;
+        }
+        let (start, end) = self.selection_range()?;
         let mut out = String::new();
         let blank = Cell::default();
         for line in start.line..=end.line {
@@ -2032,22 +2049,29 @@ impl Terminal {
             let wrapped = self
                 .output_end(line)
                 .map_or(row.wrapped(), |end| end.wrapped);
+            if single_line_limit.is_some() && line != end.line && !wrapped {
+                return None;
+            }
             // Block selections copy physical cells, so wrap padding stays as spaces there.
             let skip = if block {
                 Flags::WIDE_SPACER
             } else {
                 Flags::WIDE_SPACER.union(Flags::WIDE_WRAP)
             };
-            let mut text = String::new();
+            let row_start = out.len();
             for cell in self.selected_cells(kind, line, from, to, &blank) {
                 if !cell.flags.intersects(skip) {
-                    self.push_cell_text(cell, &mut text);
+                    if single_line_limit
+                        .is_some_and(|max| self.cell_text_len(cell) > max - out.len())
+                    {
+                        return None;
+                    }
+                    self.push_cell_text(cell, &mut out);
                 }
             }
             if !block && (!wrapped || line == end.line) {
-                text.truncate(text.trim_end().len());
+                out.truncate(row_start + out[row_start..].trim_end().len());
             }
-            out.push_str(&text);
             if line != end.line && (block || !wrapped) {
                 out.push('\n');
             }

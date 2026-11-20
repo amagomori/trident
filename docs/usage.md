@@ -71,6 +71,10 @@ Query the mode with `CSI ? 2027 $ p`: the reply is `CSI ? 2027 ; 1 $ y` when set
 | Clear scrollback | Cmd+K | — |
 | Toggle fullscreen | Ctrl+Cmd+F (native fullscreen, also Window > Enter Full Screen) | F11 (borderless) |
 
+Open Find with text selected to search for it literally, without copying it. The selection
+can span soft wraps, but must fit on one logical line and be at most 256 UTF-8 bytes.
+Rectangular selections are ignored. Opening Find again leaves the current query unchanged.
+
 ## Tabs
 
 Every tab runs its own shell, which keeps running in the background. A new tab starts in the

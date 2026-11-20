@@ -1110,6 +1110,27 @@ fn selection_text_joins_wrapped_lines() {
 }
 
 #[test]
+fn selected_single_line_checks_bytes_and_logical_breaks() {
+    let mut t = term(4, 4, "abc界\u{301}x\r\nnext");
+    assert_eq!(t.selected_single_line(64), None);
+    t.start_selection(t.viewport_to_point(1, 2), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(0, 0));
+    let expected = "abc界\u{301}x";
+    assert_eq!(
+        t.selected_single_line(expected.len()).as_deref(),
+        Some(expected)
+    );
+    assert_eq!(t.selected_single_line(expected.len() - 1), None);
+    t.update_selection(t.viewport_to_point(2, 0));
+    assert_eq!(t.selected_single_line(64), None);
+    t.start_selection(t.viewport_to_point(2, 0), SelectionKind::Block);
+    t.update_selection(t.viewport_to_point(2, 3));
+    assert_eq!(t.selected_single_line(64), None);
+    t.start_selection(t.viewport_to_point(3, 0), SelectionKind::Line);
+    assert_eq!(t.selected_single_line(64), None);
+}
+
+#[test]
 fn selection_text_skips_padding_of_widened_wrapped_lines() {
     let mut t = term(5, 3, "\x1b[?1049hhello world");
     t.resize(8, 3);
