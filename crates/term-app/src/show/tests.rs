@@ -178,6 +178,36 @@ fn show_plays_gif_and_webp_in_one_placement_at_the_file_delays() {
 }
 
 #[test]
+fn show_uploads_lossless_blended_webp_pixels_exactly() {
+    let mut bytes = Vec::new();
+    show(
+        &sample("blended.webp"),
+        &Options::default(),
+        big_window(),
+        &mut bytes,
+    )
+    .unwrap();
+    let mut term = Terminal::new(80, 24);
+    term.advance(&bytes);
+    let id = term.visible_placements()[0].placement.image_id;
+    let start = Instant::now();
+    let next = term.advance_animations(start, 0).unwrap();
+    term.advance_animations(next, 0);
+
+    let frame = term.image(id).unwrap();
+    assert_eq!((frame.width, frame.height), (48, 32));
+    for (i, &pixel) in frame.pixels.as_chunks::<4>().0.iter().enumerate() {
+        let (x, y) = (i % 48, i / 48);
+        let expected = if (2..8).contains(&x) && y < 16 {
+            [255, 0, 0, 255]
+        } else {
+            [1, 127, 255, 255]
+        };
+        assert_eq!(pixel, expected, "at ({x}, {y})");
+    }
+}
+
+#[test]
 fn type_comes_from_the_bytes_not_the_name() {
     let bytes = std::fs::read(sample("png-named.jpg")).unwrap();
     assert_eq!(detect(&bytes), Kind::Raster(ImageFormat::Png));
