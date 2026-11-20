@@ -1613,8 +1613,8 @@ fn animation_wakeup(
 }
 
 struct App {
-    /// Consume repeats and kitty releases even if the picker closed on the press.
-    picker_keys: HashSet<PhysicalKey>,
+    /// Consume repeats and kitty releases for keys claimed until key-up.
+    consumed_keys: HashSet<PhysicalKey>,
     startup_stderr: bool,
     search: Option<search::Search>,
     appearance: Option<Theme>,
@@ -1832,7 +1832,7 @@ impl App {
         .map_err(|e| diag!("trident: config reload unavailable: {e}"))
         .ok();
         App {
-            picker_keys: HashSet::new(),
+            consumed_keys: HashSet::new(),
             startup_stderr: false,
             search: None,
             appearance: None,
@@ -4279,7 +4279,7 @@ impl App {
         }
         match action {
             Action::CopyLinkTarget => {
-                self.picker_keys.insert(event.physical_key);
+                self.consumed_keys.insert(event.physical_key);
                 if !event.repeat
                     && !held_at_focus
                     && self.search.is_none()
@@ -4398,6 +4398,19 @@ impl App {
             }
             Action::None => return false,
             Action::Copy => self.copy(false),
+            Action::SelectAll => {
+                let Some(s) = &mut self.session else {
+                    return false;
+                };
+                if self.search.is_some() || s.composition.preedit().is_some() {
+                    return false;
+                }
+                self.consumed_keys.insert(event.physical_key);
+                if !held_at_focus && !event.repeat {
+                    s.term.select_all();
+                    s.request_frame();
+                }
+            }
             Action::Paste => self.paste(false),
             Action::PastePrimary => self.paste(true),
             Action::Increase => self.zoom(|size| size + 1.0),
@@ -5486,6 +5499,14 @@ impl App {
                 let held_at_focus =
                     self.held_at_focus
                         .observe(event.physical_key, event.state, is_synthetic);
+                if event.repeat && self.consumed_keys.contains(&event.physical_key) {
+                    return;
+                }
+                if self.consumed_keys.remove(&event.physical_key)
+                    && event.state == ElementState::Released
+                {
+                    return;
+                }
                 if self.picker_key(&event, is_synthetic) {
                     return;
                 }

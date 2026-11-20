@@ -50,12 +50,12 @@ pub fn holds_keys(composition: &Composition, find_preedit: Option<&str>) -> bool
 const SUPER: u8 = 8;
 
 #[cfg(any(target_os = "macos", test))]
-/// The bound Command chords, which take a key away from an active composition the way menu key
-/// equivalents do in native macOS text views.
-pub fn command_chords(bindings: &BTreeMap<Chord, Action>) -> BTreeSet<Chord> {
+/// Bound Command chords that take precedence over the Window menu or marked text.
+pub fn command_chords(bindings: &BTreeMap<Chord, Action>, composing: bool) -> BTreeSet<Chord> {
     bindings
         .iter()
         .filter(|(chord, action)| chord.modifiers & SUPER != 0 && **action != Action::None)
+        .filter(|(_, action)| !composing || **action != Action::SelectAll)
         .map(|(chord, _)| chord.clone())
         .collect()
 }
@@ -117,6 +117,8 @@ pub fn is_command_chord(chords: &BTreeSet<Chord>, flags: usize, unmodified: &str
 thread_local! {
     static COMMAND_CHORDS: std::cell::RefCell<BTreeSet<Chord>> =
         const { std::cell::RefCell::new(BTreeSet::new()) };
+    static COMPOSITION_CHORDS: std::cell::RefCell<BTreeSet<Chord>> =
+        const { std::cell::RefCell::new(BTreeSet::new()) };
     static VIEW_SUPERCLASS: std::cell::Cell<Option<&'static objc2::runtime::AnyClass>> =
         const { std::cell::Cell::new(None) };
 }
@@ -124,7 +126,8 @@ thread_local! {
 /// Follows the bindings across config reloads.
 #[cfg(target_os = "macos")]
 pub fn set_command_chords(bindings: &BTreeMap<Chord, Action>) {
-    COMMAND_CHORDS.set(command_chords(bindings));
+    COMMAND_CHORDS.set(command_chords(bindings, false));
+    COMPOSITION_CHORDS.set(command_chords(bindings, true));
 }
 
 /// Delivers bound Command chords during marked-text composition without
@@ -195,7 +198,7 @@ unsafe fn takes_from_composition(
             return false;
         };
         let unmodified = unmodified.to_string();
-        COMMAND_CHORDS.with_borrow(|chords| is_command_chord(chords, flags, &unmodified))
+        COMPOSITION_CHORDS.with_borrow(|chords| is_command_chord(chords, flags, &unmodified))
     }
 }
 
@@ -426,7 +429,7 @@ mod tests {
 
     #[test]
     fn bound_command_chords_reach_the_app_during_a_composition() {
-        let chords = command_chords(&crate::config::default_bindings_for(true));
+        let chords = command_chords(&crate::config::default_bindings_for(true), true);
         for (flags, key) in [
             (COMMAND, "f"),
             (COMMAND, "="),
@@ -464,7 +467,14 @@ mod tests {
         bindings.insert(Chord::parse("super+f").unwrap(), Action::None);
         bindings.insert(Chord::parse("cmd+shift+enter").unwrap(), Action::Search);
         bindings.insert(Chord::parse("ctrl+t").unwrap(), Action::Search);
-        let chords = command_chords(&bindings);
+        bindings.insert(Chord::parse("super+a").unwrap(), Action::SelectAll);
+        assert!(is_command_chord(
+            &command_chords(&bindings, false),
+            COMMAND,
+            "a"
+        ));
+        let chords = command_chords(&bindings, true);
+        assert!(!is_command_chord(&chords, COMMAND, "a"));
         assert!(!is_command_chord(&chords, COMMAND, "f"));
         assert!(is_command_chord(&chords, COMMAND | SHIFT, "\r"));
         assert!(!chords.iter().any(|chord| chord.modifiers & SUPER == 0));
@@ -473,10 +483,10 @@ mod tests {
     #[test]
     fn a_bound_super_m_is_taken_from_the_window_menus_minimize() {
         let mut bindings = crate::config::default_bindings_for(true);
-        let chords = command_chords(&bindings);
+        let chords = command_chords(&bindings, false);
         assert!(!is_command_chord(&chords, COMMAND, "m"));
         bindings.insert(Chord::parse("super+m").unwrap(), Action::Search);
-        let chords = command_chords(&bindings);
+        let chords = command_chords(&bindings, false);
         assert!(is_command_chord(&chords, COMMAND, "m"));
         assert!(is_command_chord(&chords, COMMAND, "M"));
         assert!(!is_command_chord(&chords, COMMAND | OPTION, "m"));

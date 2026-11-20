@@ -1897,6 +1897,21 @@ impl Terminal {
 
     // Selection
 
+    /// Selects the active screen and its scrollback without moving the viewport.
+    pub fn select_all(&mut self) {
+        self.selection = Some(Selection {
+            anchor: Point {
+                line: self.first_line(),
+                col: 0,
+            },
+            head: Point {
+                line: self.history + self.rows as u64 - 1,
+                col: self.cols - 1,
+            },
+            kind: SelectionKind::Line,
+        });
+    }
+
     /// Starts a selection anchored at a retained cell position.
     ///
     /// Obtain valid endpoints with [`Self::viewport_to_point_signed`].

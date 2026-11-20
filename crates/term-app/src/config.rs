@@ -342,6 +342,7 @@ pub enum Action {
     SelectCommandOutput,
     ToggleFullscreen,
     ShowLastCommandOutput,
+    SelectAll,
     None,
     Send(String),
 }
@@ -360,6 +361,7 @@ impl Action {
                 "scroll_line_up" => Self::LineUp,
                 "scroll_line_down" => Self::LineDown,
                 "copy" => Self::Copy,
+                "select_all" => Self::SelectAll,
                 "copy_link_target" => Self::CopyLinkTarget,
                 "search" => Self::Search,
                 "paste" => Self::Paste,
@@ -489,6 +491,19 @@ fn toggle_fullscreen_defaults_to_ctrl_cmd_f_on_macos_and_f11_on_linux() {
                 .count(),
             1
         );
+    }
+}
+
+#[test]
+fn select_all_is_bindable_but_not_a_default() {
+    assert_eq!(
+        Action::parse(Binding::Name("select_all".into())).unwrap(),
+        Action::SelectAll
+    );
+    for macos in [false, true] {
+        let defaults = default_bindings_for(macos);
+        assert!(!defaults.values().any(|action| *action == Action::SelectAll));
+        assert!(!defaults.contains_key(&Chord::parse("ctrl+a").unwrap()));
     }
 }
 
