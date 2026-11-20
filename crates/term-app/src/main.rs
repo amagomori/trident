@@ -147,7 +147,7 @@ impl WheelRemainder {
         delta: MouseScrollDelta,
         cell: (f32, f32),
         term: &mut Terminal,
-        reporting: bool,
+        report_horizontal: bool,
     ) -> (isize, isize) {
         let (dx, dy) = match delta {
             MouseScrollDelta::LineDelta(x, y) => (f64::from(x) * 3.0, f64::from(y) * 3.0),
@@ -156,7 +156,7 @@ impl WheelRemainder {
         if term.take_mouse_reporting_changed() {
             self.x = 0.0;
         }
-        let x = if reporting && term.modes.mouse != MouseMode::X10 {
+        let x = if report_horizontal && term.modes.mouse != MouseMode::X10 {
             Self::whole_steps(&mut self.x, dx)
         } else {
             self.x = 0.0;
@@ -5012,7 +5012,7 @@ impl App {
             delta,
             (metrics.width, metrics.height),
             &mut s.term,
-            reporting,
+            reporting && self.tab_pointer.y >= f64::from(s.tab_bar),
         );
         if reporting {
             // winit already applies the platform scroll direction: positive x
