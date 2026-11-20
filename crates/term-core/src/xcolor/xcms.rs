@@ -143,13 +143,47 @@ fn clip_chroma(xyz: Triple) -> Option<Triple> {
     let tip = sample.map(|i| (i - min) / (max - min));
     let tip_xyz = transform(&RGB_TO_XYZ, tip);
     let [_, tip_v, tip_c] = xyz_to_hvc(tip_xyz);
-    if v <= tip_v {
+    let (value, chroma) = if v <= tip_v {
         // Below the tip, chroma varies linearly with value.
-        Some(transform(&XYZ_TO_RGB, hvc_to_xyz(h, v, v * tip_c / tip_v)?))
+        (v, v * tip_c / tip_v)
     } else {
-        // Above the tip, interpolate toward white at the requested luminance.
-        let t = (xyz[1] - tip_xyz[1]) / (1.0 - tip_xyz[1]);
-        Some(tip.map(|i| i * (1.0 - t) + t))
+        upper_gamut(v, tip_v, tip)
+    };
+    Some(transform(&XYZ_TO_RGB, hvc_to_xyz(h, value, chroma)?))
+}
+
+// Above the tip, Xcms searches toward white in RGB intensity space and
+// stops within 0.001 TekHVC value units, before device-code quantization.
+fn upper_gamut(value: f64, tip_value: f64, tip: Triple) -> (f64, f64) {
+    const EPS: f64 = 0.001;
+    let mut estimate = value;
+    let mut factor = 1.0;
+    let mut current = (value, 100.0);
+    let mut previous = (-1.0_f64, 0.0);
+    for _ in 0..100 {
+        let two_back = previous.0;
+        previous = current;
+        let t = (estimate - tip_value) / (100.0 - tip_value) * factor;
+        let rgb = tip.map(|i| i * (1.0 - t) + t);
+        let [_, v, c] = xyz_to_hvc(transform(&RGB_TO_XYZ, rgb));
+        current = (v, c);
+        if (v - value).abs() <= EPS {
+            return current;
+        }
+        estimate += value - v;
+        if estimate < tip_value {
+            estimate = tip_value;
+            factor *= 0.5;
+        } else if estimate > 100.0 {
+            break;
+        } else if (v - two_back).abs() <= EPS {
+            factor *= 0.5;
+        }
+    }
+    if (previous.0 - value).abs() < (current.0 - value).abs() {
+        previous
+    } else {
+        current
     }
 }
 
