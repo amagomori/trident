@@ -206,6 +206,8 @@ impl ResizeThrottle {
 #[derive(Debug)]
 enum UserEvent {
     #[cfg(target_os = "linux")]
+    FileDrop(std::sync::Weak<Window>, Vec<PathBuf>),
+    #[cfg(target_os = "linux")]
     Appearance(u64, Option<Theme>),
     /// A long command finished in the tab with this pane id.
     CommandFinished(u64, command_notify::Finished),
@@ -409,6 +411,9 @@ struct Session {
     ime_cursor_area: Option<[f32; 4]>,
     scroll: PixelScroll,
     pty_cell: (f32, f32),
+    /// Retained per window, not per tab or clipboard binding.
+    #[cfg(target_os = "linux")]
+    _file_drop_target: Option<smithay_clipboard::FileDropTarget>,
     window: Arc<Window>,
     /// The window's inner size from its last `Resized` event; on X11
     /// `Window::inner_size` is a blocking server round trip.
@@ -1938,6 +1943,7 @@ impl App {
                 .ok()
                 .map(|position| (position, window.inner_size()));
         }
+        self.clipboard = clipboard::Clipboard::new(window.clone());
         self.session_for(
             window,
             pty,
@@ -2058,6 +2064,8 @@ impl App {
             ime_cursor_area: None,
             scroll: PixelScroll::default(),
             pty_cell: cell,
+            #[cfg(target_os = "linux")]
+            _file_drop_target: self.clipboard.file_drop_target(&window, self.proxy.clone()),
             size,
             latency,
             window,
@@ -5506,7 +5514,6 @@ impl ApplicationHandler<UserEvent> for App {
                 native_tabs::observe_fullscreen_exit();
                 #[cfg(target_os = "macos")]
                 native_tabs::install_window_menu();
-                self.clipboard = clipboard::Clipboard::new(session.window.clone());
                 self.session = Some(session);
                 self.tabs = vec![None];
                 self.active_tab = 0;
@@ -5560,6 +5567,14 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Appearance(generation, theme) => {
                 if self.appearance_watch.is_some() && generation == self.appearance_generation {
                     self.set_appearance(theme);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            UserEvent::FileDrop(target, paths) => {
+                if let Some(window) = target.upgrade() {
+                    for path in paths {
+                        self.window_event(event_loop, window.id(), WindowEvent::DroppedFile(path));
+                    }
                 }
             }
             UserEvent::CommandFinished(id, finished) => {
