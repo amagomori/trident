@@ -2811,6 +2811,7 @@ dependencies = [
  "term-core",
  "term-render",
  "toml",
+ "unicode-segmentation",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",

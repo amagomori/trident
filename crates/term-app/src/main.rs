@@ -4557,10 +4557,7 @@ impl App {
                 }
                 Key::Named(NamedKey::ArrowUp) => search.step(&mut s.term, true),
                 Key::Named(NamedKey::ArrowDown) => search.step(&mut s.term, false),
-                Key::Named(NamedKey::Backspace) => {
-                    search.query.pop();
-                    changed = true;
-                }
+                Key::Named(NamedKey::Backspace) => search.backspace(&mut s.term),
                 Key::Character(c)
                     if search::toggles_regex(c, base, self.modifiers.state(), alt_sends_esc) =>
                 {
