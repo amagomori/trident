@@ -58,6 +58,7 @@ block2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSBitmapImageRep", "NSButton", "NSControl", "NSImage", "NSImageRep", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow"] }
 
 [dev-dependencies]
+allocation-counter = "0.8.1"
 tempfile.workspace = true
 
 [lints]

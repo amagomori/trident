@@ -62,15 +62,29 @@ impl PendingPaste {
 
 /// The bytes sent to the shell for a paste.
 pub fn encode(text: &str, bracketed: bool) -> Vec<u8> {
-    // Normalize newlines to carriage returns, as typed Enter would send.
-    let text = text.replace("\r\n", "\r").replace('\n', "\r");
-    if bracketed {
-        // Strip every ESC so the text cannot end the bracketed paste early.
-        let text = text.replace('\x1b', "");
-        format!("\x1b[200~{text}\x1b[201~").into_bytes()
+    let (open, close): (&[u8], &[u8]) = if bracketed {
+        (b"\x1b[200~", b"\x1b[201~")
     } else {
-        text.into_bytes()
+        (b"", b"")
+    };
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(open.len() + bytes.len() + close.len());
+    out.extend_from_slice(open);
+    let mut start = 0;
+    for i in memchr::memchr2_iter(b'\n', 0x1b, bytes) {
+        if bytes[i] == 0x1b && !bracketed {
+            continue;
+        }
+        out.extend_from_slice(&bytes[start..i]);
+        // Drop bracketed ESCs and the LF of an original CRLF, not a CR/ESC/LF.
+        if bytes[i] == b'\n' && (i == 0 || bytes[i - 1] != b'\r') {
+            out.push(b'\r');
+        }
+        start = i + 1;
     }
+    out.extend_from_slice(&bytes[start..]);
+    out.extend_from_slice(close);
+    out
 }
 
 #[cfg(test)]
@@ -167,5 +181,33 @@ mod tests {
             encode("a\n\x1b[201~b", true),
             b"\x1b[200~a\r[201~b\x1b[201~"
         );
+    }
+
+    #[test]
+    fn encode_uses_only_the_returned_buffer() {
+        let long = "日本語\t🙂\r\nline\n\x1b".repeat(65_536);
+        for text in [
+            "",
+            "echo hello",
+            "\n\r\n\r\r\n\t\0\x03\x7f\r\x1b\n",
+            "\x1b[200~\x1b[201~\x1b",
+            &long,
+        ] {
+            for bracketed in [false, true] {
+                let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+                let expected = if bracketed {
+                    format!("\x1b[200~{}\x1b[201~", normalized.replace('\x1b', ""))
+                } else {
+                    normalized
+                };
+                let mut encoded = Vec::new();
+                let allocations = allocation_counter::measure(|| encoded = encode(text, bracketed));
+                assert_eq!(encoded, expected.as_bytes());
+                assert_eq!(allocations.count_total, u64::from(!expected.is_empty()));
+                assert!(
+                    allocations.bytes_total <= (text.len() + if bracketed { 12 } else { 0 }) as u64
+                );
+            }
+        }
     }
 }
