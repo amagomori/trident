@@ -553,8 +553,8 @@ impl Pty {
     /// reader thread when output is ready, and with `true` once the shell exits. It starts in
     /// `cwd` when given, else in this process's directory (`$HOME` when that is `/`).
     #[allow(clippy::too_many_arguments)]
-    pub fn spawn(
-        command: &[String],
+    pub fn spawn<S: AsRef<std::ffi::OsStr>>(
+        command: &[S],
         env: &std::collections::BTreeMap<String, String>,
         cwd: Option<&std::path::Path>,
         cols: usize,
@@ -1152,7 +1152,7 @@ mod tests {
             file.display()
         );
         let mut pty = Pty::spawn(
-            &["sh".into(), "-c".into(), script],
+            &["sh".to_string(), "-c".to_string(), script],
             &Default::default(),
             None,
             80,
@@ -1180,7 +1180,7 @@ mod tests {
     #[test]
     fn notifications_start_disabled_and_can_be_reloaded() {
         let mut pty = Pty::spawn(
-            &["/bin/sh".into()],
+            &["/bin/sh".to_string()],
             &Default::default(),
             None,
             80,
@@ -1251,11 +1251,11 @@ mod tests {
     fn running_program_is_reported_only_away_from_the_shell() {
         let mut pty = Pty::spawn(
             &[
-                "bash".into(),
-                "--norc".into(),
-                "--noprofile".into(),
-                "--noediting".into(),
-                "-i".into(),
+                "bash".to_string(),
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "--noediting".to_string(),
+                "-i".to_string(),
             ],
             &Default::default(),
             None,
@@ -1294,7 +1294,11 @@ mod tests {
     fn spawn_starts_in_the_requested_directory() {
         let dir = std::env::temp_dir().canonicalize().unwrap();
         let mut pty = Pty::spawn(
-            &["/bin/sh".into(), "-c".into(), "pwd; sleep 5".into()],
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "pwd; sleep 5".into(),
+            ],
             &Default::default(),
             Some(&dir),
             80,
@@ -1319,7 +1323,7 @@ mod tests {
     fn exit_code_reports_how_the_command_exited() {
         let spawn = |script: &str| {
             Pty::spawn(
-                &["/bin/sh".into(), "-c".into(), script.into()],
+                &["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
                 &Default::default(),
                 None,
                 80,
@@ -1349,8 +1353,8 @@ mod tests {
     fn drop_reaps_a_shell_that_ignores_hangup() {
         let mut pty = Pty::spawn(
             &[
-                "/bin/sh".into(),
-                "-c".into(),
+                "/bin/sh".to_string(),
+                "-c".to_string(),
                 "trap '' HUP; echo ready; while :; do sleep 1; done".into(),
             ],
             &Default::default(),
@@ -1387,8 +1391,8 @@ mod tests {
         let spawn = || {
             Pty::spawn(
                 &[
-                    "/bin/sh".into(),
-                    "-c".into(),
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
                     "trap '' HUP; echo ready; while :; do sleep 1; done".into(),
                 ],
                 &Default::default(),
@@ -1575,7 +1579,8 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let mut pty = Pty::spawn(&[], &env, None, 80, 24, (8.0, 16.0), |_| {}, |_| {}).unwrap();
+        let mut pty =
+            Pty::spawn::<String>(&[], &env, None, 80, 24, (8.0, 16.0), |_| {}, |_| {}).unwrap();
         assert_eq!(pty.output.probe.login.as_deref(), Some("-myshell"));
         let wait_for = |pty: &mut Pty, running: bool| {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -1733,7 +1738,7 @@ mod tests {
         let script = "read line; stty -icanon -echo -icrnl; printf 'x\\n'; sleep 0.3; \
                       printf 'A\\360\\237\\221\\215\\360\\237\\217\\275B\\n'; sleep 0.3; \
                       printf 'done\\n'; sleep 5";
-        let args = ["sh".into(), "-c".into(), script.into()];
+        let args = ["sh".to_string(), "-c".to_string(), script.to_string()];
         let env = [("LC_ALL".to_owned(), "C.UTF-8".to_owned())]
             .into_iter()
             .collect();
@@ -1767,10 +1772,10 @@ mod tests {
     fn only_the_shell_at_its_prompt_is_line_editing() {
         let mut pty = Pty::spawn(
             &[
-                "bash".into(),
-                "--norc".into(),
-                "--noprofile".into(),
-                "-i".into(),
+                "bash".to_string(),
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "-i".to_string(),
             ],
             &Default::default(),
             None,
@@ -1822,10 +1827,10 @@ mod tests {
     fn a_password_read_is_password_input() {
         let mut pty = Pty::spawn(
             &[
-                "bash".into(),
-                "--norc".into(),
-                "--noprofile".into(),
-                "-i".into(),
+                "bash".to_string(),
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "-i".to_string(),
             ],
             &Default::default(),
             None,
@@ -1879,7 +1884,7 @@ mod tests {
     fn a_shell_running_a_command_counts_as_running() {
         for shell in ["sh", "bash"] {
             let mut pty = Pty::spawn(
-                &[shell.into(), "-c".into(), "sleep 30; true".into()],
+                &[shell.to_string(), "-c".to_string(), "sleep 30; true".into()],
                 &Default::default(),
                 None,
                 80,
@@ -1915,11 +1920,11 @@ mod tests {
         assert!(shell_name("vim").is_none() && shell_name("/usr/bin/ssh").is_none());
         let mut wrapped = Pty::spawn(
             &[
-                "env".into(),
-                "bash".into(),
-                "--norc".into(),
-                "--noprofile".into(),
-                "-i".into(),
+                "env".to_string(),
+                "bash".to_string(),
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "-i".to_string(),
             ],
             &Default::default(),
             None,
@@ -1940,7 +1945,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         let mut pty = Pty::spawn(
-            &["sleep".into(), "30".into()],
+            &["sleep".to_string(), "30".to_string()],
             &Default::default(),
             None,
             80,
@@ -1969,7 +1974,7 @@ mod tests {
     fn failed_startup_returns_without_a_watcher() {
         assert!(
             Pty::spawn(
-                &["/nonexistent/terminal-test-shell".into()],
+                &["/nonexistent/terminal-test-shell".to_string()],
                 &Default::default(),
                 None,
                 80,
