@@ -52,6 +52,22 @@ pub struct SearchOverlay<'a> {
     pub status: &'a str,
 }
 
+/// Regex matches can share a grapheme cell. Paint its focused match in preference
+/// to the first match, without changing what counts as a highlightable cell.
+fn highlighted_match(
+    matches: &[term_core::search::Match],
+    current: Option<usize>,
+    point: term_core::Point,
+    cell: &term_core::Cell,
+) -> Option<usize> {
+    let first = term_core::search::highlighted(matches, point, cell)?;
+    Some(
+        current
+            .filter(|&i| matches.get(i).is_some_and(|m| m.contains(point)))
+            .unwrap_or(first),
+    )
+}
+
 /// Text in the Find input, without the synthetic one-cell caret.
 #[derive(Clone, Copy)]
 pub struct SearchInput<'a> {
@@ -190,6 +206,31 @@ pub fn search_layout(
 #[cfg(test)]
 mod search_tests {
     use super::{Preedit, SearchInput};
+
+    #[test]
+    fn focused_regex_hit_wins_on_shared_grapheme_cells() {
+        for (base, width) in [('X', 1), ('界', 2)] {
+            let mut term = term_core::Terminal::new(10, 2);
+            term.advance(format!("{base}\u{301} {base}").as_bytes());
+            let hits = term.search(&format!(r"{base}|\p{{M}}"), true).unwrap();
+            assert_eq!(hits.len(), 3);
+            for current in [None, Some(0), Some(1), Some(2)] {
+                let at = |col| {
+                    super::highlighted_match(
+                        &hits,
+                        current,
+                        term.viewport_to_point(0, col),
+                        &term.viewport_row(0).cells[col],
+                    )
+                };
+                for col in 0..width {
+                    assert_eq!(at(col), Some(usize::from(current == Some(1))));
+                    assert_eq!(at(width + 1 + col), Some(2));
+                }
+                assert_eq!(at(width), None);
+            }
+        }
+    }
 
     #[test]
     fn committed_input_anchors_in_display_cells() {

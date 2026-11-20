@@ -681,8 +681,8 @@ impl Renderer {
                     fg = (mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2));
                 }
                 let point = term.viewport_to_point_signed(row, col);
-                let matched =
-                    search.and_then(|s| term_core::search::highlighted(s.matches, point, cell));
+                let matched = search
+                    .and_then(|s| crate::highlighted_match(s.matches, s.current, point, cell));
                 if let Some(search) = search
                     && let Some(index) = matched
                 {
@@ -732,7 +732,7 @@ impl Renderer {
                             let other = term.viewport_to_point_signed(row, col + offset);
                             is_selected(col + offset, next) == selected
                                 && search.and_then(|s| {
-                                    term_core::search::highlighted(s.matches, other, next)
+                                    crate::highlighted_match(s.matches, s.current, other, next)
                                 }) == matched
                                 && hover.is_none_or(|h| h.contains(point) == h.contains(other))
                         },
