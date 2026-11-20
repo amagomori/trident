@@ -530,6 +530,8 @@ pub enum MouseButton {
     None = 3,
     WheelUp = 64,
     WheelDown = 65,
+    WheelLeft = 66,
+    WheelRight = 67,
 }
 
 /// Encodes a mouse report for programs that enabled mouse tracking.
@@ -612,14 +614,12 @@ pub fn encode_mouse_report(
 ) -> Option<Vec<u8>> {
     match mode {
         MouseMode::Off => None,
-        MouseMode::X10
-            if !pressed
-                || motion
-                || matches!(button, MouseButton::WheelUp | MouseButton::WheelDown) =>
-        {
-            None
-        }
-        MouseMode::X10 => encode_mouse(button, true, false, col, row, ModifiersState::empty(), sgr),
+        MouseMode::X10 => match button {
+            MouseButton::Left | MouseButton::Middle | MouseButton::Right if pressed && !motion => {
+                encode_mouse(button, true, false, col, row, ModifiersState::empty(), sgr)
+            }
+            _ => None,
+        },
         MouseMode::Click | MouseMode::Drag | MouseMode::Motion => {
             encode_mouse(button, pressed, motion, col, row, mods, sgr)
         }
@@ -773,6 +773,28 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_wheel_reports_preserve_encoding_and_bounds() {
+        let mods = ModifiersState::CONTROL | ModifiersState::ALT;
+        for mode in [MouseMode::Click, MouseMode::Drag, MouseMode::Motion] {
+            for (button, code) in [(MouseButton::WheelLeft, 90), (MouseButton::WheelRight, 91)] {
+                let press = |col, row, sgr| {
+                    encode_mouse_report(mode, button, true, false, col, row, mods, sgr)
+                };
+                assert_eq!(
+                    press(222, 1, false),
+                    Some(vec![27, 91, 77, 32 + code, 255, 34])
+                );
+                assert_eq!(press(223, 1, false), None);
+                assert_eq!(press(1, 223, false), None);
+                assert_eq!(
+                    press(223, 1, true),
+                    Some(format!("\x1b[<{code};224;2M").into_bytes())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn x10_reports_unmodified_presses_only() {
         let none = ModifiersState::empty();
         let x10 = |button, pressed, motion, mods, sgr| {
@@ -786,7 +808,12 @@ mod tests {
             x10(MouseButton::Right, true, false, none, false),
             Some(vec![0x1b, b'[', b'M', 34, 37, 42])
         );
-        for wheel in [MouseButton::WheelUp, MouseButton::WheelDown] {
+        for wheel in [
+            MouseButton::WheelUp,
+            MouseButton::WheelDown,
+            MouseButton::WheelLeft,
+            MouseButton::WheelRight,
+        ] {
             assert_eq!(x10(wheel, true, false, none, false), None);
             assert_eq!(x10(wheel, true, false, none, true), None);
         }

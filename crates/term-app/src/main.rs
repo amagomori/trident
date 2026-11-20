@@ -135,6 +135,45 @@ fn remove_on_signal(path: &std::path::Path) {
 #[cfg(target_os = "linux")]
 const INITIAL_APPEARANCE_WAIT: Duration = Duration::from_millis(100);
 
+/// Fractions of a cell left after dispatching discrete wheel steps.
+#[derive(Default)]
+struct WheelRemainder {
+    x: f64,
+    y: f64,
+}
+
+impl WheelRemainder {
+    fn steps(
+        &mut self,
+        delta: MouseScrollDelta,
+        cell: (f32, f32),
+        term: &mut Terminal,
+        report_horizontal: bool,
+    ) -> (isize, isize) {
+        let (dx, dy) = match delta {
+            MouseScrollDelta::LineDelta(x, y) => (f64::from(x) * 3.0, f64::from(y) * 3.0),
+            MouseScrollDelta::PixelDelta(p) => (p.x / f64::from(cell.0), p.y / f64::from(cell.1)),
+        };
+        if term.take_mouse_reporting_changed() {
+            self.x = 0.0;
+        }
+        let x = if report_horizontal && term.modes.mouse != MouseMode::X10 {
+            Self::whole_steps(&mut self.x, dx)
+        } else {
+            self.x = 0.0;
+            0
+        };
+        (x, Self::whole_steps(&mut self.y, dy))
+    }
+
+    fn whole_steps(remainder: &mut f64, delta: f64) -> isize {
+        *remainder += delta;
+        let steps = remainder.trunc() as isize;
+        *remainder -= steps as f64;
+        steps
+    }
+}
+
 #[derive(Default)]
 struct PixelScroll {
     offset: f64,
@@ -1653,7 +1692,7 @@ struct App {
     reported_button: Option<ReportButton>,
     last_click: Option<(Instant, Point, u8)>,
     click_to_move: prompt_click::ClickToMove,
-    scroll_accum: f64,
+    scroll_accum: WheelRemainder,
     clipboard: clipboard::Clipboard,
     /// Clipboard text waiting for the user to confirm (paste protection).
     pending_paste: Option<paste::PendingPaste>,
@@ -1700,7 +1739,7 @@ struct WindowGroup {
     reported_button: Option<ReportButton>,
     last_click: Option<(Instant, Point, u8)>,
     click_to_move: prompt_click::ClickToMove,
-    scroll_accum: f64,
+    scroll_accum: WheelRemainder,
     typing_pointer: pointer::TypingPointer,
     hover_preview: hover_preview::HoverPreview,
 }
@@ -1746,7 +1785,7 @@ impl Default for WindowGroup {
             reported_button: None,
             last_click: None,
             click_to_move: prompt_click::ClickToMove::default(),
-            scroll_accum: 0.0,
+            scroll_accum: WheelRemainder::default(),
             typing_pointer: pointer::TypingPointer::default(),
             hover_preview: hover_preview::HoverPreview::new(),
         }
@@ -1848,7 +1887,7 @@ impl App {
             reported_button: None,
             last_click: None,
             click_to_move: prompt_click::ClickToMove::default(),
-            scroll_accum: 0.0,
+            scroll_accum: WheelRemainder::default(),
             clipboard: clipboard::Clipboard::default(),
             pending_paste: None,
             pending_close: None,
@@ -2820,6 +2859,7 @@ impl App {
         }
         self.tabs[self.active_tab] = Some(pane);
         self.active_tab = index;
+        self.scroll_accum.x = 0.0;
         if self.focused && s.term.modes.focus_events {
             s.pty.write(b"\x1b[I");
         }
@@ -4983,9 +5023,9 @@ impl App {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        let Some(s) = &self.session else { return };
-        if !self.mouse_reporting() && !(s.term.is_alt_screen() && s.term.modes.alt_scroll) {
-            let s = self.session.as_mut().unwrap();
+        let reporting = self.mouse_reporting();
+        let Some(s) = &mut self.session else { return };
+        if !reporting && !(s.term.is_alt_screen() && s.term.modes.alt_scroll) {
             match delta {
                 MouseScrollDelta::PixelDelta(p) => {
                     let steps = s.scroll.update(
@@ -4995,36 +5035,41 @@ impl App {
                         s.term.scrollback_len(),
                     );
                     s.term.scroll_display(steps);
-                    self.scroll_accum = 0.0;
+                    self.scroll_accum = WheelRemainder::default();
                     s.request_frame();
                     return;
                 }
                 MouseScrollDelta::LineDelta(..) => s.scroll.reset(),
             }
         }
-        let s = self.session.as_ref().unwrap();
-        let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y as f64 * 3.0,
-            MouseScrollDelta::PixelDelta(p) => p.y / s.fonts.metrics.height as f64,
-        };
-        self.scroll_accum += lines;
-        let steps = self.scroll_accum.trunc() as isize;
-        if steps == 0 {
-            return;
-        }
-        self.scroll_accum -= steps as f64;
-        if self.mouse_reporting() {
-            let button = if steps > 0 {
-                ReportButton::WheelUp
-            } else {
-                ReportButton::WheelDown
-            };
-            for _ in 0..steps.unsigned_abs() {
-                self.report_mouse(button, true, false);
+        let metrics = s.fonts.metrics;
+        let (horizontal, steps) = self.scroll_accum.steps(
+            delta,
+            (metrics.width, metrics.height),
+            &mut s.term,
+            reporting && self.tab_pointer.y >= f64::from(s.tab_bar),
+        );
+        if reporting {
+            // winit already applies the platform scroll direction: positive x
+            // moves content right (wheel left), positive y down (wheel up).
+            for (count, positive, negative) in [
+                (steps, ReportButton::WheelUp, ReportButton::WheelDown),
+                (
+                    horizontal,
+                    ReportButton::WheelLeft,
+                    ReportButton::WheelRight,
+                ),
+            ] {
+                let button = if count > 0 { positive } else { negative };
+                for _ in 0..count.unsigned_abs() {
+                    self.report_mouse(button, true, false);
+                }
             }
             return;
         }
-        let Some(s) = &mut self.session else { return };
+        if steps == 0 {
+            return;
+        }
         if s.term.is_alt_screen() && s.term.modes.alt_scroll {
             // Programs on the alternate screen (less, man, vim) get arrow keys instead.
             let key: &[u8] = match (steps > 0, s.term.modes.app_cursor) {
@@ -5422,6 +5467,9 @@ impl App {
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
+                if mods.state().shift_key() {
+                    self.scroll_accum.x = 0.0;
+                }
                 self.modifiers = mods;
                 #[cfg(target_os = "macos")]
                 if links::command_modifier(self.modifiers.state()) {
@@ -7674,6 +7722,53 @@ mod tests {
         config.compare_runs = true;
         configure_term(&mut term, &config, 100);
         assert!(term.compare_runs());
+    }
+
+    #[test]
+    fn wheel_steps_keep_diagonal_axes_independent() {
+        let mut term = Terminal::new(80, 24);
+        term.advance(b"\x1b[?1000h");
+        let mut wheel = WheelRemainder::default();
+        let mut steps = |delta| wheel.steps(delta, (8.0, 20.0), &mut term, true);
+        assert_eq!(steps(MouseScrollDelta::LineDelta(1.0, -1.0)), (3, -3));
+        assert_eq!(steps(MouseScrollDelta::LineDelta(-1.0, 0.0)), (-3, 0));
+        let pixels = |x, y| MouseScrollDelta::PixelDelta(PhysicalPosition::new(x, y));
+        assert_eq!(steps(pixels(6.0, 10.0)), (0, 0));
+        assert_eq!(steps(pixels(3.0, 0.0)), (1, 0));
+        assert_eq!(steps(pixels(-8.0, 10.0)), (0, 1));
+        assert_eq!(steps(pixels(-1.0, 0.0)), (-1, 0));
+    }
+
+    #[test]
+    fn wheel_steps_discard_horizontal_motion_outside_the_same_reporting_mode() {
+        let mut term = Terminal::new(80, 24);
+        let mut wheel = WheelRemainder::default();
+        let delta = MouseScrollDelta::PixelDelta(PhysicalPosition::new(6.0, 0.0));
+        let mut scroll = |term: &mut Terminal, mods| {
+            let reporting = input::tracks_mouse(term.modes.mouse, mods);
+            wheel.steps(delta, (8.0, 20.0), term, reporting).0
+        };
+        let none = ModifiersState::empty();
+        for seq in [
+            b"\x1b[?1000h".as_slice(),
+            b"\x1b[?1002h",
+            b"\x1b[?1003h",
+            b"\x1b[?1003l\x1b[?1003h",
+            b"\x1b[?1006h",
+            b"\x1bc\x1b[?1003h",
+        ] {
+            term.advance(seq);
+            assert_eq!(scroll(&mut term, none), 0);
+        }
+        assert_eq!(scroll(&mut term, ModifiersState::SHIFT), 0);
+        assert_eq!(scroll(&mut term, none), 0);
+        assert_eq!(scroll(&mut term, none), 1);
+        for mode in [b"\x1b[?9h".as_slice(), b"\x1b[?9l", b"\x1b[?1049;1007h"] {
+            term.advance(mode);
+            for _ in 0..2 {
+                assert_eq!(scroll(&mut term, none), 0);
+            }
+        }
     }
 
     #[test]

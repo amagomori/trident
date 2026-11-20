@@ -511,6 +511,7 @@ pub struct Terminal {
     window_ops: Vec<WindowOp>,
     /// Replies (device attributes, cursor reports...) to write back to the shell.
     responses: Vec<u8>,
+    mouse_reporting_changed: bool,
     synchronized_output_started: bool,
     synchronized_output_ended: bool,
     /// Set by BEL; the application clears it after handling the bell.
@@ -1341,6 +1342,7 @@ impl Terminal {
             window_ops: Vec::new(),
             responses: Vec::new(),
             synchronized_output_started: false,
+            mouse_reporting_changed: false,
             synchronized_output_ended: false,
             bell: false,
             images: images::ImageStore::new(),
@@ -1482,6 +1484,12 @@ impl Terminal {
         std::mem::take(&mut self.responses)
     }
 
+    /// Returns whether mouse tracking or its coordinate encoding changed since
+    /// the last call, even if it changed back within a single PTY read.
+    pub fn take_mouse_reporting_changed(&mut self) -> bool {
+        std::mem::take(&mut self.mouse_reporting_changed)
+    }
+
     /// Whether a synchronized frame began since the last call.
     pub fn take_synchronized_output_started(&mut self) -> bool {
         std::mem::take(&mut self.synchronized_output_started)
@@ -1598,6 +1606,7 @@ impl Terminal {
             || self.modes.focus_events
             || self.modes.bracketed_paste
             || self.modes.keyboard_locked;
+        self.mouse_reporting_changed |= self.modes.mouse != MouseMode::Off || self.modes.sgr_mouse;
         self.modes.mouse = MouseMode::Off;
         self.modes.sgr_mouse = false;
         self.modes.focus_events = false;
@@ -3178,6 +3187,7 @@ impl Terminal {
         let widened = cols != self.cols;
         let max_scrollback = self.max_scrollback;
         let mut fresh = Terminal::new(cols, rows);
+        fresh.mouse_reporting_changed = true;
         fresh.shell.progress_changed = self.shell.progress.is_some() || self.shell.progress_changed;
         fresh.max_scrollback = max_scrollback;
         fresh.shrunk = self.shrunk || !self.primary.scrollback.is_empty();

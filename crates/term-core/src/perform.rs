@@ -1376,7 +1376,10 @@ impl Terminal {
             1002 => self.set_mouse(MouseMode::Drag, enable),
             1003 => self.set_mouse(MouseMode::Motion, enable),
             1004 => self.modes.focus_events = enable,
-            1006 => self.modes.sgr_mouse = enable,
+            1006 => {
+                self.mouse_reporting_changed |= self.modes.sgr_mouse != enable;
+                self.modes.sgr_mouse = enable;
+            }
             1007 => self.modes.alt_scroll = enable,
             2004 => self.modes.bracketed_paste = enable,
             2027 => self.modes.grapheme_clusters = enable,
@@ -1395,11 +1398,13 @@ impl Terminal {
     }
 
     fn set_mouse(&mut self, mode: MouseMode, enable: bool) {
+        let previous = self.modes.mouse;
         if enable {
             self.modes.mouse = mode;
         } else if self.modes.mouse == mode {
             self.modes.mouse = MouseMode::Off;
         }
+        self.mouse_reporting_changed |= self.modes.mouse != previous;
     }
 
     fn sgr(&mut self, params: &Params) {

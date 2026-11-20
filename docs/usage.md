@@ -76,6 +76,10 @@ Open Find with text selected to search for it literally, without copying it. The
 can span soft wraps, but must fit on one logical line and be at most 256 UTF-8 bytes.
 Rectangular selections are ignored. Opening Find again leaves the current query unchanged.
 
+When a program tracks the mouse, Trident sends it left and right wheel input as well
+as up and down. Hold Shift to scroll locally instead. Horizontal input does nothing
+locally, and X10 mouse mode reports button presses but no wheel input.
+
 ## Tabs
 
 Every tab runs its own shell, which keeps running in the background. A new tab starts in the

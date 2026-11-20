@@ -1060,6 +1060,10 @@ impl EventProcessor {
                 WindowEvent::MouseInput { device_id, state, button: MouseButton::Right }
             },
 
+            // A discrete horizontal notch has a button press and a release, but
+            // only the press contributes motion. Keep legacy vertical behavior.
+            6 | 7 if state == ElementState::Released => return,
+
             // Suppress emulated scroll wheel clicks, since we handle the real motion events for
             // those. In practice, even clicky scroll wheels appear to be reported by
             // evdev (and XInput2 in turn) as axis motion, so we don't otherwise
