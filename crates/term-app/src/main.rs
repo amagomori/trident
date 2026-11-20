@@ -64,7 +64,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use term_core::{ClipboardRequest, MouseMode, Point, SelectionKind, Terminal};
+use term_core::{ClipboardRequest, MouseEncoding, MouseMode, Point, SelectionKind, Terminal};
 #[cfg(test)]
 use term_render::PADDING;
 use term_render::{FontFaces, FontSpec, Fonts, Renderer};
@@ -939,6 +939,16 @@ impl Session {
     /// The part of the window below the tab bar, where the grid goes.
     fn grid_px(&self) -> PhysicalSize<u32> {
         below_tab_bar(self.size, self.tab_bar)
+    }
+
+    fn mouse_grid(&self, padding: f32) -> input::MouseGrid {
+        let m = self.fonts.metrics;
+        input::MouseGrid {
+            padding: f64::from(padding) * self.window.scale_factor(),
+            cell: (m.width.into(), m.height.into()),
+            size: (self.term.cols(), self.term.rows()),
+            scroll_offset: self.scroll.offset,
+        }
     }
 
     fn frame_deadline(&mut self) -> Option<(Instant, Instant)> {
@@ -4623,18 +4633,12 @@ impl App {
     }
 
     fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(isize, usize)> {
-        let s = self.session.as_ref()?;
-        let pad = self.config.padding as f64 * s.window.scale_factor();
-        let m = s.fonts.metrics;
-        let col = ((pos.x - pad) / m.width as f64).floor().max(0.0) as usize;
-        let row = ((pos.y - pad - s.scroll.offset) / m.height as f64).floor() as isize;
-        Some((
-            row.clamp(
-                if s.scroll.offset > 0.0 { -1 } else { 0 },
-                s.term.rows() as isize - 1,
-            ),
-            col.min(s.term.cols() - 1),
-        ))
+        Some(
+            self.session
+                .as_ref()?
+                .mouse_grid(self.config.padding)
+                .cell_at(pos),
+        )
     }
 
     fn mouse_reporting(&self) -> bool {
@@ -4779,21 +4783,27 @@ impl App {
         }
     }
 
-    fn report_mouse(&mut self, button: ReportButton, pressed: bool, motion: bool) {
-        let Some((row, col)) = self.cell_at(self.mouse_pos) else {
+    fn report_mouse(
+        &mut self,
+        button: ReportButton,
+        pressed: bool,
+        motion_from: Option<PhysicalPosition<f64>>,
+    ) {
+        let Some(s) = &mut self.session else { return };
+        let grid = s.mouse_grid(self.config.padding);
+        let encoding = s.term.modes.mouse_encoding;
+        let Some((x, y)) = grid.report_at(encoding, self.mouse_pos, motion_from) else {
             return;
         };
-        let Some(s) = &mut self.session else { return };
-        let sgr = s.term.modes.sgr_mouse;
         if let Some(bytes) = input::encode_mouse_report(
             s.term.modes.mouse,
             button,
             pressed,
-            motion,
-            col,
-            row.max(0) as usize,
+            motion_from.is_some(),
+            x,
+            y,
             self.modifiers.state(),
-            sgr,
+            encoding != MouseEncoding::Legacy,
         ) {
             s.pty.write(&bytes);
         }
@@ -4876,7 +4886,7 @@ impl App {
                 _ => return,
             };
             self.reported_button = pressed.then_some(button);
-            self.report_mouse(button, pressed, false);
+            self.report_mouse(button, pressed, None);
             return;
         }
         match button {
@@ -5006,28 +5016,24 @@ impl App {
     }
 
     fn cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
-        let old = self.cell_at(self.mouse_pos);
-        self.mouse_pos = pos;
+        let old = std::mem::replace(&mut self.mouse_pos, pos);
         self.refresh_link();
-        let cell = self.cell_at(pos);
         if self.left_down {
-            self.extend_selection(cell);
+            self.extend_selection(self.cell_at(pos));
             let active = self.autoscroll_lines() != 0;
             self.autoscroll.set(active, Instant::now());
             return;
         }
         if self.mouse_reporting() {
             let mode = self.session.as_ref().map(|s| s.term.modes.mouse);
-            if cell != old {
-                match (mode, self.reported_button) {
-                    (Some(MouseMode::Drag | MouseMode::Motion), Some(b)) => {
-                        self.report_mouse(b, true, true)
-                    }
-                    (Some(MouseMode::Motion), None) => {
-                        self.report_mouse(ReportButton::None, true, true)
-                    }
-                    _ => {}
+            match (mode, self.reported_button) {
+                (Some(MouseMode::Drag | MouseMode::Motion), Some(b)) => {
+                    self.report_mouse(b, true, Some(old))
                 }
+                (Some(MouseMode::Motion), None) => {
+                    self.report_mouse(ReportButton::None, true, Some(old))
+                }
+                _ => {}
             }
         }
     }
@@ -5112,7 +5118,7 @@ impl App {
             ] {
                 let button = if count > 0 { positive } else { negative };
                 for _ in 0..count.unsigned_abs() {
-                    self.report_mouse(button, true, false);
+                    self.report_mouse(button, true, None);
                 }
             }
             return;
@@ -7878,6 +7884,7 @@ mod tests {
             b"\x1b[?1003h",
             b"\x1b[?1003l\x1b[?1003h",
             b"\x1b[?1006h",
+            b"\x1b[?1016h",
             b"\x1bc\x1b[?1003h",
         ] {
             term.advance(seq);

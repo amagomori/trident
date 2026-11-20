@@ -1621,7 +1621,21 @@ fn golden_mouse_modes() {
         ("SGR with X10", b"\x1b[?1006h"),
         ("X10 reset", b"\x1b[?9l\x1b[?9$p"),
         ("X10 set again", b"\x1b[?9;1006h"),
-        ("RIS", b"\x1bc\x1b[?9$p"),
+        ("1016 replaces 1006", b"\x1b[?1016h\x1b[?1006$p\x1b[?1016$p"),
+        ("1006 reset keeps pixels", b"\x1b[?1006l\x1b[?1016$p"),
+        ("1006 replaces 1016", b"\x1b[?1006h\x1b[?1006$p\x1b[?1016$p"),
+        ("1016 reset keeps cells", b"\x1b[?1016l\x1b[?1006$p"),
+        ("1006 reset to legacy", b"\x1b[?1006l\x1b[?1006$p"),
+        (
+            "1016 reset to legacy",
+            b"\x1b[?1016h\x1b[?1016l\x1b[?1016$p",
+        ),
+        (
+            "pixels without tracking",
+            b"\x1b[?9l\x1b[?1016h\x1b[?1016$p",
+        ),
+        ("tracking after pixels", b"\x1b[?1003h\x1b[?1016$p"),
+        ("RIS", b"\x1bc\x1b[?9$p\x1b[?1006$p\x1b[?1016$p"),
     ];
     let run = |bytewise: bool| {
         let mut term = Terminal::new(5, 2);
@@ -1637,8 +1651,8 @@ fn golden_mouse_modes() {
             let replies = String::from_utf8(term.take_responses()).unwrap();
             writeln!(
                 out,
-                "{label}: mouse={:?} sgr={} replies={replies:?}",
-                term.modes.mouse, term.modes.sgr_mouse
+                "{label}: mouse={:?} encoding={:?} replies={replies:?}",
+                term.modes.mouse, term.modes.mouse_encoding
             )
             .unwrap();
         }

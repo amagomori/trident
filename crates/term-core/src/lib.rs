@@ -287,6 +287,17 @@ pub enum MouseMode {
     Motion,
 }
 
+/// Coordinate format for mouse reports, independent of which events are tracked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseEncoding {
+    #[default]
+    Legacy,
+    /// DECSET 1006: decimal character-cell coordinates.
+    Sgr,
+    /// DECSET 1016: decimal physical-pixel coordinates.
+    SgrPixels,
+}
+
 /// VT modes updated by escape sequences during [`Terminal::advance`].
 ///
 /// Applications use these flags when encoding input and scheduling redraws.
@@ -308,8 +319,7 @@ pub struct Modes {
     /// Line feed also returns the cursor to column zero.
     pub linefeed_newline: bool,
     pub mouse: MouseMode,
-    /// Mouse coordinates use SGR encoding.
-    pub sgr_mouse: bool,
+    pub mouse_encoding: MouseEncoding,
     /// Window focus changes should be reported.
     pub focus_events: bool,
     /// Mode 3 (DECCOLM): the grid is 132 columns wide. Honored only when
@@ -1608,14 +1618,15 @@ impl Terminal {
         if self.alt_active {
             return false;
         }
-        let changed = self.modes.mouse != MouseMode::Off
-            || self.modes.sgr_mouse
+        let mouse_changed = self.modes.mouse != MouseMode::Off
+            || self.modes.mouse_encoding != MouseEncoding::Legacy;
+        let changed = mouse_changed
             || self.modes.focus_events
             || self.modes.bracketed_paste
             || self.modes.keyboard_locked;
-        self.mouse_reporting_changed |= self.modes.mouse != MouseMode::Off || self.modes.sgr_mouse;
+        self.mouse_reporting_changed |= mouse_changed;
         self.modes.mouse = MouseMode::Off;
-        self.modes.sgr_mouse = false;
+        self.modes.mouse_encoding = MouseEncoding::Legacy;
         self.modes.focus_events = false;
         self.modes.bracketed_paste = false;
         self.modes.keyboard_locked = false;
