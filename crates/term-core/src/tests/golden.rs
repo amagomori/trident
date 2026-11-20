@@ -766,6 +766,14 @@ struct Case {
 fn cases() -> Vec<Case> {
     let inputs: &[(&str, usize, usize, &[u8])] = &[
         ("empty", 5, 2, b""),
+        ("rectangle_copy", 7, 3,
+            "a界cdef\r\n1234567\r\nABCDEFG\x1b[1;2;2;4;1;2;3;1$v\x1b[99;1;2;2$z".as_bytes()),
+        ("rectangle_protection", 7, 3,
+            b"\x1b[1\"q\x1b[1;31mSAFE\x1b[0\"q\x1b[3m123\r\nABCDEFG\r\n\x1bVISO\x1bWline\x1b[1;2;2;5${\x1b[3;1H\x1b[2K"),
+        ("rectangle_origin_and_columns", 7, 4,
+            b"abcdefg\r\nhijklmn\r\nopqrstu\r\nvwxyz12\x1b[?69h\x1b[2;6s\x1b[2;4r\x1b[?6h\x1b[37;2;2;3;99$x\x1b[2;2H\x1b[2'}\x1b['~\x1b[3;5;3;5$z"),
+        ("rectangle_attributes", 5, 3,
+            b"abcde\r\nfghij\r\nklmno\x1b[1;3;3;4;1;4$r\x1b[2*x\x1b[1;3;3;3;4;7$t\x1b[1;4;2;4;22$r"),
         (
             "horizontal_region_scroll", 7, 4,
             b"A11111a\r\nB22222b\r\nC33333c\r\nD44444d\x1b[?69h\x1b[2;6s\x1b[2;4r\x1b[?6h\x1b[3;1H123456",
@@ -1324,6 +1332,14 @@ fn attributes(t: &Terminal, cell: &Cell) -> String {
         color(cell.bg),
         flags.join(",")
     );
+    for (mask, name) in [
+        (links::Protection::DEC, "DEC"),
+        (links::Protection::ISO, "ISO"),
+    ] {
+        if t.links.protection(cell.hyperlink).contains(mask) {
+            write!(out, " protect={name}").unwrap();
+        }
+    }
     if let Some(c) = t.underline_color(cell) {
         write!(out, " underline-color={}", color(c)).unwrap();
     }

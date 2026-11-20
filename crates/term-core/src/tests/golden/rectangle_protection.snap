@@ -1,0 +1,21 @@
+size=7x3 active=primary
+cursor row=2 col=0 visible=true shape=block pending_wrap=false
+cursor attributes: fg=index(1) bg=default-bg flags=[bold,italic]
+scroll_region=0..=2 history=0 display_offset=0
+primary:
+  row 0 wrap=false text="SAFE 23"
+    cells 0..4: fg=index(1) bg=default-bg flags=[bold] protect=DEC
+    cells 4..7: fg=index(1) bg=default-bg flags=[bold,italic]
+  row 1 wrap=false text="A    FG"
+    cells 0..7: fg=index(1) bg=default-bg flags=[bold,italic]
+  row 2 wrap=false text="ISO    "
+    cells 0..3: fg=index(1) bg=default-bg flags=[bold,italic] protect=ISO
+    cells 3..7: fg=default-fg bg=default-bg flags=[]
+scrollback (oldest first):
+alternate:
+  row 0 wrap=false text="       "
+    cells 0..7: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="       "
+    cells 0..7: fg=default-fg bg=default-bg flags=[]
+  row 2 wrap=false text="       "
+    cells 0..7: fg=default-fg bg=default-bg flags=[]

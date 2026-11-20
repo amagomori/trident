@@ -12,7 +12,7 @@ cargo build --release -p term-core --example vtrun
 VTRUN=target/release/examples/vtrun
 
 # esctest (from an esctest2 checkout's esctest/ directory)
-$VTRUN --idle 5000 -- python3 esctest.py --expected-terminal=xterm --max-vt-level=4 \
+$VTRUN --idle 5000 -- python3 esctest.py --expected-terminal=xterm --options allowC2Controls --max-vt-level=4 \
   --xterm-reverse-wrap=383 --timeout=0.3 --logfile=esctest.log --v=2
 
 # vttest menu N: --key is typed once output goes idle; screens are printed to stdout
@@ -26,12 +26,13 @@ $VTRUN --idle 400 --key '1\r' --key '\r' --key '\r' --key '0\r' -- vttest
 
 ## esctest results
 
-With xterm expectations at VT level 4, 414 tests pass and 114 fail; the suite marks 39 tests as
-known xterm bugs. The failures group under these tickets:
+With xterm expectations at VT level 4 and `allowC2Controls`, 467 tests pass and 60 fail;
+the suite classifies 40 as known bugs or missing options. Rectangle edits, column edits
+and character protection have no unexpected failures. As in xterm, DECSED and DECSEL honor
+both DEC and ISO protection, while DECSERA honors DEC protection only. The remaining failures are:
 
 | Failures | Cause | Ticket |
 | --- | --- | --- |
-| 54 | VT420 rectangle and column ops, character protection (DECSCA, DECSED, DECSEL) | [KAN-137](https://jarettforzano.atlassian.net/browse/KAN-137) |
 | 47 | OSC 4/10-19 color spec formats, special colors (OSC 5/105) | [KAN-138](https://jarettforzano.atlassian.net/browse/KAN-138) |
 | 2 | DECRQSS for DECSLPP; VT level 4 honors DECNCSM instead of clearing on DECCOLM | [KAN-139](https://jarettforzano.atlassian.net/browse/KAN-139) |
 | 7 | XTWINOPS window-manager ops refused by policy (table below) | intentional |
