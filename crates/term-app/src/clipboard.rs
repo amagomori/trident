@@ -352,6 +352,35 @@ mod tests {
         assert_eq!(reader.get_text().unwrap(), "A&B");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[ignore = "replaces the system clipboard; run on a disposable display"]
+    fn clipboard_preserves_printed_unicode_spaces() {
+        let mut clipboard = Clipboard {
+            inner: Some(Backend::Arboard(arboard::Clipboard::new().unwrap())),
+            #[cfg(target_os = "linux")]
+            x11: true,
+            #[cfg(target_os = "linux")]
+            x11_max_request_bytes: None,
+            #[cfg(target_os = "linux")]
+            _window: None,
+        };
+        let mut reader = arboard::Clipboard::new().unwrap();
+        for space in ['\u{a0}', '\u{2009}', '\u{202f}', '\u{3000}'] {
+            let mut term = term_core::Terminal::new(12, 2);
+            term.advance(format!("price{space}  \r\nZ").as_bytes());
+            term.start_selection(
+                term.viewport_to_point(0, 0),
+                term_core::SelectionKind::Simple,
+            );
+            term.update_selection(term.viewport_to_point(1, 0));
+            clipboard.set_selection(false, || term.selection_text(), || term.selection_html());
+            let expected = format!("price{space}\nZ");
+            assert_eq!(reader.get_text().unwrap(), expected);
+            assert!(reader.get().html().unwrap().contains(&expected));
+        }
+    }
+
     #[test]
     fn x11_uses_arboard() {
         for display in [

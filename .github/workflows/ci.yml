@@ -40,9 +40,12 @@ jobs:
         run: |
           if ! command -v xclip >/dev/null; then sudo apt-get install -y xclip; fi
           xvfb-run -a cargo test -p term-app --bin trident x11_oversized_html_replaces_rich_selection_with_plain_text -- --ignored
+          xvfb-run -a cargo test -p term-app --bin trident clipboard_preserves_printed_unicode_spaces -- --ignored
       - name: Check native pasteboard selection formats
         if: runner.os == 'macOS'
-        run: cargo test -p term-app --bin trident macos_primary_leaves_rich_pasteboard_untouched -- --ignored
+        run: |
+          cargo test -p term-app --bin trident macos_primary_leaves_rich_pasteboard_untouched -- --ignored
+          cargo test -p term-app --bin trident clipboard_preserves_printed_unicode_spaces -- --ignored
       - name: Replay tmux image history
         run: |
           if ! command -v tmux >/dev/null; then

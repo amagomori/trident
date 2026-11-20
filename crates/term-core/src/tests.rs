@@ -1445,16 +1445,56 @@ fn rich_copy_escapes_styled_graphemes_and_trims_each_hard_line() {
 
     assert_eq!(
         t.selection_text().as_deref(),
-        Some("値<&\u{301}>\ne\u{301}")
+        Some("値<&\u{301}>\u{3000}\ne\u{301}")
     );
     let mut style = String::new();
     t.push_html_style(&Cell::default(), &mut style);
     assert_eq!(
         t.selection_html().unwrap(),
         format!(
-            "<pre>\n<span style=\"{style}\">値</span><span style=\"{style};font-weight:bold\">&lt;&amp;\u{301}&gt;\n</span><span style=\"{style}\">e\u{301}</span></pre>"
+            "<pre>\n<span style=\"{style}\">値</span><span style=\"{style};font-weight:bold\">&lt;&amp;\u{301}&gt;</span><span style=\"{style}\">\u{3000}\ne\u{301}</span></pre>"
         )
     );
+}
+
+#[test]
+fn copy_trims_only_ascii_padding_at_hard_breaks_and_selection_end() {
+    for space in ['\u{a0}', '\u{2009}', '\u{202f}', '\u{3000}'] {
+        // The first row wraps after an ordinary space; the third is all padding.
+        let mut t = term(6, 4, &format!("abcde {space}  \r\n   \r\nZ{space}  !"));
+        t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+        t.update_selection(t.viewport_to_point(3, 3));
+        let expected = format!("abcde {space}\n\nZ{space}");
+        assert_eq!(t.selection_text(), Some(expected.clone()));
+        let mut style = String::new();
+        t.push_html_style(&Cell::default(), &mut style);
+        assert_eq!(
+            t.selection_html().unwrap(),
+            format!("<pre>\n<span style=\"{style}\">{expected}</span></pre>")
+        );
+    }
+}
+
+#[test]
+fn unicode_space_before_padding_retains_style_and_prefill_byte_limit() {
+    let mut t = term(8, 1, "A\x1b[1m\u{202f}\x1b[m  B");
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(0, 3));
+    assert_eq!(t.selected_single_line("A\u{202f}  ".len() - 1), None);
+    assert_eq!(
+        t.selected_single_line("A\u{202f}  ".len()).as_deref(),
+        Some("A\u{202f}")
+    );
+    assert!(
+        t.selection_html()
+            .unwrap()
+            .ends_with("font-weight:bold\">\u{202f}</span></pre>")
+    );
+
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Block);
+    t.update_selection(t.viewport_to_point(0, 3));
+    assert_eq!(t.selection_text().as_deref(), Some("A\u{202f}  "));
+    assert!(t.selection_html().unwrap().ends_with("\">  </span></pre>"));
 }
 
 #[test]
