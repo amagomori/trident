@@ -244,23 +244,22 @@ fn text_cells(term: &Terminal, line: u64, last: u64) -> (&[Cell], &Row, usize) {
     let row = term.line(line);
     let trim = !row.wrapped() || line == last;
     let hidden = if row.has_hidden() {
-        hidden_text_len(row, trim)
+        hidden_text_len(term, row, trim)
     } else {
         0
     };
     if !trim || hidden > 0 {
         return (&row.cells, row, hidden);
     }
-    let blank = Cell::default();
     // Past `occupied` every cell equals the last one, so a default last cell bounds the scan.
-    let content = if row.cells.last() == Some(&blank) {
+    let content = if row.cells.last().is_some_and(|c| term.links.is_blank(c)) {
         &row.cells[..row.occupied()]
     } else {
         &row.cells[..]
     };
     let end = content
         .iter()
-        .rposition(|cell| *cell != blank)
+        .rposition(|cell| !term.links.is_blank(cell))
         .map_or(0, |col| col + 1);
     (&row.cells[..end], row, 0)
 }
@@ -310,11 +309,11 @@ fn push_utf8<'a>(
 
 /// Searches a narrowed row as if it were widened again, so results don't depend on width.
 #[cold]
-fn hidden_text_len(row: &Row, trim: bool) -> usize {
+fn hidden_text_len(term: &Terminal, row: &Row, trim: bool) -> usize {
     if trim {
         row.hidden_columns()
             .enumerate()
-            .filter(|(_, (_, cell))| **cell != Cell::default())
+            .filter(|(_, (_, cell))| !term.links.is_blank(cell))
             .last()
             .map_or(0, |(i, _)| i + 1)
     } else {

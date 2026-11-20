@@ -221,6 +221,22 @@ fn recent_slot(id: &[u8], uri: &[u8], extras: &Extras) -> Slot {
 }
 
 impl LinkTable {
+    /// Whether trimming this cell loses neither text nor rendition. An OSC 7
+    /// origin alone does not turn trailing spaces into visible content.
+    pub(crate) fn is_blank(&self, cell: &Cell) -> bool {
+        let index = cell.hyperlink;
+        *cell
+            == (Cell {
+                hyperlink: index,
+                ..Cell::default()
+            })
+            && (index == 0
+                || index == 4u16.wrapping_neg()
+                || self.spans.get(index as usize - 1).is_some_and(|s| {
+                    s.uri_len == 0 && s.extras.underline.is_none() && s.extras.protection.0 == 0
+                }))
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.spans.len()
     }
@@ -370,7 +386,7 @@ impl LinkTable {
 
 impl Terminal {
     /// The index cells store for the OSC 8 link `(id, uri)` underlined in `underline`.
-    /// Without a link or color, or when the table is full, only protection is retained.
+    /// When the table is full, retain protection and mark any reported origin unavailable.
     pub(crate) fn intern_link(
         &mut self,
         id: &[u8],
@@ -1476,6 +1492,20 @@ mod tests {
             t.directory_origin_at(at(0, 2)),
             DirectoryOrigin::Unavailable
         );
+    }
+
+    #[test]
+    fn directory_origin_does_not_make_padding_text() {
+        let mut t = Terminal::new(30, 4);
+        t.advance(b"\x1b]7;file:///a\x07foo           \r\nbar\r\n");
+        for cols in [30, 5, 24] {
+            t.resize(cols, 4);
+            assert_eq!(t.search("foo$", true).unwrap().len(), 1);
+            assert_eq!(t.search("bar$", true).unwrap()[0].start.line, 1);
+        }
+        // An OSC 8 link on a space is not just a directory report.
+        t.advance(b"baz\x1b]8;;https://example.com\x07 \x1b]8;;\x07");
+        assert_eq!(t.search("baz $", true).unwrap().len(), 1);
     }
 
     #[test]

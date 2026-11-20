@@ -188,7 +188,7 @@ impl Terminal {
                 && row
                     .cells
                     .get(cols..)
-                    .is_none_or(|tail| tail.iter().all(|c| *c == Cell::default()))
+                    .is_none_or(|tail| tail.iter().all(|c| self.links.is_blank(c)))
             {
                 // Unstored trailing cells of a hard history row are default blanks.
                 row.cells.truncate(cols);
@@ -226,7 +226,9 @@ impl Terminal {
                 } else {
                     let used = cells
                         .iter()
-                        .rposition(|c| *c != Cell::default() && !c.flags.contains(Flags::WIDE_WRAP))
+                        .rposition(|c| {
+                            !self.links.is_blank(c) && !c.flags.contains(Flags::WIDE_WRAP)
+                        })
                         .map_or(0, |c| c + 1);
                     cells.truncate(used);
                     if cursor.is_some() && i == cursor_index && cells.len() <= cursor_at {
@@ -311,7 +313,7 @@ impl Terminal {
         if let Some((first_old, true)) = cursor_line {
             let OldRow { first, count, .. } = map.old[cursor_index];
             let row = first + (cursor_index - first_old);
-            if row != cursor_row && new[first + count..].iter().all(Row::is_blank) {
+            if row != cursor_row && new[first + count..].iter().all(|r| r.is_blank(&self.links)) {
                 cursor_row = row;
                 cursor_col = anchor.1.min(cols - 1);
                 new.resize_with(new.len().max(row + 1), || Row::new(cols, &Cell::default()));
@@ -326,7 +328,7 @@ impl Terminal {
         // Pull the screen up to keep rows below the cursor, as far as the cursor allows.
         let used = new
             .iter()
-            .rposition(|r| !r.is_blank() || r.flags != RowFlags::default())
+            .rposition(|r| !r.is_blank(&self.links) || r.flags != RowFlags::default())
             .map_or(0, |r| r + 1);
         if used > top + rows {
             top = (used - rows).min(cursor_row);
