@@ -1,21 +1,20 @@
-use super::Rgba;
-use flate2::{Decompress, FlushDecompress, Status};
 use term_core::images::DEFAULT_IMAGE_QUOTA;
+use zlib_rs::{Inflate, InflateFlush, Status};
 
 /// Checks whether the original PNG can stand in for the decoded, sized image.
 /// The image decoder tolerates incomplete zlib trailers and stops before IEND.
-pub(super) fn can_forward(bytes: &[u8], image: &Rgba) -> bool {
+pub(super) fn can_forward(bytes: &[u8], (width, height): (u32, u32)) -> bool {
     let Some(chunks) = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR") else {
         return false;
     };
     let Some((header, chunks)) = chunks.split_at_checked(17) else {
         return false;
     };
-    if header[..4] != image.width.to_be_bytes()
-        || header[4..8] != image.height.to_be_bytes()
+    if header[..4] != width.to_be_bytes()
+        || header[4..8] != height.to_be_bytes()
         || !matches!(&header[8..13], [8, 2 | 6, 0, 0, 0])
         || bytes.len() > DEFAULT_IMAGE_QUOTA
-        || image.pixels.len() > DEFAULT_IMAGE_QUOTA
+        || u64::from(width) * u64::from(height) > (DEFAULT_IMAGE_QUOTA / 4) as u64
     {
         return false;
     }
@@ -25,9 +24,9 @@ pub(super) fn can_forward(bytes: &[u8], image: &Rgba) -> bool {
         return false;
     };
     let channels = if header[9] == 2 { 3 } else { 4 };
-    let scanline_bytes = (u64::from(image.width) * channels + 1) * u64::from(image.height);
-    let mut zlib = Decompress::new(true);
-    let mut scratch = [0; 8192];
+    let scanline_bytes = (u64::from(width) * channels + 1) * u64::from(height);
+    let mut zlib = Inflate::new(true, 0);
+    let mut scratch = vec![0; scanline_bytes.min(128 * 1024) as usize];
     let mut finished = false;
     while !chunks.is_empty() {
         let Some((prefix, rest)) = chunks.split_at_checked(8) else {
@@ -44,7 +43,7 @@ pub(super) fn can_forward(bytes: &[u8], image: &Rgba) -> bool {
         chunks = &tail[4..];
         while !data.is_empty() || (chunks.is_empty() && !finished) {
             let (before_in, before_out) = (zlib.total_in(), zlib.total_out());
-            let Ok(status) = zlib.decompress(data, &mut scratch, FlushDecompress::None) else {
+            let Ok(status) = zlib.decompress(data, &mut scratch, InflateFlush::NoFlush) else {
                 return false;
             };
             finished = status == Status::StreamEnd;

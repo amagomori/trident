@@ -2818,6 +2818,7 @@ dependencies = [
  "x11rb",
  "xdg-mime",
  "zbus",
+ "zlib-rs",
 ]
 
 [[package]]

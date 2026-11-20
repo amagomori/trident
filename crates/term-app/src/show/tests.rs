@@ -371,6 +371,18 @@ fn ineligible_pngs_keep_the_previous_output_or_error() {
     let (ihdr, rest) = png.split_at(33);
     let (idat, iend) = rest.split_at(rest.len() - 12);
     let data = &idat[8..idat.len() - 4];
+    let split = [
+        ihdr,
+        &chunk(b"IDAT", &data[..1]),
+        &chunk(b"IDAT", &data[1..data.len() - 2]),
+        &chunk(b"IDAT", &[]),
+        &chunk(b"IDAT", &data[data.len() - 2..]),
+        iend,
+    ]
+    .concat();
+    let opts = Options::default();
+    let image = decode_raster(&split, ImageFormat::Png, &opts, big_window()).unwrap();
+    assert!(png::can_forward(&split, (image.width, image.height)));
     let mut bad_adler = data.to_vec();
     *bad_adler.last_mut().unwrap() ^= 1;
     let mut frame = [0; 26];
@@ -399,6 +411,7 @@ fn ineligible_pngs_keep_the_previous_output_or_error() {
         .concat(),
         [ihdr, &chunk(b"IDAT", &bad_adler), iend].concat(),
         [ihdr, &chunk(b"IDAT", &data[..data.len() - 4]), iend].concat(),
+        [ihdr, &chunk(b"IDAT", &[data, b"x"].concat()), iend].concat(),
         [ihdr, idat, &chunk(b"IDAT", b"extra"), iend].concat(),
         [ihdr, idat, &iend[..8]].concat(),
         [ihdr, idat, &chunk(b"IEND", b"x")].concat(),
