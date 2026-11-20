@@ -3,7 +3,8 @@
 
 Run on a macOS desktop with Accessibility permission and English Window menu items:
     python3 .github/scripts/fullscreen_isolation.py target/release/trident
-Uses a private config and one process; both windows must come from the same tab group.
+Pass --new-window to create the second group with Cmd+N instead of detaching a tab.
+Both groups must be visible to Accessibility under the original Trident PID.
 """
 
 import argparse
@@ -48,7 +49,7 @@ def until(read, accept, message):
     raise AssertionError(f"{message}: last saw {value!r}")
 
 
-def exercise(process, directory):
+def exercise(process, directory, new_window):
     def ax(command):
         script = (f'tell application "System Events" to tell (first application process '
                   f'whose unix id is {process.pid})\n{command}\nend tell')
@@ -71,9 +72,9 @@ def exercise(process, directory):
     def frame(name):
         return ax(f'get {{position, size}} of window "{name}"')
 
-    def new_tab():
+    def new_pane(key="t"):
         before = set(directory.glob("geometry-*"))
-        ax('keystroke "t" using command down')
+        ax(f'keystroke "{key}" using command down')
         new = until(lambda: set(directory.glob("geometry-*")) - before, bool, "new PTY")
         name = new.pop().name
         until(names, lambda n: n[0] == name, "new tab did not become key")
@@ -97,7 +98,7 @@ def exercise(process, directory):
         menu("Enter Full Screen")
         until(lambda: fullscreen(active), bool, "did not enter fullscreen")
         until(lambda: menu_enabled("Exit Full Screen"), bool, "fullscreen transition not ready")
-        created = new_tab()
+        created = new_pane()
         until(lambda: fullscreen(created), bool, "new tab did not join fullscreen")
         menu("Exit Full Screen")
         until(names, lambda n: set(n) == {created, inactive}, "expected two normal groups")
@@ -116,9 +117,12 @@ def exercise(process, directory):
     a = until(lambda: list(directory.glob("geometry-*")), bool, "first PTY")[0].name
     until(names, lambda n: n == [a], "expected one normal group")
     ax("set frontmost to true")
-    b = new_tab()
-    menu("Move Tab to New Window")
-    until(names, lambda n: set(n) == {a, b}, "tab did not detach")
+    if new_window:
+        b = new_pane("n")
+    else:
+        b = new_pane()
+        menu("Move Tab to New Window")
+    until(names, lambda n: set(n) == {a, b}, "expected two windows in the original process")
     place(b, 480, 260, 600, 400)
     place(a, 80, 100, 812, 554)
     until(lambda: grid(a) != grid(b), bool, "precondition: distinct PTY sizes")
@@ -126,15 +130,30 @@ def exercise(process, directory):
     place(new_a, 80, 100, 812, 590)
     place(b, 480, 260, 600, 400)
     until(lambda: grid(new_a) != grid(b), bool, "reverse precondition: distinct PTY sizes")
-    _, reverse_errors = cycle(b, new_a, [a, new_a])
+    new_b, reverse_errors = cycle(b, new_a, [a, new_a])
     errors.extend(reverse_errors)
     if errors:
         raise AssertionError("\n".join(errors))
+    if new_window:
+        menu(new_b)
+        before_zoom = {name: grid(name) for name in (a, new_a, new_b)}
+        ax('keystroke "=" using command down')
+        until(lambda: grid(new_b), lambda size: size != before_zoom[new_b], "zoom had no effect")
+        ax('keystroke "w" using {command down, shift down}')
+        until(names, lambda n: n == [new_a], "Close Window did not leave the other group intact")
+        if any(grid(name) != before_zoom[name] for name in (a, new_a)):
+            raise AssertionError("zoom resized a PTY in the other group")
+        ax('keystroke "w" using command down')
+        until(names, lambda n: n == [a], "surviving tab did not become key")
+        ax('keystroke "w" using command down')
+        if process.wait(timeout=10) != 0:
+            raise AssertionError("closing the final window did not exit cleanly")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--new-window", action="store_true")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("requires a native macOS desktop")
@@ -142,11 +161,12 @@ def main():
         directory = Path(temp)
         config = directory / "config.toml"
         shell = [sys.executable, str(Path(__file__).resolve()), "--monitor", temp]
-        config.write_text(f"shell = {json.dumps(shell)}\nremember_window_size = false\n")
+        # The geometry monitors are foreground programs, not idle shells.
+        config.write_text(f"shell = {json.dumps(shell)}\nremember_window_size = false\nconfirm_close = false\n")
         with subprocess.Popen([args.binary.resolve(), "--config", config],
                               env={**os.environ, "HOME": temp, "XDG_CONFIG_HOME": temp}) as process:
             try:
-                exercise(process, directory)
+                exercise(process, directory, args.new_window)
             finally:
                 process.terminate()
         print("PASS: both inactive groups retained their frame and grid")

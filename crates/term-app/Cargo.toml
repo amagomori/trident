@@ -54,7 +54,7 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLDrawable", "block2", "objc2-core-foundation"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CABase", "objc2-core-foundation"] }
 block2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSBitmapImageRep", "NSButton", "NSControl", "NSImage", "NSImageRep", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSBitmapImageRep", "NSButton", "NSControl", "NSImage", "NSImageRep", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow"] }
 
 [dev-dependencies]
 tempfile.workspace = true
