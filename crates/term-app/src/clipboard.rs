@@ -170,11 +170,12 @@ impl Clipboard {
         self._window = Some(window);
     }
 
-    /// Whether the X server can be handed `len` bytes of clipboard text; true off X11
-    /// or when the server's limit can't be read.
+    /// Returns whether one X11 selection format fits in a single request.
+    ///
+    /// If querying the server limit fails, let the backend try the transfer.
     #[cfg(target_os = "linux")]
     fn x11_can_serve(&mut self, len: usize) -> bool {
-        if !self.x11 || x11_property_fits(len, X11_MIN_REQUEST_BYTES) {
+        if x11_property_fits(len, X11_MIN_REQUEST_BYTES) {
             return true;
         }
         let max = *self.x11_max_request_bytes.get_or_insert_with(|| {
@@ -234,20 +235,24 @@ impl Clipboard {
         }
     }
 
-    /// Stores `text`, plus `html` as the `text/html` flavor when the backend can
-    /// serve more than one format (arboard; the smithay Wayland backend is
-    /// text-only, so HTML is dropped there).
+    /// Stores plain text and, when supported, HTML in the selected clipboard.
+    ///
+    /// Wayland stores only text. X11 omits HTML that exceeds the server's
+    /// request limit and leaves the selection unchanged if the text cannot fit.
     pub fn set(&mut self, text: String, html: Option<String>, primary: bool) {
         #[cfg(target_os = "linux")]
-        if self.inner.is_some()
-            && !self.x11_can_serve(text.len().max(html.as_ref().map_or(0, |h| h.len())))
-        {
-            diag!(
-                "trident: {} bytes is more than the X server can transfer; clipboard left unchanged",
-                text.len().max(html.as_ref().map_or(0, |h| h.len()))
-            );
-            return;
-        }
+        let html = if self.x11 && self.inner.is_some() {
+            if !self.x11_can_serve(text.len()) {
+                diag!(
+                    "trident: {} text bytes is more than the X server can transfer; clipboard left unchanged",
+                    text.len()
+                );
+                return;
+            }
+            html.filter(|html| self.x11_can_serve(html.len()))
+        } else {
+            html
+        };
         let Some(backend) = self.inner.as_mut() else {
             return;
         };
@@ -354,6 +359,49 @@ mod tests {
             RawDisplayHandle::Xcb(XcbDisplayHandle::new(None, 0)),
         ] {
             assert_eq!(backend_kind(display), BackendKind::Arboard);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires xclip and a disposable X11 display"]
+    fn x11_oversized_html_replaces_rich_selection_with_plain_text() {
+        let mut clipboard = Clipboard {
+            inner: Some(Backend::Arboard(arboard::Clipboard::new().unwrap())),
+            x11: true,
+            x11_max_request_bytes: Some(Some(X11_MIN_REQUEST_BYTES)),
+            ..Default::default()
+        };
+        for (primary, selection) in [(false, "clipboard"), (true, "primary")] {
+            let paste = |target| {
+                let output = std::process::Command::new("timeout")
+                    .args([
+                        "5",
+                        "xclip",
+                        "-selection",
+                        selection,
+                        "-o",
+                        "-target",
+                        target,
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{selection}: {target}");
+                String::from_utf8(output.stdout).unwrap()
+            };
+            clipboard.set("old".into(), Some("<b>old</b>".into()), primary);
+            assert_eq!(paste("text/html"), "<b>old</b>");
+
+            clipboard.set_selection(
+                primary,
+                || Some("new λ".into()),
+                || Some("x".repeat(X11_MIN_REQUEST_BYTES)),
+            );
+            assert_eq!(paste("UTF8_STRING"), "new λ");
+            assert!(!paste("TARGETS").lines().any(|target| target == "text/html"));
+
+            clipboard.set("x".repeat(X11_MIN_REQUEST_BYTES), None, primary);
+            assert_eq!(paste("UTF8_STRING"), "new λ");
         }
     }
 
