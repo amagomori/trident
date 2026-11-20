@@ -226,7 +226,11 @@ enum UserEvent {
     Presented,
     /// The native tab bar's + button was clicked.
     #[cfg(target_os = "macos")]
-    NewTab,
+    NewTab(usize),
+    #[cfg(target_os = "macos")]
+    CloseWindow(usize),
+    #[cfg(target_os = "macos")]
+    QuitRequested,
     /// The pointer moved with Cmd held; its position is read back from `AppKit`.
     #[cfg(target_os = "macos")]
     PointerMoved,
@@ -538,8 +542,30 @@ impl Pane {
 /// What `reopen_tab` needs to start a closed tab again.
 struct ClosedTab {
     index: usize,
+    /// A surviving sibling identifies the native group, even after a tab moves.
+    #[cfg(target_os = "macos")]
+    sibling: u64,
     working_directory: Option<PathBuf>,
     title: String,
+}
+
+#[derive(Clone, Copy)]
+enum PanePlacement {
+    Before(usize),
+    After(usize),
+    #[cfg(target_os = "macos")]
+    Window,
+}
+
+impl PanePlacement {
+    fn slot(self, len: usize) -> usize {
+        match self {
+            Self::Before(index) => index.min(len),
+            Self::After(index) => (index + 1).min(len),
+            #[cfg(target_os = "macos")]
+            Self::Window => len,
+        }
+    }
 }
 
 /// Whether Trident draws its own tab bar; macOS shows native `AppKit` tabs
@@ -1065,8 +1091,7 @@ fn open_window(
     pager: Option<PagerWindow>,
 ) {
     let cleanup = pager.as_ref().map(|pager| pager.file.clone());
-    // Capture on the UI thread before moving into the window launcher. Pager windows
-    // belong to the same app quit group as ordinary New Window windows.
+    // Pager and editor subprocesses still participate in app-wide quit.
     #[cfg(target_os = "macos")]
     let quit_group = close_confirm::current_quit_group();
     let spawned = std::thread::Builder::new()
@@ -2423,39 +2448,69 @@ impl App {
 
     /// Opens a tab after the active one, in the active tab's OSC 7 directory, and shows it.
     fn new_tab(&mut self, event_loop: &ActiveEventLoop) {
+        self.new_pane(event_loop, PanePlacement::After(self.active_tab));
+    }
+
+    fn new_pane(&mut self, event_loop: &ActiveEventLoop, placement: PanePlacement) {
         let cwd = self
             .session
             .as_ref()
             .and_then(|s| local_working_directory(s.term.working_directory()))
             .or_else(|| self.options.working_directory.clone());
-        self.open_tab(event_loop, self.active_tab + 1, cwd, String::new());
+        self.open_tab(event_loop, placement, cwd, String::new());
     }
 
     /// Opens the most recently closed tab where it was, with its directory and title.
     fn reopen_tab(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(closed) = self.closed_tabs.last() else {
+        #[cfg(target_os = "linux")]
+        let selection = self
+            .closed_tabs
+            .len()
+            .checked_sub(1)
+            .map(|i| (i, PanePlacement::Before(self.closed_tabs[i].index)));
+        #[cfg(target_os = "macos")]
+        let selection = {
+            let group = self.native_tab_order();
+            self.closed_tabs
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(i, closed)| {
+                    let sibling = self.tab_index(closed.sibling)?;
+                    if !group.contains(&sibling) {
+                        return None;
+                    }
+                    let placement = group.get(closed.index).map_or_else(
+                        || PanePlacement::After(*group.last().unwrap_or(&sibling)),
+                        |&tab| PanePlacement::Before(tab),
+                    );
+                    Some((i, placement))
+                })
+        };
+        let Some((i, placement)) = selection else {
             return;
         };
+        let closed = &self.closed_tabs[i];
         if self.open_tab(
             event_loop,
-            closed.index,
+            placement,
             closed.working_directory.clone(),
             closed.title.clone(),
         ) {
-            self.closed_tabs.pop();
+            self.closed_tabs.remove(i);
         }
     }
 
-    /// Spawns a tab at `index` in `working_directory`, then shows it.
+    /// Starts a fresh PTY and shows it at the requested placement.
     fn open_tab(
         &mut self,
         event_loop: &ActiveEventLoop,
-        index: usize,
+        placement: PanePlacement,
         working_directory: Option<PathBuf>,
         title: String,
     ) -> bool {
         #[cfg(target_os = "macos")]
-        let window = match self.open_tab_window(event_loop, index) {
+        let window = match self.open_tab_window(event_loop, placement) {
             Ok(window) => window,
             Err(error) => {
                 diag!("trident: new tab: {error}");
@@ -2494,7 +2549,7 @@ impl App {
         self.quit_checks
             .borrow_mut()
             .push((id, Box::new(pty.running_program_check())));
-        let index = index.min(self.tabs.len());
+        let index = placement.slot(self.tabs.len());
         let mut pane = Pane::new(
             id,
             term,
@@ -2504,6 +2559,10 @@ impl App {
             window,
         );
         pane.title = title;
+        #[cfg(target_os = "macos")]
+        if matches!(placement, PanePlacement::Window) {
+            native_tabs::show_separately(&pane.window.window);
+        }
         self.tabs.insert(index, Some(pane));
         if index <= self.active_tab {
             self.active_tab += 1;
@@ -2512,13 +2571,13 @@ impl App {
         true
     }
 
-    /// Creates the window for a new native tab at `index` and adds it to the active
-    /// window's tab group there.
+    /// Creates an initially hidden native window and optionally attaches it
+    /// to an existing group.
     #[cfg(target_os = "macos")]
     fn open_tab_window(
         &self,
         event_loop: &ActiveEventLoop,
-        index: usize,
+        placement: PanePlacement,
     ) -> Result<TabWindow, String> {
         let s = self.session.as_ref().ok_or("no window")?;
         let current = s
@@ -2526,8 +2585,14 @@ impl App {
             .outer_position()
             .ok()
             .map(|position| (position, s.size));
-        let (position, size) = new_tab_frame(is_fullscreen(&s.window), current, self.normal_frame)
-            .map_or((None, s.size), |(position, size)| (Some(position), size));
+        let standalone = matches!(placement, PanePlacement::Window);
+        let fullscreen = !standalone && is_fullscreen(&s.window);
+        let (position, size) = if standalone {
+            (None, s.size)
+        } else {
+            new_tab_frame(fullscreen, current, self.normal_frame)
+                .map_or((None, s.size), |(position, size)| (Some(position), size))
+        };
         let attrs = Window::default_attributes()
             .with_title("Trident")
             .with_inner_size(size)
@@ -2544,13 +2609,14 @@ impl App {
                 .map_err(|e| format!("cannot create window: {e}"))?,
         );
         window.set_ime_allowed(true);
-        let index = index.min(self.tabs.len());
-        let (anchor, before) = if index == 0 {
-            (self.tab_window(0).unwrap_or(&s.window), true)
-        } else {
-            (self.tab_window(index - 1).unwrap_or(&s.window), false)
-        };
-        native_tabs::add_tab(anchor, &window, before);
+        if let PanePlacement::Before(index) | PanePlacement::After(index) = placement {
+            let anchor = self.tab_window(index).ok_or("missing native tab")?;
+            native_tabs::add_tab(
+                anchor,
+                &window,
+                matches!(placement, PanePlacement::Before(_)),
+            );
+        }
         let size = window.inner_size();
         let fonts = Fonts::new(&self.faces, self.font_size * window.scale_factor() as f32);
         let renderer = Renderer::new(window.clone(), size.width, size.height, self.config.vsync)?;
@@ -2569,9 +2635,13 @@ impl App {
             redraw_pending: false,
             drawable_wait: None,
             occluded: false,
-            normal_cells: self.normal_cells,
-            normal_frame: self.normal_frame,
-            fullscreen_exit: FullscreenExit::entered(is_fullscreen(&s.window)),
+            normal_cells: if standalone {
+                (s.term.cols(), s.term.rows())
+            } else {
+                self.normal_cells
+            },
+            normal_frame: if standalone { None } else { self.normal_frame },
+            fullscreen_exit: FullscreenExit::entered(fullscreen),
         })
     }
 
@@ -2591,13 +2661,18 @@ impl App {
     /// The tabs of the active window's native tab group, in tab bar order.
     #[cfg(target_os = "macos")]
     fn native_tab_order(&self) -> Vec<usize> {
-        let Some(s) = &self.session else {
+        self.native_group(self.active_tab)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_group(&self, tab: usize) -> Vec<usize> {
+        let Some(window) = self.tab_window(tab) else {
             return Vec::new();
         };
         let keys: Vec<Option<usize>> = (0..self.tabs.len())
             .map(|index| self.tab_window(index).and_then(native_tabs::key))
             .collect();
-        native_tabs::tab_order(&s.window)
+        native_tabs::tab_order(window)
             .into_iter()
             .filter_map(|key| keys.iter().position(|&k| k == Some(key)))
             .collect()
@@ -2673,11 +2748,7 @@ impl App {
                 self.select_tab(index);
                 self.window_event(event_loop, id, WindowEvent::Focused(true));
             }
-            WindowEvent::CloseRequested => match close_confirm::take_wide_close() {
-                Some(close_confirm::WideClose::Quit) => self.close_requested(event_loop),
-                Some(close_confirm::WideClose::Window) => self.close_window(event_loop),
-                None => self.close_tab(index, event_loop),
-            },
+            WindowEvent::CloseRequested => self.close_tab(index, event_loop),
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
             WindowEvent::Occluded(occluded) => {
                 if let Some(pane) = &mut self.tabs[index] {
@@ -2827,7 +2898,10 @@ impl App {
     fn close_window(&mut self, event_loop: &ActiveEventLoop) {
         self.cancel_prompt_click();
         let group = self.native_tab_order();
-        if group.is_empty() || group.len() >= self.tabs.len() {
+        if group.is_empty() {
+            return;
+        }
+        if group.len() == self.tabs.len() {
             self.close_requested(event_loop);
             return;
         }
@@ -2893,25 +2967,38 @@ impl App {
         if self.tabs.len() <= 1 || index >= self.tabs.len() {
             return;
         }
+        #[cfg(target_os = "macos")]
+        let group = self.native_group(index);
+        #[cfg(target_os = "macos")]
+        let sibling = native_tabs::neighbor_in(&group, index);
         if index == self.active_tab {
             #[cfg(target_os = "macos")]
-            let neighbor = native_tabs::neighbor_in(&self.native_tab_order(), index)
-                .unwrap_or_else(|| neighbor_tab(index, self.tabs.len()));
+            let neighbor = sibling.unwrap_or_else(|| neighbor_tab(index, self.tabs.len()));
             #[cfg(not(target_os = "macos"))]
             let neighbor = neighbor_tab(index, self.tabs.len());
             self.select_tab(neighbor);
         }
+        #[cfg(target_os = "macos")]
+        let sibling = sibling.and_then(|i| {
+            if i == self.active_tab {
+                self.session.as_ref().map(|s| s.pane)
+            } else {
+                self.tabs[i].as_ref().map(|pane| pane.id)
+            }
+        });
         let removed = self.tabs.remove(index);
         if index < self.active_tab {
             self.active_tab -= 1;
         }
         if let Some(pane) = &removed {
-            self.closed_tabs.push(ClosedTab {
+            #[cfg(target_os = "macos")]
+            let index = group.iter().position(|&tab| tab == index).unwrap_or(0);
+            self.remember_closed_tab(
+                pane,
                 index,
-                working_directory: local_working_directory(pane.term.working_directory())
-                    .or_else(|| self.options.working_directory.clone()),
-                title: pane.title.clone(),
-            });
+                #[cfg(target_os = "macos")]
+                sibling,
+            );
         }
         #[cfg(target_os = "macos")]
         if let Some(pane) = &removed {
@@ -2922,6 +3009,38 @@ impl App {
         drop(removed);
         self.tab_hover = None;
         self.resize_grid();
+    }
+
+    fn remember_closed_tab(
+        &mut self,
+        pane: &Pane,
+        index: usize,
+        #[cfg(target_os = "macos")] sibling: Option<u64>,
+    ) {
+        #[cfg(target_os = "macos")]
+        let sibling = {
+            // Keep the history with a surviving sibling, or discard it when
+            // the last tab in this native group closes.
+            self.closed_tabs.retain_mut(|closed| {
+                if closed.sibling != pane.id {
+                    return true;
+                }
+                sibling.is_some_and(|id| {
+                    closed.sibling = id;
+                    true
+                })
+            });
+            let Some(id) = sibling else { return };
+            id
+        };
+        self.closed_tabs.push(ClosedTab {
+            index,
+            #[cfg(target_os = "macos")]
+            sibling,
+            working_directory: local_working_directory(pane.term.working_directory())
+                .or_else(|| self.options.working_directory.clone()),
+            title: pane.title.clone(),
+        });
     }
 
     /// Tab output while the tab is in the background: parsed right away so its program
@@ -4150,17 +4269,7 @@ impl App {
             #[cfg(target_os = "linux")]
             Action::NewWindow => self.new_window(event_loop, None, Vec::new(), Vec::new()),
             #[cfg(target_os = "macos")]
-            Action::NewWindow => {
-                let working_directory = self
-                    .session
-                    .as_ref()
-                    .and_then(|s| local_working_directory(s.term.working_directory()));
-                spawn_window(
-                    new_window_args(std::env::args_os().skip(1)),
-                    working_directory,
-                    self.window_cells(),
-                );
-            }
+            Action::NewWindow => self.new_pane(event_loop, PanePlacement::Window),
             Action::ShowLastCommandOutput => {
                 let Some(output) = self
                     .session
@@ -5211,11 +5320,7 @@ impl App {
         match event {
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
             #[cfg(target_os = "macos")]
-            WindowEvent::CloseRequested => match close_confirm::take_wide_close() {
-                Some(close_confirm::WideClose::Quit) => self.close_requested(event_loop),
-                Some(close_confirm::WideClose::Window) => self.close_window(event_loop),
-                None => self.close_tab(self.active_tab, event_loop),
-            },
+            WindowEvent::CloseRequested => self.close_tab(self.active_tab, event_loop),
             #[cfg(not(target_os = "macos"))]
             WindowEvent::CloseRequested => self.close_this_window(event_loop),
             WindowEvent::Resized(size) => {
@@ -5494,7 +5599,7 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(target_os = "macos")]
                 close_confirm::QUIT_CONFIRMS.store(self.config.confirm_close, Ordering::Relaxed);
                 #[cfg(target_os = "macos")]
-                close_confirm::route_app_quit_through_close(&session.window, {
+                close_confirm::route_app_quit_through_close(self.proxy.clone(), {
                     let checks = self.quit_checks.clone();
                     move || checks.borrow().iter().any(|(_, running)| running())
                 });
@@ -5558,7 +5663,23 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             #[cfg(target_os = "macos")]
-            UserEvent::NewTab => self.new_tab(event_loop),
+            UserEvent::NewTab(key) | UserEvent::CloseWindow(key) => {
+                if let Some(index) = (0..self.tabs.len())
+                    .find(|&i| self.tab_window(i).and_then(native_tabs::key) == Some(key))
+                {
+                    if index != self.active_tab {
+                        self.cancel_prompts();
+                        self.select_tab(index);
+                    }
+                    if matches!(event, UserEvent::NewTab(_)) {
+                        self.new_tab(event_loop);
+                    } else {
+                        self.close_window(event_loop);
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            UserEvent::QuitRequested => self.close_requested(event_loop),
             #[cfg(target_os = "macos")]
             UserEvent::PointerMoved => self.sync_pointer(),
             #[cfg(target_os = "macos")]

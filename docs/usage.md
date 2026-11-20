@@ -86,7 +86,8 @@ active tab's directory when the shell reports it with OSC 7.
   closes the window.
 - On Linux, to show the tab bar only while a window has two or more tabs, set `tab_bar = "auto"`.
 
-On macOS, tabs are native window tabs, like Terminal.app's. The system shows the tab bar once a
+On macOS, Cmd+N opens a separate window in the same Trident process, without adding a Dock icon.
+Cmd+T opens a native tab in the current window. The system shows the tab bar once a
 window has two tabs, and you can drag tabs to reorder them or into their own window. The
 **Window** menu has the usual tab commands, such as **Move Tab to New Window** and **Merge All
 Windows**.
