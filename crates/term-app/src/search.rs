@@ -33,6 +33,8 @@ pub struct Search {
     job: Option<SearchJob>,
     /// Selection to restore once the running search reaches it.
     keep: Option<Match>,
+    /// Net steps from the selection, retained until their destination is known.
+    pending_steps: i64,
     reveal_found: bool,
     /// Bottom grid rows the Find bar is drawn over; reveals keep matches above them.
     pub covered_rows: usize,
@@ -100,17 +102,21 @@ impl Search {
         self.current = None;
         self.dirty = false;
         self.keep = if reset { None } else { previous };
+        if reset {
+            self.pending_steps = 0;
+        }
         self.reveal_found = reset;
         match term.search_job(&self.query, self.regex) {
             Ok(job) => {
                 self.invalid = false;
                 self.job = Some(job);
-                self.advance(term, Some(Instant::now() + SLICE));
+                self.advance(term, Instant::now() + SLICE);
             }
             Err(_) => {
                 self.invalid = true;
                 self.job = None;
                 self.keep = None;
+                self.pending_steps = 0;
             }
         }
     }
@@ -119,15 +125,12 @@ impl Search {
         self.job.is_some()
     }
 
-    /// Scan older lines until `deadline` (`None`: to the end); true when the matches or the status changed.
-    pub fn advance(&mut self, term: &mut Terminal, deadline: Option<Instant>) -> bool {
+    /// Scans older lines until the deadline; returns whether Find needs redrawing.
+    pub fn advance(&mut self, term: &mut Terminal, deadline: Instant) -> bool {
         let Some(job) = &mut self.job else {
             return false;
         };
-        let done = match deadline {
-            Some(deadline) => job.run_until(term, deadline),
-            None => job.run(term, usize::MAX),
-        };
+        let done = job.run_until(term, deadline);
         let frontier = job.frontier();
         let mut found = job.take_found();
         let added = found.len();
@@ -141,15 +144,17 @@ impl Search {
         }
         if self.current.is_none() {
             self.current = match self.keep {
-                Some(keep) => self
-                    .matches
-                    .iter()
-                    .position(|candidate| *candidate == keep)
-                    .or_else(|| {
-                        (done || frontier <= keep.start.line)
-                            .then(|| self.matches.len().checked_sub(1))
-                            .flatten()
-                    }),
+                Some(keep) => {
+                    let restored = self.matches.iter().position(|candidate| *candidate == keep);
+                    if restored.is_none() && (done || frontier <= keep.start.line) {
+                        // Output replaced the anchor. Don't replay its steps on a different hit.
+                        self.keep = None;
+                        self.pending_steps = 0;
+                        self.matches.len().checked_sub(1)
+                    } else {
+                        restored
+                    }
+                }
                 None => self.matches.len().checked_sub(1),
             };
             if self.current.is_some() || done {
@@ -159,6 +164,7 @@ impl Search {
                 self.reveal(term);
             }
         }
+        self.apply_steps(term);
         added > 0 || done
     }
 
@@ -166,24 +172,37 @@ impl Search {
         if self.dirty {
             self.refresh(term, false);
         }
-        let wraps = self.current.is_none_or(|i| {
-            if older {
-                i == 0
-            } else {
-                i + 1 == self.matches.len()
+        self.pending_steps = self
+            .pending_steps
+            .saturating_add(if older { -1 } else { 1 });
+        self.apply_steps(term);
+    }
+
+    fn apply_steps(&mut self, term: &mut Terminal) {
+        if self.pending_steps == 0 {
+            return;
+        }
+        let Some(i) = self.current else {
+            if !self.searching() {
+                self.pending_steps = 0;
             }
-        });
-        if wraps {
-            self.advance(term, None);
-        }
-        if let Some(i) = self.current {
-            self.current = Some(if older {
-                (i + self.matches.len() - 1) % self.matches.len()
-            } else {
-                (i + 1) % self.matches.len()
-            });
-            self.reveal(term);
-        }
+            return;
+        };
+        let len = self.matches.len() as i64;
+        let target = if self.searching() {
+            // New matches are prepended. A step inside this range cannot change;
+            // one outside needs older matches or the final length to wrap.
+            let target = (i as i64).saturating_add(self.pending_steps);
+            if !(0..len).contains(&target) {
+                return;
+            }
+            target
+        } else {
+            (i as i64 + self.pending_steps % len).rem_euclid(len)
+        };
+        self.current = Some(target as usize);
+        self.pending_steps = 0;
+        self.reveal(term);
     }
 
     /// The selected match, also while a re-scan has yet to find it again.
@@ -273,6 +292,14 @@ fn accepts_query_char(c: char) -> bool {
 mod tests {
     use super::*;
 
+    impl Search {
+        fn finish(&mut self, term: &mut Terminal) {
+            while self.searching() {
+                self.advance(term, Instant::now() + SLICE);
+            }
+        }
+    }
+
     #[test]
     fn opening_find_seeds_once_and_searches_soft_wraps_literally() {
         let mut term = Terminal::new(5, 8);
@@ -286,7 +313,7 @@ mod tests {
         let mut composition = crate::ime::Composition::default();
         Search::open(&mut slot, &mut term, 1, &mut composition);
         let search = slot.as_mut().unwrap();
-        search.advance(&mut term, None);
+        search.finish(&mut term);
         assert_eq!(search.query, "ERR.42");
         assert!(!search.regex);
         assert_eq!(search.matches.len(), 2);
@@ -480,6 +507,91 @@ mod tests {
     }
 
     #[test]
+    fn navigation_across_the_frontier() {
+        let (mut term, mut search) = partial_search();
+        search.step(&mut term, true);
+        assert_eq!(search.selected().unwrap().start.col, 0); // Known hit on the same line.
+        search.step(&mut term, true);
+        assert!(search.searching());
+        assert_eq!(search.matches.len(), 2);
+        search.step(&mut term, false); // Cancel the pending older step.
+        search.step(&mut term, false); // Immediately select the next known hit.
+        assert_eq!(search.selected().unwrap().start.col, 4);
+
+        search.step(&mut term, false);
+        search.step(&mut term, false);
+        search.advance(&mut term, Instant::now());
+        assert!(search.searching());
+        assert_eq!(search.matches.len(), 3);
+        assert_eq!(search.selected().unwrap().start.col, 4); // Can't wrap yet.
+        search.finish(&mut term);
+        assert_eq!(search.selected().unwrap().start.line, 700);
+    }
+
+    #[test]
+    fn older_hit_is_revealed_before_scan_finishes() {
+        let (mut term, mut search) = partial_search();
+        search.step(&mut term, true);
+        search.step(&mut term, true);
+        search.advance(&mut term, Instant::now());
+        assert!(search.searching());
+        assert_eq!(search.selected().unwrap().start.line, 700);
+        assert!(term.line_visible(700));
+    }
+
+    #[test]
+    fn refresh_reanchors_pending_steps_but_edits_and_lost_anchors_cancel_them() {
+        let (mut term, mut search) = partial_search();
+        search.step(&mut term, false);
+        term.advance(b" hit");
+        search.dirty = true;
+        search.refresh(&mut term, false);
+        search.finish(&mut term);
+        assert_eq!(search.selected().unwrap().start.col, 8);
+
+        let (mut term, mut search) = partial_search();
+        search.step(&mut term, false);
+        term.advance(b"\r\x1b[K");
+        search.refresh(&mut term, false);
+        search.finish(&mut term);
+        assert_eq!(search.selected().unwrap().start.line, 700);
+
+        let (mut term, mut search) = partial_search();
+        search.step(&mut term, false);
+        search.insert("s", &mut term);
+        search.finish(&mut term);
+        assert_eq!(search.selected().unwrap().start.line, 700);
+        search.insert("?", &mut term);
+        search.step(&mut term, true);
+        search.finish(&mut term);
+        assert!(search.selected().is_none());
+        assert_eq!(search.pending_steps, 0);
+    }
+
+    fn partial_search() -> (Terminal, Search) {
+        let mut term = Terminal::new(12, 2);
+        term.set_scrollback_limit(1_100);
+        for line in 0..1_000 {
+            term.advance(if matches!(line, 0 | 700) {
+                b"hits\r\n"
+            } else {
+                b".\r\n"
+            });
+        }
+        term.advance(b"hit hit");
+        let mut search = Search {
+            query: "hit".into(),
+            job: term.search_job("hit", false).ok(),
+            ..Search::default()
+        };
+        // An expired deadline scans one batch regardless of machine speed.
+        search.advance(&mut term, Instant::now());
+        assert!(search.searching());
+        assert_eq!(search.current, Some(1));
+        (term, search)
+    }
+
+    #[test]
     fn sliced_refresh_matches_whole_search_and_keeps_selection() {
         let mut term = Terminal::new(20, 3);
         term.set_scrollback_limit(200_000);
@@ -499,7 +611,7 @@ mod tests {
         search.refresh(&mut term, true);
         while search.searching() {
             assert!(search.status().contains('+') || search.status().starts_with("searching"));
-            search.advance(&mut term, Some(Instant::now() + SLICE));
+            search.advance(&mut term, Instant::now() + SLICE);
         }
         assert_eq!(search.matches, whole);
         assert_eq!(search.current, Some(3));
@@ -507,11 +619,12 @@ mod tests {
         search.step(&mut term, true);
         search.step(&mut term, true);
         search.refresh(&mut term, false);
-        search.advance(&mut term, None);
+        search.finish(&mut term);
         assert_eq!(search.current, Some(1));
         search.refresh(&mut term, false);
         search.step(&mut term, true);
         search.step(&mut term, true);
+        search.finish(&mut term);
         assert_eq!(search.current, Some(3));
         assert!(!search.searching());
     }
@@ -526,7 +639,7 @@ mod tests {
         term.advance(line.as_bytes());
         let mut search = Search::default();
         search.insert("CMDMATCH", &mut term);
-        search.advance(&mut term, None);
+        search.finish(&mut term);
         let found = search.matches[search.current.unwrap()].start.line;
         // Bash's redraw after SIGWINCH: up the rows the cursor was below the line's start.
         for (cols, rows, up) in [(60, 20, 2), (100, 30, 4)] {
@@ -559,7 +672,7 @@ mod tests {
         }
         let mut search = Search::default();
         search.insert("needle", &mut term);
-        search.advance(&mut term, None);
+        search.finish(&mut term);
         let line = search.matches[search.current.unwrap()].start.line;
         assert!(term.line_visible(line));
         for (cols, rows) in [(30, 12), (12, 3), (40, 1), (20, 6)] {
@@ -589,7 +702,7 @@ mod tests {
         }
         let mut search = Search::default();
         search.insert("needle", &mut term);
-        search.advance(&mut term, None);
+        search.finish(&mut term);
         let line = search.matches[search.current.unwrap()].start.line;
         term.scroll_to_line(line - 17);
         for rows in [15, 6, 3] {
@@ -602,7 +715,7 @@ mod tests {
             Search::resize(Some(&search), &mut term, 20, rows, false);
             assert!(term.line_visible(line), "{rows} rows");
         }
-        search.advance(&mut term, None);
+        search.finish(&mut term);
         assert_eq!(search.matches[search.current.unwrap()].start.line, line);
         assert!(term.line_visible(line));
     }
@@ -620,7 +733,7 @@ mod tests {
         }
         let mut search = Search::default();
         search.insert("SPANHIT", &mut term);
-        search.advance(&mut term, None);
+        search.finish(&mut term);
         let found = search.matches[search.current.unwrap()];
         let (start, end) = (found.start.line, found.end.line);
         assert_eq!(end, start + 1);
@@ -676,7 +789,7 @@ mod tests {
         }
         let mut search = Search::default();
         search.insert("SPANHIT", &mut term);
-        search.advance(&mut term, None);
+        search.finish(&mut term);
         search.covered_rows = 1;
         let line = search.matches[search.current.unwrap()].start.line;
         // The match sits just above the Find bar, below a line that wraps once narrowed.

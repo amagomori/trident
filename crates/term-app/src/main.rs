@@ -5751,7 +5751,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if search.dirty {
                     search.refresh(&mut s.term, false);
                     s.window.request_redraw();
-                } else if search.advance(&mut s.term, Some(Instant::now() + search::SLICE)) {
+                } else if search.advance(&mut s.term, Instant::now() + search::SLICE) {
                     s.window.request_redraw();
                 }
                 search.searching()
