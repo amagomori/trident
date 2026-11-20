@@ -66,6 +66,7 @@ mod reflow;
 mod rerun;
 mod sixel;
 mod xcolor;
+mod xtgettcap;
 
 pub use cell::{Cell, Color, Flags, Row, RowFlags, UnderlineStyle};
 pub use images::{Image, ImageError, PlaceOptions, Placement, Rect, VisiblePlacement};
