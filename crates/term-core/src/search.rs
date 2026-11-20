@@ -139,8 +139,9 @@ impl SearchJob {
 
     fn scan(&mut self, term: &Terminal, logical_start: u64, logical_end: u64, last: u64) {
         self.text.clear();
+        let mut direct_columns = logical_start == logical_end;
         for line in logical_start..=logical_end {
-            push_line(&mut self.text, term, line, last);
+            direct_columns &= push_line(&mut self.text, term, line, last);
         }
         let mut cell_at = endpoint_cursor(term, logical_start..=logical_end, last);
         let offset = self.found.len();
@@ -150,9 +151,22 @@ impl SearchJob {
             if m.is_empty() {
                 continue;
             }
-            let matched = Match {
-                start: cell_at(m.start()).start,
-                end: cell_at(m.end() - 1).end,
+            let matched = if direct_columns {
+                Match {
+                    start: Point {
+                        line: logical_start,
+                        col: m.start(),
+                    },
+                    end: Point {
+                        line: logical_start,
+                        col: m.end() - 1,
+                    },
+                }
+            } else {
+                Match {
+                    start: cell_at(m.start()).start,
+                    end: cell_at(m.end() - 1).end,
+                }
             };
             if self.found.len() < offset + remaining {
                 self.found.push(matched);
@@ -180,8 +194,10 @@ impl SearchJob {
     }
 }
 
-/// Map nondecreasing byte offsets to inclusive cell bounds. Keep the current cell:
-/// even distinct regex matches can fall within the same grapheme.
+/// Maps nondecreasing byte offsets to inclusive cell bounds.
+///
+/// Distinct matches can fall within the same grapheme, so the cursor keeps
+/// the current cell until the requested offset advances beyond it.
 fn endpoint_cursor(
     term: &Terminal,
     lines: std::ops::RangeInclusive<u64>,
@@ -259,13 +275,14 @@ fn line_columns(term: &Terminal, line: u64, last: u64) -> impl Iterator<Item = (
     )
 }
 
-/// Append the UTF-8 text of `line`, copying rows of plain ASCII cells byte for byte.
-fn push_line(text: &mut Vec<u8>, term: &Terminal, line: u64, last: u64) {
+/// Appends the row text and reports whether its byte offsets are cell columns.
+fn push_line(text: &mut Vec<u8>, term: &Terminal, line: u64, last: u64) -> bool {
     let (cells, row, hidden) = text_cells(term, line, last);
     let start = text.len();
     let mut seen = 0;
+    let special = NOT_TEXT.union(Flags::WIDE).bits();
     text.extend(cells.iter().map(|cell| {
-        seen |= u32::from(cell.c) | u32::from(cell.flags.bits() & NOT_TEXT.bits()) << 16;
+        seen |= u32::from(cell.c) | u32::from(cell.flags.bits() & special) << 16;
         cell.c as u8
     }));
     if seen > 0x7f {
@@ -275,6 +292,7 @@ fn push_line(text: &mut Vec<u8>, term: &Terminal, line: u64, last: u64) {
     if hidden > 0 {
         push_utf8(text, term, hidden_text_cells(row, hidden));
     }
+    seen <= 0x7f && hidden == 0
 }
 
 fn push_utf8<'a>(
