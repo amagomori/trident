@@ -632,36 +632,11 @@ impl Terminal {
         if !self.on_screen_or_history(point) {
             return None;
         }
-        let (first, last) = self.logical_line(point.line);
         let index = self.line(point.line).cells.get(point.col)?.hyperlink;
-        if self
-            .links
-            .get(index)
-            .is_some_and(|(_, uri)| !uri.is_empty())
-        {
-            let cells: Vec<_> = (first..=last)
-                .flat_map(|line| {
-                    self.line(line)
-                        .cells
-                        .iter()
-                        .enumerate()
-                        .map(move |(col, cell)| (Point { line, col }, cell))
-                })
-                .collect();
-            let at = cells.iter().position(|(p, _)| *p == point)?;
-            let same = |other: u16| {
-                other == index || (other != 0 && self.links.get(other) == self.links.get(index))
-            };
-            let mut start = at;
-            let mut end = at;
-            while start > 0 && same(cells[start - 1].1.hyperlink) {
-                start -= 1;
-            }
-            while end + 1 < cells.len() && same(cells[end + 1].1.hyperlink) {
-                end += 1;
-            }
-            let (id, uri) = self.links.get(index)?;
-            let (start, end) = (cells[start].0, cells[end].0);
+        if let Some(key @ (id, uri)) = self.links.get(index).filter(|(_, uri)| !uri.is_empty()) {
+            let same = |other| other == index || self.links.get(other) == Some(key);
+            let start = self.osc8_run_edge(point, false, same);
+            let end = self.osc8_run_edge(point, true, same);
             let mut pieces = Vec::new();
             if !id.is_empty() {
                 let top = self.history - self.display_offset as u64;
@@ -686,6 +661,7 @@ impl Terminal {
                 osc8: true,
             });
         }
+        let (first, last) = self.logical_line(point.line);
         let (text, positions) = self.logical_text(first, last);
         for (offset, uri, _) in plain_uris(&text) {
             let (start, end) = self.text_span(&positions, offset, uri.len());
@@ -701,6 +677,40 @@ impl Terminal {
             }
         }
         None
+    }
+
+    /// Follows adjacent displayed columns across soft wraps, skipping resize-hidden cells.
+    fn osc8_run_edge(&self, point: Point, forward: bool, same: impl Fn(u16) -> bool) -> Point {
+        let mut edge = point;
+        let Point { mut line, mut col } = point;
+        loop {
+            let cells = &self.line(line).cells;
+            let accept = |(col, cell): (usize, &Cell)| {
+                if !same(cell.hyperlink) {
+                    return false;
+                }
+                edge = Point { line, col };
+                true
+            };
+            let reached_edge = if forward {
+                cells.iter().enumerate().skip(col).all(accept)
+            } else {
+                cells[..=col].iter().enumerate().rev().all(accept)
+            };
+            if !reached_edge {
+                break;
+            }
+            let Some(next) = self.wrapped_neighbor(line, forward) else {
+                break;
+            };
+            line = next;
+            col = if forward {
+                0
+            } else {
+                self.line(next).cells.len() - 1
+            };
+        }
+        edge
     }
 
     /// Enumerates OSC 8 links and complete plain URLs in the current viewport,
@@ -970,6 +980,57 @@ mod tests {
         t.advance(b"\x1b[2K");
         assert!(t.link_at(Point { line: 1, col: 3 }).is_none());
         assert!(t.line(1).cells.iter().all(|c| c.hyperlink == 0));
+    }
+
+    #[test]
+    fn osc8_run_crosses_soft_wraps_but_not_hard_breaks_or_other_targets() {
+        let mut t = Terminal::new(4, 4);
+        t.advance(b"\x1b]8;id=a;https://u\x07abcd\x1b[58:5:2mefgh\r\nij");
+        t.advance(b"\x1b]8;id=b;https://u\x07k\x1b]8;id=a;https://v\x07l");
+        let start = Point { line: 0, col: 0 };
+        let end = Point { line: 1, col: 3 };
+        let piece = (Point { line: 2, col: 0 }, Point { line: 2, col: 1 });
+        for hit in [start, end, piece.0, piece.1] {
+            let link = t.link_at(hit).unwrap();
+            assert_eq!(link.uri, "https://u");
+            assert!(link.osc8);
+            if hit.line == 2 {
+                assert_eq!((link.start, link.end), piece);
+                // Additional visible pieces are reported a row at a time.
+                assert_eq!(
+                    link.pieces,
+                    [
+                        (start, Point { line: 0, col: 3 }),
+                        (Point { line: 1, col: 0 }, end)
+                    ]
+                );
+            } else {
+                assert_eq!((link.start, link.end), (start, end));
+                assert_eq!(link.pieces, [piece]);
+            }
+        }
+        for (col, uri) in [(2, "https://u"), (3, "https://v")] {
+            let hit = Point { line: 2, col };
+            let link = t.link_at(hit).unwrap();
+            assert_eq!((link.uri.as_str(), link.start, link.end), (uri, hit, hit));
+            assert!(link.pieces.is_empty());
+        }
+    }
+
+    #[test]
+    fn osc8_run_skips_resize_hidden_columns() {
+        let mut t = Terminal::new(6, 3);
+        t.advance(b"\x1b[?1049h...\x1b]8;;https://u\x07A\x1b]8;;\x07--\x1b]8;;https://u\x07BC");
+        let start = Point { line: 0, col: 3 };
+        let end = Point { line: 1, col: 1 };
+        t.resize(4, 3);
+        for hit in [start, end] {
+            let link = t.link_at(hit).unwrap();
+            assert_eq!((link.start, link.end), (start, end));
+        }
+        t.resize(6, 3);
+        assert_eq!(t.link_at(start).unwrap().end, start);
+        assert_eq!(t.link_at(end).unwrap().start, Point { line: 1, col: 0 });
     }
 
     #[test]
