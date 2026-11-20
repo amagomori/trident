@@ -1325,7 +1325,7 @@ impl Terminal {
             scroll_left: 0,
             scroll_right: cols - 1,
             lr_margin_mode: LrMode::Off,
-            tabs: default_tabs(cols),
+            tabs: (0..cols).map(default_tab).collect(),
             charsets: [Charset::Ascii; 2],
             active_charset: 0,
             modes: Modes {
@@ -1802,6 +1802,9 @@ impl Terminal {
         // The primary screen rewraps its lines; the alternate one is redrawn by its app.
         let reflow = cols != self.cols;
         if reflow {
+            // Discard stops beyond the new edge; regrown columns start with defaults.
+            self.tabs.truncate(cols);
+            self.tabs.extend((self.tabs.len()..cols).map(default_tab));
             anchor = self.reflow_primary(cols, rows, anchor, editing);
         }
 
@@ -1896,7 +1899,6 @@ impl Terminal {
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
         self.reset_lr_margins();
-        self.tabs = default_tabs(cols);
         for saved in [&mut self.primary.saved, &mut self.alternate.saved]
             .into_iter()
             .flatten()
@@ -3359,8 +3361,8 @@ impl Terminal {
     }
 }
 
-fn default_tabs(cols: usize) -> Vec<bool> {
-    (0..cols).map(|c| c % 8 == 0 && c != 0).collect()
+fn default_tab(col: usize) -> bool {
+    col != 0 && col.is_multiple_of(8)
 }
 
 // Keep the shifting insert-mode path out of ordinary printing. Inlining

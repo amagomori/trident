@@ -862,6 +862,38 @@ fn wide_characters() {
 }
 
 #[test]
+fn resize_retains_programmed_and_cleared_tab_stops() {
+    for (cols, rows) in [(24, 4), (24, 6), (32, 4), (20, 4)] {
+        // HTS at column 5, TBC at column 9.
+        let mut t = term(24, 4, "\x1b[5G\x1bH\x1b[9G\x1b[g");
+        t.resize(cols, rows);
+        t.advance(b"\r\t\x1b[6n\x1b[5G\x1b[I\x1b[6n\x1b[14G\x1b[Z\x1b[6n");
+        assert_eq!(
+            t.take_responses(),
+            b"\x1b[1;5R\x1b[1;17R\x1b[1;5R",
+            "{cols}x{rows}"
+        );
+    }
+}
+
+#[test]
+fn regrown_tab_stops_use_defaults_only_in_new_columns() {
+    let mut t = term(24, 4, "\x1b[3g");
+    for _ in 0..2 {
+        t.resize(32, 4);
+        t.advance(b"\x1b[H\t\x1b[6n");
+        assert_eq!(t.take_responses(), b"\x1b[1;25R");
+        // Neither the cleared default at 25 nor the custom stop at 23 survives.
+        t.advance(b"\x1b[g\x1b[23G\x1bH");
+        t.resize(20, 4);
+        t.advance(b"\x1b[H\t\x1b[6n");
+        assert_eq!(t.take_responses(), b"\x1b[1;20R");
+    }
+    t.advance(b"\x1bc\t\x1b[6n\t\x1b[6n");
+    assert_eq!(t.take_responses(), b"\x1b[1;9R\x1b[1;17R");
+}
+
+#[test]
 fn device_status_reports() {
     let mut t = term(10, 5, "\x1b[3;4H\x1b[6n\x1b[c");
     assert_eq!(t.take_responses(), b"\x1b[3;4R\x1b[?62;4;22c");
