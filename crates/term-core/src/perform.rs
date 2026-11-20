@@ -1,7 +1,7 @@
 use super::links::Protection;
 use super::{
-    Charset, Color, CursorShape, Flags, LrMode, MouseMode, Progress, Terminal, TitlePair,
-    UnderlineStyle, WindowOp, xcolor,
+    Charset, Color, CursorShape, Flags, LrMode, MouseEncoding, MouseMode, Progress, Terminal,
+    TitlePair, UnderlineStyle, WindowOp, xcolor,
 };
 use vte::{Params, Perform};
 
@@ -720,7 +720,8 @@ impl Terminal {
             1002 => self.modes.mouse == MouseMode::Drag,
             1003 => self.modes.mouse == MouseMode::Motion,
             1004 => self.modes.focus_events,
-            1006 => self.modes.sgr_mouse,
+            1006 => self.modes.mouse_encoding == MouseEncoding::Sgr,
+            1016 => self.modes.mouse_encoding == MouseEncoding::SgrPixels,
             1007 => self.modes.alt_scroll,
             1045 => self.modes.reverse_wrap_ext,
             2004 => self.modes.bracketed_paste,
@@ -1376,10 +1377,8 @@ impl Terminal {
             1002 => self.set_mouse(MouseMode::Drag, enable),
             1003 => self.set_mouse(MouseMode::Motion, enable),
             1004 => self.modes.focus_events = enable,
-            1006 => {
-                self.mouse_reporting_changed |= self.modes.sgr_mouse != enable;
-                self.modes.sgr_mouse = enable;
-            }
+            1006 => self.set_mouse_encoding(MouseEncoding::Sgr, enable),
+            1016 => self.set_mouse_encoding(MouseEncoding::SgrPixels, enable),
             1007 => self.modes.alt_scroll = enable,
             2004 => self.modes.bracketed_paste = enable,
             2027 => self.modes.grapheme_clusters = enable,
@@ -1405,6 +1404,16 @@ impl Terminal {
             self.modes.mouse = MouseMode::Off;
         }
         self.mouse_reporting_changed |= self.modes.mouse != previous;
+    }
+
+    fn set_mouse_encoding(&mut self, encoding: MouseEncoding, enable: bool) {
+        let previous = self.modes.mouse_encoding;
+        if enable {
+            self.modes.mouse_encoding = encoding;
+        } else if previous == encoding {
+            self.modes.mouse_encoding = MouseEncoding::Legacy;
+        }
+        self.mouse_reporting_changed |= self.modes.mouse_encoding != previous;
     }
 
     fn sgr(&mut self, params: &Params) {

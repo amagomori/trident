@@ -80,6 +80,12 @@ When a program tracks the mouse, Trident sends it left and right wheel input as 
 as up and down. Hold Shift to scroll locally instead. Horizontal input does nothing
 locally, and X10 mouse mode reports button presses but no wheel input.
 
+Programs can request SGR mouse reports in character cells (DECSET 1006) or in physical
+pixels (DECSET 1016). Pixel coordinates start at (1, 1) in the text area, excluding
+window padding and the tab bar. Only pixel mode reports motion within a cell. Setting
+either format replaces the other; resetting the active format restores legacy reports.
+Selecting a format does not enable tracking.
+
 ## Tabs
 
 Every tab runs its own shell, which keeps running in the background. A new tab starts in the

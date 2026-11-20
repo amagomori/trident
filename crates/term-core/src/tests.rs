@@ -1058,7 +1058,14 @@ fn title_and_modes() {
 
 fn assert_input_modes(t: &Terminal, mouse: MouseMode, enabled: bool) {
     assert_eq!(t.modes.mouse, mouse);
-    assert_eq!(t.modes.sgr_mouse, enabled);
+    assert_eq!(
+        t.modes.mouse_encoding,
+        if enabled {
+            MouseEncoding::Sgr
+        } else {
+            MouseEncoding::Legacy
+        }
+    );
     assert_eq!(t.modes.focus_events, enabled);
     assert_eq!(t.modes.bracketed_paste, enabled);
 }
@@ -1089,7 +1096,7 @@ fn command_end_preserves_alt_screen_input_modes() {
 fn reset_input_modes_reports_changes_and_preserves_alt_screen() {
     let mut t = Terminal::new(10, 2);
     assert!(!t.reset_input_modes());
-    for mode in [9, 1000, 1002, 1003, 1006, 1004, 2004] {
+    for mode in [9, 1000, 1002, 1003, 1006, 1016, 1004, 2004] {
         t.advance(format!("\x1b[?{mode}h").as_bytes());
         assert!(t.reset_input_modes());
         assert_input_modes(&t, MouseMode::Off, false);

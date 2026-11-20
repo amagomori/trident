@@ -2138,7 +2138,7 @@ mod tests {
 
     fn input_modes_on(term: &term_core::Terminal) -> bool {
         term.modes.mouse != term_core::MouseMode::Off
-            || term.modes.sgr_mouse
+            || term.modes.mouse_encoding != term_core::MouseEncoding::Legacy
             || term.modes.focus_events
             || term.modes.bracketed_paste
     }

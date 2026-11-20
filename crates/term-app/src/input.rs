@@ -1,6 +1,7 @@
 //! Encoding of keyboard and mouse input into the byte sequences terminal programs expect.
 
-use term_core::MouseMode;
+use term_core::{MouseEncoding, MouseMode};
+use winit::dpi::PhysicalPosition;
 use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 
 /// xterm's modifier parameter: 1 + shift + 2*alt + 4*ctrl.
@@ -540,6 +541,57 @@ pub enum MouseButton {
     WheelRight = 67,
 }
 
+/// Physical grid geometry below the tab bar.
+pub struct MouseGrid {
+    pub padding: f64,
+    pub cell: (f64, f64),
+    pub size: (usize, usize),
+    pub scroll_offset: f64,
+}
+
+impl MouseGrid {
+    pub fn cell_at(&self, pos: PhysicalPosition<f64>) -> (isize, usize) {
+        let col = ((pos.x - self.padding) / self.cell.0) as usize;
+        let row = ((pos.y - self.padding - self.scroll_offset) / self.cell.1).floor() as isize;
+        (
+            row.clamp(
+                if self.scroll_offset > 0.0 { -1 } else { 0 },
+                self.size.1 as isize - 1,
+            ),
+            col.min(self.size.0 - 1),
+        )
+    }
+
+    /// Returns zero-based report coordinates, or `None` for motion that maps
+    /// to the same coordinates. Pixels are relative to the visible text area,
+    /// not a row displaced by smooth scrolling.
+    pub fn report_at(
+        &self,
+        encoding: MouseEncoding,
+        pos: PhysicalPosition<f64>,
+        motion_from: Option<PhysicalPosition<f64>>,
+    ) -> Option<(usize, usize)> {
+        let coords = |pos: PhysicalPosition<f64>| match encoding {
+            MouseEncoding::SgrPixels => {
+                let axis = |p: f64, cell: f64, count: usize| {
+                    ((p - self.padding) as usize)
+                        .min(((count as f64 * cell) as usize).saturating_sub(1))
+                };
+                (
+                    axis(pos.x, self.cell.0, self.size.0),
+                    axis(pos.y, self.cell.1, self.size.1),
+                )
+            }
+            MouseEncoding::Legacy | MouseEncoding::Sgr => {
+                let (row, col) = self.cell_at(pos);
+                (col, row.max(0) as usize)
+            }
+        };
+        let current = coords(pos);
+        (motion_from.map(coords) != Some(current)).then_some(current)
+    }
+}
+
 /// Encodes a mouse report for programs that enabled mouse tracking.
 pub fn encode_mouse(
     button: MouseButton,
@@ -755,6 +807,64 @@ mod tests {
             key(named(NamedKey::Tab), None, ModifiersState::SHIFT),
             Some(b"\x1b[Z".to_vec())
         );
+    }
+
+    #[test]
+    fn mouse_motion_coalesces_at_the_negotiated_resolution() {
+        let grid = MouseGrid {
+            padding: 12.5,
+            cell: (8., 16.),
+            size: (2, 2),
+            scroll_offset: 0.,
+        };
+        let reports = |encoding| {
+            let mut prev = PhysicalPosition::new(50., 50.);
+            (13..29)
+                .filter_map(|x| {
+                    let pos = PhysicalPosition::new(f64::from(x), 16.);
+                    let last = std::mem::replace(&mut prev, pos);
+                    let (x, y) = grid.report_at(encoding, pos, Some(last))?;
+                    encode_mouse_report(
+                        MouseMode::Motion,
+                        MouseButton::None,
+                        true,
+                        true,
+                        x,
+                        y,
+                        ModifiersState::empty(),
+                        encoding != MouseEncoding::Legacy,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            reports(MouseEncoding::SgrPixels),
+            (1..=16)
+                .map(|x| format!("\x1b[<35;{x};4M").into_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reports(MouseEncoding::Sgr),
+            [b"\x1b[<35;1;1M", b"\x1b[<35;2;1M"]
+        );
+        assert_eq!(reports(MouseEncoding::Legacy).len(), 2);
+    }
+
+    #[test]
+    fn pixel_reports_clamp_to_the_viewport_and_ignore_subpixel_motion() {
+        let grid = MouseGrid {
+            padding: 12.,
+            cell: (16., 32.),
+            size: (80, 24),
+            scroll_offset: 5.,
+        };
+        let at =
+            |x, y, old| grid.report_at(MouseEncoding::SgrPixels, PhysicalPosition::new(x, y), old);
+        assert_eq!(at(0., -7., None), Some((0, 0)));
+        assert_eq!(at(9999., 9999., None), Some((1279, 767)));
+        assert_eq!(at(17.9, 26.5, None), Some((5, 14)));
+        assert_eq!(at(17.9, 26.5, Some(PhysicalPosition::new(17., 26.1))), None);
+        assert_eq!(at(3., -8., Some(PhysicalPosition::new(1., -10.))), None);
     }
 
     #[test]
