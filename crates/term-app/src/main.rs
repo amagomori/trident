@@ -4105,19 +4105,19 @@ impl App {
         match action {
             Action::Search => {
                 self.cancel_prompt_click();
-                let search = self.search.get_or_insert_with(search::Search::default);
-                if let Some(s) = &self.session {
-                    search.covered_rows = find_bar_rows(
+                if let Some(s) = &mut self.session {
+                    let covered_rows = find_bar_rows(
                         fit_size(&s.window, &s.renderer, s.tab_bar).height as f32,
                         self.config.padding * s.window.scale_factor() as f32,
                         s.fonts.metrics.height,
                         s.term.rows(),
                     );
-                }
-                if let Some((text, cursor)) =
-                    self.session.as_mut().and_then(|s| s.composition.take())
-                {
-                    search.set_preedit(text, cursor);
+                    search::Search::open(
+                        &mut self.search,
+                        &mut s.term,
+                        covered_rows,
+                        &mut s.composition,
+                    );
                 }
                 self.refresh_link();
                 self.update_ime_cursor_area();

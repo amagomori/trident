@@ -42,6 +42,28 @@ pub struct Search {
 pub const SLICE: Duration = Duration::from_millis(4);
 
 impl Search {
+    /// Opens Find without replacing an existing query or committing IME preedit.
+    pub fn open(
+        slot: &mut Option<Self>,
+        term: &mut Terminal,
+        covered_rows: usize,
+        composition: &mut crate::ime::Composition,
+    ) {
+        const MAX_SEED_BYTES: usize = 256;
+        let newly_opened = slot.is_none();
+        let search = slot.get_or_insert_with(Self::default);
+        search.covered_rows = covered_rows;
+        if let Some((text, cursor)) = composition.take() {
+            search.set_preedit(text, cursor);
+        } else if newly_opened
+            && let Some(query) = term.selected_single_line(MAX_SEED_BYTES)
+            && query.chars().all(accepts_query_char)
+        {
+            search.query = query;
+            search.refresh(term, true);
+        }
+    }
+
     pub fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
         self.preedit_cursor =
             cursor.filter(|&(a, b)| text.is_char_boundary(a) && text.is_char_boundary(b));
@@ -67,10 +89,8 @@ impl Search {
 
     pub fn insert(&mut self, text: &str, term: &mut Terminal) {
         self.clear_preedit();
-        self.query.extend(
-            text.chars()
-                .filter(|c| !c.is_control() && *c != '\u{2028}' && *c != '\u{2029}'),
-        );
+        self.query
+            .extend(text.chars().filter(|&c| accepts_query_char(c)));
         self.refresh(term, true);
     }
     /// Restart the search, scanning the newest lines now and the rest in later `advance` calls.
@@ -245,9 +265,57 @@ impl Search {
     }
 }
 
+fn accepts_query_char(c: char) -> bool {
+    !c.is_control() && c != '\u{2028}' && c != '\u{2029}'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_find_seeds_once_and_searches_soft_wraps_literally() {
+        let mut term = Terminal::new(5, 8);
+        term.advance(b"xxERR.42\r\nERRX42\r\nERR.42");
+        term.start_selection(
+            term.viewport_to_point(0, 2),
+            term_core::SelectionKind::Simple,
+        );
+        term.update_selection(term.viewport_to_point(1, 2));
+        let mut slot = None;
+        let mut composition = crate::ime::Composition::default();
+        Search::open(&mut slot, &mut term, 1, &mut composition);
+        let search = slot.as_mut().unwrap();
+        search.advance(&mut term, None);
+        assert_eq!(search.query, "ERR.42");
+        assert!(!search.regex);
+        assert_eq!(search.matches.len(), 2);
+        assert_eq!(search.matches[0].start.line, 0);
+        assert_eq!(search.matches[1].start.line, 4);
+
+        search.query.clear();
+        Search::open(&mut slot, &mut term, 1, &mut composition);
+        assert!(slot.as_ref().unwrap().query.is_empty());
+        slot.as_mut().unwrap().insert("other", &mut term);
+        Search::open(&mut slot, &mut term, 1, &mut composition);
+        assert_eq!(slot.unwrap().query, "other");
+    }
+
+    #[test]
+    fn opening_find_transfers_preedit_instead_of_seeding() {
+        let mut term = Terminal::new(10, 2);
+        term.advance(b"error");
+        term.start_selection(term.viewport_to_point(0, 1), term_core::SelectionKind::Word);
+        let mut composition = crate::ime::Composition::default();
+        composition.update(&winit::event::Ime::Preedit("あ".into(), Some((0, 3))));
+        let mut slot = None;
+        Search::open(&mut slot, &mut term, 1, &mut composition);
+        let search = slot.unwrap();
+        assert_eq!(search.preedit, "あ");
+        assert_eq!(search.preedit_cursor, Some((0, 3)));
+        assert!(search.query.is_empty());
+        assert!(composition.preedit().is_none());
+    }
 
     #[test]
     fn composition_is_not_a_query_and_empty_preedit_does_not_drop_commit() {
