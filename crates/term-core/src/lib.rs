@@ -112,6 +112,8 @@ struct ShellState {
     progress: Option<Progress>,
     progress_changed: bool,
     cwd: Option<std::sync::Arc<WorkingDirectory>>,
+    /// A full-screen program may replay its history without replaying OSC 7.
+    alternate_origin: DirectoryOrigin,
     clipboard: Vec<ClipboardRequest>,
 }
 
@@ -1282,6 +1284,7 @@ impl Terminal {
                 progress: None,
                 progress_changed: false,
                 cwd: None,
+                alternate_origin: DirectoryOrigin::Unreported,
                 clipboard: Vec::new(),
             }),
             reports: Box::default(),
@@ -3118,6 +3121,11 @@ impl Terminal {
                 self.save_cursor();
             }
             self.alt_active = true;
+            if clear {
+                self.shell.alternate_origin = DirectoryOrigin::Unreported;
+            }
+            self.observe_alternate_directory();
+            self.sync_directory_origin();
         }
         // Clears the alternate buffer: after switching on entry, before switching back on exit.
         if clear {
@@ -3127,8 +3135,13 @@ impl Terminal {
         }
         if !enable {
             self.alt_active = false;
+            if clear {
+                self.shell.alternate_origin = DirectoryOrigin::Unreported;
+            }
             if save_cursor {
                 self.restore_cursor();
+            } else {
+                self.sync_directory_origin();
             }
         }
         self.selection = None;

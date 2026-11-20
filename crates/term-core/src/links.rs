@@ -21,7 +21,7 @@ pub struct Link {
 pub struct FileLink {
     /// Printed path, not resolved against the shell's working directory.
     pub path: String,
-    /// Origin of the first cell of the printed path.
+    /// Common origin of the printed path, or unavailable when its cells disagree.
     pub origin: DirectoryOrigin,
     /// One-based source line number as printed.
     pub line: u32,
@@ -448,6 +448,9 @@ impl Terminal {
     }
 
     fn current_directory_origin(&self) -> DirectoryOrigin {
+        if self.alt_active {
+            return self.shell.alternate_origin.clone();
+        }
         self.shell
             .cwd
             .clone()
@@ -474,6 +477,32 @@ impl Terminal {
             && let Some(cell) = self.line(point.line).cells.get(point.col)
         {
             self.links.extras(cell.hyperlink).origin
+        } else {
+            DirectoryOrigin::Unavailable
+        }
+    }
+
+    /// Common origin of the cells spelling a path. A partial repaint may replace
+    /// only its suffix, so the first cell alone cannot establish the origin.
+    pub fn path_origin(&self, points: impl IntoIterator<Item = Point>) -> DirectoryOrigin {
+        let mut indices = points.into_iter().map(|p| {
+            if !self.on_screen_or_history(p) {
+                return None;
+            }
+            let row = self.line(p.line);
+            row.cells
+                .get(p.col)
+                .or_else(|| row.hidden_cells().nth(p.col - row.cells.len()))
+                .map(|c| c.hyperlink)
+        });
+        let Some(Some(first)) = indices.next() else {
+            return DirectoryOrigin::Unavailable;
+        };
+        let origin = self.links.extras(first).origin;
+        if indices
+            .all(|index| index.is_some_and(|i| i == first || self.links.extras(i).origin == origin))
+        {
+            origin
         } else {
             DirectoryOrigin::Unavailable
         }
@@ -719,7 +748,8 @@ impl Terminal {
             let (start, end) = self.text_span(&positions, r.offset, r.len);
             (start <= point && point <= end).then(|| FileLink {
                 path: r.path.to_owned(),
-                origin: self.directory_origin_at(start),
+                origin: self
+                    .path_origin(positions[r.offset..r.offset + r.path.len()].iter().copied()),
                 line: r.line,
                 column: r.column,
                 start,
@@ -1492,6 +1522,22 @@ mod tests {
             t.directory_origin_at(at(0, 2)),
             DirectoryOrigin::Unavailable
         );
+    }
+
+    #[test]
+    fn alternate_directory_ambiguity_outlives_cursor_and_preserved_screen_restores() {
+        let mut t = Terminal::new(36, 4);
+        let origin = |t: &Terminal, row| t.directory_origin_at(Point { line: row, col: 0 });
+        t.advance(b"\x1b[?47hx\r\n");
+        assert_eq!(origin(&t, 0), DirectoryOrigin::Unreported);
+        t.advance(b"\x1b]7;file:///a\x07\x1b]7;file:///a\x07a\x1b7");
+        assert!(matches!(origin(&t, 1), DirectoryOrigin::Reported(cwd) if cwd.path == "/a"));
+        t.advance(b"\x1b]7;file://remote/a\x07\x1b8\r\nb");
+        assert_eq!(origin(&t, 2), DirectoryOrigin::Unavailable);
+        t.advance(b"\x1b[?47l\x1b]7;file:///a\x07\x1b[?47h\x1b[Hc");
+        assert_eq!(origin(&t, 0), DirectoryOrigin::Unavailable);
+        t.advance(b"\x1b[?1047l\x1b[?1049h\x1b[Hd");
+        assert!(matches!(origin(&t, 0), DirectoryOrigin::Reported(cwd) if cwd.path == "/a"));
     }
 
     #[test]

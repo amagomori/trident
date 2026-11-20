@@ -60,7 +60,7 @@ pub enum DirectoryOrigin {
     #[default]
     Unreported,
     Reported(std::sync::Arc<WorkingDirectory>),
-    /// Metadata was discarded. Do not substitute another directory.
+    /// The origin was lost or is ambiguous. Do not substitute another directory.
     Unavailable,
 }
 
@@ -150,7 +150,22 @@ impl Terminal {
             && self.working_directory() != Some(&cwd)
         {
             self.shell.cwd = Some(cwd.into());
+            if self.alt_active {
+                self.observe_alternate_directory();
+            }
             self.sync_directory_origin();
+        }
+    }
+
+    pub(crate) fn observe_alternate_directory(&mut self) {
+        let Some(cwd) = &self.shell.cwd else { return };
+        let origin = &mut self.shell.alternate_origin;
+        match origin {
+            DirectoryOrigin::Unreported => *origin = DirectoryOrigin::Reported(cwd.clone()),
+            DirectoryOrigin::Reported(first) if first != cwd => {
+                *origin = DirectoryOrigin::Unavailable;
+            }
+            _ => {}
         }
     }
 

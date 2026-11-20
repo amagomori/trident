@@ -325,11 +325,16 @@ fn printed_candidates(
     let candidates = candidates_at(&chars, (row - first) as usize * cols + col)
         .into_iter()
         .map(|candidate| {
-            let start = Point {
-                line: line + (candidate.start / cols) as u64,
-                col: candidate.start % cols,
-            };
-            (candidate, term.directory_origin_at(start))
+            let first = chars.partition_point(|&(_, col, _)| col < candidate.start);
+            let points = chars[first..]
+                .iter()
+                .take_while(|&&(_, col, _)| col < candidate.end)
+                .map(|&(_, col, _)| Point {
+                    line: line + (col / cols) as u64,
+                    col: col % cols,
+                });
+            let origin = term.path_origin(points);
+            (candidate, origin)
         })
         .collect();
     (line, candidates)
@@ -1469,6 +1474,18 @@ mod tests {
         check(&term, 1, 2, Some(a.join(file)));
         check(&term, 2, 2, None);
         check(&term, 3, 2, Some(b.join(file)));
+
+        // A multiplexer repaints the same bytes without the original report.
+        let mut mux = Terminal::new(40, 6);
+        mux.advance(format!("\x1b[?1049h{}{printed}{}", report("", &a), report("", &b)).as_bytes());
+        check(&mux, 0, 2, Some(a.join(file)));
+        mux.advance(b"\x1b[1;5Hmain.rs");
+        check(&mux, 0, 2, None); // First path cell is still from A.
+        mux.advance(format!("\x1b[H{printed}").as_bytes());
+        check(&mux, 0, 2, None);
+        mux.advance(format!("\x1b[?1049l{printed}").as_bytes());
+        check(&mux, 0, 2, Some(b.join(file)));
+
         std::fs::remove_file(a.join(file)).unwrap();
         check(&term, 1, 2, None);
         std::fs::remove_dir_all(&a).unwrap();
