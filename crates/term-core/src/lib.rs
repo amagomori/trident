@@ -1954,9 +1954,11 @@ impl Terminal {
             .is_some_and(|(from, to)| (from..=to).contains(&point.col))
     }
 
-    /// Inclusive columns on one physical row, shared by highlighting and copying.
-    /// Selecting either half of a wide glyph selects the whole glyph.
-    fn selection_columns(&self, range: (Point, Point), line: u64) -> Option<(usize, usize)> {
+    /// Returns inclusive selected columns on an absolute line.
+    ///
+    /// Pass the current [`Self::selection_range`]. Lines outside that range
+    /// return `None`. Either half of a wide glyph selects the whole glyph.
+    pub fn selection_columns(&self, range: (Point, Point), line: u64) -> Option<(usize, usize)> {
         self.columns_of(self.selection?.kind, range, line)
     }
 
