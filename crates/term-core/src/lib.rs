@@ -551,6 +551,8 @@ struct Reports {
     decsace: u16,
     /// Protection kinds seen since reset; skips row scans on ordinary erases.
     protection_used: links::Protection,
+    /// Ordinary ED, EL and ECH honor ISO protection after SPA, until a soft reset.
+    ordinary_erase_mask: links::Protection,
     /// DECRQSS-reportable settings stored but not enacted: status display,
     /// status-line type and lines per screen.
     decsasd: u16,
@@ -567,6 +569,7 @@ impl Default for Reports {
             conformance_level: 64,
             conformance_pc: 0,
             protection_used: Default::default(),
+            ordinary_erase_mask: Default::default(),
             decsace: 0,
             decsasd: 0,
             decssdt: 0,

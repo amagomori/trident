@@ -288,6 +288,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_vt420_honors_rectangle_and_column_edits() {
+        let mut t = Terminal::new(4, 2);
+        for (level, expected) in [(63, "AB"), (64, " XB")] {
+            t.advance(format!("\x1b[{level};1\"p").as_bytes());
+            t.advance(b"AB\x1b[88;1;1;1;1$x\r\x1b[1'}");
+            assert_eq!(t.viewport_row(0).text(), expected);
+        }
+    }
+
+    #[test]
+    fn column_mode_clear_is_not_a_selective_erase() {
+        let mut t = Terminal::new(80, 3);
+        t.advance(b"\x1b[1\"qD\x1b[0\"q\x1bVI\x1bW\x1b[?2J");
+        assert_eq!(t.viewport_row(0).text(), "DI");
+        t.advance(b"\x1b[?40h\x1b[?3h");
+        assert!(t.viewport_row(0).text().is_empty());
+    }
+
+    #[test]
+    fn soft_reset_ends_iso_protection_for_ordinary_erases() {
+        for erase in [b"\x1b[2J".as_slice(), b"\x1b[2K", b"\x1b[X"] {
+            let mut t = Terminal::new(4, 2);
+            t.advance(b"\x1bVP\x1bW\r");
+            t.advance(erase);
+            assert_eq!(t.viewport_row(0).text(), "P");
+            t.advance(b"\x1b[!p");
+            assert_eq!(t.viewport_row(0).text(), "P");
+            t.advance(erase);
+            assert!(t.viewport_row(0).text().is_empty());
+        }
+    }
+
+    #[test]
     fn copied_wrap_padding_is_a_selectable_space() {
         let mut t = Terminal::new(4, 3);
         t.advance("abc界\x1b[3;1HXYZ\x1b[1;4;1;4;1;3;2;1$v".as_bytes());

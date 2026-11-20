@@ -412,6 +412,9 @@ impl Terminal {
     }
 
     pub(super) fn set_protection(&mut self, kind: Protection, on: bool) {
+        if kind == Protection::ISO && on {
+            self.reports.ordinary_erase_mask = Protection::ISO;
+        }
         let index = self.cursor.template.hyperlink;
         let mut extras = self.links.extras(index);
         if extras.protection.contains(kind) == on {

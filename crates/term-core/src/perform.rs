@@ -100,7 +100,7 @@ impl Perform for Terminal {
                 let protected = if private {
                     Protection::EITHER
                 } else {
-                    Protection::ISO
+                    self.reports.ordinary_erase_mask
                 };
                 let mode = arg(params, 0, 0);
                 if action == 'J' {
@@ -122,7 +122,7 @@ impl Perform for Terminal {
             ('X', []) => {
                 let (row, col) = (self.cursor.row, self.cursor.col);
                 let end = (col + n(0)).min(self.cols);
-                if self.reports.protection_used.contains(Protection::ISO) {
+                if self.reports.ordinary_erase_mask.contains(Protection::ISO) {
                     self.erase_unprotected(row, col..end, Protection::ISO, false);
                 } else {
                     self.erase_cells(row, col, end);
@@ -222,6 +222,7 @@ impl Perform for Terminal {
             ('p', [b'!']) => {
                 // DECSTR soft reset.
                 self.reports.decsace = 0;
+                self.reports.ordinary_erase_mask = Protection::default();
                 self.modes.show_cursor = true;
                 self.modes.origin = false;
                 self.lr_margin_mode = LrMode::Off;

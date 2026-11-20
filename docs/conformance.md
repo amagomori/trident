@@ -26,8 +26,10 @@ $VTRUN --idle 400 --key '1\r' --key '\r' --key '\r' --key '0\r' -- vttest
 
 ## esctest results
 
-With xterm expectations at VT level 4, 414 tests pass and 114 fail; the suite marks 39 tests as
-known xterm bugs. The failures group under these tickets:
+With xterm expectations at VT level 4 and `allowC2Controls`, 467 tests pass and 60 fail;
+the suite classifies 40 as known bugs or missing options. Rectangle edits, column edits
+and character protection have no unexpected failures. As in xterm, DECSED and DECSEL honor
+both DEC and ISO protection, while DECSERA honors DEC protection only. The remaining failures are:
 
 | Failures | Cause | Ticket |
 | --- | --- | --- |
