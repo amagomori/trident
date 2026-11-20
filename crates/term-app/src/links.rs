@@ -50,13 +50,16 @@ pub fn command_modifier(modifiers: ModifiersState) -> bool {
     }
 }
 
+pub fn allowed_uri(uri: &str) -> bool {
+    uri.split_once(':').is_some_and(|(scheme, _)| {
+        ["http", "https", "ftp", "file", "mailto"]
+            .iter()
+            .any(|s| scheme.eq_ignore_ascii_case(s))
+    }) && !uri.chars().any(char::is_control)
+}
+
 pub fn open_command(uri: &str) -> Option<Command> {
-    let (scheme, _) = uri.split_once(':')?;
-    if !["http", "https", "ftp", "file", "mailto"]
-        .iter()
-        .any(|s| scheme.eq_ignore_ascii_case(s))
-        || uri.chars().any(char::is_control)
-    {
+    if !allowed_uri(uri) {
         return None;
     }
     let mut command = Command::new(if cfg!(target_os = "macos") {

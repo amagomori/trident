@@ -326,6 +326,7 @@ pub enum Action {
     LineUp,
     LineDown,
     Copy,
+    CopyLinkTarget,
     Paste,
     PastePrimary,
     Increase,
@@ -359,6 +360,7 @@ impl Action {
                 "scroll_line_up" => Self::LineUp,
                 "scroll_line_down" => Self::LineDown,
                 "copy" => Self::Copy,
+                "copy_link_target" => Self::CopyLinkTarget,
                 "search" => Self::Search,
                 "paste" => Self::Paste,
                 "paste_primary" => Self::PastePrimary,
@@ -546,6 +548,12 @@ pub(crate) fn default_bindings_for(macos: bool) -> BTreeMap<Chord, Action> {
         );
     }
     let select = if macos { "super" } else { "alt" };
+    let copy_link = if macos {
+        "super+shift+l"
+    } else {
+        "ctrl+shift+l"
+    };
+    bindings.insert(Chord::parse(copy_link).unwrap(), Action::CopyLinkTarget);
     for n in 1..=9 {
         bindings.insert(
             Chord::parse(&format!("{select}+{n}")).unwrap(),

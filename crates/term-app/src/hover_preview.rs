@@ -1049,6 +1049,10 @@ impl App {
     /// What the pointer is over, if a preview should be looked for.
     fn hover_preview_target(&self) -> Option<Job> {
         if !self.config.hover_preview
+            || self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.link_picker.is_some())
             || !self.focused
             || !links::command_modifier(self.modifiers.state())
         {

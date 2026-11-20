@@ -31,6 +31,7 @@ mod input;
 #[cfg(target_os = "linux")]
 mod ipc;
 mod latency;
+mod link_picker;
 mod osc_notify;
 mod paste;
 mod pointer;
@@ -402,6 +403,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
 }
 
 struct Session {
+    link_picker: Option<Box<link_picker::Picker>>,
     composition: ime::Composition,
     link_pressed: bool,
     hover: Option<links::Hover>,
@@ -823,6 +825,13 @@ fn update_terminal(
 }
 
 impl Session {
+    fn close_link_picker(&mut self) {
+        if self.link_picker.take().is_some() {
+            self.window.set_ime_allowed(true);
+            self.window.request_redraw();
+        }
+    }
+
     /// Makes `pane` the active tab, leaving the previous active tab's state in `pane`.
     fn swap_pane(&mut self, pane: &mut Pane) {
         use std::mem::swap;
@@ -1539,6 +1548,8 @@ fn animation_wakeup(
 }
 
 struct App {
+    /// Consume repeats and kitty releases even if the picker closed on the press.
+    picker_keys: HashSet<PhysicalKey>,
     startup_stderr: bool,
     search: Option<search::Search>,
     appearance: Option<Theme>,
@@ -1756,6 +1767,7 @@ impl App {
         .map_err(|e| diag!("trident: config reload unavailable: {e}"))
         .ok();
         App {
+            picker_keys: HashSet::new(),
             startup_stderr: false,
             search: None,
             appearance: None,
@@ -2040,6 +2052,7 @@ impl App {
             }
         };
         Ok(Session {
+            link_picker: None,
             composition: ime::Composition::default(),
             link_pressed: false,
             hover: None,
@@ -2604,6 +2617,7 @@ impl App {
             self.tabs[index] = Some(pane);
             return;
         };
+        let picker = s.link_picker.take();
         s.swap_pane(&mut pane);
         std::mem::swap(&mut self.occluded, &mut pane.window.occluded);
         std::mem::swap(&mut self.normal_cells, &mut pane.window.normal_cells);
@@ -2630,6 +2644,7 @@ impl App {
         if let Some(s) = &mut self.session {
             s.latency = latency;
             s.swap_pane(&mut pane);
+            s.link_picker = picker;
         }
         self.tabs[index] = Some(pane);
     }
@@ -2709,6 +2724,7 @@ impl App {
         if self.focused && s.term.modes.focus_events {
             s.pty.write(b"\x1b[O");
         }
+        s.close_link_picker();
         s.swap_pane(&mut pane);
         pane.bell.show();
         #[cfg(not(target_os = "macos"))]
@@ -3090,6 +3106,7 @@ impl App {
         self.cancel_prompt_click();
         let tab_bar_shown = tab_bar_drawn(self.config.tab_bar.shown(self.tabs.len()));
         let Some(s) = &mut self.session else { return };
+        s.close_link_picker();
         s.scroll.reset();
         s.resize.applied(Instant::now());
         s.tab_bar = if tab_bar_shown {
@@ -3420,12 +3437,17 @@ impl App {
         let hover = self.hover_link();
         let Some(s) = &mut self.session else { return };
         s.renderer.set_floating(floating);
-        s.renderer.set_link_target(
-            hover
-                .as_ref()
-                .filter(|hover| hover.link.osc8)
-                .map(|hover| hover.link.uri.as_str()),
-        );
+        let picker = s.link_picker.as_deref();
+        let selected = picker.and_then(link_picker::Picker::selected);
+        s.renderer
+            .set_link_badges(picker.map(|p| p.badges.as_slice()));
+        s.renderer
+            .set_link_target(selected.map(|l| l.uri.as_str()).or_else(|| {
+                hover
+                    .as_ref()
+                    .filter(|hover| hover.link.osc8)
+                    .map(|hover| hover.link.uri.as_str())
+            }));
         if s.term.modes.synchronized_output {
             s.redraw_pending = true;
             return;
@@ -3535,7 +3557,7 @@ impl App {
             banner.as_deref(),
             search.as_ref(),
             s.composition.preedit().filter(|_| search.is_none()),
-            hover.as_ref().map(|hover| &hover.link),
+            selected.or_else(|| hover.as_ref().map(|hover| &hover.link)),
             Some(&mut pre_present),
         );
         s.blink_at = s.renderer.blinking().then_some(blink_flip);
@@ -4086,6 +4108,22 @@ impl App {
             return true;
         }
         match action {
+            Action::CopyLinkTarget => {
+                self.picker_keys.insert(event.physical_key);
+                if !event.repeat
+                    && !held_at_focus
+                    && self.search.is_none()
+                    && let Some(s) = &mut self.session
+                    && s.composition.preedit().is_none()
+                    && let Some(picker) = link_picker::Picker::open(&s.term)
+                {
+                    s.link_picker = Some(picker);
+                    s.window.set_ime_allowed(false);
+                    s.window.request_redraw();
+                    self.cancel_prompt_click();
+                    self.refresh_link();
+                }
+            }
             Action::Search => {
                 self.cancel_prompt_click();
                 if let Some(s) = &mut self.session {
@@ -4408,6 +4446,9 @@ impl App {
             return None;
         }
         let s = self.session.as_ref()?;
+        if s.link_picker.is_some() {
+            return None;
+        }
         if pointer_in_search_bar(
             self.search.is_some(),
             self.mouse_pos,
@@ -5176,6 +5217,9 @@ impl App {
                 // `focused` still describes the outgoing window: blur it once, since a
                 // separate Focused(false) may never reach it.
                 let blur = self.focused;
+                if let Some(s) = &mut self.session {
+                    s.close_link_picker();
+                }
                 self.swap_window(index);
                 if blur
                     && let Some(g) = self.windows.get_mut(index)
@@ -5191,6 +5235,19 @@ impl App {
     }
 
     fn window_event_inner(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        if matches!(
+            event,
+            WindowEvent::Focused(false)
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::DroppedFile(_)
+                | WindowEvent::CloseRequested
+        ) && let Some(s) = &mut self.session
+        {
+            s.close_link_picker();
+        }
         match event {
             WindowEvent::ThemeChanged(theme) => self.set_appearance(Some(theme)),
             #[cfg(target_os = "macos")]
@@ -5265,6 +5322,9 @@ impl App {
                 let held_at_focus =
                     self.held_at_focus
                         .observe(event.physical_key, event.state, is_synthetic);
+                if self.picker_key(&event, is_synthetic) {
+                    return;
+                }
                 let kitty_flags = self.session.as_ref().map_or(0, |s| s.term.kitty_flags());
                 if event.state != ElementState::Pressed {
                     // Releases reach the PTY only where the press would: not past a
@@ -5366,6 +5426,11 @@ impl App {
                     self.hide_pointer_for_typing();
                 }
             }
+            WindowEvent::Ime(_)
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.link_picker.is_some()) => {}
             WindowEvent::Ime(Ime::Commit(text)) if self.search.is_some() => {
                 if self.pending_paste.is_some() || self.pending_close.is_some() {
                     // Like typed keys, committed text never reaches the shell past the banner.
