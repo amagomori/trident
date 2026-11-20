@@ -30,6 +30,7 @@ pub struct Search {
     pub current: Option<usize>,
     pub dirty: bool,
     pub invalid: bool,
+    capped: bool,
     job: Option<SearchJob>,
     /// Selection to restore once the running search reaches it.
     keep: Option<Match>,
@@ -101,6 +102,7 @@ impl Search {
         self.matches.clear();
         self.current = None;
         self.dirty = false;
+        self.capped = false;
         self.keep = if reset { None } else { previous };
         if reset {
             self.pending_steps = 0;
@@ -140,6 +142,7 @@ impl Search {
             self.current = self.current.map(|i| i + added);
         }
         if done {
+            self.capped = job.capped();
             self.job = None;
         }
         if self.current.is_none() {
@@ -268,6 +271,12 @@ impl Search {
             } else {
                 "no matches".into()
             }
+        } else if self.capped {
+            format!(
+                "{} of newest {}",
+                self.current.unwrap_or(0) + 1,
+                self.matches.len()
+            )
         } else {
             format!(
                 "{}/{}{}",
@@ -483,6 +492,31 @@ mod tests {
     }
 
     #[test]
+    fn completed_counts_at_the_limit_are_exact_unless_history_was_skipped() {
+        let limit = term_core::search::MATCH_LIMIT;
+        let mut term = Terminal::new(limit + 1, 1);
+        term.advance(&vec![b'a'; limit - 1]);
+        let mut search = Search {
+            regex: true,
+            ..Search::default()
+        };
+        search.insert("[a]", &mut term);
+        assert_eq!(search.status(), "9999/9999  [regex]");
+        term.advance(b"a");
+        search.refresh(&mut term, true);
+        assert!(!search.searching());
+        assert_eq!(search.status(), "10000/10000  [regex]");
+
+        term.advance(b"\r\n");
+        term.advance(&vec![b'a'; limit]);
+        term.advance(b"z");
+        search.refresh(&mut term, true);
+        assert_eq!(search.status(), "10000 of newest 10000  [regex]");
+        search.insert("z", &mut term);
+        assert_eq!(search.status(), "1/1  [regex]");
+    }
+
+    #[test]
     fn capped_results_select_newest_and_preserve_navigation() {
         let limit = term_core::search::MATCH_LIMIT;
         let mut term = Terminal::new(limit + 4, 1);
@@ -491,7 +525,7 @@ mod tests {
         search.insert("a", &mut term);
         assert_eq!(search.current, Some(limit - 1));
         assert_eq!(search.matches[limit - 1].start.col, limit);
-        assert_eq!(search.status(), "10000/10000  [plain]");
+        assert_eq!(search.status(), "10000 of newest 10000  [plain]");
         search.step(&mut term, false);
         assert_eq!(search.current, Some(0));
         assert_eq!(search.matches[0].start.col, 1);
@@ -503,7 +537,11 @@ mod tests {
         term.advance(b"a");
         search.refresh(&mut term, false);
         assert_eq!(search.matches[search.current.unwrap()].start.col, limit);
-        assert_eq!(search.status(), "9998/10000  [plain]");
+        assert_eq!(search.status(), "9998 of newest 10000  [plain]");
+
+        term.advance(b"\rbbbb");
+        search.refresh(&mut term, false);
+        assert_eq!(search.status(), "9997/9999  [plain]");
     }
 
     #[test]

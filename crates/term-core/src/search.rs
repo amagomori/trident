@@ -36,6 +36,7 @@ pub struct SearchJob {
     found: Vec<Match>,
     chunks: Vec<std::ops::Range<usize>>,
     total: usize,
+    capped: bool,
     text: Vec<u8>,
     /// After a miss, try the literal batch filter on the next lines.
     last_missed: bool,
@@ -53,6 +54,11 @@ impl SearchJob {
     /// Returns whether all retained text was scanned or [`MATCH_LIMIT`] reached.
     pub fn done(&self) -> bool {
         self.next.is_none()
+    }
+
+    /// Whether the match limit discarded a hit or left older text unsearched.
+    pub fn capped(&self) -> bool {
+        self.capped
     }
 
     /// Matches start on or after this line come from this search; older lines are still unscanned.
@@ -75,7 +81,7 @@ impl SearchJob {
         let mut unbatched = 0;
         while budget > 0 {
             let Some(next) = self.next else { break };
-            if next < first || self.total == MATCH_LIMIT {
+            if next < first {
                 self.next = None;
                 break;
             }
@@ -100,7 +106,12 @@ impl SearchJob {
 
     fn advance_past(&mut self, logical_start: u64, first: u64) {
         self.frontier = logical_start;
-        self.next = (logical_start > first && self.total < MATCH_LIMIT).then(|| logical_start - 1);
+        self.next = if self.total == MATCH_LIMIT {
+            self.capped |= logical_start > first;
+            None
+        } else {
+            (logical_start > first).then(|| logical_start - 1)
+        };
     }
 
     /// Rule out up to `lines` logical lines ending at `next` with one regex call, returning how
@@ -171,6 +182,7 @@ impl SearchJob {
             if self.found.len() < offset + remaining {
                 self.found.push(matched);
             } else {
+                self.capped = true;
                 self.found[offset + oldest] = matched;
                 oldest = (oldest + 1) % remaining;
             }
@@ -393,6 +405,7 @@ impl Terminal {
             found: Vec::with_capacity(MATCH_LIMIT),
             chunks: Vec::new(),
             total: 0,
+            capped: false,
             text: Vec::new(),
             last_missed: false,
             batch: !regex && !query.contains('\n'),
@@ -879,6 +892,20 @@ mod tests {
         wrapped.advance(b"foo  bar");
         assert_eq!(wrapped.search("o  b", false).unwrap().len(), 1);
         assert_eq!(wrapped.search("bar$", true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn limit_stops_before_older_text_without_claiming_an_extra_hit() {
+        let mut term = Terminal::new(MATCH_LIMIT, 2);
+        term.advance(b"no hits\r\n");
+        term.advance(&vec![b'a'; MATCH_LIMIT]);
+        for (pattern, regex) in [("a", false), ("[a]", true)] {
+            let mut job = term.search_job(pattern, regex).unwrap();
+            assert!(job.run(&term, 1));
+            assert_eq!(job.frontier(), 1);
+            assert!(job.capped());
+            assert_eq!(job.take_found().len(), MATCH_LIMIT);
+        }
     }
 
     #[test]
