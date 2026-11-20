@@ -518,11 +518,36 @@ fn text_is_printed_with_controls_made_visible() {
     assert_eq!(out, std::fs::read(sample("sample.txt")).unwrap());
 
     let mut out = Vec::new();
-    write_text(&mut out, "red \x1b[31mtext\x07\r\nnext\u{9b}".as_bytes()).unwrap();
+    write_text(&mut out, "red \x1b[31mtext\x07\r\nnext\u{9b}").unwrap();
     assert_eq!(
         String::from_utf8(out).unwrap(),
         "red ^[[31mtext^G\nnext\u{fffd}\n"
     );
+}
+
+#[test]
+fn text_preserves_safe_runs_and_normalizes_line_endings() {
+    for (input, expected) in [
+        ("", ""),
+        ("\r\r\n\n\r", "\n\n\n\n"),
+        ("界\t🙂\u{a0}", "界\t🙂\u{a0}\n"),
+        ("\0\x08\x0b\x1f\x7f\u{80}\u{9f}", "^@^H^K^_^?��\n"),
+    ] {
+        let mut out = Vec::new();
+        write_text(&mut out, input).unwrap();
+        assert_eq!(out, expected.as_bytes());
+    }
+}
+
+#[test]
+fn text_propagates_short_write_errors() {
+    // A slice accepts only its remaining capacity; write_all must report the shortfall.
+    for n in 0..7 {
+        let mut buf = vec![0; n];
+        let error = write_text(&mut buf.as_mut_slice(), "abc\x1bZ").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+        assert_eq!(buf, &b"abc^[Z\n"[..n]);
+    }
 }
 
 #[test]
@@ -545,7 +570,7 @@ fn latin1_and_windows1252_are_text() {
         panic!("not text")
     };
     let mut out = Vec::new();
-    write_text(&mut out, text.as_bytes()).unwrap();
+    write_text(&mut out, &text).unwrap();
     assert_eq!(
         String::from_utf8(out).unwrap(),
         "café and enough printable text to allow an escape ^[[31m\nnext\nend\n"
@@ -570,7 +595,7 @@ fn utf16_endianness_and_boms() {
             }
             assert_eq!(detect(&bytes), Kind::DecodedText(text.into()));
             let mut out = Vec::new();
-            write_text(&mut out, decode_text(&bytes).unwrap().as_bytes()).unwrap();
+            write_text(&mut out, &decode_text(&bytes).unwrap()).unwrap();
             assert_eq!(
                 String::from_utf8(out).unwrap(),
                 "Hello café world\nnext\nend\n"
@@ -584,9 +609,7 @@ fn utf16_endianness_and_boms() {
     let mut out = Vec::new();
     write_text(
         &mut out,
-        decode_text(&[0xff, 0xfe, 0x1b, 0, 0x41, 0])
-            .unwrap()
-            .as_bytes(),
+        &decode_text(&[0xff, 0xfe, 0x1b, 0, 0x41, 0]).unwrap(),
     )
     .unwrap();
     assert_eq!(out, b"^[A\n");
