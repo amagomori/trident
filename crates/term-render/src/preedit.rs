@@ -38,31 +38,34 @@ pub(crate) struct PreeditGlyph {
     pub width: usize,
 }
 
-fn columns(text: &str, end: usize) -> usize {
+pub(crate) fn columns(text: &str, end: usize) -> usize {
     text.char_indices()
         .take_while(|(byte, _)| *byte < end)
         .map(|(_, c)| c.width().unwrap_or(0))
         .sum()
 }
 
+pub(crate) fn glyphs(chars: impl Iterator<Item = char>) -> impl Iterator<Item = PreeditGlyph> {
+    chars
+        .filter_map(|c| c.width().map(|width| (c, width)))
+        .scan((0, 0), |(column, base_column), (character, width)| {
+            if width != 0 {
+                *base_column = *column;
+            }
+            let glyph = PreeditGlyph {
+                character,
+                column: *column,
+                base_column: *base_column,
+                width,
+            };
+            *column += width;
+            Some(glyph)
+        })
+}
+
 impl Preedit<'_> {
     pub(crate) fn glyphs(self) -> impl Iterator<Item = PreeditGlyph> {
-        self.text
-            .chars()
-            .filter_map(|c| c.width().map(|width| (c, width)))
-            .scan((0, 0), |(column, base_column), (character, width)| {
-                if width != 0 {
-                    *base_column = *column;
-                }
-                let glyph = PreeditGlyph {
-                    character,
-                    column: *column,
-                    base_column: *base_column,
-                    width,
-                };
-                *column += width;
-                Some(glyph)
-            })
+        glyphs(self.text.chars())
     }
 
     /// Fits a single-line composition in the grid, keeping its selected clause visible.

@@ -77,18 +77,6 @@ impl Search {
         self.preedit_cursor = None;
     }
 
-    pub fn cursor_column(&self) -> usize {
-        self.query.chars().count()
-            + self.preedit[..self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)]
-                .chars()
-                .count()
-    }
-
-    pub fn preedit_columns(&self) -> std::ops::Range<usize> {
-        let start = self.query.chars().count();
-        start..start + self.preedit.chars().count() + usize::from(!self.preedit.is_empty())
-    }
-
     pub fn insert(&mut self, text: &str, term: &mut Terminal) {
         self.clear_preedit();
         self.query
@@ -250,13 +238,14 @@ impl Search {
         }
     }
 
-    pub fn input(&self) -> String {
-        format!(
-            "{}{}▏{}",
-            self.query,
-            &self.preedit[..self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)],
-            &self.preedit[self.preedit_cursor.map_or(self.preedit.len(), |c| c.0)..],
-        )
+    pub fn input(&self) -> term_render::SearchInput<'_> {
+        term_render::SearchInput {
+            query: &self.query,
+            preedit: term_render::Preedit {
+                text: &self.preedit,
+                cursor: self.preedit_cursor,
+            },
+        }
     }
 
     pub fn status(&self) -> String {
@@ -352,8 +341,13 @@ mod tests {
         search.insert("a", &mut term);
         let matches = search.matches.clone();
         search.set_preedit("日本".into(), Some((3, 6)));
-        assert_eq!(search.cursor_column(), 2);
-        assert_eq!(search.input(), "a日▏本");
+        assert_eq!(
+            search
+                .input()
+                .layout(0, 800.0, 600.0, 10.0, 20.0)
+                .cursor_area[0],
+            90.0
+        );
         assert_eq!(search.query, "a");
         assert_eq!(search.matches, matches);
         search.set_preedit(String::new(), None);
@@ -376,18 +370,11 @@ mod tests {
         search.insert(&query, &mut term);
         assert_eq!(search.status(), "1/1  [plain]");
         search.set_preedit("日本".into(), Some((3, 6)));
-        assert_eq!(search.input(), format!("{query}日▏本"));
-        let layout = term_render::search_layout(
-            search.cursor_column(),
-            search.preedit_columns(),
-            search.status().chars().count(),
-            800.0,
-            600.0,
-            10.0,
-            20.0,
-        );
-        assert!(layout.input.contains(&search.cursor_column()));
-        assert!(search.preedit_columns().contains(&search.cursor_column()));
+        let layout =
+            search
+                .input()
+                .layout(search.status().chars().count(), 800.0, 600.0, 10.0, 20.0);
+        assert!(layout.input.contains(&77)); // 75 ASCII cells and 日 before the caret.
         assert_eq!(layout.status_columns, search.status().chars().count());
         assert!(layout.cursor_area[0] + layout.cursor_area[2] < layout.status_column as f32 * 10.0);
         search.insert("[", &mut term);
@@ -402,26 +389,13 @@ mod tests {
             query: "a".repeat(85),
             ..Search::default()
         };
-        for (text, cursor) in [("にほ", (6, 6)), ("日本", (0, 6))] {
+        for (text, cursor, caret) in [("にほ", (6, 6), 89), ("日本", (0, 6), 85)] {
             search.set_preedit(text.into(), Some(cursor));
-            let layout = term_render::search_layout(
-                search.cursor_column(),
-                search.preedit_columns(),
-                0,
-                850.0,
-                20.0,
-                10.0,
-                20.0,
-            );
-            assert_eq!(layout.input, 9..88);
-            assert!(
-                search
-                    .preedit_columns()
-                    .all(|column| layout.input.contains(&column))
-            );
+            let layout = search.input().layout(0, 850.0, 20.0, 10.0, 20.0);
+            assert_eq!(layout.input, 11..90);
             assert_eq!(
                 layout.cursor_area[0],
-                (layout.prefix_columns + search.cursor_column() - layout.input.start) as f32 * 10.0
+                (layout.prefix_columns + caret - layout.input.start) as f32 * 10.0
             );
         }
     }
