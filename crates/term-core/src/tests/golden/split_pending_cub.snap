@@ -1,0 +1,15 @@
+size=8x2 active=primary
+cursor row=0 col=5 visible=true shape=block pending_wrap=true
+cursor attributes: fg=default-fg bg=default-bg flags=[]
+scroll_region=0..=1 history=0 display_offset=0
+primary:
+  row 0 wrap=false text="     X  "
+    cells 0..8: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="  abcd  "
+    cells 0..8: fg=default-fg bg=default-bg flags=[]
+scrollback (oldest first):
+alternate:
+  row 0 wrap=false text="        "
+    cells 0..8: fg=default-fg bg=default-bg flags=[]
+  row 1 wrap=false text="        "
+    cells 0..8: fg=default-fg bg=default-bg flags=[]

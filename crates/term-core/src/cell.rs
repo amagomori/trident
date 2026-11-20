@@ -212,13 +212,15 @@ pub struct Row {
     /// `u8::MAX` means not known. Writers to `cells` must call `touch` or `touch_all`;
     /// `put_char` relies on `Terminal::sync_cursor_row`.
     occupied: u8,
-    /// Cells past the right edge, kept when the window narrows so widening brings them back.
-    /// Boxed so rows that were never cut stay small; every scroll moves rows around.
-    hidden: Option<Box<Hidden>>,
+    /// Rare row state is boxed to keep full-width scrolling compact.
+    extra: Option<Box<RowExtra>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Hidden {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RowExtra {
+    /// Inclusive margins where text wrapped without joining the entire rows.
+    split_wraps: Vec<(usize, usize)>,
+    /// Cells cut off when narrowing, restored on widening.
     cells: Vec<Cell>,
     /// The last cell of the row is a `PAD` blank standing in for a wide character that no
     /// longer fits; the character itself is the start of `cells`.
@@ -232,7 +234,7 @@ impl PartialEq for Row {
             && self.flags == other.flags
             && self.prompt_col == other.prompt_col
             && self.output_col == other.output_col
-            && self.hidden == other.hidden
+            && self.extra == other.extra
     }
 }
 
@@ -260,14 +262,14 @@ impl Row {
         self.flags = RowFlags::default();
         self.prompt_col = 0;
         self.output_col = 0;
-        self.hidden = None;
+        self.extra = None;
     }
 
     pub(crate) fn erase(&mut self, blank: Row) {
         self.cells = blank.cells;
         self.occupied = blank.occupied;
         self.set_wrapped(false);
-        self.hidden = None;
+        self.extra = None;
     }
 
     /// The line continues on the next row because it soft-wrapped.
@@ -277,10 +279,42 @@ impl Row {
 
     /// Sets whether the logical line continues onto the next physical row.
     pub fn set_wrapped(&mut self, wrapped: bool) {
+        if let Some(extra) = &mut self.extra {
+            if extra.cells.is_empty() {
+                self.extra = None;
+            } else {
+                extra.split_wraps.clear();
+            }
+        }
         if wrapped {
             self.flags.insert(RowFlags::WRAPPED);
         } else {
             self.flags.remove(RowFlags::WRAPPED);
+        }
+    }
+
+    pub(crate) fn split_wrapped(&self, left: usize, right: usize) -> bool {
+        self.extra
+            .as_ref()
+            .is_some_and(|e| e.split_wraps.contains(&(left, right)))
+    }
+
+    pub(crate) fn set_split_wrapped(&mut self, left: usize, right: usize, wrapped: bool) {
+        self.flags.remove(RowFlags::WRAPPED);
+        if let Some(extra) = &mut self.extra {
+            extra.split_wraps.retain(|&(l, r)| r < left || l > right);
+        }
+        if wrapped {
+            self.extra
+                .get_or_insert_with(Default::default)
+                .split_wraps
+                .push((left, right));
+        } else if self
+            .extra
+            .as_ref()
+            .is_some_and(|e| e.split_wraps.is_empty() && e.cells.is_empty())
+        {
+            self.extra = None;
         }
     }
 
@@ -317,7 +351,7 @@ impl Row {
             prompt_col: 0,
             output_col: 0,
             occupied: 0,
-            hidden: None,
+            extra: None,
         }
     }
 
@@ -329,7 +363,7 @@ impl Row {
             prompt_col: 0,
             output_col: 0,
             occupied: u8::MAX,
-            hidden: None,
+            extra: None,
         }
     }
 
@@ -337,10 +371,11 @@ impl Row {
     pub(crate) fn take_cells(&mut self) -> Vec<Cell> {
         self.touch_all();
         let mut cells = std::mem::take(&mut self.cells);
-        if let Some(hidden) = self.hidden.take() {
-            let Hidden {
+        if let Some(hidden) = self.extra.take() {
+            let RowExtra {
                 cells: mut hidden,
                 padded,
+                ..
             } = *hidden;
             if padded {
                 let pad = cells.pop().unwrap_or_default();
@@ -392,9 +427,10 @@ impl Row {
                 hidden.truncate(used);
             }
             if wide_at_edge || !hidden.is_empty() {
-                self.hidden = Some(Box::new(Hidden {
+                self.extra = Some(Box::new(RowExtra {
                     cells: hidden,
                     padded: wide_at_edge,
+                    ..Default::default()
                 }));
             }
         } else {
@@ -409,7 +445,14 @@ impl Row {
 
     /// Forgets the cells past the right edge, for when the line is erased to its end.
     pub fn clear_hidden(&mut self) {
-        self.hidden = None;
+        if let Some(extra) = &mut self.extra {
+            if extra.split_wraps.is_empty() {
+                self.extra = None;
+            } else {
+                extra.cells = Vec::new();
+                extra.padded = false;
+            }
+        }
     }
 
     /// Cells past the right edge, in order after the visible ones, as `resize` would bring
@@ -426,7 +469,7 @@ impl Row {
     }
 
     pub(crate) fn has_hidden(&self) -> bool {
-        self.hidden.is_some()
+        self.extra.as_ref().is_some_and(|e| !e.cells.is_empty())
     }
 
     /// The column of the first hidden cell, a blank standing in for an overwritten wide
@@ -439,7 +482,7 @@ impl Row {
             flags: Flags(0),
             hyperlink: 0,
         };
-        let h = self.hidden.as_deref()?;
+        let h = self.extra.as_deref()?;
         let pad_intact = self
             .cells
             .last()
@@ -473,7 +516,7 @@ impl Row {
 
     /// Marks the links the row references and returns how many were not marked yet.
     pub(crate) fn mark_hyperlinks(&self, used: &mut [bool]) -> usize {
-        let hidden = self.hidden.as_deref().map_or(&[][..], |h| &h.cells[..]);
+        let hidden = self.extra.as_deref().map_or(&[][..], |h| &h.cells[..]);
         let mut marked = 0;
         for cells in [&self.cells[..], hidden] {
             // Neighbouring cells mostly share a link, so only a change of index is looked up.
@@ -495,14 +538,14 @@ impl Row {
     pub(crate) fn hyperlinks_mut(&mut self) -> impl Iterator<Item = &mut u16> {
         self.cells
             .iter_mut()
-            .chain(self.hidden.iter_mut().flat_map(|h| h.cells.iter_mut()))
+            .chain(self.extra.iter_mut().flat_map(|h| h.cells.iter_mut()))
             .map(|c| &mut c.hyperlink)
     }
 
     pub(crate) fn is_blank(&self) -> bool {
         self.cells.iter().all(|c| *c == Cell::default())
             && self
-                .hidden
+                .extra
                 .as_ref()
                 .is_none_or(|h| h.cells.iter().all(|c| *c == Cell::default()))
     }

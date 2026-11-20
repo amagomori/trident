@@ -27,7 +27,9 @@ pub mod grapheme;
 mod iterm;
 mod kitty;
 mod links;
+mod margins;
 pub use links::{FileLink, Link};
+use margins::{LrMode, shift_cells};
 mod notifications;
 pub use notifications::{Notification, Occasion, Urgency};
 mod osc;
@@ -461,6 +463,9 @@ pub struct Terminal {
     cursor: Cursor,
     scroll_top: usize,
     scroll_bottom: usize,
+    scroll_left: usize,
+    scroll_right: usize,
+    lr_margin_mode: LrMode,
     tabs: Vec<bool>,
     charsets: [Charset; 2],
     active_charset: usize,
@@ -1288,6 +1293,9 @@ impl Terminal {
             },
             scroll_top: 0,
             scroll_bottom: rows - 1,
+            scroll_left: 0,
+            scroll_right: cols - 1,
+            lr_margin_mode: LrMode::Off,
             tabs: default_tabs(cols),
             charsets: [Charset::Ascii; 2],
             active_charset: 0,
@@ -1845,6 +1853,7 @@ impl Terminal {
         }
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
+        self.reset_lr_margins();
         self.tabs = default_tabs(cols);
         for saved in [&mut self.primary.saved, &mut self.alternate.saved]
             .into_iter()
@@ -2308,7 +2317,7 @@ impl Terminal {
         let to_history = top == 0 && !self.alt_active;
         if !self.screen().placements.is_empty() {
             let keeps_lines = to_history && self.max_scrollback > 0;
-            self.scroll_placements(top, bottom, -(n as isize), keeps_lines);
+            self.scroll_placements(top, bottom, 0..usize::MAX, -(n as isize), keeps_lines);
         }
         if !to_history {
             self.rotate_region_up(top, bottom, n);
@@ -2400,7 +2409,7 @@ impl Terminal {
             self.shift_shell_lines_down(top, bottom, n);
         }
         if !self.screen().placements.is_empty() {
-            self.scroll_placements(top, bottom, n as isize, false);
+            self.scroll_placements(top, bottom, 0..usize::MAX, n as isize, false);
         }
         self.lines_mut()[top..=bottom].rotate_right(n);
         self.reset_rows(top..top + n);
@@ -2428,7 +2437,9 @@ impl Terminal {
     fn linefeed(&mut self) {
         self.cursor.pending_wrap = false;
         if self.cursor.row == self.scroll_bottom {
-            self.scroll_up_region(self.scroll_top, self.scroll_bottom, 1);
+            if self.in_horizontal_margins() {
+                self.scroll_up(self.scroll_top, self.scroll_bottom, 1);
+            }
         } else if self.cursor.row < self.rows - 1 {
             self.cursor.row += 1;
         }
@@ -2437,7 +2448,9 @@ impl Terminal {
     fn reverse_index(&mut self) {
         self.cursor.pending_wrap = false;
         if self.cursor.row == self.scroll_top {
-            self.scroll_down_region(self.scroll_top, self.scroll_bottom, 1);
+            if self.in_horizontal_margins() {
+                self.scroll_down(self.scroll_top, self.scroll_bottom, 1);
+            }
         } else if self.cursor.row > 0 {
             self.cursor.row -= 1;
         }
@@ -2557,6 +2570,7 @@ impl Terminal {
         // establish this boundary. Keep this off the untracked output path.
         if self.shell.zone == Zone::Input
             && !self.alt_active
+            && !self.has_partial_width()
             && self.cursor.pending_wrap
             && self.modes.autowrap
             && self.print_state.last() == Some(' ')
@@ -2600,42 +2614,43 @@ impl Terminal {
         }
 
         if self.cursor.pending_wrap && self.modes.autowrap {
-            self.sync_cursor_row();
-            let row = self.cursor.row;
-            self.lines_mut()[row].set_wrapped(true);
-            self.cursor.col = 0;
-            self.linefeed();
+            self.wrap_line();
         }
-        if width == 2 && self.cursor.col == self.cols - 1 {
+        if width == 2 && self.cursor.col == self.right_bound() {
             if self.modes.autowrap {
                 self.sync_cursor_row();
                 let (row, col) = (self.cursor.row, self.cursor.col);
                 let mut blank = Cell::blank(&self.cursor.template);
-                blank.flags.insert(Flags::WIDE_WRAP);
+                if !self.has_partial_width() {
+                    blank.flags.insert(Flags::WIDE_WRAP);
+                }
                 let line = &mut self.lines_mut()[row];
+                clear_wide_pair(&mut line.cells, col);
                 line.cells[col] = blank;
-                line.cells[col].flags.insert(Flags::WIDE_WRAP);
                 line.touch(col + 1);
-                line.set_wrapped(true);
-                self.cursor.col = 0;
-                self.linefeed();
+                self.wrap_line();
             } else {
                 self.print_state.disarm_clear();
                 return;
             }
         }
 
-        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        let (row, col) = (self.cursor.row, self.cursor.col);
         let template = self.cursor.template;
-        let insert = self.modes.insert;
-        if insert && track {
-            self.shift_input_writes(row, col, 0, width);
-        }
-        let line = &mut self.lines_mut()[row];
-        if insert {
+        if self.modes.insert {
+            let cols = self.right_bound() + 1;
+            if track {
+                if cols == self.cols {
+                    self.shift_input_writes(row, col, 0, width);
+                } else {
+                    self.erase_input_writes(row, col, cols);
+                }
+            }
+            let line = &mut self.lines_mut()[row];
             insert_printed_cells(line, col, cols, width, &template);
             line.touch_all();
         }
+        let line = &mut self.lines_mut()[row];
         clear_wide_pair(&mut line.cells, col);
         if width == 2 {
             clear_wide_pair(&mut line.cells, col + 1);
@@ -2657,11 +2672,24 @@ impl Terminal {
         if track {
             self.record_printed(row, col..col + width);
         }
-        if col + width >= cols {
-            self.cursor.col = cols - 1;
+        let next = col + width;
+        if next <= self.scroll_right {
+            self.cursor.col = next;
+        } else {
+            self.finish_print_at_right(next);
+        }
+    }
+
+    // Only writes reaching or beyond the right margin need to distinguish
+    // its edge from the physical edge of the screen.
+    #[cold]
+    fn finish_print_at_right(&mut self, next: usize) {
+        let right = self.right_bound();
+        if next > right {
+            self.cursor.col = right;
             self.cursor.pending_wrap = true;
         } else {
-            self.cursor.col = col + width;
+            self.cursor.col = next;
         }
     }
 
@@ -2672,13 +2700,14 @@ impl Terminal {
             (0, self.rows - 1)
         };
         self.cursor.row = (row + min_row).clamp(min_row, max_row);
-        self.cursor.col = col.min(self.cols - 1);
+        self.cursor.col = self.address_col(col);
         self.cursor.pending_wrap = false;
     }
 
     fn goto_row(&mut self, row: usize) {
         let col = self.cursor.col;
-        self.goto(row, col);
+        self.goto(row, 0);
+        self.cursor.col = col;
     }
 
     fn move_up(&mut self, n: usize) {
@@ -2865,67 +2894,70 @@ impl Terminal {
     }
 
     fn insert_blank(&mut self, n: usize) {
-        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
-        if self.shell.track_input {
-            self.shift_input_writes(row, col, 0, n.min(cols - col));
-        }
-        if !self.screen().placements.is_empty() {
-            self.erase_placements(row, row, col, usize::MAX);
-        }
-        let blank = Cell::blank(&self.cursor.template);
-        let line = &mut self.lines_mut()[row];
-        line.materialize_wrap_padding(col);
-        let n = n.min(cols - col);
-        if line.cells[col].flags.contains(Flags::WIDE_SPACER) {
-            clear_wide_pair(&mut line.cells, col);
-        }
-        for _ in 0..n {
-            line.cells.insert(col, blank);
-        }
-        line.cells.truncate(cols);
-        line.touch_all();
-        if line.cells[cols - 1].flags.contains(Flags::WIDE) {
-            line.cells[cols - 1] = blank;
+        if self.in_horizontal_margins() {
+            self.shift_row(self.cursor.row, self.cursor.col, n, true);
         }
         self.cursor.pending_wrap = false;
     }
 
     fn delete_chars(&mut self, n: usize) {
-        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
+        if self.in_horizontal_margins() {
+            self.shift_row(self.cursor.row, self.cursor.col, n, false);
+        }
+        self.cursor.pending_wrap = false;
+    }
+
+    fn shift_row(&mut self, row: usize, col: usize, n: usize, insert: bool) {
+        let end = self.scroll_right + 1;
+        let n = n.min(end - col);
         if self.shell.track_input {
-            self.shift_input_writes(row, col, n.min(cols - col), 0);
+            if end == self.cols {
+                self.shift_input_writes(
+                    row,
+                    col,
+                    if insert { 0 } else { n },
+                    if insert { n } else { 0 },
+                );
+            } else {
+                self.erase_input_writes(row, col, end);
+            }
         }
         if !self.screen().placements.is_empty() {
-            self.erase_placements(row, row, col, usize::MAX);
+            self.erase_placements(row, row, col, end);
         }
         let blank = Cell::blank(&self.cursor.template);
         let line = &mut self.lines_mut()[row];
         line.materialize_wrap_padding(col);
-        let n = n.min(cols - col);
-        clear_wide_pair(&mut line.cells, col);
-        clear_wide_pair(&mut line.cells, col + n - 1);
-        line.cells.drain(col..col + n);
-        line.cells.resize(cols, blank);
+        shift_cells(line, col, end, n, insert, blank);
         line.touch_all();
-        self.cursor.pending_wrap = false;
     }
 
     fn insert_lines(&mut self, n: usize) {
-        if (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row) {
-            self.scroll_down_region(self.cursor.row, self.scroll_bottom, n);
-            self.cursor.col = 0;
+        if self.in_horizontal_margins()
+            && (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row)
+        {
+            self.scroll_down(self.cursor.row, self.scroll_bottom, n);
+            self.cursor.col = self.scroll_left;
             self.cursor.pending_wrap = false;
         }
     }
 
     fn delete_lines(&mut self, n: usize) {
-        if (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row) {
+        if self.in_horizontal_margins()
+            && (self.scroll_top..=self.scroll_bottom).contains(&self.cursor.row)
+        {
             let bottom = self.scroll_bottom;
             let row = self.cursor.row;
+            if self.has_partial_width() {
+                self.scroll_rectangle(row, bottom, n, false);
+                self.cursor.col = self.scroll_left;
+                self.cursor.pending_wrap = false;
+                return;
+            }
             self.invalidate_output_ends_in_region(row, bottom, 0);
             let n = n.min(bottom - row + 1);
             if !self.screen().placements.is_empty() {
-                self.scroll_placements(row, bottom, -(n as isize), false);
+                self.scroll_placements(row, bottom, 0..usize::MAX, -(n as isize), false);
             }
             self.rotate_region_up(row, bottom, n);
             self.cursor.col = 0;
@@ -2951,21 +2983,21 @@ impl Terminal {
         if self.cursor.pending_wrap {
             self.cursor.pending_wrap = false;
             if !(self.modes.autowrap && (self.modes.reverse_wrap || self.modes.reverse_wrap_ext)) {
-                self.cursor.col = self.cursor.col.saturating_sub(1);
+                self.cursor.col = self.cursor.col.saturating_sub(1).max(self.left_bound());
             }
             return;
         }
-        if self.cursor.col > 0 {
+        if self.cursor.col > self.left_bound() {
             self.cursor.col -= 1;
         } else if self.modes.autowrap
             && let Some(row) = self.reverse_wrap_row()
         {
             self.cursor.row = row;
-            self.cursor.col = self.cols - 1;
+            self.cursor.col = self.scroll_right;
         }
     }
 
-    /// The row reverse wraparound lands on from column zero: mode 1045 wraps
+    /// The row reverse wraparound lands on from the left bound: mode 1045 wraps
     /// anywhere inside the scrolling region, top back to bottom; mode 45 only
     /// when the line above is a soft wrap continuation, as xterm limits it
     /// since patch 383. Both need autowrap, checked by the caller.
@@ -2978,7 +3010,10 @@ impl Terminal {
             return (row > 0).then(|| row - 1);
         }
         if self.modes.reverse_wrap {
-            return (row > 0 && self.screen().lines[row - 1].wrapped()).then(|| row - 1);
+            let previous = row.checked_sub(1)?;
+            let line = &self.screen().lines[previous];
+            return (line.wrapped() || line.split_wrapped(self.scroll_left, self.scroll_right))
+                .then_some(previous);
         }
         None
     }
@@ -2991,18 +3026,15 @@ impl Terminal {
                 if !(self.modes.more_fix && self.modes.autowrap) {
                     continue;
                 }
-                self.sync_cursor_row();
-                let row = self.cursor.row;
-                self.lines_mut()[row].set_wrapped(true);
-                self.cursor.col = 0;
-                self.linefeed();
+                self.wrap_line();
             }
             self.cursor.pending_wrap = false;
+            let right = self.right_bound();
             let mut col = self.cursor.col + 1;
-            while col < self.cols - 1 && !self.tabs[col] {
+            while col < right && !self.tabs[col] {
                 col += 1;
             }
-            self.cursor.col = col.min(self.cols - 1);
+            self.cursor.col = col.min(right);
         }
     }
 
@@ -3111,7 +3143,7 @@ fn default_tabs(cols: usize) -> Vec<bool> {
     (0..cols).map(|c| c % 8 == 0 && c != 0).collect()
 }
 
-// Keep the allocating/shifting insert-mode path out of ordinary printing. Inlining
+// Keep the shifting insert-mode path out of ordinary printing. Inlining
 // it here spills the hot character writer's state even when insert mode is off.
 #[cold]
 #[inline(never)]
@@ -3123,10 +3155,7 @@ pub(crate) fn insert_printed_cells(
     template: &Cell,
 ) {
     line.materialize_wrap_padding(col);
-    for _ in 0..width {
-        line.cells.insert(col, Cell::blank(template));
-    }
-    line.cells.truncate(cols);
+    shift_cells(line, col, cols, width, true, Cell::blank(template));
 }
 
 /// Overwriting one half of a wide character must blank the other half.
