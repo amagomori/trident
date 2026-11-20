@@ -24,9 +24,10 @@ programming ligatures. See [Fonts](configuration.md#fonts).
 
 ## Why doesn’t a new tab open in my current directory?
 
-The shell must report its directory to Trident. Source the
-[shell integration snippet](configuration.md#shell-integration) for bash, zsh or fish,
-restart the shell and change directories before opening another tab.
+New tabs and windows use the directory reported by the shell. Without a report,
+Trident checks the directory of a recognized local shell if it still owns the
+foreground. It does not use a running job's directory or guess a remote path.
+For reliable directory reporting, enable [shell integration](configuration.md#shell-integration).
 
 ## Why does a program report an unknown terminal over SSH?
 

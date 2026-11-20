@@ -146,6 +146,7 @@ impl Terminal {
     }
 
     pub(crate) fn osc_working_directory(&mut self, url: &[u8]) {
+        self.shell.cwd_report_seen = true;
         if let Some(cwd) = parse_file_url(url)
             && self.working_directory() != Some(&cwd)
         {
@@ -178,6 +179,11 @@ impl Terminal {
     /// The working directory the shell last reported with OSC 7.
     pub fn working_directory(&self) -> Option<&WorkingDirectory> {
         self.shell.cwd.as_deref()
+    }
+
+    /// Whether an OSC 7 report was received, even if its URL could not be parsed.
+    pub fn working_directory_report_seen(&self) -> bool {
+        self.shell.cwd_report_seen
     }
 }
 
@@ -295,5 +301,15 @@ mod tests {
             );
         }
         assert_eq!(t.viewport_row(0).text(), "");
+    }
+
+    #[test]
+    fn rejected_osc7_is_not_an_unreported_directory() {
+        let mut t = term("");
+        assert!(!t.working_directory_report_seen());
+        t.advance(b"\x1b]7;not-a-file-url\x07");
+        assert!(t.working_directory().is_none() && t.working_directory_report_seen());
+        t.advance(b"\x1bc");
+        assert!(t.working_directory().is_none() && t.working_directory_report_seen());
     }
 }

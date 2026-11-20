@@ -52,7 +52,7 @@ mod window_state;
 
 use config::Action;
 use input::MouseButton as ReportButton;
-use pty::Pty;
+use pty::{Pty, SpawnDirectory};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{File, FileType};
@@ -1315,6 +1315,26 @@ fn local_working_directory(cwd: Option<&term_core::WorkingDirectory>) -> Option<
     (local && path.is_absolute() && path.is_dir()).then_some(path)
 }
 
+fn new_pane_directory(
+    caller: Option<PathBuf>,
+    term: &Terminal,
+    startup: Option<PathBuf>,
+    shell: impl FnOnce() -> Option<PathBuf>,
+) -> SpawnDirectory {
+    if let Some(dir) = caller.filter(|dir| dir.is_dir()) {
+        return Some(dir).into();
+    }
+    if term.working_directory_report_seen() {
+        return local_working_directory(term.working_directory())
+            .or(startup)
+            .into();
+    }
+    SpawnDirectory {
+        fallback: startup,
+        shell: shell(),
+    }
+}
+
 /// Start another Trident window with `args`, in `working_directory` and with `cells`
 /// columns and rows when given.
 fn spawn_window(
@@ -1974,7 +1994,7 @@ impl App {
         let pty = self.spawn_pty(
             0,
             self.options.command(&self.config, true),
-            self.options.working_directory.as_deref(),
+            self.options.working_directory.clone().into(),
             &[],
             (spawn_cols, spawn_rows, spawn_cell),
         )?;
@@ -2165,7 +2185,7 @@ impl App {
         &self,
         id: u64,
         command: &[S],
-        cwd: Option<&std::path::Path>,
+        cwd: SpawnDirectory,
         env_overlay: &[(String, String)],
         grid: (usize, usize, (f32, f32)),
     ) -> Result<Pty, String> {
@@ -2404,15 +2424,14 @@ impl App {
 
     /// Opens a new window inside this process instead of spawning a child: a winit
     /// window, a PTY on a fresh pane id, and a `WindowGroup` pushed to `windows`.
-    /// `cwd`, `env` and `command` come from a forwarded request when another
-    /// `trident` run asked for the window; a keyboard shortcut passes `None` and
-    /// empty values. The window becomes the app's current one through its
+    /// A forwarded request supplies its directory, environment and command.
+    /// The window becomes the app's current one through its
     /// `Focused` event.
     #[cfg(target_os = "linux")]
     fn new_window(
         &mut self,
         event_loop: &ActiveEventLoop,
-        cwd: Option<PathBuf>,
+        cwd: SpawnDirectory,
         env: Vec<(String, String)>,
         command: Vec<OsString>,
     ) {
@@ -2431,10 +2450,6 @@ impl App {
             }
         });
         window.set_ime_allowed(true);
-        let cwd = cwd
-            .filter(|dir| dir.is_dir())
-            .or_else(|| local_working_directory(s.term.working_directory()))
-            .or_else(|| self.options.working_directory.clone());
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         let (cols, rows) = (s.term.cols(), s.term.rows());
         self.next_pane += 1;
@@ -2446,7 +2461,7 @@ impl App {
             .map(OsString::from)
             .collect();
         let command: &[OsString] = if command.is_empty() { &shell } else { &command };
-        let pty = match self.spawn_pty(id, command, cwd.as_deref(), &env, (cols, rows, cell)) {
+        let pty = match self.spawn_pty(id, command, cwd, &env, (cols, rows, cell)) {
             Ok(pty) => pty,
             Err(error) => {
                 diag!("trident: new window: {error}");
@@ -2482,18 +2497,30 @@ impl App {
         }
     }
 
-    /// Opens a tab after the active one, in the active tab's OSC 7 directory, and shows it.
+    /// Opens a tab after the active one, in the active shell's directory, and shows it.
     fn new_tab(&mut self, event_loop: &ActiveEventLoop) {
         self.new_pane(event_loop, PanePlacement::After(self.active_tab));
     }
 
     fn new_pane(&mut self, event_loop: &ActiveEventLoop, placement: PanePlacement) {
-        let cwd = self
-            .session
-            .as_ref()
-            .and_then(|s| local_working_directory(s.term.working_directory()))
-            .or_else(|| self.options.working_directory.clone());
+        let Some(cwd) = self.active_pane_directory(None, Pty::foreground_shell_directory) else {
+            return;
+        };
         self.open_tab(event_loop, placement, cwd, String::new());
+    }
+
+    fn active_pane_directory(
+        &self,
+        caller: Option<PathBuf>,
+        shell: impl FnOnce(&Pty) -> Option<PathBuf>,
+    ) -> Option<SpawnDirectory> {
+        let s = self.session.as_ref()?;
+        Some(new_pane_directory(
+            caller,
+            &s.term,
+            self.options.working_directory.clone(),
+            || shell(&s.pty),
+        ))
     }
 
     /// Opens the most recently closed tab where it was, with its directory and title.
@@ -2530,7 +2557,7 @@ impl App {
         if self.open_tab(
             event_loop,
             placement,
-            closed.working_directory.clone(),
+            closed.working_directory.clone().into(),
             closed.title.clone(),
         ) {
             self.closed_tabs.remove(i);
@@ -2542,7 +2569,7 @@ impl App {
         &mut self,
         event_loop: &ActiveEventLoop,
         placement: PanePlacement,
-        working_directory: Option<PathBuf>,
+        working_directory: SpawnDirectory,
         title: String,
     ) -> bool {
         #[cfg(target_os = "macos")]
@@ -2563,7 +2590,7 @@ impl App {
         let pty = match self.spawn_pty(
             id,
             self.options.command(&self.config, false),
-            working_directory.as_deref(),
+            working_directory,
             &[],
             (cols, rows, cell),
         ) {
@@ -4339,7 +4366,12 @@ impl App {
             #[cfg(not(target_os = "macos"))]
             Action::SelectTab(index) => self.select_tab(shortcut_tab(index, self.tabs.len())),
             #[cfg(target_os = "linux")]
-            Action::NewWindow => self.new_window(event_loop, None, Vec::new(), Vec::new()),
+            Action::NewWindow => {
+                if let Some(cwd) = self.active_pane_directory(None, Pty::foreground_shell_directory)
+                {
+                    self.new_window(event_loop, cwd, Vec::new(), Vec::new());
+                }
+            }
             #[cfg(target_os = "macos")]
             Action::NewWindow => self.new_pane(event_loop, PanePlacement::Window),
             Action::ShowLastCommandOutput => {
@@ -5842,7 +5874,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::HoverPreview(ready) => self.hover_preview_ready(ready),
             #[cfg(target_os = "linux")]
             UserEvent::OpenWindow(cwd, env, command) => {
-                self.new_window(event_loop, cwd, env, command)
+                if let Some(cwd) = self.active_pane_directory(cwd, |_| None) {
+                    self.new_window(event_loop, cwd, env, command);
+                }
             }
             UserEvent::Output(id) if self.session.as_ref().is_some_and(|s| s.pane == id) => {
                 self.output_ready()
@@ -6508,6 +6542,47 @@ mod tests {
         assert!(super::same_host("mac.local", "MAC"));
         assert!(!super::same_host("mac.local", "box.local"));
         assert!(!super::same_host("dev.office.example", "dev.cloud.example"));
+    }
+
+    #[test]
+    fn new_pane_probes_only_without_a_caller_directory_or_report() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let reported = root.join("reported");
+        std::fs::create_dir(&reported).unwrap();
+        let startup = Some(root.join("startup"));
+        let shell = Some(root.join("shell"));
+        let t = Terminal::new(10, 2);
+        let inferred = new_pane_directory(None, &t, startup.clone(), || shell.clone());
+        assert_eq!(
+            (inferred.shell, inferred.fallback),
+            (shell, startup.clone())
+        );
+        let no_probe = || panic!("unexpected process lookup");
+        for (url, expected) in [
+            (
+                format!("file://{}", reported.display()),
+                Some(reported.clone()),
+            ),
+            (
+                format!("file://foreign.example{}", reported.display()),
+                startup.clone(),
+            ),
+            (
+                format!("file://{}/missing", root.display()),
+                startup.clone(),
+            ),
+            ("file:///bad%escape".into(), startup.clone()),
+            ("".into(), startup.clone()),
+        ] {
+            let mut t = Terminal::new(10, 2);
+            t.advance(format!("\x1b]7;{url}\x07").as_bytes());
+            let choice = new_pane_directory(None, &t, startup.clone(), no_probe);
+            assert_eq!((choice.shell, choice.fallback), (None, expected));
+            let caller = Some(root.to_owned());
+            let choice = new_pane_directory(caller.clone(), &t, startup.clone(), no_probe);
+            assert_eq!((choice.shell, choice.fallback), (None, caller));
+        }
     }
 
     #[test]
