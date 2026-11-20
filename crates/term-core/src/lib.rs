@@ -369,7 +369,9 @@ pub struct Point {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionKind {
     Simple,
+    /// A word, including continuations across soft wraps.
     Word,
+    /// Entire logical lines, not individual display rows.
     Line,
     /// Output delimited by shell integration marks.
     CommandOutput,
@@ -886,11 +888,7 @@ impl Terminal {
             .then_some(Selection {
                 anchor,
                 head,
-                kind: if partial.is_some() || start_col > 0 {
-                    SelectionKind::CommandOutput
-                } else {
-                    SelectionKind::Line
-                },
+                kind: SelectionKind::CommandOutput,
             });
         Some((start, selection))
     }
@@ -1926,6 +1924,9 @@ impl Terminal {
         if end.line < first || start.line > last {
             return None;
         }
+        if start.line < first && sel.kind == SelectionKind::Word {
+            start.col = 0;
+        }
         start.line = start.line.max(first);
         end.line = end.line.min(last);
         match sel.kind {
@@ -1939,6 +1940,8 @@ impl Terminal {
                 end = self.word_boundary(end, true);
             }
             SelectionKind::Line => {
+                start.line = self.wrapped_edge(start.line, false);
+                end.line = self.wrapped_edge(end.line, true);
                 start.col = 0;
                 end.col = self.cols - 1;
             }
@@ -1949,9 +1952,18 @@ impl Terminal {
 
     /// Tests a cell against [`Self::selection_range`], including wide-cell halves.
     pub fn is_selected(&self, range: Option<(Point, Point)>, point: Point) -> bool {
+        let Some(sel) = self.selection else {
+            return false;
+        };
         range
-            .and_then(|range| self.selection_columns(range, point.line))
+            .and_then(|range| self.columns_of(sel.kind, range, point.line))
             .is_some_and(|(from, to)| (from..=to).contains(&point.col))
+            && !(matches!(sel.kind, SelectionKind::Word | SelectionKind::Line)
+                && self
+                    .line(point.line)
+                    .cells
+                    .get(point.col)
+                    .is_some_and(|c| c.flags.contains(Flags::WIDE_WRAP)))
     }
 
     /// Inclusive columns on one physical row, shared by highlighting and copying.
@@ -1998,26 +2010,102 @@ impl Terminal {
         Some((from, to))
     }
 
-    fn word_boundary(&self, mut point: Point, forward: bool) -> Point {
-        let row = self.padded_line(point.line);
-        let is_word = |c: char| !c.is_whitespace() && !"\"'`()[]{}<>|,;".contains(c);
-        let col = point.col.min(self.cols - 1);
-        let is_word = |cell: &Cell| is_word(self.base_char(cell));
-        if !is_word(&row.cells[col]) {
-            return point;
-        }
-        let mut col = col;
+    /// Adjacent retained row of the same logical line, if there is one.
+    fn wrapped_neighbor(&self, line: u64, forward: bool) -> Option<u64> {
         if forward {
-            while col + 1 < self.cols && is_word(&row.cells[col + 1]) {
-                col += 1;
-            }
+            (line + 1 < self.history + self.rows as u64 && self.line(line).wrapped())
+                .then_some(line + 1)
         } else {
-            while col > 0 && is_word(&row.cells[col - 1]) {
-                col -= 1;
+            (line > self.first_line() && self.line(line - 1).wrapped()).then(|| line - 1)
+        }
+    }
+
+    fn wrapped_edge(&self, mut line: u64, forward: bool) -> u64 {
+        while let Some(next) = self.wrapped_neighbor(line, forward) {
+            line = next;
+        }
+        line
+    }
+
+    /// Map a spacer to its glyph, or synthetic wrap padding to the following text.
+    fn word_origin(&self, mut point: Point) -> Point {
+        point.col = point.col.min(self.cols - 1);
+        let origin = point;
+        loop {
+            let cells = &self.line(point.line).cells;
+            let Some(cell) = cells.get(point.col) else {
+                return point;
+            };
+            if !cell.flags.contains(Flags::WIDE_WRAP) {
+                if cell.flags.contains(Flags::WIDE_SPACER) {
+                    point.col = point.col.saturating_sub(1);
+                }
+                return point;
+            }
+            point.col += 1;
+            if point.col == cells.len() {
+                let Some(next) = self.wrapped_neighbor(point.line, true) else {
+                    return origin;
+                };
+                point = Point { line: next, col: 0 };
             }
         }
-        point.col = col;
-        point
+    }
+
+    fn word_boundary(&self, point: Point, forward: bool) -> Point {
+        let mut boundary = self.word_origin(point);
+        let Point { mut line, mut col } = boundary;
+        loop {
+            let cells = &self.line(line).cells;
+            if col >= cells.len() {
+                break;
+            }
+            let accept = |(i, cell): (usize, &Cell)| {
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_SPACER.union(Flags::WIDE_WRAP))
+                {
+                    return true;
+                }
+                let ch = self.base_char(cell);
+                if ch.is_whitespace()
+                    || matches!(
+                        ch,
+                        '"' | '\''
+                            | '`'
+                            | '('
+                            | ')'
+                            | '['
+                            | ']'
+                            | '{'
+                            | '}'
+                            | '<'
+                            | '>'
+                            | '|'
+                            | ','
+                            | ';'
+                    )
+                {
+                    return false;
+                }
+                boundary = Point { line, col: i };
+                true
+            };
+            let reached_edge = if forward {
+                cells.iter().enumerate().skip(col).all(accept)
+            } else {
+                cells[..=col].iter().enumerate().rev().all(accept)
+            };
+            if !reached_edge {
+                break;
+            }
+            let Some(next) = self.wrapped_neighbor(line, forward) else {
+                break;
+            };
+            line = next;
+            col = if forward { 0 } else { self.cols - 1 };
+        }
+        boundary
     }
 
     /// Copies selected text, joining soft wraps except for block selections.

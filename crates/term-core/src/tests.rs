@@ -1135,6 +1135,110 @@ fn selection_text_joins_wrapped_lines() {
 }
 
 #[test]
+fn wrapped_path_selection_matches_the_highlight_before_and_after_reflow() {
+    let path = "src/very_long.rs:42";
+    let mut t = term(8, 8, &format!("{path}\r\nNEXT"));
+    for cols in [8, 5, 12] {
+        t.resize(cols, 8);
+        let first = t.first_line();
+        let next = first + path.len().div_ceil(cols) as u64;
+        for i in 0..path.len() {
+            let click = Point {
+                line: first + (i / cols) as u64,
+                col: i % cols,
+            };
+            for kind in [SelectionKind::Word, SelectionKind::Line] {
+                t.start_selection(click, kind);
+                assert_eq!(t.selection_text().as_deref(), Some(path));
+                assert!(t.selection_html().unwrap().contains(path));
+                let range = t.selection_range();
+                for line in first..=next {
+                    for col in 0..cols {
+                        let offset = (line - first) as usize * cols + col;
+                        let expected =
+                            line < next && (kind == SelectionKind::Line || offset < path.len());
+                        assert_eq!(t.is_selected(range, Point { line, col }), expected);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn wrapped_selection_skips_synthetic_padding_but_highlights_both_wide_halves() {
+    let mut t = term(4, 4, "(ab界e\u{301},x");
+    for (line, clicks) in [(0, 1..=3), (1, 0..=2)] {
+        for col in clicks {
+            t.start_selection(Point { line, col }, SelectionKind::Word);
+            assert_eq!(t.selection_text().as_deref(), Some("ab界e\u{301}"));
+            let range = t.selection_range();
+            for (line, selected) in [(0, 1..=2), (1, 0..=2)] {
+                for col in 0..4 {
+                    assert_eq!(
+                        t.is_selected(range, Point { line, col }),
+                        selected.contains(&col)
+                    );
+                }
+            }
+        }
+    }
+    t.start_selection(Point { line: 1, col: 3 }, SelectionKind::Word);
+    assert_eq!(t.selection_text().as_deref(), Some(","));
+}
+
+#[test]
+fn word_and_line_drags_expand_both_ends_in_either_direction() {
+    let mut t = term(4, 8, "hi abcdef end\r\nx\r\nbcdefg z");
+    let a = Point { line: 1, col: 2 };
+    let b = Point { line: 6, col: 0 };
+    for (kind, expected) in [
+        (SelectionKind::Word, "abcdef end\nx\nbcdefg"),
+        (SelectionKind::Line, "hi abcdef end\nx\nbcdefg z"),
+    ] {
+        for (anchor, head) in [(a, b), (b, a)] {
+            t.start_selection(anchor, kind);
+            t.update_selection(head);
+            assert_eq!(t.selection_text().as_deref(), Some(expected));
+        }
+    }
+}
+
+#[test]
+fn wrapped_selection_stops_at_oldest_retained_row() {
+    let mut t = Terminal::new(4, 2);
+    t.set_scrollback_limit(1);
+    t.advance(b"zzzzabcdefghijk");
+    assert_eq!(t.first_line(), 1);
+    for kind in [SelectionKind::Word, SelectionKind::Line] {
+        t.start_selection(Point { line: 3, col: 1 }, kind);
+        assert_eq!(t.selection_text().as_deref(), Some("abcdefghijk"));
+    }
+}
+
+#[test]
+fn word_drag_from_an_evicted_row_starts_at_first_retained_column() {
+    let mut t = term(4, 2, "xxxxa b ");
+    t.set_scrollback_limit(1);
+    t.start_selection(Point { line: 0, col: 3 }, SelectionKind::Word);
+    t.update_selection(Point { line: 1, col: 2 });
+    t.advance(b"\r\nc\r\nd");
+    assert_eq!(t.selection_text().as_deref(), Some("a b"));
+}
+
+#[test]
+fn marked_command_output_does_not_expand_into_soft_wrapped_prompt() {
+    let mut t = term(
+        4,
+        3,
+        "\x1b]133;A\x07abcdx\r\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+    );
+    t.select_command_output();
+    assert_eq!(t.selection_text().as_deref(), Some("out"));
+    assert_eq!(t.last_command_output().as_deref(), Some("out"));
+}
+
+#[test]
 fn selected_single_line_checks_bytes_and_logical_breaks() {
     let mut t = term(4, 4, "abc界\u{301}x\r\nnext");
     assert_eq!(t.selected_single_line(64), None);

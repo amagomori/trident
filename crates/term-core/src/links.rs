@@ -766,15 +766,10 @@ impl Terminal {
 
     /// The first and last lines of the soft-wrapped line holding `line`.
     fn logical_line(&self, line: u64) -> (u64, u64) {
-        let mut first = line;
-        while first > self.first_line() && self.line(first - 1).wrapped() {
-            first -= 1;
-        }
-        let mut last = line;
-        while last + 1 < self.history + self.rows as u64 && self.line(last).wrapped() {
-            last += 1;
-        }
-        (first, last)
+        (
+            self.wrapped_edge(line, false),
+            self.wrapped_edge(line, true),
+        )
     }
 
     /// The text of lines `first..=last` and the cell each of its bytes came from.

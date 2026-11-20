@@ -70,7 +70,13 @@ impl Damage {
 
     /// Records this frame and sets `damaged[i]` for each drawn row `first_row + i` whose
     /// instances must be rebuilt.
-    pub fn update(&mut self, term: &Terminal, frame: &Frame<'_>, damaged: &mut Vec<bool>) {
+    pub fn update(
+        &mut self,
+        term: &Terminal,
+        frame: &Frame<'_>,
+        selection: Option<(Point, Point)>,
+        damaged: &mut Vec<bool>,
+    ) {
         let first = Self::first_row(frame.pixel_offset);
         let count = (term.rows() as isize - first) as usize;
         let highlights =
@@ -88,9 +94,7 @@ impl Damage {
             graphemes: term.grapheme_releases(),
             links: term.link_releases(),
             top: highlights.then(|| term.viewport_to_point_signed(first, 0)),
-            selection: term
-                .selection_range()
-                .zip(term.selection.map(|selection| selection.kind)),
+            selection: selection.zip(term.selection.map(|selection| selection.kind)),
             current_match: frame.search.and_then(|(_, current)| current),
         };
         let matches = frame.search.map_or(&[][..], |(matches, _)| matches);
@@ -195,7 +199,7 @@ mod tests {
 
     fn damaged(damage: &mut Damage, term: &Terminal, frame: &Frame<'_>) -> Vec<usize> {
         let mut rows = Vec::new();
-        damage.update(term, frame, &mut rows);
+        damage.update(term, frame, term.selection_range(), &mut rows);
         rows.iter()
             .enumerate()
             .filter(|(_, d)| **d)

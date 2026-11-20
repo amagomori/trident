@@ -623,6 +623,7 @@ impl Renderer {
                 blink_visible: self.blink_visible,
                 rerun: &rerun,
             },
+            selection,
             &mut damaged,
         );
         let mut grid = std::mem::take(&mut self.grid);

@@ -138,6 +138,8 @@ lines. It ignores case unless the query has an uppercase letter.
 
 ## Selection
 
+- Double-click selects a word; triple-click selects a whole line. Both follow soft wraps
+  but stop at a hard line break.
 - While a program such as vim, tmux or htop uses the mouse, hold Shift to select text. For a
   rectangle, hold Shift+Alt (Shift+Option on macOS).
 - Shift-click extends the current selection, keeping its anchor and shape.
