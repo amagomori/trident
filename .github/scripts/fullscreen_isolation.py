@@ -161,7 +161,8 @@ def main():
         directory = Path(temp)
         config = directory / "config.toml"
         shell = [sys.executable, str(Path(__file__).resolve()), "--monitor", temp]
-        config.write_text(f"shell = {json.dumps(shell)}\nremember_window_size = false\n")
+        # The geometry monitors are foreground programs, not idle shells.
+        config.write_text(f"shell = {json.dumps(shell)}\nremember_window_size = false\nconfirm_close = false\n")
         with subprocess.Popen([args.binary.resolve(), "--config", config],
                               env={**os.environ, "HOME": temp, "XDG_CONFIG_HOME": temp}) as process:
             try:
