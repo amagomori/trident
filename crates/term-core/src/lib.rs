@@ -2616,8 +2616,7 @@ impl Terminal {
         if self.cursor.pending_wrap && self.modes.autowrap {
             self.wrap_line();
         }
-        let mut right = self.right_bound();
-        if width == 2 && self.cursor.col == right {
+        if width == 2 && self.cursor.col == self.right_bound() {
             if self.modes.autowrap {
                 self.sync_cursor_row();
                 let (row, col) = (self.cursor.row, self.cursor.col);
@@ -2630,28 +2629,28 @@ impl Terminal {
                 line.cells[col] = blank;
                 line.touch(col + 1);
                 self.wrap_line();
-                right = self.scroll_right;
             } else {
                 self.print_state.disarm_clear();
                 return;
             }
         }
 
-        let (row, col, cols) = (self.cursor.row, self.cursor.col, right + 1);
+        let (row, col) = (self.cursor.row, self.cursor.col);
         let template = self.cursor.template;
-        let insert = self.modes.insert;
-        if insert && track {
-            if cols == self.cols {
-                self.shift_input_writes(row, col, 0, width);
-            } else {
-                self.erase_input_writes(row, col, cols);
+        if self.modes.insert {
+            let cols = self.right_bound() + 1;
+            if track {
+                if cols == self.cols {
+                    self.shift_input_writes(row, col, 0, width);
+                } else {
+                    self.erase_input_writes(row, col, cols);
+                }
             }
-        }
-        let line = &mut self.lines_mut()[row];
-        if insert {
+            let line = &mut self.lines_mut()[row];
             insert_printed_cells(line, col, cols, width, &template);
             line.touch_all();
         }
+        let line = &mut self.lines_mut()[row];
         clear_wide_pair(&mut line.cells, col);
         if width == 2 {
             clear_wide_pair(&mut line.cells, col + 1);
@@ -2673,11 +2672,24 @@ impl Terminal {
         if track {
             self.record_printed(row, col..col + width);
         }
-        if col + width >= cols {
-            self.cursor.col = cols - 1;
+        let next = col + width;
+        if next <= self.scroll_right {
+            self.cursor.col = next;
+        } else {
+            self.finish_print_at_right(next);
+        }
+    }
+
+    // Only writes reaching or beyond the right margin need to distinguish
+    // its edge from the physical edge of the screen.
+    #[cold]
+    fn finish_print_at_right(&mut self, next: usize) {
+        let right = self.right_bound();
+        if next > right {
+            self.cursor.col = right;
             self.cursor.pending_wrap = true;
         } else {
-            self.cursor.col = col + width;
+            self.cursor.col = next;
         }
     }
 
