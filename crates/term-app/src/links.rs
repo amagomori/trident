@@ -27,6 +27,31 @@ pub struct Hover {
     pub target: Target,
 }
 
+/// The reference under the pointer, even if it doesn't resolve to a local file.
+pub enum PointerLink {
+    Uri(term_core::Link),
+    File(term_core::FileLink, Option<PathBuf>),
+}
+
+impl PointerLink {
+    pub fn into_hover(self) -> Option<Hover> {
+        Some(match self {
+            Self::Uri(link) => Hover {
+                target: Target::Uri(link.uri.clone()),
+                link,
+            },
+            Self::File(file, path) => Hover {
+                link: file.link(),
+                target: Target::File {
+                    path: path?,
+                    line: file.line,
+                    column: file.column,
+                },
+            },
+        })
+    }
+}
+
 pub fn mouse_action<T>(
     button: MouseButton,
     pressed: bool,
@@ -426,6 +451,7 @@ mod tests {
             path: path.into(),
             line: 1,
             column: None,
+            clipped: false,
             start: term_core::Point { line: 0, col: 0 },
             end: term_core::Point { line: 0, col: 1 },
             origin: term_core::DirectoryOrigin::Unreported,

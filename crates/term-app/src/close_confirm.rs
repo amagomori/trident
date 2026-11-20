@@ -193,14 +193,11 @@ thread_local! {
     static QUIT_HOOK: std::cell::RefCell<Option<QuitHook>> = const { std::cell::RefCell::new(None) };
     /// `AppKit` waits for `answer_quit` on a quit that `should_terminate` deferred.
     static QUIT_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// The window close `should_terminate` or Close Window sent closes more than its tab.
-    static WIDE_CLOSE: std::cell::Cell<Option<WideClose>> = const { std::cell::Cell::new(None) };
     /// Set while `quit_relayed` quits this process for another window's quit.
     static QUIT_RELAYED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Hands a window's quit group to the windows New Window opens, each its own process, so an
-/// app quit in any of them quits them all.
+/// Propagates app quit to separate pager and editor processes.
 #[cfg(target_os = "macos")]
 pub const QUIT_GROUP: &str = "TERMINAL_QUIT_GROUP";
 
@@ -211,7 +208,7 @@ const QUIT_ALL: &str = "com.amagomori.trident.quit-all";
 #[cfg(target_os = "macos")]
 static QUIT_GROUP_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// Joins the quit group this window was opened into by New Window, or starts one.
+/// Joins the launching process's quit group, or starts one.
 #[cfg(target_os = "macos")]
 pub fn join_quit_group(inherited: Option<String>) {
     let started = std::time::SystemTime::now()
@@ -220,7 +217,7 @@ pub fn join_quit_group(inherited: Option<String>) {
     let _ = QUIT_GROUP_ID.set(quit_group(inherited, std::process::id(), started));
 }
 
-/// The quit group a window opened by New Window joins.
+/// The quit group passed to pager and editor subprocesses.
 #[cfg(target_os = "macos")]
 pub fn current_quit_group() -> Option<&'static str> {
     QUIT_GROUP_ID.get().map(String::as_str)
@@ -249,31 +246,14 @@ fn quit_is_for(message: &str, group: &str, pid: u32) -> bool {
         .is_some_and(|(from, to)| to == group && from.parse::<u32>().is_ok_and(|from| from != pid))
 }
 
-/// What a window's `CloseRequested` closes beyond that one tab.
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WideClose {
-    /// Every tab, for a quit (see `should_terminate`).
-    Quit,
-    /// Every tab of the key window's tab group, for Close Window (see `close_window`).
-    Window,
-}
-
-/// What a window's `CloseRequested` closes beyond that one tab, if it came from a quit or
-/// Close Window; clears it.
-#[cfg(target_os = "macos")]
-pub fn take_wide_close() -> Option<WideClose> {
-    WIDE_CLOSE.take()
-}
-
 #[cfg(target_os = "macos")]
 struct QuitHook {
-    window: objc2::rc::Retained<objc2::runtime::AnyObject>,
+    proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>,
     running: Box<dyn Fn() -> bool>,
 }
 
 /// `applicationShouldTerminate:`, which every app quit (Cmd-Q, menu or Dock Quit, logout)
-/// asks: with a program running it closes the window instead, so the close banner asks first.
+/// asks: with a program running it requests the app-wide close banner first.
 /// A quit of the app alone is cancelled, so a second one confirms like a second close; a
 /// logout or shutdown is deferred until `answer_quit` lets it go on or cancels it, since
 /// `AppKit` sends it only once.
@@ -302,17 +282,7 @@ unsafe extern "C-unwind" fn should_terminate(
     QUIT_HOOK.with_borrow(|hook| match hook {
         Some(hook) if confirms && (hook.running)() => {
             QUIT_DEFERRED.set(session_ends);
-            WIDE_CLOSE.set(Some(WideClose::Quit));
-            // SAFETY: on the main thread; mainWindow is nil or a live NSWindow, and so is
-            // hook.window, which stands in when the app has no main window.
-            let _: () = unsafe {
-                let app: objc2::rc::Retained<objc2::runtime::AnyObject> =
-                    objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
-                let main: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
-                    objc2::msg_send![&*app, mainWindow];
-                let window = main.as_deref().unwrap_or(&hook.window);
-                objc2::msg_send![window, performClose: std::ptr::null::<objc2::runtime::AnyObject>()]
-            };
+            let _ = hook.proxy.send_event(crate::UserEvent::QuitRequested);
             if session_ends {
                 NS_TERMINATE_LATER
             } else {
@@ -323,8 +293,8 @@ unsafe extern "C-unwind" fn should_terminate(
     })
 }
 
-/// Tells the other windows of this quit group, each its own process, to quit as if their own
-/// app quit was asked for, so each asks first while one of its programs runs.
+/// Asks the other processes in this quit group to quit. Each process
+/// confirms once for its own running programs.
 ///
 /// # Safety
 ///
@@ -397,9 +367,7 @@ unsafe extern "C-unwind" fn quit_relayed(
 }
 
 /// `terminalCloseWindow:`, the app menu's Close Window: each native tab is its
-/// own `NSWindow`,
-/// so a plain `performClose:` would close only the key one; this marks the close as one of
-/// every tab in the key window's group first.
+/// own `NSWindow`, so this targets its group instead of just closing the key tab.
 ///
 /// # Safety
 ///
@@ -411,7 +379,6 @@ unsafe extern "C-unwind" fn close_window(
     _cmd: objc2::runtime::Sel,
     _sender: *mut objc2::runtime::AnyObject,
 ) {
-    WIDE_CLOSE.set(Some(WideClose::Window));
     // SAFETY: on the main thread, where AppKit sends menu actions; keyWindow is nil or a
     // live NSWindow.
     unsafe {
@@ -419,14 +386,14 @@ unsafe extern "C-unwind" fn close_window(
             objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
         let key: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
             objc2::msg_send![&*app, keyWindow];
-        match key {
-            Some(key) => {
-                let _: () = objc2::msg_send![
-                    &*key,
-                    performClose: std::ptr::null::<objc2::runtime::AnyObject>()
-                ];
-            }
-            None => WIDE_CLOSE.set(None),
+        if let Some(window) = key {
+            QUIT_HOOK.with_borrow(|hook| {
+                if let Some(hook) = hook {
+                    let _ = hook.proxy.send_event(crate::UserEvent::CloseWindow(
+                        crate::native_tabs::key_of(&window),
+                    ));
+                }
+            });
         }
     }
 }
@@ -531,32 +498,24 @@ unsafe extern "C-unwind" fn reply_to_quit(
 #[cfg(any(target_os = "macos", test))]
 const CLOSE_WINDOW_KEY: &str = "w";
 
-/// Makes every app quit go through `window`'s close confirmation (see `should_terminate`) and
+/// Makes every app quit go through the app's close confirmation and
 /// adds Close Window (Cmd-Shift-W) to the app menu. Needs winit's application delegate and default
 /// menu to be installed.
 #[cfg(target_os = "macos")]
 #[cold]
 pub fn route_app_quit_through_close(
-    window: &winit::window::Window,
+    proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>,
     running: impl Fn() -> bool + 'static,
 ) {
     use objc2::rc::{Allocated, Retained};
     use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
     use objc2::{class, msg_send, sel};
     use objc2_foundation::NSString;
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    let Ok(RawWindowHandle::AppKit(handle)) = window.window_handle().map(|h| h.as_raw()) else {
-        return;
-    };
     // SAFETY: called on the main thread once the event loop runs; every message matches the
-    // AppKit signature of NSApplication, NSMenu, NSMenuItem and NSView; ns_view is the live
-    // view of `window`, and should_terminate, reply_to_quit, close_window and quit_relayed
+    // AppKit signature of NSApplication, NSMenu and NSMenuItem.
+    // should_terminate, reply_to_quit, close_window and quit_relayed
     // have the `Q@:@`, `v@:@`, `v@:@` and `v@:@` signatures they are added with.
     unsafe {
-        let view: &AnyObject = handle.ns_view.cast().as_ref();
-        let ns_window: Option<Retained<AnyObject>> = msg_send![view, window];
-        let Some(ns_window) = ns_window else { return };
         let Some(delegate) = AnyClass::get(c"WinitApplicationDelegate") else {
             return;
         };
@@ -601,7 +560,7 @@ pub fn route_app_quit_through_close(
             c"v@:@".as_ptr(),
         );
         QUIT_HOOK.set(Some(QuitHook {
-            window: ns_window,
+            proxy,
             running: Box::new(running),
         }));
 

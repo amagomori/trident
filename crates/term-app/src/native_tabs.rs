@@ -48,7 +48,7 @@ fn ns_window(window: &Window) -> Option<Retained<AnyObject>> {
     }
 }
 
-fn key_of(window: &AnyObject) -> usize {
+pub fn key_of(window: &AnyObject) -> usize {
     window as *const AnyObject as usize
 }
 
@@ -83,6 +83,23 @@ pub fn show(window: &Window) {
             let _: () = msg_send![&*group, setSelectedWindow: &*window];
         }
         let _: () = msg_send![&*window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+    }
+}
+
+/// Orders a new window without letting the user's tabbing preference attach
+/// it to the key window. Subsequent manual tabbing and merging stay enabled.
+pub fn show_separately(window: &Window) {
+    use objc2_app_kit::NSWindowTabbingMode;
+
+    let Some(window) = ns_window(window) else {
+        return;
+    };
+    // SAFETY: a live, not-yet-visible NSWindow on the main thread.
+    unsafe {
+        let mode: NSWindowTabbingMode = msg_send![&*window, tabbingMode];
+        let _: () = msg_send![&*window, setTabbingMode: NSWindowTabbingMode::Disallowed];
+        let _: () = msg_send![&*window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+        let _: () = msg_send![&*window, setTabbingMode: mode];
     }
 }
 
@@ -136,9 +153,24 @@ pub fn handle_new_tab_button(window: &Window, proxy: EventLoopProxy<UserEvent>) 
 /// # Safety
 ///
 /// Must be invoked on the main thread using the Objective-C `v@:@` method ABI.
-/// Arguments are unused; the event-loop proxy must have been installed first.
-unsafe extern "C-unwind" fn new_window_for_tab(_: *mut AnyObject, _: Sel, _: *mut AnyObject) {
-    send(UserEvent::NewTab);
+/// The receiver is the window or the application delegate.
+unsafe extern "C-unwind" fn new_window_for_tab(this: *mut AnyObject, _: Sel, _: *mut AnyObject) {
+    // SAFETY: AppKit calls this action on a live receiver on the main thread.
+    let key = unsafe {
+        let Some(receiver) = this.as_ref() else {
+            return;
+        };
+        let is_window: bool = msg_send![receiver, isKindOfClass: class!(NSWindow)];
+        if is_window {
+            key_of(receiver)
+        } else {
+            let app: Retained<AnyObject> = msg_send![class!(NSApplication), sharedApplication];
+            let window: Option<Retained<AnyObject>> = msg_send![&*app, keyWindow];
+            let Some(window) = window else { return };
+            key_of(&window)
+        }
+    };
+    send(UserEvent::NewTab(key));
 }
 
 define_class!(

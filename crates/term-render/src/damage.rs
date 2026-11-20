@@ -3,10 +3,9 @@
 
 use term_core::colors::Palette;
 use term_core::search::Match;
-use term_core::{Cell, CursorShape, Flags, Link, Point, SelectionKind, Terminal};
+use term_core::{Cell, CursorShape, Flags, Link, Point, Terminal};
 
-/// Everything besides a row's cells and cursor that its instances depend on; when any of
-/// it changes, every row is damaged.
+/// Shared frame inputs whose changes damage every row.
 #[derive(Clone, PartialEq)]
 struct FrameKey {
     rows: usize,
@@ -20,9 +19,8 @@ struct FrameKey {
     atlas: u64,
     graphemes: u64,
     links: u64,
-    /// Highlights are keyed by absolute line, so they move when the viewport does.
+    /// Search and hover highlights are keyed by absolute line.
     top: Option<Point>,
-    selection: Option<((Point, Point), SelectionKind)>,
     current_match: Option<usize>,
 }
 
@@ -49,7 +47,22 @@ pub(crate) struct Frame<'a> {
 struct RowState {
     cells: Vec<Cell>,
     cursor: Option<usize>,
+    selected: Option<RowHighlight>,
     rerun: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowHighlight {
+    from: usize,
+    to: usize,
+    skip_wrap_padding: bool,
+}
+
+impl RowHighlight {
+    pub fn contains(self, col: usize, cell: &Cell) -> bool {
+        (self.from..=self.to).contains(&col)
+            && !(self.skip_wrap_padding && cell.flags.contains(Flags::WIDE_WRAP))
+    }
 }
 
 #[derive(Default)]
@@ -70,17 +83,13 @@ impl Damage {
 
     /// Records this frame and sets `damaged[i]` for each drawn row `first_row + i` whose
     /// instances must be rebuilt.
-    pub fn update(
-        &mut self,
-        term: &Terminal,
-        frame: &Frame<'_>,
-        selection: Option<(Point, Point)>,
-        damaged: &mut Vec<bool>,
-    ) {
+    pub fn update(&mut self, term: &Terminal, frame: &Frame<'_>, damaged: &mut Vec<bool>) {
         let first = Self::first_row(frame.pixel_offset);
         let count = (term.rows() as isize - first) as usize;
-        let highlights =
-            term.selection.is_some() || frame.search.is_some() || frame.hover.is_some();
+        let selection = term.selection_range().zip(
+            term.selection
+                .map(|selection| selection.kind.skips_wrap_padding()),
+        );
         let key = FrameKey {
             rows: term.rows(),
             cols: term.cols(),
@@ -93,8 +102,8 @@ impl Damage {
             atlas: frame.atlas,
             graphemes: term.grapheme_releases(),
             links: term.link_releases(),
-            top: highlights.then(|| term.viewport_to_point_signed(first, 0)),
-            selection: selection.zip(term.selection.map(|selection| selection.kind)),
+            top: (frame.search.is_some() || frame.hover.is_some())
+                .then(|| term.viewport_to_point_signed(first, 0)),
             current_match: frame.search.and_then(|(_, current)| current),
         };
         let matches = frame.search.map_or(&[][..], |(matches, _)| matches);
@@ -117,6 +126,14 @@ impl Damage {
         damaged.resize(count, false);
         for (i, state) in self.rows.iter_mut().enumerate() {
             let row = first + i as isize;
+            let selected = selection.and_then(|(range, skip_wrap_padding)| {
+                term.selection_columns(range, term.viewport_to_point_signed(row, 0).line)
+                    .map(|(from, to)| RowHighlight {
+                        from,
+                        to,
+                        skip_wrap_padding,
+                    })
+            });
             let cells = &term.viewport_row_signed(row).cells;
             let cursor = frame
                 .cursor
@@ -131,15 +148,22 @@ impl Damage {
             if all
                 || blinked
                 || state.cursor != cursor
+                || state.selected != selected
                 || state.rerun != rerun
                 || state.cells != *cells
             {
                 state.cells.clone_from(cells);
                 state.cursor = cursor;
+                state.selected = selected;
                 state.rerun = rerun;
                 damaged[i] = true;
             }
         }
+    }
+
+    /// Highlight bounds and padding policy for drawn row `i` of the recorded frame.
+    pub fn highlight(&self, i: usize) -> Option<RowHighlight> {
+        self.rows[i].selected
     }
 
     /// Forgets the last frame, so the next one rebuilds every row.
@@ -181,6 +205,7 @@ pub(crate) fn upload_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use term_core::SelectionKind;
 
     fn frame(term: &Terminal) -> Frame<'static> {
         Frame {
@@ -199,7 +224,7 @@ mod tests {
 
     fn damaged(damage: &mut Damage, term: &Terminal, frame: &Frame<'_>) -> Vec<usize> {
         let mut rows = Vec::new();
-        damage.update(term, frame, term.selection_range(), &mut rows);
+        damage.update(term, frame, &mut rows);
         rows.iter()
             .enumerate()
             .filter(|(_, d)| **d)
@@ -358,14 +383,116 @@ mod tests {
 
         damage.invalidate();
         assert_eq!(damaged(&mut damage, &term, &base), all);
+    }
 
-        let point = |col| Point { line: 0, col };
+    #[test]
+    fn same_row_drag_damages_one_row_per_move() {
+        let mut term = Terminal::new(160, 60);
+        let mut damage = Damage::default();
+        let frame = frame(&term);
+        damaged(&mut damage, &term, &frame);
+        let point = |col| Point { line: 30, col };
         term.start_selection(point(0), SelectionKind::Simple);
-        term.update_selection(point(3));
-        assert_eq!(damaged(&mut damage, &term, &base), all);
-        assert_eq!(damaged(&mut damage, &term, &base), [] as [usize; 0]);
-        term.update_selection(point(4));
-        assert_eq!(damaged(&mut damage, &term, &base), all);
+        for col in 1..=40 {
+            term.update_selection(point(col));
+            assert_eq!(damaged(&mut damage, &term, &frame), [30]);
+        }
+        term.selection = None;
+        assert_eq!(damaged(&mut damage, &term, &frame), [30]);
+    }
+
+    /// Applies only damaged rows, then compares with a full per-cell paint.
+    fn check_highlights(
+        term: &Terminal,
+        offset: f32,
+        damage: &mut Damage,
+        painted: &mut Vec<Vec<bool>>,
+    ) {
+        let frame = Frame {
+            pixel_offset: offset,
+            ..frame(term)
+        };
+        let first = Damage::first_row(offset);
+        let count = term.rows() + first.unsigned_abs();
+        painted.resize_with(count, Vec::new);
+        for i in damaged(damage, term, &frame) {
+            let highlight = damage.highlight(i);
+            let cells = &term.viewport_row_signed(first + i as isize).cells;
+            painted[i] = (0..term.cols())
+                .map(|col| {
+                    highlight.is_some_and(|s| {
+                        s.contains(col, cells.get(col).unwrap_or(&Cell::default()))
+                    })
+                })
+                .collect();
+        }
+        let range = term.selection_range();
+        for (i, row) in painted.iter().enumerate() {
+            let row_index = first + i as isize;
+            let full: Vec<_> = (0..term.cols())
+                .map(|col| term.is_selected(range, term.viewport_to_point_signed(row_index, col)))
+                .collect();
+            assert_eq!(*row, full, "viewport row {row_index}");
+        }
+    }
+
+    #[test]
+    fn identical_selection_bounds_handle_wrap_padding_on_kind_change() {
+        let mut term = Terminal::new(4, 3);
+        term.advance("abc界de".as_bytes());
+        let mut damage = Damage::default();
+        let mut painted = Vec::new();
+        let start = term.viewport_to_point(0, 0);
+        let end = term.viewport_to_point(1, 3);
+        assert!(
+            term.viewport_row(0).cells[3]
+                .flags
+                .contains(Flags::WIDE_WRAP)
+        );
+        for kind in [
+            SelectionKind::Word,
+            SelectionKind::Simple,
+            SelectionKind::Line,
+        ] {
+            term.start_selection(start, kind);
+            term.update_selection(end);
+            check_highlights(&term, 0.0, &mut damage, &mut painted);
+            assert_eq!(painted[0][3], kind == SelectionKind::Simple);
+        }
+    }
+
+    #[test]
+    fn incremental_highlights_match_full_paint_across_wraps_and_scrolls() {
+        let mut term = Terminal::new(10, 4);
+        for _ in 0..4 {
+            // Identical soft-wrapped pairs, so moving the viewport alone need
+            // not change cells. The wide character occupies columns 3 and 4.
+            term.advance("one界two  wrapped\r\n".as_bytes());
+        }
+        let mut damage = Damage::default();
+        let mut painted = Vec::new();
+        for kind in [
+            SelectionKind::Simple,
+            SelectionKind::Block,
+            SelectionKind::Word,
+            SelectionKind::Line,
+            SelectionKind::CommandOutput,
+        ] {
+            term.scroll_display(2);
+            let anchor = term.viewport_to_point(1, 4);
+            term.start_selection(anchor, kind);
+            // Grow, shrink, reverse across the anchor, then reach above the grid.
+            for (row, col) in [(3, 7), (2, 3), (1, 6), (0, 1), (-1, 4)] {
+                term.update_selection(term.viewport_to_point_signed(row, col));
+                check_highlights(&term, 3.0, &mut damage, &mut painted);
+            }
+            term.scroll_display(-2);
+            check_highlights(&term, 3.0, &mut damage, &mut painted);
+            term.update_selection(term.viewport_to_point(3, 7));
+            check_highlights(&term, 0.0, &mut damage, &mut painted);
+            term.selection = None;
+            check_highlights(&term, 0.0, &mut damage, &mut painted);
+        }
     }
 
     #[test]

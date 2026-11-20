@@ -596,7 +596,6 @@ impl Renderer {
             stroke,
             ..
         } = fonts.metrics;
-        let selection = term.selection_range();
         let preedit = preedit.filter(|p| !p.text.is_empty() && focused);
         let cursor = term
             .cursor_position()
@@ -623,7 +622,6 @@ impl Renderer {
                 blink_visible: self.blink_visible,
                 rerun: &rerun,
             },
-            selection,
             &mut damaged,
         );
         let mut grid = std::mem::take(&mut self.grid);
@@ -640,6 +638,8 @@ impl Renderer {
             glyphs.clear();
             overlays.clear();
             let row = first + i as isize;
+            let highlight = self.damage.highlight(i);
+            let is_selected = |col, cell: &Cell| highlight.is_some_and(|s| s.contains(col, cell));
             let line = term.viewport_row_signed(row);
             let y = padding + row as f32 * ch + pixel_offset;
             if rerun
@@ -683,7 +683,7 @@ impl Renderer {
                     };
                     fg = (255, 255, 255);
                 }
-                let selected = term.is_selected(selection, point);
+                let selected = is_selected(col, cell);
                 if selected {
                     bg = term.palette.selection;
                 }
@@ -720,7 +720,7 @@ impl Renderer {
                                 return false;
                             }
                             let other = term.viewport_to_point_signed(row, col + offset);
-                            term.is_selected(selection, other) == selected
+                            is_selected(col + offset, next) == selected
                                 && search.and_then(|s| {
                                     term_core::search::highlighted(s.matches, other, next)
                                 }) == matched

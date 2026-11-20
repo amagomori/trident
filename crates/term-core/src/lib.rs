@@ -379,6 +379,13 @@ pub enum SelectionKind {
     Block,
 }
 
+impl SelectionKind {
+    /// Whether highlights omit synthetic padding inserted at a soft wrap.
+    pub fn skips_wrap_padding(self) -> bool {
+        matches!(self, Self::Word | Self::Line)
+    }
+}
+
 /// Inclusive selection endpoints, in either drag direction.
 #[derive(Clone, Copy, Debug)]
 pub struct Selection {
@@ -1958,7 +1965,7 @@ impl Terminal {
         range
             .and_then(|range| self.columns_of(sel.kind, range, point.line))
             .is_some_and(|(from, to)| (from..=to).contains(&point.col))
-            && !(matches!(sel.kind, SelectionKind::Word | SelectionKind::Line)
+            && !(sel.kind.skips_wrap_padding()
                 && self
                     .line(point.line)
                     .cells
@@ -1966,9 +1973,11 @@ impl Terminal {
                     .is_some_and(|c| c.flags.contains(Flags::WIDE_WRAP)))
     }
 
-    /// Inclusive columns on one physical row, shared by highlighting and copying.
-    /// Selecting either half of a wide glyph selects the whole glyph.
-    fn selection_columns(&self, range: (Point, Point), line: u64) -> Option<(usize, usize)> {
+    /// Returns inclusive selected columns on an absolute line.
+    ///
+    /// Pass the current [`Self::selection_range`]. Lines outside that range
+    /// return `None`. Either half of a wide glyph selects the whole glyph.
+    pub fn selection_columns(&self, range: (Point, Point), line: u64) -> Option<(usize, usize)> {
         self.columns_of(self.selection?.kind, range, line)
     }
 
