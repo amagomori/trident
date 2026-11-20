@@ -220,6 +220,15 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             State::DcsIntermediate => self.advance_dcs_intermediate(performer, byte),
             State::DcsParam => self.advance_dcs_param(performer, byte),
             State::DcsPassthrough => self.advance_dcs_passthrough(performer, byte),
+            State::DcsEscape => {
+                if byte == b'\\' {
+                    performer.unhook();
+                } else {
+                    performer.cancel_dcs();
+                }
+                self.state = State::Escape;
+                self.advance_esc(performer, byte);
+            },
             State::Escape => self.advance_esc(performer, byte),
             State::EscapeIntermediate => self.advance_esc_intermediate(performer, byte),
             State::OscString => self.advance_osc_string(performer, byte),
@@ -369,14 +378,18 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         match byte {
             0x00..=0x17 | 0x19 | 0x1C..=0x7E => performer.put(byte),
             0x18 | 0x1A => {
-                performer.unhook();
+                performer.cancel_dcs();
                 performer.execute(byte);
                 self.state = State::Ground
             },
             0x1B => {
-                performer.unhook();
                 self.reset_params();
-                self.state = State::Escape
+                self.state = if performer.await_dcs_st() {
+                    State::DcsEscape
+                } else {
+                    performer.unhook();
+                    State::Escape
+                }
             },
             0x7F => (),
             0x9C => {
@@ -853,6 +866,7 @@ enum State {
     SosPmApcString,
     #[default]
     Ground,
+    DcsEscape,
 }
 
 /// Performs actions requested by the Parser
@@ -899,6 +913,16 @@ pub trait Perform {
     /// `[code, body]`, or an empty body on cancellation or overflow.
     fn raw_osc_limit(&self, _code: &[u8]) -> Option<usize> {
         None
+    }
+
+    /// Whether the active handler needs the full ST before committing its payload.
+    fn await_dcs_st(&self) -> bool {
+        false
+    }
+
+    /// A CAN, SUB, or (for a handler awaiting ST) an escape other than ST.
+    fn cancel_dcs(&mut self) {
+        self.unhook()
     }
 
     /// Dispatch an operating system command.

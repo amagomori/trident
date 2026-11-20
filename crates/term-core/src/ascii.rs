@@ -122,6 +122,15 @@ impl Perform for Writer<'_> {
         self.term.unhook();
     }
 
+    fn await_dcs_st(&self) -> bool {
+        self.term.await_dcs_st()
+    }
+
+    fn cancel_dcs(&mut self) {
+        self.flush();
+        self.term.cancel_dcs();
+    }
+
     #[inline]
     fn raw_osc_limit(&self, code: &[u8]) -> Option<usize> {
         self.term.raw_osc_limit(code)
