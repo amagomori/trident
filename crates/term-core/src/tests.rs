@@ -283,6 +283,30 @@ fn configured_palette_resolves_colors_and_osc_queries() {
 }
 
 #[test]
+fn osc_color_replies_preserve_index_width_order_and_terminators() {
+    let mut term = Terminal::new(80, 24);
+    for i in [0u8, 9, 10, 99, 100, 255] {
+        term.palette.ansi_overrides[usize::from(i)] = Some((i, 0x0a, 0xf0));
+    }
+    term.palette.special[4] = Some((1, 2, 3));
+    term.palette.foreground = (4, 5, 6);
+    term.palette.cursor = (7, 8, 9);
+    term.advance(b"\x1b]4;255;?;0;?;099;?;10;?;100;?;9;?\x07\x1b]5;4;?\x1b\\\x1b]10;?;;?\x07");
+    assert_eq!(
+        term.take_responses(),
+        b"\x1b]4;255;rgb:ffff/0a0a/f0f0\x07\
+          \x1b]4;0;rgb:0000/0a0a/f0f0\x07\
+          \x1b]4;99;rgb:6363/0a0a/f0f0\x07\
+          \x1b]4;10;rgb:0a0a/0a0a/f0f0\x07\
+          \x1b]4;100;rgb:6464/0a0a/f0f0\x07\
+          \x1b]4;9;rgb:0909/0a0a/f0f0\x07\
+          \x1b]5;4;rgb:0101/0202/0303\x1b\\\
+          \x1b]10;rgb:0404/0505/0606\x07\
+          \x1b]12;rgb:0707/0808/0909\x07"
+    );
+}
+
+#[test]
 fn osc_colors_accept_xterm_specs_and_reset() {
     let mut term = Terminal::new(80, 24);
     term.advance(b"\x1b]4;1;#fff;2;rgb:f0f0/0000/0000;3;rgbi:0.5/0.5/0.5;4;CIEXYZ:0.5/0.5/0.5\x07");
