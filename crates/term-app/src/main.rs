@@ -3128,9 +3128,22 @@ impl App {
                 pane.window.window.request_redraw();
             }
         }
+        #[cfg(target_os = "macos")]
+        let (focused, visible) = (false, std::cell::OnceCell::new());
+        #[cfg(not(target_os = "macos"))]
+        let focused = self.focused;
         for notification in pane.term.take_notifications() {
             if self.config.desktop_notifications
-                && osc_notify::wanted(notification.occasion, self.focused, || Some(false))
+                && osc_notify::wanted(notification.occasion, focused, || {
+                    #[cfg(target_os = "macos")]
+                    {
+                        *visible.get_or_init(|| {
+                            osc_notify::visible(&pane.window.window, pane.window.occluded)
+                        })
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    Some(false)
+                })
                 && self.notification_throttle.allow(Instant::now())
             {
                 osc_notify::show(notification);
@@ -3452,17 +3465,7 @@ impl App {
         for notification in s.term.take_notifications() {
             if self.config.desktop_notifications
                 && osc_notify::wanted(notification.occasion, self.focused, || {
-                    *visible.get_or_init(|| {
-                        if self.occluded {
-                            return Some(false);
-                        }
-                        let shown = s.window.is_minimized().map(|minimized| !minimized);
-                        #[cfg(target_os = "macos")]
-                        if shown == Some(true) && osc_notify::covered(&s.window) {
-                            return Some(false);
-                        }
-                        shown
-                    })
+                    *visible.get_or_init(|| osc_notify::visible(&s.window, self.occluded))
                 })
                 && self.notification_throttle.allow(Instant::now())
             {

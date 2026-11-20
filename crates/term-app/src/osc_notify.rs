@@ -41,6 +41,19 @@ pub fn wanted(occasion: Occasion, focused: bool, visible: impl FnOnce() -> Optio
     }
 }
 
+/// Whether any part of the originating window is visible to the user.
+pub fn visible(window: &winit::window::Window, occluded: bool) -> Option<bool> {
+    if occluded || window.is_visible() == Some(false) {
+        return Some(false);
+    }
+    let shown = window.is_minimized().map(|minimized| !minimized);
+    #[cfg(target_os = "macos")]
+    if shown == Some(true) && covered(window) {
+        return Some(false);
+    }
+    shown
+}
+
 /// A window's frame in screen points.
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,11 +124,11 @@ fn uncovered(frame: Frame, cover: Frame) -> Vec<Frame> {
     parts
 }
 
-/// Whether other apps' windows hide all of `window`, or it is off screen (another Space).
+/// Whether windows above `window` hide all of it, or it is off screen (another Space).
 /// `AppKit`'s occlusion state, which winit reports, can stay visible under
 /// opaque windows.
 #[cfg(target_os = "macos")]
-pub fn covered(window: &winit::window::Window) -> bool {
+fn covered(window: &winit::window::Window) -> bool {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
@@ -129,7 +142,6 @@ pub fn covered(window: &winit::window::Window) -> bool {
         static kCGWindowAlpha: *const c_void;
         static kCGWindowBounds: *const c_void;
         static kCGWindowIsOnscreen: *const c_void;
-        static kCGWindowOwnerPID: *const c_void;
     }
     const ON_SCREEN_ABOVE_WINDOW: u32 = 1 << 1;
     const INCLUDING_WINDOW: u32 = 1 << 3;
@@ -197,7 +209,6 @@ pub fn covered(window: &winit::window::Window) -> bool {
     let Some(own_frame) = frame(&own) else {
         return false;
     };
-    let pid = f64::from(std::process::id());
     let Some(above) = list(
         ON_SCREEN_ABOVE_WINDOW | EXCLUDE_DESKTOP_ELEMENTS,
         number_in_server,
@@ -210,7 +221,6 @@ pub fn covered(window: &winit::window::Window) -> bool {
             // SAFETY: These immutable externs are framework-defined CFString keys.
             number(info, unsafe { kCGWindowLayer }) == Some(0.0)
                 && number(info, unsafe { kCGWindowAlpha }).is_some_and(|alpha| alpha > 0.99)
-                && number(info, unsafe { kCGWindowOwnerPID }) != Some(pid)
         })
         .filter_map(|info| frame(&info))
         .collect();
