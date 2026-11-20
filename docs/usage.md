@@ -268,6 +268,7 @@ path in the output to see a small card next to it:
 - Text files show their first lines, or highlight the referenced line in locations such as
   `path:line:column` and Python's `File "notes.txt", line 25`.
 - Directories list their entries.
+- ZIP archives (`.zip`) list member paths and uncompressed sizes without extracting them.
 
 Paths are found in `ls` columns, `git status` and `git diff` output, compiler and traceback
 locations, and quoted names. Unquoted paths can contain single spaces; two or more spaces
@@ -287,10 +288,10 @@ trident show [--width N] [--height N] [--fit] [--page N[-M]] FILE...
   --page N[-M] Show one PDF page or an inclusive range (first page is 1)
 ```
 
-`trident show` displays a file in Trident, kitty, Ghostty or WezTerm. It
-picks the type from the file's contents, not its name:
+`trident show` displays a file in Trident, kitty, Ghostty or WezTerm:
 
-- Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG) are drawn shrunk to fit
+- Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM, TGA and SVG) are recognized by
+  their contents, not their name, and drawn shrunk to fit
   the window. Animated GIF and WebP files play in place in Trident and other terminals
   that support kitty animation. Trident only schedules animation redraws while the image
   is visible and playing; drop and hover previews remain still.
@@ -298,6 +299,9 @@ picks the type from the file's contents, not its name:
   `trident show --page 2-4 --fit report.pdf` fits each selected page inside the window.
   Without `--page`, all pages are shown. Unlock password-protected files before viewing them.
 - Text files are printed with control characters made visible.
+- A `.zip` with a readable ZIP directory lists member paths and uncompressed sizes in archive
+  order, up to 32 entries or the available rows. Nothing is extracted. Other ZIP-based formats
+  such as Office documents keep their system thumbnail behavior.
 - For other files, Trident asks Quick Look on macOS or an installed
   freedesktop thumbnailer on Linux for a preview. For example, on Ubuntu,
   `ffmpegthumbnailer` previews videos, `gnome-font-viewer` previews fonts, and
