@@ -38,6 +38,14 @@ pub struct Palette {
     pub selection: Rgb,
     /// Normal ANSI colors followed by their eight bright counterparts.
     pub ansi: [Rgb; 16],
+    /// Colors changed with `OSC 4`; absent entries use `indexed`.
+    pub ansi_overrides: [Option<Rgb>; 256],
+    /// Colors changed with `OSC 5` or the extended `OSC 4` indexes.
+    pub special: [Option<Rgb>; 5],
+    /// Colors changed with `OSC 10` through `OSC 19`.
+    pub dynamic: [Option<Rgb>; 10],
+    /// Configured values for `OSC 10` through `OSC 19`.
+    pub dynamic_base: [Rgb; 10],
 }
 
 impl Default for Palette {
@@ -48,6 +56,13 @@ impl Default for Palette {
             cursor: CURSOR,
             selection: SELECTION,
             ansi: ANSI,
+            ansi_overrides: [None; 256],
+            special: [None; 5],
+            dynamic: [None; 10],
+            dynamic_base: [
+                FOREGROUND, BACKGROUND, CURSOR, FOREGROUND, BACKGROUND, FOREGROUND, BACKGROUND,
+                SELECTION, CURSOR, FOREGROUND,
+            ],
         }
     }
 }
@@ -64,7 +79,18 @@ impl Palette {
         match color {
             Color::DefaultFg => self.foreground,
             Color::DefaultBg => self.background,
-            Color::Indexed(i @ 0..=15) => self.ansi[i as usize],
+            Color::Indexed(i) => self
+                .ansi_overrides
+                .get(i as usize)
+                .copied()
+                .flatten()
+                .unwrap_or_else(|| {
+                    if i < 16 {
+                        self.ansi[i as usize]
+                    } else {
+                        indexed(i)
+                    }
+                }),
             other => resolve(other),
         }
     }
