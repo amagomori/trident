@@ -103,7 +103,8 @@ runtime using the URLs and SHA-256 pins in `release.yml`, verify both checksums,
 ```sh
 # Linux
 cargo build --release --locked -p term-app
-python3 .github/scripts/release/release.py linux --binary target/release/trident --version "$version" \
+.github/scripts/release/pdfium.sh linux-x64 pdfium
+python3 .github/scripts/release/release.py linux --pdfium pdfium --binary target/release/trident --version "$version" \
   --out dist --appimagetool ./appimagetool --runtime ./appimage-runtime
 ./dist/*.AppImage --appimage-extract-and-run --version
 ```
@@ -117,7 +118,8 @@ cargo build --release --locked -p term-app --target x86_64-apple-darwin
 lipo -create -output trident-universal \
   target/aarch64-apple-darwin/release/trident target/x86_64-apple-darwin/release/trident
 lipo trident-universal -verify_arch arm64 x86_64
-python3 .github/scripts/release/release.py macos --binary trident-universal --version "$version" --out dist
+.github/scripts/release/pdfium.sh mac-universal pdfium
+python3 .github/scripts/release/release.py macos --pdfium pdfium --binary trident-universal --version "$version" --out dist
 hdiutil verify "dist/Trident-$version-macos-universal.dmg"
 ```
 

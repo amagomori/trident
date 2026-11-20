@@ -38,11 +38,15 @@ jobs:
           curl -fsSLo appimage-runtime "$APPIMAGE_RUNTIME_URL"
           printf '%s  appimagetool\n%s  appimage-runtime\n' "$APPIMAGETOOL_SHA256" "$APPIMAGE_RUNTIME_SHA256" | sha256sum -c
           chmod +x appimagetool
+      - run: .github/scripts/release/pdfium.sh linux-x64 pdfium
       - run: >
-          python3 .github/scripts/release/release.py linux --binary target/release/trident
+          python3 .github/scripts/release/release.py linux --pdfium pdfium --binary target/release/trident
           --version "${{ steps.version.outputs.version }}" --out dist
           --appimagetool ./appimagetool --runtime ./appimage-runtime
       - run: ./dist/*.AppImage --appimage-extract-and-run --version
+      - run: |
+          tar -xf dist/*.tar.gz
+          python3 .github/scripts/release/check_pdf.py Trident-*-linux-x86_64/bin/trident
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -69,10 +73,12 @@ jobs:
           lipo -create -output trident-universal \
             target/aarch64-apple-darwin/release/trident target/x86_64-apple-darwin/release/trident
           lipo trident-universal -verify_arch arm64 x86_64
+      - run: .github/scripts/release/pdfium.sh mac-universal pdfium
       - run: >
-          python3 .github/scripts/release/release.py macos --binary trident-universal
+          python3 .github/scripts/release/release.py macos --pdfium pdfium --binary trident-universal
           --version "${{ steps.version.outputs.version }}" --out dist
       - run: |
+          python3 .github/scripts/release/check_pdf.py dist/Trident.app/Contents/MacOS/trident
           rm -rf dist/Trident.app
           hdiutil verify dist/*.dmg
       - uses: actions/upload-artifact@v4

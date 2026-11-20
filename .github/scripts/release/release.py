@@ -105,15 +105,22 @@ def share_files(prefix):
     return out
 
 
-def stage(root, binary, prefix):
+def pdfium_notices(pdfium, dest):
+    shutil.copytree(pdfium / "licenses", dest)
+    shutil.copyfile(pdfium / "LICENSE", dest / "LICENSE")
+
+
+def stage(root, binary, pdfium, prefix):
     """Lays out bin/ and share/ under root/prefix."""
     root = Path(root)
-    files = [(Path(binary), f"{prefix}bin/{PACKAGE}", 0o755)] + share_files(prefix)
+    files = [(Path(binary), f"{prefix}bin/{PACKAGE}", 0o755),
+             (pdfium / "lib/libpdfium.so", f"{prefix}lib/{PACKAGE}/libpdfium.so", 0o644)] + share_files(prefix)
     for source, dest, mode in files:
         target = root / dest
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         target.chmod(mode)
+    pdfium_notices(pdfium, root / f"{prefix}share/doc/{PACKAGE}/pdfium")
 
 
 def epoch():
@@ -151,14 +158,14 @@ def tarball(src_dir, top, out):
         gz.write(buf.getvalue())
 
 
-def deb(binary, version, arch, out):
+def deb(binary, pdfium, version, arch, out):
     if not shutil.which("dpkg-deb"):
         raise ReleaseError("dpkg-deb not found")
     if not shutil.which("tic"):
         raise ReleaseError("tic not found (ncurses-bin)")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "root"
-        stage(root, binary, "usr/")
+        stage(root, binary, pdfium, "usr/")
         info = root / "usr/share/terminfo"
         info.mkdir(parents=True)
         subprocess.run(["tic", "-x", "-o", str(info),
@@ -170,7 +177,9 @@ def deb(binary, version, arch, out):
             f"Upstream-Name: {NAME}\nSource: {HOMEPAGE}\n\n"
             f"Files: *\nLicense: MIT\n\n"
             f"Files: usr/bin/{PACKAGE}\nComment: embeds the JetBrains Mono fonts\n"
-            f"License: OFL-1.1\n\nSee LICENSE and OFL.txt in this directory.\n")
+            f"License: OFL-1.1\n\nFiles: usr/lib/{PACKAGE}/libpdfium.so\n"
+            "Comment: See pdfium/ in this directory for all PDFium license notices.\n"
+            "License: BSD-3-Clause and others\n")
         size = sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
         depends = list(DEB_DEPENDS)
         glibc = glibc_minimum(binary)
@@ -193,9 +202,9 @@ def deb(binary, version, arch, out):
                        check=True, capture_output=True, env=env)
 
 
-def appdir(binary, path):
+def appdir(binary, pdfium, path):
     path = Path(path)
-    stage(path, binary, "usr/")
+    stage(path, binary, pdfium, "usr/")
     shutil.copyfile(DESKTOP, path / f"{PACKAGE}.desktop")
     shutil.copyfile(ROOT / f"assets/icons/{ICON}-256.png", path / f"{PACKAGE}.png")
     (path / ".DirIcon").symlink_to(f"{PACKAGE}.png")
@@ -203,10 +212,10 @@ def appdir(binary, path):
     (path / "AppRun").chmod(0o755)
 
 
-def appimage(binary, arch, out, tool, runtime):
+def appimage(binary, pdfium, arch, out, tool, runtime):
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / f"{NAME}.AppDir"
-        appdir(binary, root)
+        appdir(binary, pdfium, root)
         env = dict(os.environ, ARCH=arch, APPIMAGE_EXTRACT_AND_RUN="1",
                    SOURCE_DATE_EPOCH=str(epoch()))
         result = subprocess.run([str(Path(tool).resolve()), "--no-appstream", "--runtime-file",
@@ -216,7 +225,7 @@ def appimage(binary, arch, out, tool, runtime):
             raise ReleaseError(f"appimagetool failed:\n{result.stdout}{result.stderr}")
 
 
-def linux(binary, version, arch, out, tool=None, runtime=None):
+def linux(binary, pdfium, version, arch, out, tool=None, runtime=None):
     if arch not in DEB_ARCH:
         raise ReleaseError(f"unsupported arch {arch}")
     out = Path(out)
@@ -224,14 +233,14 @@ def linux(binary, version, arch, out, tool=None, runtime=None):
     top = f"{NAME}-{version}-linux-{arch}"
     made = []
     with tempfile.TemporaryDirectory() as tmp:
-        stage(tmp, binary, "")
+        stage(tmp, binary, pdfium, "")
         made.append(out / f"{top}.tar.gz")
         tarball(tmp, top, made[-1])
     made.append(out / f"{NAME}-{version}-linux-{DEB_ARCH[arch]}.deb")
-    deb(binary, version, arch, made[-1])
+    deb(binary, pdfium, version, arch, made[-1])
     if tool:
         made.append(out / f"{NAME}-{version}-{arch}.AppImage")
-        appimage(binary, arch, made[-1], tool, runtime)
+        appimage(binary, pdfium, arch, made[-1], tool, runtime)
     return made
 
 
@@ -255,7 +264,7 @@ def info_plist(version):
     }
 
 
-def app_bundle(binary, version, path):
+def app_bundle(binary, pdfium, version, path):
     contents = Path(path) / "Contents"
     (contents / "MacOS").mkdir(parents=True)
     resources = contents / "Resources"
@@ -265,6 +274,8 @@ def app_bundle(binary, version, path):
     exe = contents / "MacOS" / PACKAGE
     shutil.copyfile(binary, exe)
     exe.chmod(0o755)
+    shutil.copyfile(pdfium / "lib/libpdfium.dylib", exe.parent / "libpdfium.dylib")
+    pdfium_notices(pdfium, resources / "pdfium")
     shutil.copyfile(ROOT / "assets/icons/tide.icns", resources / f"{PACKAGE}.icns")
     for source, dest, mode in share_files(""):
         if dest.startswith(f"share/{PACKAGE}/"):
@@ -279,13 +290,13 @@ def app_bundle(binary, version, path):
                        capture_output=True)
 
 
-def macos(binary, version, out, dmg=True):
+def macos(binary, pdfium, version, out, dmg=True):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     app = out / f"{NAME}.app"
     if app.exists():
         shutil.rmtree(app)
-    app_bundle(binary, version, app)
+    app_bundle(binary, pdfium, version, app)
     if not dmg:
         return [app]
     if not shutil.which("hdiutil"):
@@ -404,6 +415,7 @@ sha256sums=('{sha256}')
 package() {{
   cd "{NAME}-${{_tag}}-linux-x86_64"
   install -Dm755 bin/{PACKAGE} "$pkgdir/usr/bin/{PACKAGE}"
+  install -Dm644 lib/{PACKAGE}/libpdfium.so "$pkgdir/usr/lib/{PACKAGE}/libpdfium.so"
   cp -r --no-preserve=ownership share "$pkgdir/usr/"
   install -dm755 "$pkgdir/usr/share/terminfo" "$pkgdir/usr/share/licenses/$pkgname"
   tic -x -o "$pkgdir/usr/share/terminfo" share/{PACKAGE}/terminfo/xterm-trident.terminfo
@@ -527,6 +539,7 @@ def main(argv=None):
     for name in ("linux", "macos"):
         p = sub.add_parser(name)
         p.add_argument("--binary", required=True, type=Path)
+        p.add_argument("--pdfium", required=True, type=Path, help="directory staged by pdfium.sh")
         p.add_argument("--version", required=True)
         p.add_argument("--out", required=True, type=Path)
     p = sub.choices["linux"]
@@ -554,11 +567,11 @@ def main(argv=None):
         elif args.command == "linux":
             if bool(args.appimagetool) != bool(args.runtime):
                 raise ReleaseError("--appimagetool and --runtime go together")
-            for path in linux(args.binary, args.version, args.arch, args.out, args.appimagetool,
+            for path in linux(args.binary, args.pdfium, args.version, args.arch, args.out, args.appimagetool,
                               args.runtime):
                 print(path)
         elif args.command == "macos":
-            for path in macos(args.binary, args.version, args.out, not args.no_dmg):
+            for path in macos(args.binary, args.pdfium, args.version, args.out, not args.no_dmg):
                 print(path)
         elif args.command == "packages":
             for path in packages(args.version, args.sums, args.out, args.base_url):

@@ -275,11 +275,12 @@ PDF previews require `pdftoppm` from poppler-utils on Linux and use Quick Look o
 ## View files
 
 ```text
-trident show [--width N] [--height N] [--fit] FILE...
+trident show [--width N] [--height N] [--fit] [--page N[-M]] FILE...
 
   --width N    Draw images N columns wide
   --height N   Draw images N rows tall (with --width: fit inside both)
   --fit        Scale images up or down to fill the window
+  --page N[-M] Show one PDF page or an inclusive range (first page is 1)
 ```
 
 `trident show` displays a file in Trident, kitty, Ghostty or WezTerm. It
@@ -289,6 +290,9 @@ picks the type from the file's contents, not its name:
   the window. Animated GIF and WebP files play in place in Trident and other terminals
   that support kitty animation. Trident only schedules animation redraws while the image
   is visible and playing; drop and hover previews remain still.
+- PDFs are drawn one page at a time, at window width by default. For example,
+  `trident show --page 2-4 --fit report.pdf` fits each selected page inside the window.
+  Without `--page`, all pages are shown. Unlock password-protected files before viewing them.
 - Text files are printed with control characters made visible.
 - For other files, Trident asks Quick Look on macOS or an installed
   freedesktop thumbnailer on Linux for a preview. For example, on Ubuntu,
@@ -299,6 +303,13 @@ picks the type from the file's contents, not its name:
 
 A missing, unreadable or corrupt file prints an error, and the command exits with status 1. For
 sample files, see `crates/term-app/samples`.
+
+Release packages include PDFium. If a source build reports `cannot load PDFium`,
+install a packaged Trident release, or download the non-V8
+[PDFium 8125 archive for your OS and architecture](https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F8125)
+and copy `lib/libpdfium.so` (Linux) or `lib/libpdfium.dylib` (macOS) beside the
+actual `trident` executable. The bundled macOS PDFium requires macOS 13 or later;
+on older versions use a compatible system build. Other file types do not need PDFium.
 
 Inside tmux, `trident show` turns on `allow-passthrough` for its pane, which tmux 3.3 and later
 need for images. It sends pixels once, then writes Kitty Unicode placeholder cells so

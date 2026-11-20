@@ -11,12 +11,13 @@ import termios
 import time
 from pathlib import Path
 
-binary, png, directory = sys.argv[1:]
+binary, image, directory = sys.argv[1:]
+pdf = Path(image).suffix == ".pdf"
 root = Path(directory)
 tmux = ["tmux", "-L", f"trident-image-{os.getpid()}"]
 os.environ.pop("TMUX", None)
 os.environ.update(TERM="xterm-256color", LC_ALL="en_US.UTF-8", SHELL="/bin/sh")
-args = [binary, "show", *(["--width", "158"] if "tall" in png else []), png]
+args = [binary, "show", *(["--width", "158"] if not pdf and "tall" in image else []), image]
 script = (
     "printf 'BEFORE-IMAGE\\n'; while ! test -e start; do sleep .05; done; "
     + shlex.join(args)
@@ -27,7 +28,8 @@ script = (
 os.chdir(root)
 pid, fd = pty.fork()
 if pid == 0:
-    fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", 41, 158, 1264, 820))
+    pixels = (1896, 1107) if pdf else (1264, 820)
+    fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", 41, 158, *pixels))
     os.execvp("tmux", tmux + ["-f", "/dev/null", "new-session", "-s", "image", script])
 
 data = bytearray()
@@ -69,12 +71,14 @@ try:
     assert ctl("display", "-p", "#{pane_width}x#{pane_height}") == "158x40"
     # Reserve the last available IDs; wrapping to the start could corrupt an
     # earlier image still reachable in history.
-    tiles = 2 if "tall" in Path(png).name else 1
-    ctl("set", "-s", "@trident-image-sequence", str(240 * 255 - tiles))
+    if not pdf:
+        tiles = 2 if "tall" in Path(image).name else 1
+        ctl("set", "-s", "@trident-image-sequence", str(240 * 255 - tiles))
     Path("start").touch()
     until("done")
     assert Path("done").read_text().strip() == "0"
-    assert int(ctl("show", "-sv", "@trident-image-sequence")) == 240 * 255
+    if not pdf:
+        assert int(ctl("show", "-sv", "@trident-image-sequence")) == 240 * 255
     frame("live")
     Path("scroll").touch()
     until("scrolled")

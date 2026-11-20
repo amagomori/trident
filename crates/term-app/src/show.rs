@@ -1,5 +1,5 @@
 //! `trident show`: prints files in the terminal. Images (detected from their
-//! bytes) are
+//! bytes) and PDF pages are
 //! scaled to the window and sent as kitty graphics escapes, so any terminal that speaks the
 //! protocol shows them. Text is printed as text. Other files get a system
 //! thumbnail when available, or a one-line summary.
@@ -12,9 +12,12 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use image::{ImageDecoder, ImageFormat};
 use std::io::{self, Write};
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+mod pdf;
 
 /// Base64 bytes per kitty escape; the protocol allows at most 4096.
 const CHUNK: usize = 4096;
@@ -35,6 +38,7 @@ struct Options {
     width: Option<u32>,
     height: Option<u32>,
     fit: bool,
+    pages: Option<RangeInclusive<i32>>,
     files: Vec<PathBuf>,
 }
 
@@ -66,6 +70,7 @@ impl Default for Window {
 enum Kind {
     Raster(ImageFormat),
     Svg,
+    Pdf,
     Text,
     DecodedText(String),
     Binary(String),
@@ -80,15 +85,16 @@ struct Rgba {
 
 pub fn usage() -> String {
     format!(
-        "USAGE: {} show [--width N] [--height N] [--fit] FILE...\n\n\
+        "USAGE: {} show [--width N] [--height N] [--fit] [--page N[-M]] FILE...\n\n\
          Shows files in the terminal. Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM,\n\
          TGA and SVG, told apart by their contents) are drawn with the kitty graphics\n\
-         protocol, shrunk to fit the window; text files are printed. Other files get a\n\
-         system thumbnail or a one-line summary.\n\n\
+         protocol, shrunk to fit the window; PDF pages fill its width. Text files are\n\
+         printed. Other files get a system thumbnail or a one-line summary.\n\n\
          OPTIONS:\n  \
            --width N    Draw images N columns wide\n  \
            --height N   Draw images N rows tall (with --width: fit inside both)\n  \
            --fit        Scale images up or down to fill the window\n  \
+           --page N[-M] Show PDF page N or pages N through M (first page is 1; default: all)\n  \
            -h, --help   Show this help\n\n\
          Inside tmux, images go through its passthrough. tmux 3.3 and later drop that\n\
          unless allow-passthrough is on, so, like `kitten icat`, show turns it on for\n\
@@ -111,6 +117,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Options, String>
             "--width" => options.width = Some(cells("--width", args.next())?),
             "--height" => options.height = Some(cells("--height", args.next())?),
             "--fit" => options.fit = true,
+            "--page" => options.pages = Some(pdf::page_range(&args.next().unwrap_or_default())?),
             "-h" | "--help" => {
                 println!("{}", usage());
                 std::process::exit(0);
@@ -173,7 +180,6 @@ fn show(
     out: &mut impl Write,
 ) -> Result<(), String> {
     let (bytes, size) = read_for_show(path).map_err(|e| io_message(&e))?;
-    let write_err = |e: io::Error| format!("cannot write output: {}", io_message(&e));
     match detect(&bytes) {
         Kind::Raster(format @ (ImageFormat::Gif | ImageFormat::WebP)) => {
             animation::show(&bytes, format, options, window, out)
@@ -186,6 +192,7 @@ fn show(
             let image = render_svg(&bytes, path, options, window)?;
             write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
         }
+        Kind::Pdf => pdf::show(&bytes, options, window, out),
         Kind::Text => write_text(out, &bytes).map_err(write_err),
         Kind::DecodedText(text) => write_text(out, text.as_bytes()).map_err(write_err),
         Kind::Binary(kind) => {
@@ -195,6 +202,10 @@ fn show(
             writeln!(out, "{kind}, {}", human_size(size)).map_err(write_err)
         }
     }
+}
+
+fn write_err(e: io::Error) -> String {
+    format!("cannot write output: {}", io_message(&e))
 }
 
 /// Large videos and Office archives only need a header for classification.
@@ -300,6 +311,7 @@ pub(super) fn preview(bytes: &[u8], complete: bool, path: &Path, max: (u32, u32)
         Kind::Svg if complete => image(render_svg(bytes, path, &options, window), "SVG".into()),
         Kind::Raster(format) => Preview::Binary(format!("{} image", format_name(format))),
         Kind::Svg => Preview::Binary("SVG image".into()),
+        Kind::Pdf => Preview::Binary("PDF document".into()),
         Kind::Text => Preview::Text(String::from_utf8_lossy(bytes).into_owned()),
         Kind::DecodedText(text) => Preview::Text(text),
         Kind::Binary(kind) => Preview::Binary(kind),
@@ -320,6 +332,13 @@ fn io_message(e: &io::Error) -> String {
 }
 
 fn detect(bytes: &[u8]) -> Kind {
+    // Even a PDF with entirely ASCII contents has a version header on its own line.
+    if let Some([major, b'.', minor, b'\r' | b'\n', ..]) = bytes.strip_prefix(b"%PDF-")
+        && major.is_ascii_digit()
+        && minor.is_ascii_digit()
+    {
+        return Kind::Pdf;
+    }
     if let Ok(format) = image::guess_format(bytes) {
         // Some signatures ("BM", "P1".."P7", "qoif") also start ordinary text; text only
         // counts as an image when it has a whole header.
@@ -687,15 +706,29 @@ fn write_kitty(
     out: &mut impl Write,
     image: &Rgba,
     window: Window,
-    mut wait: impl FnMut(),
+    wait: impl FnMut(),
 ) -> io::Result<()> {
+    if let Some(grid) = transmit_image(out, image, window, wait)? {
+        grid.write_cells(out)?;
+    }
+    Ok(())
+}
+
+/// Returns tmux cells to write after transmitting all pixels for a page.
+fn transmit_image(
+    out: &mut impl Write,
+    image: &Rgba,
+    window: Window,
+    mut wait: impl FnMut(),
+) -> io::Result<Option<TileGrid>> {
     if window.tmux {
         let grid = TileGrid::new(image, window, reserve_tile_ids)?;
         grid.send(out, image, None, &mut wait)?;
-        grid.write_cells(out)
+        Ok(Some(grid))
     } else {
         send_direct(out, image, None, None)?;
-        out.write_all(b"\n")
+        out.write_all(b"\n")?;
+        Ok(None)
     }
 }
 

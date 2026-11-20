@@ -450,10 +450,7 @@ fn encoding_heuristics_preserve_binaries() {
             "{bytes:?}"
         );
     }
-    assert_eq!(
-        detect(b"%PDF-1.7\nmostly printable caf\xe9"),
-        Kind::Binary("PDF document".into())
-    );
+    assert_eq!(detect(b"%PDF-1.7\nmostly printable caf\xe9"), Kind::Pdf);
     assert_eq!(
         detect(b"\x7fELFprintable caf\xe9"),
         Kind::Binary("ELF executable".into())
@@ -563,6 +560,7 @@ fn parses_arguments() {
             width: Some(20),
             height: None,
             fit: true,
+            pages: None,
             files: vec!["a.png".into(), "--b.png".into()],
         })
     );
@@ -570,6 +568,11 @@ fn parses_arguments() {
     assert!(args(&["--width", "0", "a.png"]).is_err());
     assert!(args(&["--height"]).is_err());
     assert!(args(&["--bogus", "a.png"]).is_err());
+    assert_eq!(args(&["--page", "2", "x"]).unwrap().pages, Some(2..=2));
+    assert_eq!(args(&["--page", "2-4", "x"]).unwrap().pages, Some(2..=4));
+    for value in ["", "-1", "0", "3-2", "2-", "1-2-3", "1.5", "2147483648"] {
+        assert!(args(&["--page", value, "x"]).is_err(), "{value}");
+    }
     assert_eq!(args(&["-"]).unwrap().files, vec![PathBuf::from("-")]);
 }
 
