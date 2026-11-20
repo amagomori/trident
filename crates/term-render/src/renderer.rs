@@ -648,8 +648,8 @@ impl Renderer {
             glyphs.clear();
             overlays.clear();
             let row = first + i as isize;
-            let selected_columns = self.damage.selected_columns(i);
-            let is_selected = |col| selected_columns.as_ref().is_some_and(|s| s.contains(&col));
+            let highlight = self.damage.highlight(i);
+            let is_selected = |col, cell: &Cell| highlight.is_some_and(|s| s.contains(col, cell));
             let line = term.viewport_row_signed(row);
             let y = padding + row as f32 * ch + pixel_offset;
             if rerun
@@ -693,7 +693,7 @@ impl Renderer {
                     };
                     fg = (255, 255, 255);
                 }
-                let selected = is_selected(col);
+                let selected = is_selected(col, cell);
                 if selected {
                     bg = term.palette.selection;
                 }
@@ -730,7 +730,7 @@ impl Renderer {
                                 return false;
                             }
                             let other = term.viewport_to_point_signed(row, col + offset);
-                            is_selected(col + offset) == selected
+                            is_selected(col + offset, next) == selected
                                 && search.and_then(|s| {
                                     term_core::search::highlighted(s.matches, other, next)
                                 }) == matched

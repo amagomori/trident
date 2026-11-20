@@ -1135,6 +1135,177 @@ fn selection_text_joins_wrapped_lines() {
 }
 
 #[test]
+fn wrapped_path_selection_matches_the_highlight_before_and_after_reflow() {
+    let path = "src/very_long.rs:42";
+    let mut t = term(8, 8, &format!("{path}\r\nNEXT"));
+    for cols in [8, 5, 12] {
+        t.resize(cols, 8);
+        let first = t.first_line();
+        let next = first + path.len().div_ceil(cols) as u64;
+        for i in 0..path.len() {
+            let click = Point {
+                line: first + (i / cols) as u64,
+                col: i % cols,
+            };
+            for kind in [SelectionKind::Word, SelectionKind::Line] {
+                t.start_selection(click, kind);
+                assert_eq!(t.selection_text().as_deref(), Some(path));
+                assert!(t.selection_html().unwrap().contains(path));
+                let range = t.selection_range();
+                for line in first..=next {
+                    for col in 0..cols {
+                        let offset = (line - first) as usize * cols + col;
+                        let expected =
+                            line < next && (kind == SelectionKind::Line || offset < path.len());
+                        assert_eq!(t.is_selected(range, Point { line, col }), expected);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tmux_widened_repaint_replaces_old_wraps() {
+    let path = "history/abcdefghijklmnopqrstuvwxyz/01234567890/fixture.rs:217";
+    let mut t = term(24, 10, &format!("\x1b[?1049h{path}\r\nHARDSTOP"));
+    // Visible portion of tmux 3.8's redraw after the first row moves into history.
+    t.resize(20, 10);
+    t.advance(format!("\x1b[H{}\x1b[K\r\nHARDSTOP\x1b[K", &path[20..]).as_bytes());
+    t.resize(32, 10);
+    t.advance(format!("\x1b[H{path}   \x1b[3;1HHARDSTOP\x1b[K").as_bytes());
+    for (row, expected) in [(0, path), (1, path), (2, "HARDSTOP")] {
+        t.start_selection(t.viewport_to_point(row, 0), SelectionKind::Line);
+        assert_eq!(t.selection_text().as_deref(), Some(expected));
+        for y in 0..3 {
+            assert_eq!(
+                t.is_selected(t.selection_range(), t.viewport_to_point(y, 0)),
+                (row == 2) == (y == 2)
+            );
+        }
+    }
+    t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
+    t.update_selection(t.viewport_to_point(2, 7));
+    assert_eq!(t.selection_text(), Some(format!("{path}\nHARDSTOP")));
+}
+
+#[test]
+fn tmux_redraw_without_a_soft_wrap_keeps_rows_separate() {
+    for (before, boundary, after) in [("abc", "\r\n", "界x"), ("abcd", "\x1b[2;1H", "ef")] {
+        let mut t = term(4, 2, &format!("\x1b[?1049h{before}{boundary}{after}"));
+        for kind in [SelectionKind::Word, SelectionKind::Line] {
+            for (row, expected) in [(0, before), (1, after)] {
+                t.start_selection(t.viewport_to_point(row, 0), kind);
+                assert_eq!(t.selection_text().as_deref(), Some(expected));
+            }
+        }
+    }
+}
+
+#[test]
+fn repainting_wide_glyph_padding_preserves_the_original_wrap() {
+    for resized in [false, true] {
+        let mut t = term(4, 2, "\x1b[?1049habc界");
+        if resized {
+            t.resize(6, 2);
+            t.resize(4, 2);
+        }
+        t.advance(b"\x1b[1;4Hd");
+        for kind in [SelectionKind::Word, SelectionKind::Line] {
+            t.start_selection(t.viewport_to_point(0, 0), kind);
+            assert_eq!(t.selection_text().as_deref(), Some("abcd界"));
+        }
+    }
+}
+
+#[test]
+fn repainting_the_widened_margin_only_wraps_if_a_print_continues() {
+    for margin in ["xy", "界"] {
+        let mut t = term(2, 2, "\x1b[?1049habcd");
+        t.resize(4, 2);
+        t.advance(b"\x1b[1;1HZ");
+        assert!(t.viewport_row(0).wrapped()); // An interior edit kept the edge.
+        t.advance(format!("\x1b[1;3H{margin}\x1b[2;1HQ").as_bytes());
+        assert!(!t.viewport_row(0).wrapped());
+        t.advance(format!("\x1b[1;3H{margin}Q").as_bytes());
+        assert!(t.viewport_row(0).wrapped());
+    }
+}
+
+#[test]
+fn wrapped_selection_skips_synthetic_padding_but_highlights_both_wide_halves() {
+    let mut t = term(4, 4, "(ab界e\u{301},x");
+    for (line, clicks) in [(0, 1..=3), (1, 0..=2)] {
+        for col in clicks {
+            t.start_selection(Point { line, col }, SelectionKind::Word);
+            assert_eq!(t.selection_text().as_deref(), Some("ab界e\u{301}"));
+            let range = t.selection_range();
+            for (line, selected) in [(0, 1..=2), (1, 0..=2)] {
+                for col in 0..4 {
+                    assert_eq!(
+                        t.is_selected(range, Point { line, col }),
+                        selected.contains(&col)
+                    );
+                }
+            }
+        }
+    }
+    t.start_selection(Point { line: 1, col: 3 }, SelectionKind::Word);
+    assert_eq!(t.selection_text().as_deref(), Some(","));
+}
+
+#[test]
+fn word_and_line_drags_expand_both_ends_in_either_direction() {
+    let mut t = term(4, 8, "hi abcdef end\r\nx\r\nbcdefg z");
+    let a = Point { line: 1, col: 2 };
+    let b = Point { line: 6, col: 0 };
+    for (kind, expected) in [
+        (SelectionKind::Word, "abcdef end\nx\nbcdefg"),
+        (SelectionKind::Line, "hi abcdef end\nx\nbcdefg z"),
+    ] {
+        for (anchor, head) in [(a, b), (b, a)] {
+            t.start_selection(anchor, kind);
+            t.update_selection(head);
+            assert_eq!(t.selection_text().as_deref(), Some(expected));
+        }
+    }
+}
+
+#[test]
+fn wrapped_selection_stops_at_oldest_retained_row() {
+    let mut t = Terminal::new(4, 2);
+    t.set_scrollback_limit(1);
+    t.advance(b"zzzzabcdefghijk");
+    assert_eq!(t.first_line(), 1);
+    for kind in [SelectionKind::Word, SelectionKind::Line] {
+        t.start_selection(Point { line: 3, col: 1 }, kind);
+        assert_eq!(t.selection_text().as_deref(), Some("abcdefghijk"));
+    }
+}
+
+#[test]
+fn word_drag_from_an_evicted_row_starts_at_first_retained_column() {
+    let mut t = term(4, 2, "xxxxa b ");
+    t.set_scrollback_limit(1);
+    t.start_selection(Point { line: 0, col: 3 }, SelectionKind::Word);
+    t.update_selection(Point { line: 1, col: 2 });
+    t.advance(b"\r\nc\r\nd");
+    assert_eq!(t.selection_text().as_deref(), Some("a b"));
+}
+
+#[test]
+fn marked_command_output_does_not_expand_into_soft_wrapped_prompt() {
+    let mut t = term(
+        4,
+        3,
+        "\x1b]133;A\x07abcdx\r\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+    );
+    t.select_command_output();
+    assert_eq!(t.selection_text().as_deref(), Some("out"));
+    assert_eq!(t.last_command_output().as_deref(), Some("out"));
+}
+
+#[test]
 fn selected_single_line_checks_bytes_and_logical_breaks() {
     let mut t = term(4, 4, "abc界\u{301}x\r\nnext");
     assert_eq!(t.selected_single_line(64), None);

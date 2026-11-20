@@ -41,7 +41,10 @@ impl Terminal {
             }
             let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
             let count = bytes.len().min(cols - col);
-            let cells = &mut self.lines_mut()[row].cells;
+            let line = &mut self.lines_mut()[row];
+            let end = col + count;
+            line.overwrite_margin(end);
+            let cells = &mut line.cells;
             clear_wide_pair(cells, col);
             if count > 1 {
                 clear_wide_pair(cells, col + count - 1);
@@ -50,7 +53,6 @@ impl Terminal {
                 *cell = template;
                 cell.c = b as char;
             }
-            let end = col + count;
             if self.shell.track_input {
                 self.record_printed(row, col..end);
             }

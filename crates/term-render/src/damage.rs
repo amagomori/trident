@@ -47,8 +47,22 @@ pub(crate) struct Frame<'a> {
 struct RowState {
     cells: Vec<Cell>,
     cursor: Option<usize>,
-    selected: Option<(usize, usize)>,
+    selected: Option<RowHighlight>,
     rerun: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowHighlight {
+    from: usize,
+    to: usize,
+    skip_wrap_padding: bool,
+}
+
+impl RowHighlight {
+    pub fn contains(self, col: usize, cell: &Cell) -> bool {
+        (self.from..=self.to).contains(&col)
+            && !(self.skip_wrap_padding && cell.flags.contains(Flags::WIDE_WRAP))
+    }
 }
 
 #[derive(Default)]
@@ -72,7 +86,10 @@ impl Damage {
     pub fn update(&mut self, term: &Terminal, frame: &Frame<'_>, damaged: &mut Vec<bool>) {
         let first = Self::first_row(frame.pixel_offset);
         let count = (term.rows() as isize - first) as usize;
-        let selection = term.selection_range();
+        let selection = term.selection_range().zip(
+            term.selection
+                .map(|selection| selection.kind.skips_wrap_padding()),
+        );
         let key = FrameKey {
             rows: term.rows(),
             cols: term.cols(),
@@ -109,8 +126,13 @@ impl Damage {
         damaged.resize(count, false);
         for (i, state) in self.rows.iter_mut().enumerate() {
             let row = first + i as isize;
-            let selected = selection.and_then(|range| {
+            let selected = selection.and_then(|(range, skip_wrap_padding)| {
                 term.selection_columns(range, term.viewport_to_point_signed(row, 0).line)
+                    .map(|(from, to)| RowHighlight {
+                        from,
+                        to,
+                        skip_wrap_padding,
+                    })
             });
             let cells = &term.viewport_row_signed(row).cells;
             let cursor = frame
@@ -139,9 +161,9 @@ impl Damage {
         }
     }
 
-    /// Inclusive highlighted columns in drawn row `i` of the recorded frame.
-    pub fn selected_columns(&self, i: usize) -> Option<std::ops::RangeInclusive<usize>> {
-        self.rows[i].selected.map(|(from, to)| from..=to)
+    /// Highlight bounds and padding policy for drawn row `i` of the recorded frame.
+    pub fn highlight(&self, i: usize) -> Option<RowHighlight> {
+        self.rows[i].selected
     }
 
     /// Forgets the last frame, so the next one rebuilds every row.
@@ -394,9 +416,14 @@ mod tests {
         let count = term.rows() + first.unsigned_abs();
         painted.resize_with(count, Vec::new);
         for i in damaged(damage, term, &frame) {
-            let columns = damage.selected_columns(i);
+            let highlight = damage.highlight(i);
+            let cells = &term.viewport_row_signed(first + i as isize).cells;
             painted[i] = (0..term.cols())
-                .map(|col| columns.as_ref().is_some_and(|s| s.contains(&col)))
+                .map(|col| {
+                    highlight.is_some_and(|s| {
+                        s.contains(col, cells.get(col).unwrap_or(&Cell::default()))
+                    })
+                })
                 .collect();
         }
         let range = term.selection_range();
@@ -406,6 +433,31 @@ mod tests {
                 .map(|col| term.is_selected(range, term.viewport_to_point_signed(row_index, col)))
                 .collect();
             assert_eq!(*row, full, "viewport row {row_index}");
+        }
+    }
+
+    #[test]
+    fn identical_selection_bounds_handle_wrap_padding_on_kind_change() {
+        let mut term = Terminal::new(4, 3);
+        term.advance("abc界de".as_bytes());
+        let mut damage = Damage::default();
+        let mut painted = Vec::new();
+        let start = term.viewport_to_point(0, 0);
+        let end = term.viewport_to_point(1, 3);
+        assert!(
+            term.viewport_row(0).cells[3]
+                .flags
+                .contains(Flags::WIDE_WRAP)
+        );
+        for kind in [
+            SelectionKind::Word,
+            SelectionKind::Simple,
+            SelectionKind::Line,
+        ] {
+            term.start_selection(start, kind);
+            term.update_selection(end);
+            check_highlights(&term, 0.0, &mut damage, &mut painted);
+            assert_eq!(painted[0][3], kind == SelectionKind::Simple);
         }
     }
 

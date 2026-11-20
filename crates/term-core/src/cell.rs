@@ -224,6 +224,8 @@ struct RowExtra {
     split_wraps: Vec<(usize, usize)>,
     /// Cells cut off when narrowing, restored on widening.
     cells: Vec<Cell>,
+    /// Original soft-wrap margin when resizing without reflow adds trailing padding.
+    wrap_width: Option<usize>,
     /// The last cell of the row is a `PAD` blank standing in for a wide character that no
     /// longer fits; the character itself is the start of `cells`.
     padded: bool,
@@ -237,6 +239,7 @@ impl Clone for RowExtra {
         Self {
             split_wraps: self.split_wraps.clone(),
             cells: self.cells.clone(),
+            wrap_width: self.wrap_width,
             padded: self.padded,
             hidden_may_have_placeholder: self.hidden_may_have_placeholder,
             possible_placeholder: self.possible_placeholder.load(Ordering::Relaxed).into(),
@@ -251,6 +254,7 @@ impl PartialEq for Row {
             && self.flags == other.flags
             && self.prompt_col == other.prompt_col
             && self.output_col == other.output_col
+            && self.wrap_width() == other.wrap_width()
             && self.extra_contents() == other.extra_contents()
     }
 }
@@ -258,6 +262,10 @@ impl PartialEq for Row {
 impl Eq for Row {}
 
 impl Row {
+    fn wrap_width(&self) -> Option<usize> {
+        self.extra.as_ref().and_then(|e| e.wrap_width)
+    }
+
     fn extra_contents(&self) -> (&[(usize, usize)], &[Cell], bool) {
         self.extra
             .as_ref()
@@ -268,6 +276,7 @@ impl Row {
         if let Some(e) = &mut self.extra
             && e.split_wraps.is_empty()
             && e.cells.is_empty()
+            && e.wrap_width.is_none()
             && !*e.possible_placeholder.get_mut()
         {
             self.extra = None;
@@ -328,9 +337,19 @@ impl Row {
         self.flags.contains(RowFlags::WRAPPED)
     }
 
+    /// Widening an unreflowed wrapped row extends its edge with synthetic padding.
+    /// Once a repaint replaces that padding through the new margin, only an actual
+    /// autowrap at the new width can join the next row.
+    pub(crate) fn overwrite_margin(&mut self, end: usize) {
+        if end == self.cells.len() && self.wrap_width().is_some_and(|w| end > w) {
+            self.set_wrapped(false);
+        }
+    }
+
     /// Sets whether the logical line continues onto the next physical row.
     pub fn set_wrapped(&mut self, wrapped: bool) {
         if let Some(extra) = &mut self.extra {
+            extra.wrap_width = None;
             extra.split_wraps.clear();
             self.prune_extra();
         }
@@ -350,6 +369,7 @@ impl Row {
     pub(crate) fn set_split_wrapped(&mut self, left: usize, right: usize, wrapped: bool) {
         self.flags.remove(RowFlags::WRAPPED);
         if let Some(extra) = &mut self.extra {
+            extra.wrap_width = None;
             extra.split_wraps.retain(|&(l, r)| r < left || l > right);
         }
         if wrapped {
@@ -482,9 +502,13 @@ impl Row {
                 extra.cells = hidden;
                 extra.padded = wide_at_edge;
             }
-        } else {
+        } else if cells.len() < cols {
             let mut blank = Cell::default();
             if self.wrapped() {
+                self.extra
+                    .get_or_insert_with(Default::default)
+                    .wrap_width
+                    .get_or_insert(cells.len());
                 blank.flags.insert(Flags::WIDE_WRAP);
             }
             cells.resize(cols, blank);
