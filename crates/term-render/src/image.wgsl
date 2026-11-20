@@ -20,13 +20,14 @@ fn vs_main(
     @location(0) pos: vec2<f32>,
     @location(1) size: vec2<f32>,
     @location(2) uv: vec4<f32>,
+    @location(3) source_v: vec2<f32>,
 ) -> VertexOut {
     let corner = vec2<f32>(f32(vertex & 1u), f32(vertex >> 1u));
     let p = pos + corner * size;
     var out: VertexOut;
     out.position = vec4<f32>(p.x / u.screen.x * 2.0 - 1.0, 1.0 - p.y / u.screen.y * 2.0, 0.0, 1.0);
     out.uv = mix(uv.xy, uv.zw, corner);
-    out.bounds = uv;
+    out.bounds = vec4<f32>(uv.x, source_v.x, uv.z, source_v.y);
     return out;
 }
 

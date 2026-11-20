@@ -227,6 +227,7 @@ impl Terminal {
             col,
             cols: len,
             rows: 1,
+            skipped_rows: 0,
             clipped_rows: None,
             x_offset: 0,
             y_offset: 0,
