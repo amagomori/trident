@@ -948,15 +948,84 @@ pub fn place(x: f32, top: f32, bottom: f32, size: (f32, f32), window: (f32, f32)
     [x.round(), y.round()]
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Source {
+    Link(Candidate, PathBuf, DirectoryOrigin),
+    Printed(Vec<(Candidate, DirectoryOrigin)>),
+}
+
+impl Source {
+    fn resolve(
+        &self,
+        process: impl FnOnce() -> Option<PathBuf>,
+        home: Option<&Path>,
+    ) -> Option<(&Candidate, PathBuf)> {
+        match self {
+            Self::Link(candidate, path, origin) => {
+                links::with_file_base(origin, || None, |_| Some((candidate, path.clone())))
+            }
+            Self::Printed(candidates) => resolve_first(
+                candidates.iter().map(|(c, origin)| (c, origin)),
+                process,
+                home,
+            ),
+        }
+    }
+}
+
+fn preview_source(
+    term: &Terminal,
+    row: isize,
+    col: usize,
+    hit: Option<&links::PointerLink>,
+    hostname: &[u8],
+) -> Option<(u64, Source)> {
+    match hit {
+        Some(links::PointerLink::Uri(link)) => {
+            let Reported::Local(path) = parse_uri(link.uri.as_bytes(), hostname)? else {
+                return None;
+            };
+            let candidate = Candidate {
+                text: path.to_string_lossy().into_owned(),
+                start: col,
+                end: col,
+                line: None,
+            };
+            Some((
+                term.viewport_to_point_signed(row, col).line,
+                Source::Link(candidate, path, term.directory_origin_at(link.start)),
+            ))
+        }
+        Some(links::PointerLink::File(file, path))
+            if file.clipped || file.origin == DirectoryOrigin::Unavailable =>
+        {
+            // The visible text alone cannot identify this file. Never try a prefix namesake.
+            let path = path.as_ref()?;
+            let candidate = Candidate {
+                text: file.path.clone(),
+                start: file.start.col,
+                end: (file.end.line - file.start.line) as usize * term.cols() + file.end.col + 1,
+                line: Some(file.line as usize),
+            };
+            Some((
+                file.start.line,
+                Source::Link(candidate, path.clone(), file.origin.clone()),
+            ))
+        }
+        _ => {
+            let (line, candidates) = printed_candidates(term, row, col);
+            (!candidates.is_empty()).then_some((line, Source::Printed(candidates)))
+        }
+    }
+}
+
 struct Job {
     generation: u64,
     pane: u64,
     /// The first row of the hovered line; candidate columns count on across its rows.
     line: u64,
     cols: usize,
-    candidates: Vec<(Candidate, DirectoryOrigin)>,
-    /// The file a hovered OSC 8 link names, byte for byte.
-    link: Option<PathBuf>,
+    source: Source,
     /// Whose working directory relative paths start at without OSC 7.
     process: Option<u32>,
     style: Style,
@@ -967,17 +1036,7 @@ struct Job {
 fn build(job: &Job, latest: &AtomicU64) -> Option<(Candidate, Image)> {
     let process = || job.process.and_then(process_cwd);
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let (candidate, path) = match &job.link {
-        Some(path) => {
-            let (candidate, origin) = job.candidates.first()?;
-            links::with_file_base(origin, || None, |_| Some((candidate, path.clone())))?
-        }
-        None => resolve_first(
-            job.candidates.iter().map(|(c, origin)| (c, origin)),
-            process,
-            home.as_deref(),
-        )?,
-    };
+    let (candidate, path) = job.source.resolve(process, home.as_deref())?;
     if latest.load(Ordering::Relaxed) != job.generation {
         return None;
     }
@@ -1013,8 +1072,8 @@ impl std::fmt::Debug for Ready {
 struct Key {
     pane: u64,
     line: u64,
-    candidates: Vec<(Candidate, DirectoryOrigin)>,
-    link: Option<PathBuf>,
+    cols: usize,
+    source: Source,
     room: (u32, u32),
 }
 
@@ -1047,60 +1106,18 @@ impl HoverPreview {
 
 impl App {
     /// What the pointer is over, if a preview should be looked for.
-    fn hover_preview_target(&self) -> Option<Job> {
-        if !self.config.hover_preview
-            || !self.focused
-            || !links::command_modifier(self.modifiers.state())
-        {
+    fn hover_preview_target(
+        &self,
+        (row, col): (isize, usize),
+        hit: Option<&links::PointerLink>,
+    ) -> Option<Job> {
+        if !self.config.hover_preview {
             return None;
         }
         let s = self.session.as_ref()?;
         let cell = (s.fonts.metrics.width, s.fonts.metrics.height);
         let pad = self.config.padding * s.window.scale_factor() as f32;
-        if crate::pointer_in_search_bar(self.search.is_some(), self.mouse_pos, s.grid_px(), cell)
-            || term_render::ledger_bar(&s.term, pad, s.scroll.offset as f32, cell.1)
-                .is_some_and(|bar| bar.contains(self.mouse_pos.y as f32))
-            || !crate::pointer_in_grid(
-                self.mouse_pos,
-                pad as f64,
-                (s.term.cols(), s.term.rows()),
-                cell,
-            )
-        {
-            return None;
-        }
-        let (row, col) = self.cell_at(self.mouse_pos)?;
-        let point = s.term.viewport_to_point_signed(row, col);
-        let mut line = point.line;
-        let mut link_path = None;
-        let candidates = match s.term.link_at(point) {
-            Some(link) => {
-                let Reported::Local(path) =
-                    parse_uri(link.uri.as_bytes(), &self.hover_preview.hostname)?
-                else {
-                    return None;
-                };
-                let text = path.to_string_lossy().into_owned();
-                link_path = Some(path);
-                vec![(
-                    Candidate {
-                        text,
-                        start: col,
-                        end: col,
-                        line: None,
-                    },
-                    s.term.directory_origin_at(link.start),
-                )]
-            }
-            None => {
-                let (first, candidates) = printed_candidates(&s.term, row, col);
-                line = first;
-                candidates
-            }
-        };
-        if candidates.is_empty() {
-            return None;
-        }
+        let (line, source) = preview_source(&s.term, row, col, hit, &self.hover_preview.hostname)?;
         let scale = s.window.scale_factor() as f32;
         let row_top = pad + row as f32 * cell.1 + s.scroll.offset as f32;
         let grid = s.grid_px();
@@ -1115,8 +1132,7 @@ impl App {
             pane: s.pane,
             line,
             cols: s.term.cols(),
-            candidates,
-            link: link_path,
+            source,
             process: None,
             style: Style {
                 fg: s.term.palette.foreground,
@@ -1128,14 +1144,18 @@ impl App {
     }
 
     /// Starts looking for a preview of what the pointer is over, or hides the one shown.
-    pub(crate) fn refresh_hover_preview(&mut self) {
-        let job = self.hover_preview_target();
+    pub(crate) fn refresh_hover_preview(
+        &mut self,
+        cell: Option<(isize, usize)>,
+        hit: Option<&links::PointerLink>,
+    ) {
+        let job = cell.and_then(|cell| self.hover_preview_target(cell, hit));
         let preview = &mut self.hover_preview;
         let key = job.as_ref().map(|job| Key {
             pane: job.pane,
             line: job.line,
-            candidates: job.candidates.clone(),
-            link: job.link.clone(),
+            cols: job.cols,
+            source: job.source.clone(),
             room: job.room,
         });
         if preview.pending == key {
@@ -1491,6 +1511,62 @@ mod tests {
         std::fs::remove_dir_all(&a).unwrap();
         check(&term, 1, 2, None);
         std::fs::remove_dir_all(b).unwrap();
+    }
+
+    #[test]
+    fn clipped_reference_previews_only_what_click_opens() {
+        let dir = scratch();
+        let other = dir.join("other");
+        std::fs::create_dir(&other).unwrap();
+        let name = "clip_target_with_suffix.txt";
+        let path = dir.join(name);
+        std::fs::write(&path, "full path").unwrap();
+        std::fs::write(dir.join("clip_"), "prefix decoy").unwrap();
+        let mut term = Terminal::new(42, 4);
+        term.advance(
+            format!(
+                "\x1b[?1049h\x1b]7;file://{}\x07  {name}:3:2\x1b]7;file://{}\x07",
+                dir.display(),
+                other.display()
+            )
+            .as_bytes(),
+        );
+        let check = |term: &Terminal, clipped, expected: Option<&Path>| {
+            let (row, col) = (0, 3);
+            let file = term
+                .file_link_at(term.viewport_to_point_signed(row, col))
+                .unwrap();
+            assert_eq!(
+                (file.clipped, file.line, file.column),
+                (clipped, 3, Some(2))
+            );
+            let opened = links::resolve_file(&file, || Some(other.clone()));
+            assert_eq!(opened.as_deref(), expected);
+            let hit = links::PointerLink::File(file, opened);
+            let source = preview_source(term, row, col, Some(&hit), b"");
+            let preview = source
+                .as_ref()
+                .and_then(|(_, source)| source.resolve(|| Some(other.clone()), None));
+            assert_eq!(preview.as_ref().map(|(_, p)| p.as_path()), expected);
+            if let Some((candidate, _)) = preview {
+                assert_eq!(candidate.line, Some(3));
+                if clipped {
+                    assert_eq!((candidate.start, candidate.end), (2, term.cols()));
+                }
+            }
+        };
+        check(&term, false, Some(&path));
+        term.resize(7, 4); // Only "clip_" is visible, without repainting.
+        check(&term, true, Some(&path));
+        std::fs::remove_file(&path).unwrap();
+        check(&term, true, None);
+        std::fs::write(&path, "full path").unwrap();
+        term.resize(42, 4);
+        term.advance(b"\x1b[1;8Htarget_with_suffix.txt");
+        check(&term, false, None);
+        term.resize(7, 4);
+        check(&term, true, None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
