@@ -1,6 +1,6 @@
 //! The kitty graphics protocol: `ESC _ G <control> ; <payload> ESC \` transmits, places,
 //! deletes and queries images (<https://sw.kovidgoyal.net/kitty/graphics-protocol/>).
-//! Shared memory and Unicode placeholders are not supported.
+//! Shared memory is not supported.
 //!
 //! vte drops APC strings, so [`Terminal::advance`] diverts them here before the parser
 //! sees their bodies. Payloads are base64-decoded as they stream in, so a large image never
@@ -95,6 +95,7 @@ struct Control {
     rows: u32,
     z: i32,
     keep_cursor: bool,
+    virtual_placement: bool,
     delete: u8,
     invalid: bool,
     /// Only `m` and `q` were given, as in the second and later chunks of a transmission.
@@ -124,6 +125,7 @@ impl Default for Control {
             rows: 0,
             z: 0,
             keep_cursor: false,
+            virtual_placement: false,
             delete: b'a',
             invalid: false,
             chunk_only: true,
@@ -177,6 +179,7 @@ impl Control {
                     b'c' => c.cols = v,
                     b'r' => c.rows = v,
                     b'C' => c.keep_cursor = v == 1,
+                    b'U' => c.virtual_placement = v == 1,
                     _ => {}
                 }),
             };
@@ -511,6 +514,22 @@ impl Terminal {
 
     fn kitty_put(&mut self, control: &Control) -> Result<u32, &'static str> {
         let id = self.resolve_image(control)?;
+        if control.virtual_placement {
+            let grids = self.images.virtuals.entry(id).or_default();
+            if grids.len() >= 4096 && !grids.contains_key(&control.placement) {
+                return Err("ENOSPC:too many virtual placements for this image");
+            }
+            if control.placement != 0 {
+                self.delete_placement(id, control.placement);
+            }
+            self.images
+                .virtuals
+                .entry(id)
+                .or_default()
+                .insert(control.placement, (control.cols, control.rows));
+            self.images.generation += 1;
+            return Ok(id);
+        }
         let (cell_w, cell_h) = self.cell_pixels;
         let s = control.source;
         let opts = PlaceOptions {
@@ -547,20 +566,37 @@ impl Terminal {
             },
             _ => None,
         };
-        let removed = self.delete_placements_where(|p, top| match c.delete.to_ascii_lowercase() {
-            b'a' => top < rows && top + p.visible_rows() as i64 > 0,
-            b'i' | b'n' => {
-                Some(p.image_id) == target && (c.placement == 0 || p.placement_id == c.placement)
-            }
-            b'c' => covers_col(p, cursor_col) && covers_row(p, top, cursor_row),
-            b'p' => covers_col(p, x) && covers_row(p, top, y),
-            b'q' => covers_col(p, x) && covers_row(p, top, y) && p.z == c.z,
-            b'x' => covers_col(p, x),
-            b'y' => covers_row(p, top, y),
-            b'z' => p.z == c.z,
-            b'r' => (c.source.x..=c.source.y).contains(&p.image_id),
-            _ => false,
-        });
+        let mut removed =
+            self.delete_placements_where(|p, top| match c.delete.to_ascii_lowercase() {
+                b'a' => top < rows && top + p.visible_rows() as i64 > 0,
+                b'i' | b'n' => {
+                    Some(p.image_id) == target
+                        && (c.placement == 0 || p.placement_id == c.placement)
+                }
+                b'c' => covers_col(p, cursor_col) && covers_row(p, top, cursor_row),
+                b'p' => covers_col(p, x) && covers_row(p, top, y),
+                b'q' => covers_col(p, x) && covers_row(p, top, y) && p.z == c.z,
+                b'x' => covers_col(p, x),
+                b'y' => covers_row(p, top, y),
+                b'z' => p.z == c.z,
+                b'r' => (c.source.x..=c.source.y).contains(&p.image_id),
+                _ => false,
+            });
+        if target.is_some() || c.delete.eq_ignore_ascii_case(&b'r') {
+            self.images.virtuals.retain(|id, grids| {
+                if Some(*id) == target || target.is_none() && (c.source.x..=c.source.y).contains(id)
+                {
+                    if target.is_none() || c.placement == 0 {
+                        grids.clear();
+                    } else if grids.remove(&c.placement).is_none() {
+                        return true;
+                    }
+                    removed.push(*id);
+                    self.images.generation += 1;
+                }
+                !grids.is_empty()
+            });
+        }
         if free {
             let mut ids: Vec<u32> = removed;
             ids.extend(target);

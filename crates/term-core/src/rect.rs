@@ -74,15 +74,18 @@ impl Terminal {
                     } else {
                         i
                     };
-                    let src = &self.screen().lines[area.rows.start + i].cells;
+                    let src = &self.screen().lines[area.rows.start + i];
+                    let possible_placeholder = src.may_have_placeholder();
                     copy.clear();
-                    copy.extend(src[area.cols.start..area.cols.start + width].iter().map(
-                        |&cell| {
-                            let mut cell = cell;
-                            cell.flags.remove(Flags::WIDE_WRAP | Flags::PAD);
-                            cell
-                        },
-                    ));
+                    copy.extend(
+                        src.cells[area.cols.start..area.cols.start + width]
+                            .iter()
+                            .map(|&cell| {
+                                let mut cell = cell;
+                                cell.flags.remove(Flags::WIDE_WRAP | Flags::PAD);
+                                cell
+                            }),
+                    );
                     if copy[0].flags.contains(Flags::WIDE_SPACER) {
                         copy[0] = blank;
                     }
@@ -92,6 +95,9 @@ impl Terminal {
                     self.erase_cells(row + i, col, col + width);
                     let line = &mut self.lines_mut()[row + i];
                     line.cells[col..col + width].copy_from_slice(&copy);
+                    if possible_placeholder {
+                        line.note_placeholder();
+                    }
                     line.touch(col + width);
                 }
             }

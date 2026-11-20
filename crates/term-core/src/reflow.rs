@@ -208,11 +208,13 @@ impl Terminal {
             let first_old = map_rows.len();
             line.clear();
             let mut next = Some((i, row));
+            let mut possible_placeholder = false;
             while let Some((i, mut row)) = next.take() {
                 let wrapped = row.wrapped();
                 let flags = row.flags;
                 let (prompt_col, output_col) = (row.prompt_col, row.output_col);
                 let mut cells = row.take_cells();
+                possible_placeholder |= row.may_have_placeholder();
                 let len = if wrapped {
                     while cells
                         .last()
@@ -266,7 +268,11 @@ impl Terminal {
                 if wide_cut {
                     cells.push(wide_wrap_blank());
                 }
-                let mut row = Row::from_cells(cells, RowFlags::default());
+                let has_base = possible_placeholder
+                    && cells
+                        .iter()
+                        .any(|cell| self.base_char(cell) == crate::placeholder::CHAR);
+                let mut row = Row::from_cells(cells, RowFlags::default(), has_base);
                 row.set_wrapped(end < line.len());
                 starts.push(pos);
                 new.push(row);

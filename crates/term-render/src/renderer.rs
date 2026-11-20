@@ -757,6 +757,11 @@ impl Renderer {
                     let mut cluster = term.grapheme(cell);
                     let mut base = term.base_char(cell);
                     let mut shaped = None;
+                    if base == term_core::placeholder::CHAR {
+                        // The image layer owns these cells, including transparent pixels.
+                        base = ' ';
+                        cluster = None;
+                    }
                     if let Some(text) = cluster {
                         if let Some(syllable) = grapheme::compose_hangul(text) {
                             (base, cluster) = (syllable, None);

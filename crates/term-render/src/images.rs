@@ -55,6 +55,24 @@ pub(crate) fn layout(
         let Some(image) = term.image(p.image_id) else {
             continue;
         };
+        if let Some(slice) = v.slice {
+            let [l, t, r, b] = slice.destination;
+            let [x0, y0, x1, y1] = slice.source;
+            let (w, h) = (image.width as f32, image.height as f32);
+            quads.push(Quad {
+                image_id: p.image_id,
+                layer: Layer::of(p.z),
+                pos: [
+                    padding + (p.col as f32 + l) * cw,
+                    padding + (v.row as f32 + t) * ch + pixel_offset,
+                ],
+                size: [(r - l) * cw, (b - t) * ch],
+                uv: [x0 / w, y0 / h, x1 / w, y1 / h],
+                // The cell row clips the geometry, not the texture's filter footprint.
+                source_v: [0.0, 1.0],
+            });
+            continue;
+        }
         let scale = (cw / p.cell_pixels.0, ch / p.cell_pixels.1);
         let (x_off, y_off) = (p.x_offset as f32 * scale.0, p.y_offset as f32 * scale.1);
         let x = padding + p.col as f32 * cw + x_off;

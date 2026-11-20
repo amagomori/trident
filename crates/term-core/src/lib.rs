@@ -28,6 +28,7 @@ mod iterm;
 mod kitty;
 mod links;
 mod margins;
+pub mod placeholder;
 mod rect;
 pub use links::{FileLink, Link};
 use margins::{LrMode, shift_cells};
@@ -2680,6 +2681,9 @@ impl Terminal {
             line.cells[col + 1] = spacer;
         }
         line.cells[col] = cell;
+        if c == placeholder::CHAR {
+            line.note_placeholder();
+        }
 
         self.print_state = PrintState(c as u32);
         if track {

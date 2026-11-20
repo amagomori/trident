@@ -156,6 +156,7 @@ impl Terminal {
             )
             .map_err(|_| "ENOSPC:image storage full")?;
             self.images.bytes += bytes;
+            self.images.animated += usize::from(index == 1);
         }
         let version = self.images.tick();
         let s = self.images.images.get_mut(&id).unwrap();
@@ -298,7 +299,7 @@ impl Terminal {
     /// Advances only animations in the viewport and returns the next frame deadline.
     /// Include one extra row when a smooth scroll exposes part of the preceding row.
     pub fn advance_animations(&mut self, now: Instant, extra_rows: usize) -> Option<Instant> {
-        if self.screen().placements.is_empty() {
+        if self.images.animated == 0 {
             return None;
         }
         let mut deadline = None;

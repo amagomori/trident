@@ -717,3 +717,78 @@ fn padded_payload_fits_exact_limit() {
     tr.finish();
     assert_eq!((tr.error, tr.data), (None, vec![1, 2, 3, 4]));
 }
+
+#[test]
+fn virtual_placements_follow_cells_not_screen_clears_or_delete_at_cursor() {
+    use crate::placeholder::{CHAR, DIACRITICS as M};
+    let mut t = term();
+    let id = 0x0200002a;
+    t.advance(&apc(
+        &format!("a=T,U=1,i={id},p=8,c=4,r=1,s=40,v=20,f=24,q=2"),
+        &gradient_rgb(40, 20),
+    ));
+    assert!(t.visible_placements().is_empty());
+    let cells = format!(
+        "\x1b[38;5;42;58;5;8m{CHAR}{}{}{}{CHAR}{CHAR}",
+        M[0], M[0], M[2]
+    );
+    t.advance(cells.as_bytes());
+    let runs = t.visible_placements();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        (runs[0].placement.placement_id, runs[0].placement.cols),
+        (8, 3)
+    );
+    assert_eq!(runs[0].slice.unwrap().source, [0., 0., 30., 20.]);
+    t.advance(b"\r\x1b_Ga=d,d=C\x1b\\");
+    assert_eq!(t.visible_placements(), runs);
+    t.advance(b"\x1b[2J\x1b[H");
+    assert!(t.visible_placements().is_empty());
+    t.advance(cells.as_bytes());
+    assert_eq!(t.visible_placements().len(), 1);
+    t.advance(format!("\x1b_Ga=d,d=i,i={id},p=8\x1b\\").as_bytes());
+    assert!(t.visible_placements().is_empty());
+    assert!(t.image(id).is_some());
+    t.advance(format!("\x1b_Ga=d,d=I,i={id}\x1b\\").as_bytes());
+    assert!(t.image(id).is_none());
+}
+
+#[test]
+fn virtual_image_is_pinned_only_while_its_cells_are_visible() {
+    let mut t = term();
+    t.set_image_quota(8);
+    for id in [42, 43] {
+        t.advance(&apc(
+            &format!("a=T,U=1,i={id},c=1,r=1,s=1,v=1,f=24,q=2"),
+            &[1, 2, 3],
+        ));
+    }
+    t.advance(format!("\x1b[38;5;42m{}", crate::placeholder::CHAR).as_bytes());
+    let another = crate::Image {
+        width: 1,
+        height: 1,
+        pixels: vec![255; 4],
+    };
+    t.add_image(44, another.clone()).unwrap();
+    assert!(t.image(43).is_none());
+    t.advance(b"\r \r");
+    t.add_image(45, another).unwrap();
+    assert!(t.image(42).is_none());
+    t.advance(format!("{}", crate::placeholder::CHAR).as_bytes());
+    assert!(t.visible_placements().is_empty());
+}
+
+#[test]
+fn named_placement_replaces_the_other_kind() {
+    let mut t = term();
+    t.advance(&apc("a=T,i=42,p=7,s=1,v=1,f=24,C=1,q=2", &[1, 2, 3]));
+    assert!(t.visible_placements()[0].slice.is_none());
+    t.advance(b"\x1b_Ga=p,U=1,i=42,p=7,c=1,r=1,q=2\x1b\\");
+    assert!(t.visible_placements().is_empty());
+    t.advance(format!("\x1b[38;5;42;58;5;7m{}", crate::placeholder::CHAR).as_bytes());
+    assert!(t.visible_placements()[0].slice.is_some());
+    t.advance(b"\x1b_Ga=p,i=42,p=7,q=2\x1b\\");
+    let placements = t.visible_placements();
+    assert_eq!(placements.len(), 1);
+    assert!(placements[0].slice.is_none());
+}

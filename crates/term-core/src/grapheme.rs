@@ -445,6 +445,7 @@ impl Terminal {
             // the sequence moves to the start of the next line.
             self.sync_cursor_row();
             let mut cell = self.screen().lines[row].cells[col];
+            let possible_placeholder = self.screen().lines[row].may_have_placeholder();
             let mut blank = Cell::blank(&template);
             if !self.has_partial_width() {
                 blank.flags.insert(Flags::WIDE_WRAP);
@@ -469,6 +470,9 @@ impl Terminal {
             spacer.flags.remove(Flags::WIDE | Flags::GRAPHEME);
             spacer.flags.insert(Flags::WIDE_SPACER);
             line.cells[start] = cell;
+            if possible_placeholder {
+                line.note_placeholder();
+            }
             line.cells[start + 1] = spacer;
             line.touch(start + 2);
             self.cursor.col = (start + 2).min(end - 1);

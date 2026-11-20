@@ -64,6 +64,7 @@ fn send<'a>(
     let mut root_gap = 0;
     let mut count = 0;
     let mut wait = tmux_wait(window);
+    let mut grid = None;
     for frame in decoder.into_frames() {
         let frame = frame?;
         // A zero delay in a file still presents a frame; kitty z=0 would leave it gapless.
@@ -73,16 +74,20 @@ fn send<'a>(
         let mut image = DynamicImage::ImageRgba8(frame.into_buffer());
         image.apply_orientation(orientation);
         let image = scale_raster(image, options, window);
-        let transfer = if count == 0 {
+        let frame_gap = (count != 0).then_some(gap);
+        if count == 0 {
             root_gap = gap;
-            Transfer::Place(Some(id))
+            if window.tmux {
+                grid = Some(TileGrid::new(&image, window, reserve_tile_ids)?);
+            }
+        }
+        if let Some(grid) = &grid {
+            grid.send(out, &image, frame_gap, &mut wait)?;
         } else {
-            Transfer::Frame { id, gap }
-        };
-        write_transfer(out, &image, window, transfer, &mut wait)?;
-        if window.tmux {
-            out.flush()?;
-            wait(TmuxWait::Chunk);
+            send_direct(out, &image, Some(id), frame_gap)?;
+            if count == 0 {
+                out.write_all(b"\n")?;
+            }
         }
         count += 1usize;
     }
@@ -90,12 +95,19 @@ fn send<'a>(
         return Err(io::Error::new(io::ErrorKind::InvalidData, "image contains no frames").into());
     }
     if count > 1 {
-        let play = format!("\x1b_Ga=a,i={id},q=2,r=1,z={root_gap},s=3,v={loops}\x1b\\");
-        if window.tmux {
-            out.write_all(&tmux_passthrough(play.as_bytes()))?;
+        let play = |id| format!("\x1b_Ga=a,i={id},q=2,r=1,z={root_gap},s=3,v={loops}\x1b\\");
+        if let Some(grid) = &grid {
+            for tile_id in grid.ids() {
+                out.write_all(&tmux_passthrough(play(tile_id).as_bytes()))?;
+                out.flush()?;
+                wait();
+            }
         } else {
-            out.write_all(play.as_bytes())?;
+            out.write_all(play(id).as_bytes())?;
         }
+    }
+    if let Some(grid) = grid {
+        grid.write_cells(out)?;
     }
     Ok(())
 }

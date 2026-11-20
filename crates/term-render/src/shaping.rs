@@ -208,6 +208,9 @@ pub(crate) fn run(
             break;
         }
         let base = term.base_char(cell);
+        if base == term_core::placeholder::CHAR {
+            break;
+        }
         // Neutral punctuation stays in logical order, not mirrored by an RTL run.
         let next_rtl = !base.is_ascii() && matches!(bidi_class(base), BidiClass::R | BidiClass::AL);
         if cols != 0 && next_rtl != rtl {

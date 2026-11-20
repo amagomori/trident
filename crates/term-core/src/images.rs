@@ -122,6 +122,8 @@ pub struct VisiblePlacement {
     pub placement: Placement,
     /// Signed viewport row of the top edge, in cells.
     pub row: isize,
+    /// Exact source and destination bounds when cells clip a virtual image.
+    pub slice: Option<crate::placeholder::Slice>,
 }
 
 impl Placement {
@@ -161,6 +163,8 @@ impl StoredImage {
 
 pub(crate) struct ImageStore {
     images: HashMap<u32, StoredImage>,
+    animated: usize,
+    pub(crate) virtuals: crate::placeholder::VirtualGrids,
     bytes: usize,
     pub(crate) quota: usize,
     clock: u64,
@@ -172,6 +176,8 @@ impl ImageStore {
     pub(crate) fn new() -> ImageStore {
         ImageStore {
             images: HashMap::new(),
+            animated: 0,
+            virtuals: Default::default(),
             bytes: 0,
             quota: DEFAULT_IMAGE_QUOTA,
             clock: 0,
@@ -263,7 +269,7 @@ impl Terminal {
             .images
             .images
             .iter()
-            .filter(|(k, _)| **k != id && visible.contains(k))
+            .filter(|(k, _)| **k != id && visible.binary_search(k).is_ok())
             .map(|(_, s)| s.bytes())
             .sum();
         if pinned > self.images.quota - len {
@@ -274,7 +280,7 @@ impl Terminal {
                 .images
                 .images
                 .iter()
-                .filter(|(key, _)| **key != id && !visible.contains(key))
+                .filter(|(key, _)| **key != id && visible.binary_search(key).is_err())
                 .min_by_key(|(_, img)| img.last_used)
                 .map(|(&id, _)| id);
             match victim {
@@ -305,6 +311,8 @@ impl Terminal {
         let Some(old) = self.images.images.remove(&id) else {
             return false;
         };
+        self.images.virtuals.remove(&id);
+        self.images.animated -= usize::from(old.frames.len() > 1);
         self.images.bytes -= old.bytes();
         self.primary.placements.retain(|p| p.image_id != id);
         self.alternate.placements.retain(|p| p.image_id != id);
@@ -312,12 +320,20 @@ impl Terminal {
         true
     }
 
-    /// Removes one placement from the active screen.
+    /// Removes a placement from the active screen, or the named virtual grid.
     pub fn delete_placement(&mut self, image_id: u32, placement_id: u32) -> bool {
         let placements = &mut self.screen_mut().placements;
         let before = placements.len();
         placements.retain(|p| (p.image_id, p.placement_id) != (image_id, placement_id));
-        let removed = placements.len() != before;
+        let mut removed = placements.len() != before;
+        if placement_id != 0
+            && let Some(grids) = self.images.virtuals.get_mut(&image_id)
+        {
+            removed |= grids.remove(&placement_id).is_some();
+            if grids.is_empty() {
+                self.images.virtuals.remove(&image_id);
+            }
+        }
         if removed {
             self.images.generation += 1;
         }
@@ -353,7 +369,7 @@ impl Terminal {
     /// Whether either screen still shows image `id`.
     pub(crate) fn image_placed(&self, id: u32) -> bool {
         let placed = |s: &crate::Screen| s.placements.iter().any(|p| p.image_id == id);
-        placed(&self.primary) || placed(&self.alternate)
+        self.images.virtuals.contains_key(&id) || placed(&self.primary) || placed(&self.alternate)
     }
 
     /// Places an image with its top-left corner in the cursor cell, on the active screen.
@@ -425,11 +441,10 @@ impl Terminal {
             fixed_cols: opts.cols != 0,
             fixed_rows: opts.rows != 0,
         };
-        let placements = &mut self.screen_mut().placements;
         if opts.placement_id != 0 {
-            placements.retain(|p| (p.image_id, p.placement_id) != (image_id, opts.placement_id));
+            self.delete_placement(image_id, opts.placement_id);
         }
-        placements.push(Placement {
+        self.screen_mut().placements.push(Placement {
             line: placement.line - base,
             ..placement
         });
@@ -490,15 +505,19 @@ impl Terminal {
                 on.then_some(VisiblePlacement {
                     placement: Placement { line, ..*p },
                     row: row as isize,
+                    slice: None,
                 })
             })
             .collect();
+        self.append_placeholder_rows(extra_rows, &mut visible);
         visible.sort_by_key(|v| v.placement.z);
         visible
     }
 
-    /// Changes whenever images or placements are added, removed or moved. Scrolling the view
-    /// does not change it; positions come from [`Terminal::visible_placements`].
+    /// Changes when stored images or explicit placements change.
+    ///
+    /// Scrolling the view and editing placeholder cells can change what is drawn
+    /// without changing this counter. Use [`Self::visible_placements`] for that.
     pub fn image_generation(&self) -> u64 {
         self.images.generation
     }
@@ -525,8 +544,7 @@ impl Terminal {
         if alt { self.history } else { 0 }
     }
 
-    /// Images with a placement on either screen's visible rows (or the scrolled-back view),
-    /// which eviction must keep.
+    /// Sorted IDs of images eviction must keep on either screen or in the scrolled-back view.
     fn images_on_screen(&self) -> Vec<u32> {
         let rows = self.rows as i64;
         let on = |p: &Placement, base: u64, top: i64| {
@@ -544,7 +562,33 @@ impl Terminal {
             .placements
             .iter()
             .filter(|p| on(p, self.history, 0));
-        primary.chain(alt).map(|p| p.image_id).collect()
+        let mut ids: Vec<_> = primary.chain(alt).map(|p| p.image_id).collect();
+        if !self.images.virtuals.is_empty() {
+            // Both live screens plus the displayed history window are protected.
+            let history = self
+                .primary
+                .scrollback
+                .iter()
+                .rev()
+                .skip(self.display_offset.saturating_sub(self.rows))
+                .take(self.display_offset.min(self.rows));
+            for row in self
+                .primary
+                .lines
+                .iter()
+                .chain(&self.alternate.lines)
+                .chain(history)
+            {
+                self.placeholder_runs(&row.cells, |cell, col, len| {
+                    if self.placeholder_slice(cell, col, len, 0, 0).is_some() {
+                        ids.push(cell.image);
+                    }
+                });
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     /// Moves placements anchored in the scrolling rows and columns by `delta` rows,

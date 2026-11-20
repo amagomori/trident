@@ -134,6 +134,9 @@ impl Terminal {
                 (&mut above[i], &mut below[0])
             };
             dst.set_split_wrapped(left, end - 1, src.split_wrapped(left, end - 1));
+            if src.may_have_placeholder() {
+                dst.note_placeholder();
+            }
             dst.cells[left..end].swap_with_slice(&mut src.cells[left..end]);
         }
         let cleared = if down {
