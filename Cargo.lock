@@ -2828,6 +2828,7 @@ dependencies = [
  "flate2",
  "image",
  "libc",
+ "libm",
  "memchr",
  "png",
  "regex",
