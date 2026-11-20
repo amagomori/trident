@@ -11,7 +11,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use image::{ImageDecoder, ImageFormat};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,9 +19,11 @@ use std::time::{Duration, Instant};
 
 mod pdf;
 mod png;
+mod stream;
 
 /// Base64 bytes per kitty escape; the protocol allows at most 4096.
 const CHUNK: usize = 4096;
+const STDIN_LIMIT_MIB: u64 = 64;
 /// Largest side sent, matching what the terminal accepts.
 const MAX_SIDE: u32 = 10_000;
 /// How long to wait for a tmux command; a tmux on PATH older than the server can hang.
@@ -86,11 +88,13 @@ struct Rgba {
 
 pub fn usage() -> String {
     format!(
-        "USAGE: {} show [--width N] [--height N] [--fit] [--page N[-M]] FILE...\n\n\
+        "USAGE: {} show [--width N] [--height N] [--fit] [--page N[-M]] (FILE... | -)\n\n\
          Shows files in the terminal. Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, QOI, PNM,\n\
          TGA and SVG, told apart by their contents) are drawn with the kitty graphics\n\
          protocol, shrunk to fit the window; PDF pages fill its width. Text files are\n\
          printed. Other files get a system thumbnail or a one-line summary.\n\n\
+         Use - alone to read a piped raster image (up to {STDIN_LIMIT_MIB} MiB).\n\
+         Use ./- for a file named -.\n\n\
          OPTIONS:\n  \
            --width N    Draw images N columns wide\n  \
            --height N   Draw images N rows tall (with --width: fit inside both)\n  \
@@ -133,6 +137,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Options, String>
     if options.files.is_empty() {
         return Err("show needs a file (see show --help)".into());
     }
+    if options.files.len() > 1 && options.files.iter().any(|p| p.as_os_str() == "-") {
+        return Err("use - as the only operand to read an image from stdin".into());
+    }
     Ok(options)
 }
 
@@ -145,6 +152,14 @@ pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
             return 2;
         }
     };
+    let from_stdin = options.files[0].as_os_str() == "-";
+    if from_stdin && io::stdin().is_terminal() {
+        diag!(
+            "{} show: pipe a raster image to stdin",
+            env!("CARGO_BIN_NAME")
+        );
+        return 1;
+    }
     let window = Window {
         tmux: std::env::var_os("TMUX").is_some(),
         ..window_size()
@@ -156,10 +171,12 @@ pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
         if options.files.len() > 1 {
             let _ = writeln!(out, "{}", printable(&path.to_string_lossy()));
         }
-        let result = show(path, &options, window, &mut out).and_then(|()| {
-            out.flush()
-                .map_err(|e| format!("cannot write output: {}", io_message(&e)))
-        });
+        let result = if from_stdin {
+            show_stdin(&options, window, &mut out)
+        } else {
+            show(path, &options, window, &mut out)
+        }
+        .and_then(|()| out.flush().map_err(write_err));
         if let Err(e) = result {
             let _ = out.flush();
             diag!(
@@ -174,6 +191,32 @@ pub fn main(args: impl IntoIterator<Item = String>) -> i32 {
     status
 }
 
+fn show_stdin(options: &Options, window: Window, out: &mut impl Write) -> Result<(), String> {
+    let mut bytes = Vec::new();
+    let limit = STDIN_LIMIT_MIB * 1024 * 1024;
+    io::stdin()
+        .lock()
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read stdin: {}", io_message(&e)))?;
+    if bytes.len() as u64 > limit {
+        return Err(format!(
+            "stdin image exceeds the {STDIN_LIMIT_MIB} MiB limit"
+        ));
+    }
+    if bytes.is_empty() {
+        return Err("stdin is empty; expected a raster image".into());
+    }
+    let format = image::guess_format(&bytes)
+        .ok()
+        .filter(|format| format.reading_enabled())
+        .or_else(|| is_tga(&bytes).then_some(ImageFormat::Tga))
+        .ok_or("stdin is not a supported raster image")?;
+    let bytes = stream::complete_image(&bytes, format)?;
+    animation::validate_input(bytes, format)?;
+    show_raster(bytes, format, options, window, out)
+}
+
 fn show(
     path: &Path,
     options: &Options,
@@ -182,21 +225,7 @@ fn show(
 ) -> Result<(), String> {
     let (bytes, size) = read_for_show(path).map_err(|e| io_message(&e))?;
     match detect(&bytes) {
-        Kind::Raster(format @ (ImageFormat::Gif | ImageFormat::WebP)) => {
-            animation::show(&bytes, format, options, window, out)
-        }
-        Kind::Raster(format) => {
-            let image = read_raster(&bytes, format)?;
-            let size = raster_size(&image, options, window);
-            if format == ImageFormat::Png && !window.tmux && png::can_forward(&bytes, size) {
-                send_chunks(out, &bytes, "f=100,q=2", None, false, &mut || {})
-                    .and_then(|()| out.write_all(b"\n"))
-                    .map_err(write_err)
-            } else {
-                let image = sized_rgba(image, size);
-                write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
-            }
-        }
+        Kind::Raster(format) => show_raster(&bytes, format, options, window, out),
         Kind::Svg => {
             let image = render_svg(&bytes, path, options, window)?;
             write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
@@ -213,6 +242,28 @@ fn show(
     }
 }
 
+fn show_raster(
+    bytes: &[u8],
+    format: ImageFormat,
+    options: &Options,
+    window: Window,
+    out: &mut impl Write,
+) -> Result<(), String> {
+    if matches!(format, ImageFormat::Gif | ImageFormat::WebP) {
+        return animation::show(bytes, format, options, window, out);
+    }
+    let image = read_raster(bytes, format)?;
+    let size = raster_size(&image, options, window);
+    if format == ImageFormat::Png && !window.tmux && png::can_forward(bytes, size) {
+        send_chunks(out, bytes, "f=100,q=2", None, false, &mut || {})
+            .and_then(|()| out.write_all(b"\n"))
+            .map_err(write_err)
+    } else {
+        let image = sized_rgba(image, size);
+        write_kitty(out, &image, window, tmux_wait(window)).map_err(write_err)
+    }
+}
+
 fn write_err(e: io::Error) -> String {
     format!("cannot write output: {}", io_message(&e))
 }
@@ -220,7 +271,6 @@ fn write_err(e: io::Error) -> String {
 /// Large videos and Office archives only need a header for classification.
 /// Their native thumbnailer reads the original path, not this buffer.
 fn read_for_show(path: &Path) -> io::Result<(Vec<u8>, u64)> {
-    use std::io::Read;
     let mut file = std::fs::File::open(path)?;
     let size = file.metadata()?.len();
     let mut bytes = Vec::new();
@@ -245,7 +295,6 @@ pub(super) fn drop_preview(
     rows: usize,
     cell: (f32, f32),
 ) -> Option<(Vec<u8>, usize)> {
-    use std::io::Read;
     const MAX_BYTES: u64 = 16 * 1024 * 1024;
     if rows < 2 || !path.metadata().ok()?.is_file() {
         return None;
@@ -525,6 +574,10 @@ fn looks_like_tga(b: &[u8]) -> bool {
         && width > 0
         && height > 0
         && b[17] & 0xc0 == 0
+}
+
+fn is_tga(bytes: &[u8]) -> bool {
+    bytes.ends_with(b"TRUEVISION-XFILE.\0") || looks_like_tga(bytes)
 }
 
 fn binary_kind(b: &[u8]) -> &'static str {

@@ -51,6 +51,7 @@ jobs:
             exit 1
           fi
       - run: cargo build --release --workspace
+      - run: python3 .github/scripts/release/check_show_stdin.py target/release/trident
       - name: PDF viewer with the release PDFium
         run: |
           case "$RUNNER_OS" in

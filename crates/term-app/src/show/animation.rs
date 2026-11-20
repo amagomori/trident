@@ -3,6 +3,36 @@ use super::*;
 use image::{AnimationDecoder, DynamicImage, ImageResult, Limits, metadata::LoopCount};
 use std::hash::{BuildHasher, RandomState};
 
+/// Checks piped animations one frame at a time before writing any graphics.
+///
+/// A bad later frame must not leave partial output. Named files still stream
+/// in a single pass.
+pub(super) fn validate_input(bytes: &[u8], format: ImageFormat) -> Result<(), String> {
+    fn validate<'a>(mut decoder: impl AnimationDecoder<'a> + ImageDecoder) -> ImageResult<()> {
+        limit_canvas(&mut decoder)?;
+        decoder.into_frames().try_for_each(|frame| frame.map(drop))
+    }
+    let reader = io::Cursor::new(bytes);
+    match format {
+        ImageFormat::Gif => image::codecs::gif::GifDecoder::new(reader).and_then(validate),
+        ImageFormat::WebP => image::codecs::webp::WebPDecoder::new(reader).and_then(|decoder| {
+            if decoder.has_animation() {
+                validate(decoder)
+            } else {
+                Ok(())
+            }
+        }),
+        _ => Ok(()),
+    }
+    .map_err(|e| format!("cannot decode {} image: {e}", format_name(format)))
+}
+
+fn limit_canvas(decoder: &mut impl ImageDecoder) -> ImageResult<()> {
+    let (width, height) = decoder.dimensions();
+    Limits::default().reserve_buffer(width, height, image::ColorType::Rgba8)?;
+    decoder.set_limits(Limits::default())
+}
+
 pub(super) fn show(
     bytes: &[u8],
     format: ImageFormat,
@@ -56,9 +86,7 @@ fn send<'a>(
     window: Window,
     out: &mut impl Write,
 ) -> ImageResult<()> {
-    let (width, height) = decoder.dimensions();
-    Limits::default().reserve_buffer(width, height, image::ColorType::Rgba8)?;
-    decoder.set_limits(Limits::default())?;
+    limit_canvas(&mut decoder)?;
     let orientation = decoder.orientation()?;
     let id = (RandomState::new().hash_one(std::process::id()) as u32).max(1);
     let mut root_gap = 0;

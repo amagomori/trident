@@ -366,7 +366,7 @@ fn usage() -> ! {
     println!(
         "{bin} {} - a fast GPU-rendered terminal emulator\n\n\
          USAGE: {bin} [OPTIONS] [-e COMMAND [ARGS...]]\n       \
-         {bin} show [--width N] [--height N] [--fit] [--page N[-M]] FILE...\n\n\
+         {bin} show [--width N] [--height N] [--fit] [--page N[-M]] (FILE... | -)\n\n\
          OPTIONS:\n  \
            --config <PATH>     Override the TOML config file location\n  \
            --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)\n  \

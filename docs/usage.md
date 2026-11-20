@@ -313,7 +313,7 @@ PDF previews require `pdftoppm` from poppler-utils on Linux and use Quick Look o
 ## View files
 
 ```text
-trident show [--width N] [--height N] [--fit] [--page N[-M]] FILE...
+trident show [--width N] [--height N] [--fit] [--page N[-M]] (FILE... | -)
 
   --width N    Draw images N columns wide
   --height N   Draw images N rows tall (with --width: fit inside both)
@@ -338,6 +338,16 @@ picks the type from the file's contents, not its name:
   `libgsf-bin` extracts embedded Office thumbnails. If no helper can preview
   the file within five seconds, you get the usual summary, such as
   `ELF executable, 16.2 KiB`.
+
+To preview a raster image from a pipeline, use a single dash instead of a filename:
+
+```sh
+cat photo.jpg | trident show --width 40 -
+```
+
+The dash must be the only operand. Standard input must be redirected or piped, not a terminal,
+and is limited to 64 MiB. Sizing and tmux output work as for named images. Use `./-` for
+a file literally named `-`. Text, SVG, PDF and system thumbnails still require a filename.
 
 A missing, unreadable or corrupt file prints an error, and the command exits with status 1. For
 sample files, see `crates/term-app/samples`.
