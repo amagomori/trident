@@ -845,6 +845,32 @@ mod tests {
     }
 
     #[test]
+    fn option_side_applies_to_legacy_and_kitty_disambiguation() {
+        let base = ch("f");
+        for (left, logical, legacy, kitty) in [
+            (true, "f", b"\x1bf".as_slice(), b"\x1b[102;3u".as_slice()),
+            (false, "ƒ", "ƒ".as_bytes(), "ƒ".as_bytes()),
+        ] {
+            let key = ch(logical);
+            let event = KeyEvent {
+                key: &key,
+                base: &base,
+                text: Some(logical),
+                mods: ModifiersState::ALT,
+            };
+            let meta = crate::config::OptionAsAlt::Left.sends_esc(left, !left);
+            assert_eq!(
+                encode_key(&key, &base, event.text, event.mods, false, meta, false).as_deref(),
+                Some(legacy)
+            );
+            assert_eq!(
+                encode_kitty_key(&event, KeyEventKind::Press, 1, meta, false).as_deref(),
+                Some(kitty)
+            );
+        }
+    }
+
+    #[test]
     fn kitty_disambiguate_encodes_combos() {
         let none = ModifiersState::empty();
         let ctrl = ModifiersState::CONTROL;

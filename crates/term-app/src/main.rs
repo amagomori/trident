@@ -72,9 +72,13 @@ mod links;
 mod native_tabs;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, PhysicalKey};
+use winit::keyboard::{Key, ModifiersKeyState, ModifiersState, PhysicalKey};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Fullscreen, Theme, Window, WindowId};
 
@@ -245,6 +249,14 @@ struct Options {
 }
 
 impl Options {
+    fn option_as_alt(&self, config: &config::Config) -> config::OptionAsAlt {
+        if self.option_as_alt {
+            config::OptionAsAlt::Both
+        } else {
+            config.option_as_alt
+        }
+    }
+
     fn scrollback(&self, config: &config::Config) -> usize {
         self.scrollback.unwrap_or(config.scrollback)
     }
@@ -313,7 +325,7 @@ fn usage() -> ! {
            --config <PATH>     Override the TOML config file location\n  \
            --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)\n  \
            --font-size <SIZE>  Font size in points (default: {DEFAULT_FONT_SIZE})\n  \
-           --option-as-alt     On macOS, make Option act as Alt/Meta\n  \
+           --option-as-alt     On macOS, make both Option keys act as Alt/Meta\n  \
            --scrollback <LINES> History lines (default: 10000; 0 disables; max: 1000000)\n  \
            --copy-on-select    Copy selected text to the clipboard on mouse release\n  \
            -e, --command ...   Run this command instead of your shell\n  \
@@ -339,7 +351,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
         scrollback: None,
         font: None,
         font_size: DEFAULT_FONT_SIZE,
-        option_as_alt: !cfg!(target_os = "macos"),
+        option_as_alt: false,
         copy_on_select: false,
         command: Vec::new(),
         working_directory: None,
@@ -1571,7 +1583,7 @@ struct App {
     #[cfg(target_os = "macos")]
     quit_checks: QuitChecks,
     font_size: f32,
-    modifiers: ModifiersState,
+    modifiers: Modifiers,
     held_at_focus: HeldAtFocus,
     focused: bool,
     #[cfg(target_os = "macos")]
@@ -1769,7 +1781,7 @@ impl App {
             pending_close_window: None,
             #[cfg(target_os = "macos")]
             quit_checks: QuitChecks::default(),
-            modifiers: ModifiersState::empty(),
+            modifiers: Modifiers::default(),
             held_at_focus: HeldAtFocus::default(),
             focused: true,
             #[cfg(target_os = "macos")]
@@ -1886,10 +1898,9 @@ impl App {
             attrs, "trident", "trident",
         );
         #[cfg(target_os = "macos")]
-        let attrs = winit::platform::macos::WindowAttributesExtMacOS::with_tabbing_identifier(
-            attrs,
-            native_tabs::TABBING_IDENTIFIER,
-        );
+        let attrs = attrs
+            .with_tabbing_identifier(native_tabs::TABBING_IDENTIFIER)
+            .with_option_as_alt(self.options.option_as_alt(&self.config).into());
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -2476,7 +2487,6 @@ impl App {
         event_loop: &ActiveEventLoop,
         index: usize,
     ) -> Result<TabWindow, String> {
-        use winit::platform::macos::WindowAttributesExtMacOS;
         let s = self.session.as_ref().ok_or("no window")?;
         let current = s
             .window
@@ -2489,7 +2499,8 @@ impl App {
             .with_title("Trident")
             .with_inner_size(size)
             .with_visible(false)
-            .with_tabbing_identifier(native_tabs::TABBING_IDENTIFIER);
+            .with_tabbing_identifier(native_tabs::TABBING_IDENTIFIER)
+            .with_option_as_alt(self.options.option_as_alt(&self.config).into());
         let attrs = match position {
             Some(position) => attrs.with_position(position),
             None => attrs,
@@ -3898,6 +3909,16 @@ impl App {
                 diag!("{warning}");
             }
             self.config = next;
+            #[cfg(target_os = "macos")]
+            {
+                let mode = self.options.option_as_alt(&self.config).into();
+                if let Some(s) = &self.session {
+                    s.window.set_option_as_alt(mode);
+                }
+                for pane in self.tabs.iter().flatten() {
+                    pane.window.window.set_option_as_alt(mode);
+                }
+            }
             if !self.config.hide_mouse_when_typing {
                 self.typing_pointer.show();
             }
@@ -4031,7 +4052,7 @@ impl App {
         held_at_focus: bool,
         event_loop: &ActiveEventLoop,
     ) -> bool {
-        let mods = self.modifiers;
+        let mods = self.modifiers.state();
         let Some(chord) = shortcut_chord(event.key_without_modifiers(), mods) else {
             return false;
         };
@@ -4230,8 +4251,17 @@ impl App {
         true
     }
 
+    fn alt_sends_esc(&self) -> bool {
+        !cfg!(target_os = "macos")
+            || self.options.option_as_alt(&self.config).sends_esc(
+                self.modifiers.lalt_state() == ModifiersKeyState::Pressed,
+                self.modifiers.ralt_state() == ModifiersKeyState::Pressed,
+            )
+    }
+
     fn search_key(&mut self, event: &KeyEvent) {
         use winit::keyboard::NamedKey;
+        let alt_sends_esc = self.alt_sends_esc();
         if event.logical_key == Key::Named(NamedKey::Escape) {
             self.search = None;
         } else if let (Some(search), Some(s)) = (&mut self.search, &mut self.session) {
@@ -4243,7 +4273,7 @@ impl App {
             };
             match &event.logical_key {
                 Key::Named(NamedKey::Enter) => {
-                    search.step(&mut s.term, !self.modifiers.shift_key())
+                    search.step(&mut s.term, !self.modifiers.state().shift_key())
                 }
                 Key::Named(NamedKey::ArrowUp) => search.step(&mut s.term, true),
                 Key::Named(NamedKey::ArrowDown) => search.step(&mut s.term, false),
@@ -4252,17 +4282,12 @@ impl App {
                     changed = true;
                 }
                 Key::Character(c)
-                    if search::toggles_regex(
-                        c,
-                        base,
-                        self.modifiers,
-                        self.options.option_as_alt,
-                    ) =>
+                    if search::toggles_regex(c, base, self.modifiers.state(), alt_sends_esc) =>
                 {
                     search.regex = !search.regex;
                     changed = true;
                 }
-                _ if search::accepts_text(self.modifiers, self.options.option_as_alt) => {
+                _ if search::accepts_text(self.modifiers.state(), alt_sends_esc) => {
                     if let Some(text) = &event.text {
                         search
                             .query
@@ -4345,7 +4370,7 @@ impl App {
     fn mouse_reporting(&self) -> bool {
         self.session
             .as_ref()
-            .is_some_and(|s| input::tracks_mouse(s.term.modes.mouse, self.modifiers))
+            .is_some_and(|s| input::tracks_mouse(s.term.modes.mouse, self.modifiers.state()))
     }
 
     /// The current grid size, for a new window to open at.
@@ -4356,7 +4381,7 @@ impl App {
     }
 
     fn hover_link(&self) -> Option<links::Hover> {
-        if !self.focused || !links::command_modifier(self.modifiers) {
+        if !self.focused || !links::command_modifier(self.modifiers.state()) {
             return None;
         }
         let s = self.session.as_ref()?;
@@ -4493,7 +4518,7 @@ impl App {
             motion,
             col,
             row.max(0) as usize,
-            self.modifiers,
+            self.modifiers.state(),
             sgr,
         ) {
             s.pty.write(&bytes);
@@ -4594,7 +4619,7 @@ impl App {
                 let point = s.term.viewport_to_point_signed(row, col);
                 // Shift is also the local-selection override in mouse-tracking apps,
                 // where double/triple clicks must still select words/lines.
-                let modified = self.modifiers.alt_key();
+                let modified = self.modifiers.state().alt_key();
                 let clicks = match self.last_click.filter(|_| !modified) {
                     Some((at, p, n))
                         if p == point && at.elapsed() < prompt_click::MULTI_CLICK_INTERVAL =>
@@ -4605,13 +4630,14 @@ impl App {
                 };
                 self.last_click = (!modified).then_some((Instant::now(), point, clicks));
                 if let Some(previous) = self.click_to_move.press(
-                    (self.modifiers.is_empty() && self.prompt_click_allowed()).then_some(point),
+                    (self.modifiers.state().is_empty() && self.prompt_click_allowed())
+                        .then_some(point),
                     clicks,
                 ) {
                     self.move_cursor_to(previous);
                 }
                 let Some(s) = &mut self.session else { return };
-                select_at(&mut s.term, point, self.modifiers, clicks);
+                select_at(&mut s.term, point, self.modifiers.state(), clicks);
                 s.request_frame();
             }
             MouseButton::Middle if pressed => self.paste(true),
@@ -5200,9 +5226,9 @@ impl App {
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
+                self.modifiers = mods;
                 #[cfg(target_os = "macos")]
-                if links::command_modifier(self.modifiers) {
+                if links::command_modifier(self.modifiers.state()) {
                     self.sync_pointer();
                 }
                 self.refresh_link();
@@ -5238,11 +5264,11 @@ impl App {
                                 key: &event.logical_key,
                                 base: &base,
                                 text: event.text.as_deref(),
-                                mods: self.modifiers,
+                                mods: self.modifiers.state(),
                             },
                             input::KeyEventKind::Release,
                             kitty_flags,
-                            self.options.option_as_alt,
+                            self.alt_sends_esc(),
                             self.session
                                 .as_ref()
                                 .is_some_and(|s| s.term.modes.backarrow_sends_bs),
@@ -5293,9 +5319,9 @@ impl App {
                         &event.logical_key,
                         &base,
                         event.text.as_deref(),
-                        self.modifiers,
+                        self.modifiers.state(),
                         s.term.modes.app_cursor,
-                        self.options.option_as_alt,
+                        self.alt_sends_esc(),
                         s.term.modes.backarrow_sends_bs,
                     )
                 } else {
@@ -5304,11 +5330,11 @@ impl App {
                             key: &event.logical_key,
                             base: &base,
                             text: event.text.as_deref(),
-                            mods: self.modifiers,
+                            mods: self.modifiers.state(),
                         },
                         kind,
                         kitty_flags,
-                        self.options.option_as_alt,
+                        self.alt_sends_esc(),
                         s.term.modes.backarrow_sends_bs,
                     )
                 };
@@ -7662,6 +7688,18 @@ mod tests {
         .unwrap();
         assert!(options.command.is_empty());
         assert_eq!(options.font_size, 14.0);
+    }
+
+    #[test]
+    fn option_as_alt_flag_overrides_config_on_reload() {
+        let from_file = parse_args_from(std::iter::empty()).unwrap();
+        let from_cli = parse_args_from(["--option-as-alt".to_owned()]).unwrap();
+        let mut config = config::Config::default();
+        for mode in [config::OptionAsAlt::Left, config::OptionAsAlt::Right] {
+            config.option_as_alt = mode;
+            assert_eq!(from_file.option_as_alt(&config), mode);
+            assert_eq!(from_cli.option_as_alt(&config), config::OptionAsAlt::Both);
+        }
     }
 
     #[test]

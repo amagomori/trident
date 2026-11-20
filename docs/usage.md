@@ -12,7 +12,7 @@ trident [OPTIONS] [-e COMMAND [ARGS...]]
   --font <FONT>       Font family name or TrueType/OpenType file (default: bundled JetBrains Mono)
   --font-size <SIZE>  Font size in points (default: 14)
   --scrollback <LINES> History lines (default: 10000; 0 disables; maximum: 1000000)
-  --option-as-alt     On macOS, make Option act as Alt/Meta
+  --option-as-alt     On macOS, make both Option keys act as Alt/Meta
   --copy-on-select    Copy selected text to the clipboard on mouse release
   -e, --command ...   Run this command instead of your shell
   --install-terminfo  Install the xterm-trident terminfo entry with tic
@@ -123,7 +123,8 @@ lines. It ignores case unless the query has an uppercase letter.
 
 - Enter or Up moves to the next older match. Shift+Enter or Down moves to the next newer one.
   Search wraps at either end.
-- Alt+R or Ctrl+R toggles regular expressions.
+- Ctrl+R or Alt+R toggles regular expressions. On macOS, Option+R toggles them only with an
+  [Option key configured for Meta](configuration.md#key-bindings).
 - Escape closes search and clears highlights without changing the scroll position.
 
 ## Selection
