@@ -8,12 +8,6 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 impl crate::App {
     pub(super) fn picker_key(&mut self, event: &KeyEvent, synthetic: bool) -> bool {
-        if event.repeat && self.picker_keys.contains(&event.physical_key) {
-            return true;
-        }
-        if self.picker_keys.remove(&event.physical_key) && event.state == ElementState::Released {
-            return true;
-        }
         let Some(s) = &mut self.session else {
             return false;
         };
@@ -27,7 +21,7 @@ impl crate::App {
         if event.state == ElementState::Released {
             return false;
         }
-        self.picker_keys.insert(event.physical_key);
+        self.consumed_keys.insert(event.physical_key);
         if event.repeat || synthetic {
             return true;
         }

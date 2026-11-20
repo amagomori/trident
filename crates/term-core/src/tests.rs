@@ -1123,6 +1123,64 @@ fn tabs() {
 }
 
 #[test]
+fn select_all_starts_at_first_retained_row_and_keeps_the_viewport() {
+    let mut t = Terminal::new(8, 4);
+    t.set_scrollback_limit(12);
+    let lines: Vec<_> = (0..25).map(|i| format!("line{i:02}")).collect();
+    t.advance(lines.join("\r\n").as_bytes());
+    t.scroll_display(6);
+    t.select_all();
+    assert_eq!(t.display_offset(), 6);
+    assert_eq!(
+        t.selection_range(),
+        Some((Point { line: 9, col: 0 }, Point { line: 24, col: 7 }))
+    );
+    assert_eq!(t.selection_text().unwrap(), lines[9..].join("\n"));
+
+    t.advance(b"\x1b[?1049h\x1b[Halt");
+    assert!(t.selection_range().is_none());
+    t.select_all();
+    assert_eq!(t.selection_text().as_deref(), Some("alt\n\n\n"));
+    t.advance(b"\x1b[?1049l");
+    assert!(t.selection_range().is_none());
+    t.select_all();
+    assert_eq!(t.selection_text().unwrap(), lines[9..].join("\n"));
+}
+
+#[test]
+fn select_all_does_not_extend_to_later_wrapped_rows() {
+    let mut t = term(4, 2, "12345678");
+    t.select_all();
+    t.advance(b"9");
+    assert_eq!(t.selection_text().as_deref(), Some("12345678"));
+}
+
+#[test]
+fn select_all_on_an_empty_or_one_character_grid() {
+    // The grid clamps requests smaller than 2 x 1 to its minimum size.
+    let mut t = Terminal::new(0, 0);
+    for text in ["", "X"] {
+        t.advance(text.as_bytes());
+        t.select_all();
+        assert!(t.is_selected(t.selection_range(), Point { line: 0, col: 0 }));
+        assert_eq!(t.selection_text().as_deref(), Some(text));
+    }
+}
+
+#[test]
+fn select_all_copies_reflowed_wraps_wide_cells_and_styles() {
+    let mut t = term(8, 2, "\x1b[1mabc界<&>\r\nend");
+    t.select_all();
+    t.resize(4, 2);
+    assert!(t.selection_range().is_none());
+    t.select_all();
+    assert_eq!(t.selection_text().as_deref(), Some("abc界<&>\nend"));
+    let html = t.selection_html().unwrap();
+    assert!(html.contains("font-weight:bold"), "{html}");
+    assert!(html.contains("abc界&lt;&amp;&gt;\nend"), "{html}");
+}
+
+#[test]
 fn selection_text_joins_wrapped_lines() {
     let mut t = term(5, 4, "hello world\r\nnext");
     t.start_selection(t.viewport_to_point(0, 0), SelectionKind::Simple);
