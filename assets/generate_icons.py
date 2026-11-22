@@ -4,6 +4,7 @@
 For each icon it writes:
   <name>.icns           macOS app icon: the body scaled to 824/1024 on a transparent
                         canvas (Apple's icon grid) at 16-1024 px, 1x and 2x.
+  <name>-window.png     Linux window icon: the same 128x128 PNG as the ic07 chunk.
   <name>-menubar.png    18x18 menu bar image (1x), body at 16 px with 1 px margin.
   <name>-menubar@2x.png 36x36 menu bar image (2x).
 and, for the default icon only, the Linux hicolor set:
@@ -56,7 +57,7 @@ def fit(source: Image.Image, canvas: int, body: int) -> Image.Image:
     return out
 
 
-def icns(source: Image.Image) -> bytes:
+def icns_and_window_png(source: Image.Image) -> tuple[bytes, bytes]:
     dock = fit(source, GRID, BODY)
     by_size = {}
     for _, size in ICNS_TYPES:
@@ -66,14 +67,16 @@ def icns(source: Image.Image) -> bytes:
         kind + struct.pack(">I", 8 + len(by_size[size])) + by_size[size]
         for kind, size in ICNS_TYPES
     )
-    return b"icns" + struct.pack(">I", 8 + len(chunks)) + chunks
+    return b"icns" + struct.pack(">I", 8 + len(chunks)) + chunks, by_size[128]
 
 
 def main() -> None:
     OUT.mkdir(exist_ok=True)
     for name in NAMES:
         source = Image.open(ASSETS / f"{name}.png").convert("RGBA")
-        (OUT / f"{name}.icns").write_bytes(icns(source))
+        icns, window_png = icns_and_window_png(source)
+        (OUT / f"{name}.icns").write_bytes(icns)
+        (OUT / f"{name}-window.png").write_bytes(window_png)
         for scale, suffix in ((1, ""), (2, "@2x")):
             menu = fit(source, MENU_POINTS * scale, MENU_BODY_POINTS * scale)
             (OUT / f"{name}-menubar{suffix}.png").write_bytes(png(menu))

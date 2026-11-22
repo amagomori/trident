@@ -162,8 +162,9 @@ local tap.
 
 - `assets/generate_icons.py` requires Pillow and generates icons from the source images in
   `assets/`. It writes `assets/icons/<name>.icns`, the macOS menu bar images
-  (`<name>-menubar.png`, `<name>-menubar@2x.png`) and the Linux `hicolor` icons
-  (`tide-*.png`). After you edit a source image, run `python3 assets/generate_icons.py`.
+  (`<name>-menubar.png`, `<name>-menubar@2x.png`), the Linux window icons
+  (`<name>-window.png`) and the Linux `hicolor` icons (`tide-<size>.png`).
+  After you edit a source image, run `python3 assets/generate_icons.py`.
 - The tarball, .deb and AppImage install the icons with the `.desktop` entry,
   `packaging/linux/trident.desktop`.
 - `assets/social-preview.png` (1280x640) is the repository's social preview image. GitHub shows it
