@@ -246,6 +246,7 @@ pub fn code_to_location(key: PhysicalKey) -> KeyLocation {
         KeyCode::ControlRight => KeyLocation::Right,
 
         KeyCode::NumLock => KeyLocation::Numpad,
+        KeyCode::NumpadComma => KeyLocation::Numpad,
         KeyCode::NumpadDecimal => KeyLocation::Numpad,
         KeyCode::NumpadMultiply => KeyLocation::Numpad,
         KeyCode::NumpadAdd => KeyLocation::Numpad,
@@ -442,6 +443,7 @@ pub(crate) fn physicalkey_to_scancode(physical_key: PhysicalKey) -> Option<u32> 
         KeyCode::Numpad8 => Some(0x5b),
         KeyCode::Numpad9 => Some(0x5c),
         KeyCode::IntlYen => Some(0x5d),
+        KeyCode::NumpadComma => Some(0x5f),
         KeyCode::F5 => Some(0x60),
         KeyCode::F6 => Some(0x61),
         KeyCode::F7 => Some(0x62),
@@ -574,7 +576,7 @@ pub(crate) fn scancode_to_physicalkey(scancode: u32) -> PhysicalKey {
         0x5c => KeyCode::Numpad9,
         0x5d => KeyCode::IntlYen,
         // 0x5e => JIS Ro,
-        // 0x5f => unknown,
+        0x5f => KeyCode::NumpadComma,
         0x60 => KeyCode::F5,
         0x61 => KeyCode::F6,
         0x62 => KeyCode::F7,
@@ -613,4 +615,22 @@ pub(crate) fn scancode_to_physicalkey(scancode: u32) -> PhysicalKey {
         0xa => KeyCode::Backquote,
         _ => return PhysicalKey::Unidentified(NativeKeyCode::MacOS(scancode as u16)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jis_keypad_comma_is_distinct_from_standard_comma() {
+        for (scancode, code, location) in [
+            (0x5f, KeyCode::NumpadComma, KeyLocation::Numpad),
+            (0x2b, KeyCode::Comma, KeyLocation::Standard),
+        ] {
+            let key = scancode_to_physicalkey(scancode);
+            assert_eq!(key, PhysicalKey::Code(code));
+            assert_eq!(code_to_location(key), location);
+            assert_eq!(physicalkey_to_scancode(key), Some(scancode));
+        }
+    }
 }
