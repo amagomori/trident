@@ -1,6 +1,6 @@
 //! iTerm2's inline image protocol (<https://iterm2.com/documentation-images.html>).
 //! Current imgcat uses MultipartFile/FilePart/FileEnd; older versions use a single File.
-//! The WezTerm extension `doNotMoveCursor=1` keeps the cursor at its cell.
+//! The `WezTerm` extension `doNotMoveCursor=1` keeps the cursor at its cell.
 
 use crate::Terminal;
 use crate::images::{Image, MAX_IMAGE_SIDE, PlaceOptions};
