@@ -4,6 +4,7 @@ Name=Trident
 GenericName=Terminal
 Comment=Fast, GPU-rendered terminal emulator
 Exec=trident
+X-TerminalArgExec=-e
 Icon=trident
 Terminal=false
 Categories=System;TerminalEmulator;
