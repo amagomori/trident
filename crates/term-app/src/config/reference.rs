@@ -109,7 +109,7 @@ fn render() -> String {
         default_ignore: literal(true) => "Ignore built-in patterns such as timestamps and process IDs.",
         ignore: literal(&CompareRuns::default().ignore) => "Add regular expressions for text to ignore on each line.",
     });
-    doc.push_str("\n## colors\n\nUse quoted `#rrggbb` strings in `[colors]`. These are the defaults without a theme override.\n\n| Key | Color |\n| --- | --- |\n");
+    doc.push_str("\n## colors\n\nUse quoted `#rgb` or `#rrggbb` strings in `[colors]`. Each shorthand digit is doubled: `#a3f` means `#aa33ff`. These are the defaults without a theme override.\n\n| Key | Color |\n| --- | --- |\n");
     let theme: toml::Table = include_str!("../../../../themes/tokyo-night.toml")
         .parse()
         .unwrap();

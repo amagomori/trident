@@ -1383,8 +1383,12 @@ mod tests {
         let dir = unique_temp_dir("terminal-theme-test");
         let path = dir.join("config.toml");
         let theme = dir.join("custom.toml");
-        std::fs::write(&theme, "[colors]\nbackground = '#112233'\nred = '#abcdef'").unwrap();
-        let config = parse(&path, "theme = { light = 'custom.toml', dark = 'solarized-dark' }\n[colors]\ncursor = '#123456'").unwrap();
+        std::fs::write(&theme, "[colors]\nbackground = '#123'\nred = '#abcdef'").unwrap();
+        let config = parse(
+            &path,
+            "theme = { light = 'custom.toml', dark = 'solarized-dark' }\n[colors]\ncursor = '#a3F'",
+        )
+        .unwrap();
         assert!(config.themes.automatic());
         assert_eq!(
             config.themes.palette(Some(Theme::Light)).background,
@@ -1395,7 +1399,7 @@ mod tests {
             (0xab, 0xcd, 0xef)
         );
         for appearance in [None, Some(Theme::Light), Some(Theme::Dark)] {
-            assert_eq!(config.themes.palette(appearance).cursor, (0x12, 0x34, 0x56));
+            assert_eq!(config.themes.palette(appearance).cursor, (0xaa, 0x33, 0xff));
         }
         for text in [
             "theme = 'custom.toml'".into(),
@@ -1463,9 +1467,9 @@ mod tests {
         std::fs::write(&replacement, "[colors]\nbackground = '#abcdef'").unwrap();
         std::fs::rename(replacement, &theme).unwrap();
         wait(Some((0xab, 0xcd, 0xef)));
-        std::fs::write(&theme, "[colors]\nbackground = 'invalid'").unwrap();
+        std::fs::write(&theme, "[colors]\nbackground = '#abcd'").unwrap();
         wait(None);
-        std::fs::write(&theme, "[colors]\nbackground = '#445566'").unwrap();
+        std::fs::write(&theme, "[colors]\nbackground = '#456'").unwrap();
         wait(Some((0x44, 0x55, 0x66)));
         std::fs::remove_file(&theme).unwrap();
         wait(None);
@@ -1700,7 +1704,7 @@ bright_white = "#fefdfc"
                 "#rrggbb",
             ),
             (
-                "[colors]\nunknown = '#112233'",
+                "[colors]\nunknown = '#123'",
                 "colors.unknown",
                 "unknown key",
             ),

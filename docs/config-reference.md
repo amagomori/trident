@@ -68,7 +68,7 @@ Use `[compare_runs]` instead of the boolean form to customize [output comparison
 
 ## colors
 
-Use quoted `#rrggbb` strings in `[colors]`. These are the defaults without a theme override.
+Use quoted `#rgb` or `#rrggbb` strings in `[colors]`. Each shorthand digit is doubled: `#a3f` means `#aa33ff`. These are the defaults without a theme override.
 
 | Key | Color |
 | --- | --- |
