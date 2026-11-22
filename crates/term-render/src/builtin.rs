@@ -1,17 +1,17 @@
-//! Box drawing (U+2500–257F), block elements (U+2580–259F) and powerline separators
-//! (U+E0B0–E0BF) drawn from the cell metrics instead of the font, so lines, blocks and
-//! separators fill the cell exactly and join their neighbours with no gaps at any size.
+//! Box drawing (U+2500–257F), block elements (U+2580–259F), Braille patterns
+//! (U+2800–28FF) and powerline separators (U+E0B0–E0BF) drawn from the cell
+//! metrics instead of the font.
 
 use crate::font::{CellMetrics, RasterizedGlyph};
 
 /// Whether `c` is drawn here rather than taken from a font.
 pub fn covers(c: char) -> bool {
-    matches!(c, '\u{2500}'..='\u{259F}' | '\u{E0B0}'..='\u{E0BF}')
+    matches!(c, '\u{2500}'..='\u{259F}' | '\u{2800}'..='\u{28FF}' | '\u{E0B0}'..='\u{E0BF}')
 }
 
-/// Draws `c` over exactly `cells` cells, or `None` if it is not a built-in glyph.
+/// Draws `c` over exactly `cells` cells, or returns `None` for blank or unsupported glyphs.
 pub fn rasterize(c: char, metrics: &CellMetrics, cells: usize) -> Option<RasterizedGlyph> {
-    if !covers(c) {
+    if c == '\u{2800}' || !covers(c) {
         return None;
     }
     let w = (metrics.width * cells.max(1) as f32).round().max(1.0) as i32;
@@ -21,6 +21,7 @@ pub fn rasterize(c: char, metrics: &CellMetrics, cells: usize) -> Option<Rasteri
     match code {
         0x2500..=0x257F => canvas.box_drawing(code),
         0x2580..=0x259F => canvas.block(code),
+        0x2800..=0x28FF => canvas.braille((code - 0x2800) as u8),
         _ => canvas.powerline(code),
     }
     Some(RasterizedGlyph {
@@ -374,6 +375,30 @@ impl Canvas {
         }
     }
 
+    fn braille(&mut self, mask: u8) {
+        // In Unicode bit order: down the first three rows of each column,
+        // then across the bottom row.
+        let dots = [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (0, 3),
+            (1, 3),
+        ];
+        let side = (self.w.min(self.h / 2) / 3).max(1);
+        for (bit, (col, row)) in dots.into_iter().enumerate() {
+            if mask & (1 << bit) != 0 {
+                // Round the origin so each square is centred in its 1/2 × 1/4 slot.
+                let x = ((2 * col + 1) * self.w - 2 * side + 2) / 4;
+                let y = ((2 * row + 1) * self.h - 4 * side + 4) / 8;
+                self.fill(x, y, x + side, y + side, 1.0);
+            }
+        }
+    }
+
     fn powerline(&mut self, code: u32) {
         let (w, h) = (self.w as f32, self.h as f32);
         let half = self.light as f32 / 2.0;
@@ -436,8 +461,10 @@ mod tests {
         .collect()
     }
 
-    fn all() -> impl Iterator<Item = char> {
-        ('\u{2500}'..='\u{259F}').chain('\u{E0B0}'..='\u{E0BF}')
+    fn nonblank() -> impl Iterator<Item = char> {
+        ('\u{2500}'..='\u{259F}')
+            .chain('\u{2801}'..='\u{28FF}')
+            .chain('\u{E0B0}'..='\u{E0BF}')
     }
 
     struct Bitmap(RasterizedGlyph);
@@ -489,7 +516,7 @@ mod tests {
     #[test]
     fn every_glyph_fills_exactly_its_cells() {
         for m in sizes() {
-            for c in all() {
+            for c in nonblank() {
                 for cells in [1, 2] {
                     let g = rasterize(c, &m, cells).expect("built-in glyph");
                     assert_eq!(g.width, (m.width * cells as f32) as usize, "{c:?}");
@@ -501,6 +528,39 @@ mod tests {
             }
         }
         assert!(rasterize('A', &sizes()[0], 1).is_none());
+    }
+
+    #[test]
+    fn braille_ink_matches_unicode_dot_numbers() {
+        let mut m = Fonts::bundled(14.0).metrics;
+        // Read the bitmap spatially, not in the rasterizer's bit order.
+        let numbers = [[1, 4], [2, 5], [3, 6], [7, 8]];
+        for (w, h) in [(2, 4), (3, 5), (7, 13), (10, 20)] {
+            m.width = w as f32;
+            m.height = h as f32;
+            for mask in 0..=255 {
+                let c = char::from_u32(0x2800 + mask).unwrap();
+                assert!(covers(c));
+                if mask == 0 {
+                    assert!(rasterize(c, &m, 1).is_none());
+                    continue;
+                }
+                let glyph = Bitmap::of(c, &m);
+                let mut observed = 0;
+                for y in 0..h {
+                    for x in 0..w {
+                        if glyph.at(x, y) > 0 {
+                            let dot = numbers[(2 * y + 1) * 2 / h][(2 * x + 1) / w];
+                            observed |= 1 << (dot - 1);
+                        }
+                    }
+                }
+                assert_eq!(observed, mask, "{c:?} at {w}×{h}");
+            }
+        }
+        for c in ['\u{27ff}', '\u{2900}'] {
+            assert!(rasterize(c, &m, 1).is_none());
+        }
     }
 
     /// Each arm reaches its edge with exactly the profile of the plain line of its
