@@ -180,6 +180,11 @@ impl SearchJob {
                 }
             };
             if self.found.len() < offset + remaining {
+                if self.found.len() == self.found.capacity() {
+                    // Grow fourfold to avoid copying a nearly full buffer just before the cap.
+                    let capacity = (4 * self.found.len()).clamp(4, MATCH_LIMIT);
+                    self.found.reserve_exact(capacity - self.found.len());
+                }
                 self.found.push(matched);
             } else {
                 self.capped = true;
@@ -402,7 +407,7 @@ impl Terminal {
             re,
             next: (!query.is_empty()).then_some(last),
             frontier: last + 1,
-            found: Vec::with_capacity(MATCH_LIMIT),
+            found: Vec::new(),
             chunks: Vec::new(),
             total: 0,
             capped: false,
@@ -487,6 +492,66 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn result_capacity_tracks_hits_and_survives_drains() {
+        let mut term = Terminal::new(101, 111);
+        for _ in 0..110 {
+            term.advance(&[b'x'; 100]);
+            term.advance(b"\r\n");
+        }
+        term.advance(b"unique");
+
+        for query in ["", "absent", "unique"] {
+            let mut job = term.search_job(query, false).unwrap();
+            assert_eq!(job.found.capacity(), 0);
+            assert!(job.run(&term, usize::MAX));
+            if query == "unique" {
+                assert!(job.found.capacity() * size_of::<Match>() <= 256);
+                assert_eq!(
+                    job.take_found(),
+                    [Match {
+                        start: Point { line: 110, col: 0 },
+                        end: Point { line: 110, col: 5 },
+                    }]
+                );
+            } else {
+                assert_eq!(job.found.capacity(), 0);
+                assert!(job.take_found().is_empty());
+            }
+            assert!(!job.capped());
+        }
+
+        let expected: Vec<_> = (10..110)
+            .flat_map(|line| {
+                (0..100).map(move |col| {
+                    let point = Point { line, col };
+                    Match {
+                        start: point,
+                        end: point,
+                    }
+                })
+            })
+            .collect();
+        for lines in [usize::MAX, 7] {
+            let mut job = term.search_job("x", false).unwrap();
+            let mut end = expected.len();
+            loop {
+                let done = job.run(&term, lines);
+                let capacity = job.found.capacity();
+                assert!(capacity <= MATCH_LIMIT);
+                let batch = job.take_found();
+                assert_eq!(job.found.capacity(), capacity);
+                assert_eq!(batch, expected[end - batch.len()..end]);
+                end -= batch.len();
+                if done {
+                    break;
+                }
+            }
+            assert_eq!(end, 0);
+            assert!(job.capped());
+        }
+    }
 
     #[test]
     fn capped_across_wrapped_lines_keeps_newest_in_order() {
