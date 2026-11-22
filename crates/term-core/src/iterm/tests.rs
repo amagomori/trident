@@ -34,6 +34,67 @@ fn imgcat_multipart_png_and_legacy_animated_gif() {
 // A 9×18 JPEG with EXIF orientation 6 displays as 18×9.
 const JPEG: &[u8] = include_bytes!("fixtures/portrait.jpg");
 
+fn inline_jpegs(cursor_option: &str) -> [String; 2] {
+    let header = format!("inline=1;width=3;height=3;preserveAspectRatio=0{cursor_option}");
+    let data = STANDARD.encode(JPEG);
+    [
+        format!("\x1b]1337;File={header}:{data}\x07"),
+        format!(
+            "\x1b]1337;MultipartFile={header}\x07\x1b]1337;FilePart={data}\x07\x1b]1337;FileEnd\x07"
+        ),
+    ]
+}
+
+#[test]
+fn stationary_image_leaves_next_write_at_its_anchor() {
+    for image in inline_jpegs(";doNotMoveCursor=1") {
+        for row in [1, 4] {
+            let mut t = Terminal::new(8, 5);
+            t.advance(format!("\x1b[{};3H", row + 1).as_bytes());
+            t.advance(image.as_bytes());
+            let placements = t.visible_placements();
+            assert_eq!(placements.len(), 1);
+            let p = placements[0].placement;
+            assert_eq!((p.line, p.col, p.cols, p.rows), (row as u64, 2, 3, 3));
+            assert_eq!(t.cursor_position(), Some((row, 2)));
+            t.advance(b"x");
+            assert_eq!(t.viewport_row(row).cells[2].c, 'x');
+            assert_eq!(t.scrollback_len(), 0);
+        }
+    }
+}
+
+#[test]
+fn stationary_image_preserves_pending_wrap_at_bottom_right() {
+    for image in inline_jpegs(";doNotMoveCursor=1") {
+        let mut t = Terminal::new(8, 5);
+        t.advance(b"\x1b[5;8Hx");
+        t.advance(image.as_bytes());
+        let p = t.visible_placements()[0].placement;
+        assert_eq!((p.line, p.col), (4, 7));
+        assert_eq!(t.scrollback_len(), 0);
+        t.advance(b"y");
+        assert_eq!(t.scrollback_len(), 1);
+        assert_eq!(t.viewport_row(3).cells[7].c, 'x');
+        assert_eq!(t.viewport_row(4).cells[0].c, 'y');
+    }
+}
+
+#[test]
+fn only_exact_cursor_option_suppresses_image_advance() {
+    for option in ["", ";doNotMoveCursor=0", ";doNotMoveCursor=01"] {
+        for image in inline_jpegs(option) {
+            let mut t = Terminal::new(8, 5);
+            t.advance(b"\x1b[5;3H");
+            t.advance(image.as_bytes());
+            assert_eq!(t.scrollback_len(), 2);
+            assert_eq!(t.cursor_position(), Some((4, 5)));
+            t.advance(b"x");
+            assert_eq!(t.viewport_row(4).cells[5].c, 'x');
+        }
+    }
+}
+
 #[test]
 fn jpeg_geometry_and_st_termination() {
     let payload = STANDARD.encode(JPEG);
