@@ -4,7 +4,7 @@
 # before the rename, is kept as an alias so existing configs keep working.
 #
 # Based on xterm-256color. Added: truecolor (Tc, setrgbf, setrgbb), styled
-# underlines and their RGB color (Smulx, Setulc),
+# underlines and their RGB color (Smulx, Setulc, ol),
 # bracketed paste (BE, BD, PS, PE), synchronized output (Sync) and window
 # title (hs, tsl, fsl, dsl). The canceled capabilities below are not advertised
 # by this entry. This profile is not a complete list of the parser's features:
@@ -18,6 +18,7 @@ xterm-trident|xterm-terminal|Trident GPU-rendered terminal emulator,
 	BD=\E[?2004l, BE=\E[?2004h, PE=\E[201~, PS=\E[200~,
 	Smulx=\E[4:%p1%dm,
 	Setulc=\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%dm,
+	ol=\E[59m,
 	Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
 	dsl=\E]2;\007, fsl=^G, tsl=\E]2;,
 	setrgbb=\E[48;2;%p1%d;%p2%d;%p3%dm,

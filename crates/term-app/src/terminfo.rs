@@ -315,19 +315,25 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// What tmux sends on every cursor show: a blinking DECSCUSR style, then
-    /// the entry's cnorm. The cursor must still blink (KAN-126).
-    fn assert_cnorm_keeps_blink(dir: &Path) {
-        let cnorm = Command::new(tool("tput"))
-            .args(["-T", NAME, "cnorm"])
+    fn tput(dir: &Path, args: &[&str]) -> Vec<u8> {
+        let output = Command::new(tool("tput"))
+            .args(["-T", NAME])
+            .args(args)
             .env("TERMINFO", dir)
             .output()
             .unwrap();
-        assert!(cnorm.status.success());
-        assert_eq!(cnorm.stdout, b"\x1b[?25h");
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        output.stdout
+    }
+
+    /// What tmux sends on every cursor show: a blinking DECSCUSR style, then
+    /// the entry's cnorm. The cursor must still blink (KAN-126).
+    fn assert_cnorm_keeps_blink(dir: &Path) {
+        let cnorm = tput(dir, &["cnorm"]);
+        assert_eq!(cnorm, b"\x1b[?25h");
         let mut term = term_core::Terminal::new(10, 2);
         term.advance(b"\x1b[?25l\x1b[1 q");
-        term.advance(&cnorm.stdout);
+        term.advance(&cnorm);
         assert!(term.cursor_blink);
         assert!(term.modes.show_cursor);
     }
@@ -335,16 +341,8 @@ mod tests {
     fn assert_setulc_colors(dir: &Path) {
         use term_core::{Color, Terminal, UnderlineStyle};
 
-        let tput = |cap, arg: &str| {
-            let output = Command::new(tool("tput"))
-                .args(["-T", NAME, cap, arg])
-                .env("TERMINFO", dir)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{cap} {arg}: {output:?}");
-            output.stdout
-        };
-        let style = tput("Smulx", "3");
+        let style = tput(dir, &["Smulx", "3"]);
+        let reset = tput(dir, &["ol"]);
         for [r, g, b] in [
             [0, 0, 0],
             [255, 0, 0],
@@ -358,8 +356,10 @@ mod tests {
             let packed = u32::from_be_bytes([0, r, g, b]);
             let mut term = Terminal::new(4, 1);
             term.advance(&style);
-            term.advance(&tput("Setulc", &packed.to_string()));
-            term.advance(b"A\x1b[59mB");
+            term.advance(&tput(dir, &["Setulc", &packed.to_string()]));
+            term.advance(b"A");
+            term.advance(&reset);
+            term.advance(b"B");
             let row = term.viewport_row(0);
             assert_eq!(
                 term.underline_color(&row.cells[0]),
