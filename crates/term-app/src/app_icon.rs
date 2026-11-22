@@ -17,6 +17,9 @@ pub enum AppIcon {
 }
 
 struct Assets {
+    #[cfg(any(target_os = "linux", test))]
+    window_png: &'static [u8],
+    #[cfg(any(target_os = "macos", test))]
     icns: &'static [u8],
     #[cfg(any(target_os = "macos", test))]
     menu_bar: &'static [u8],
@@ -27,6 +30,9 @@ struct Assets {
 macro_rules! assets {
     ($name:literal) => {
         Assets {
+            #[cfg(any(target_os = "linux", test))]
+            window_png: include_bytes!(concat!("../../../assets/icons/", $name, "-window.png")),
+            #[cfg(any(target_os = "macos", test))]
             icns: include_bytes!(concat!("../../../assets/icons/", $name, ".icns")),
             #[cfg(any(target_os = "macos", test))]
             menu_bar: include_bytes!(concat!("../../../assets/icons/", $name, "-menubar.png")),
@@ -112,7 +118,7 @@ const ICNS_TYPES: [(&[u8; 4], u32); 10] = [
 const DOCK_MAX_PX: u32 = 256;
 
 /// The (type, data) chunks of an .icns file.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 fn icns_chunks(icns: &[u8]) -> Option<Vec<(&[u8], &[u8])>> {
     let len = |bytes: &[u8]| Some(u32::from_be_bytes(bytes.get(4..8)?.try_into().ok()?) as usize);
     if icns.get(..4)? != b"icns" || len(icns)? != icns.len() {
@@ -129,7 +135,7 @@ fn icns_chunks(icns: &[u8]) -> Option<Vec<(&[u8], &[u8])>> {
 }
 
 /// The PNG stored under chunk type `kind` (e.g. `ic07`, 128 px) of an .icns file.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 fn icns_png<'a>(icns: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
     icns_chunks(icns)?
         .into_iter()
@@ -157,10 +163,10 @@ fn dock_icns(icns: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(target_os = "linux")]
 fn window_icon(icon: AppIcon) -> Option<winit::window::Icon> {
-    let png = icns_png(icon.assets().icns, b"ic07")?;
-    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
-        .ok()?
-        .into_rgba8();
+    let image =
+        image::load_from_memory_with_format(icon.assets().window_png, image::ImageFormat::Png)
+            .ok()?
+            .into_rgba8();
     let (width, height) = image.dimensions();
     winit::window::Icon::from_rgba(image.into_raw(), width, height).ok()
 }
@@ -376,6 +382,18 @@ mod tests {
         assert_eq!(AppIcon::from_name("trident"), None);
         assert_eq!(AppIcon::from_name(""), None);
         assert_eq!(AppIcon::default(), AppIcon::Tide);
+    }
+
+    #[test]
+    fn window_png_matches_ic07_for_every_icon() {
+        for icon in AppIcon::ALL {
+            let assets = icon.assets();
+            assert!(
+                icns_png(assets.icns, b"ic07") == Some(assets.window_png),
+                "{}: window PNG differs from ic07",
+                icon.name()
+            );
+        }
     }
 
     #[test]
