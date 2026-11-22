@@ -93,24 +93,25 @@ pub fn sanitize(uri: &str) -> String {
     out
 }
 
-/// `text` in at most `columns` cells: when it is longer, the start (scheme and host) and
-/// the end are kept around an ellipsis.
+/// Keeps both ends of a target that exceeds `columns`, favoring its prefix.
+///
+/// Each Unicode scalar counts as one column; sanitized targets are ASCII.
 pub fn elide(text: &str, columns: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= columns {
-        return text.to_owned();
-    }
     if columns == 0 {
         return String::new();
     }
+    if text.len() <= columns || text.chars().nth(columns).is_none() {
+        return text.to_owned();
+    }
     let keep = columns - 1;
     let tail = keep / 3;
-    let head = keep - tail;
-    chars[..head]
-        .iter()
-        .chain(['…'].iter())
-        .chain(chars[chars.len() - tail..].iter())
-        .collect()
+    let prefix_bytes: usize = text.chars().take(keep - tail).map(char::len_utf8).sum();
+    let suffix_bytes: usize = text.chars().rev().take(tail).map(char::len_utf8).sum();
+    let mut out = String::with_capacity(prefix_bytes + '…'.len_utf8() + suffix_bytes);
+    out.push_str(&text[..prefix_bytes]);
+    out.push('…');
+    out.push_str(&text[text.len() - suffix_bytes..]);
+    out
 }
 
 #[cfg(test)]
@@ -142,6 +143,33 @@ mod tests {
         assert_eq!(short, "https://examp…le.txt");
         assert_eq!(elide(uri, 1), "…");
         assert_eq!(elide(uri, 0), "");
+    }
+
+    #[test]
+    fn omitted_middle_does_not_change_the_displayed_ends() {
+        let middle = "a".repeat(8192);
+        assert_eq!(elide(&format!("https://{middle}/log"), 13), "https://…/log");
+        let escaped = sanitize(&format!(" {middle}終"));
+        assert_eq!(elide(&escaped, 6), "%20a…2");
+    }
+
+    #[test]
+    fn elision_counts_scalars_not_bytes_or_graphemes() {
+        let text = "é界🦀e\u{301}終";
+        for (columns, expected) in [
+            (0, ""),
+            (1, "…"),
+            (2, "é…"),
+            (3, "é界…"),
+            (4, "é界…終"),
+            (5, "é界🦀…終"),
+            (6, text),
+            (usize::MAX, text),
+        ] {
+            assert_eq!(elide(text, columns), expected);
+        }
+        assert_eq!(elide("", 0), "");
+        assert_eq!(elide("🦀", 1), "🦀");
     }
 
     #[test]
