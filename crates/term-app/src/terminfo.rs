@@ -264,6 +264,7 @@ mod tests {
             assert!(!caps.iter().any(|c| c.starts_with(cap)), "unexpected {cap}");
         }
         assert_cnorm_keeps_blink(&dir);
+        assert_setulc_colors(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&empty).unwrap();
     }
@@ -329,5 +330,43 @@ mod tests {
         term.advance(&cnorm.stdout);
         assert!(term.cursor_blink);
         assert!(term.modes.show_cursor);
+    }
+
+    fn assert_setulc_colors(dir: &Path) {
+        use term_core::{Color, Terminal, UnderlineStyle};
+
+        let tput = |cap, arg: &str| {
+            let output = Command::new(tool("tput"))
+                .args(["-T", NAME, cap, arg])
+                .env("TERMINFO", dir)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{cap} {arg}: {output:?}");
+            output.stdout
+        };
+        let style = tput("Smulx", "3");
+        for [r, g, b] in [
+            [0, 0, 0],
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [255, 255, 255],
+            [1, 2, 3],
+            [18, 52, 86],
+            [254, 128, 1],
+        ] {
+            let packed = u32::from_be_bytes([0, r, g, b]);
+            let mut term = Terminal::new(4, 1);
+            term.advance(&style);
+            term.advance(&tput("Setulc", &packed.to_string()));
+            term.advance(b"A\x1b[59mB");
+            let row = term.viewport_row(0);
+            assert_eq!(
+                term.underline_color(&row.cells[0]),
+                Some(Color::Rgb(r, g, b))
+            );
+            assert_eq!(term.underline_color(&row.cells[1]), None);
+            assert_eq!(row.cells[1].flags.underline(), Some(UnderlineStyle::Curly));
+        }
     }
 }
