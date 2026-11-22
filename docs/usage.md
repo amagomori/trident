@@ -21,7 +21,7 @@ trident [OPTIONS] [-e COMMAND [ARGS...]]
 ## Terminfo
 
 Trident starts your login shell (`$SHELL`) with `TERM=xterm-256color`. It also ships an
-`xterm-trident` terminfo entry, which adds truecolor, styled underlines, bracketed paste,
+`xterm-trident` terminfo entry, which adds truecolor, underline styles and colors, bracketed paste,
 synchronized output and the window title, and drops xterm features Trident lacks. To use it:
 
 1. Run `trident --install-terminfo`. On macOS, this uses `/usr/bin/tic` because an entry
@@ -29,7 +29,8 @@ synchronized output and the window title, and drops xterm features Trident lacks
 2. Set `term = "xterm-trident"` in the config.
 
 If the system can't find the entry, Trident falls back to `xterm-256color`. The old name
-`xterm-terminal` works as an alias.
+`xterm-terminal` works as an alias. If you installed an older entry, rerun
+`trident --install-terminfo` to advertise RGB underline colors (`Setulc`).
 
 ssh passes `TERM` to the remote host, so install the entry there too:
 
