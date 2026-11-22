@@ -122,6 +122,20 @@ fn parse(path: &Path, text: &str) -> Result<Palette, String> {
     Ok(palette)
 }
 
+fn parse_rgb(value: &str) -> Option<(u8, u8, u8)> {
+    let [r1, r2, g1, g2, b1, b2] = match *value.as_bytes() {
+        [b'#', r, g, b] => [r, r, g, g, b, b],
+        [b'#', r1, r2, g1, g2, b1, b2] => [r1, r2, g1, g2, b1, b2],
+        _ => return None,
+    };
+    let channel = |high, low| {
+        let high = char::from(high).to_digit(16)?;
+        let low = char::from(low).to_digit(16)?;
+        Some((high * 16 + low) as u8)
+    };
+    Some((channel(r1, r2)?, channel(g1, g2)?, channel(b1, b2)?))
+}
+
 pub fn apply(
     palette: &mut Palette,
     colors: &BTreeMap<String, String>,
@@ -146,15 +160,8 @@ pub fn apply(
     ];
     for (name, value) in colors {
         let error = |message: String| (name.clone(), message);
-        let rgb = if value.len() == 7
-            && value.starts_with('#')
-            && value[1..].bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            let n = u32::from_str_radix(&value[1..], 16).unwrap();
-            ((n >> 16) as u8, (n >> 8) as u8, n as u8)
-        } else {
-            return Err(error(format!("expected \"#rrggbb\", got {value:?}")));
-        };
+        let rgb = parse_rgb(value)
+            .ok_or_else(|| error(format!("expected \"#rgb\" or \"#rrggbb\", got {value:?}")))?;
         match name.as_str() {
             "foreground" => palette.foreground = rgb,
             "background" => palette.background = rgb,
@@ -200,6 +207,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shorthand_matches_expanded_rgb() {
+        for r in 0..16u8 {
+            for g in 0..16u8 {
+                for b in 0..16u8 {
+                    let rgb = (r * 17, g * 17, b * 17);
+                    assert_eq!(parse_rgb(&format!("#{r:x}{g:X}{b:x}")), Some(rgb));
+                    assert_eq!(
+                        parse_rgb(&format!("#{:02X}{:02x}{:02X}", rgb.0, rgb.1, rgb.2)),
+                        Some(rgb)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_other_color_formats() {
+        for value in [
+            "",
+            "abc",
+            "red",
+            "#",
+            "#12",
+            "#1234",
+            "#12345",
+            "#12345678",
+            "#+12",
+            "#aGf",
+            "#é1",
+            "#１２",
+            " #abc",
+            "#abc ",
+            "#12345g",
+        ] {
+            assert_eq!(parse_rgb(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
     fn invalid_color_points_to_exact_key() {
         let error = parse(
             Path::new("theme.toml"),
@@ -208,7 +254,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error,
-            "trident: theme.toml:3:1: colors.white: expected \"#rrggbb\", got \"oops\""
+            "trident: theme.toml:3:1: colors.white: expected \"#rgb\" or \"#rrggbb\", got \"oops\""
         );
     }
 
@@ -221,7 +267,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error,
-            "trident: theme.toml:4:1: colors.white: expected \"#rrggbb\", got \"oops\""
+            "trident: theme.toml:4:1: colors.white: expected \"#rgb\" or \"#rrggbb\", got \"oops\""
         );
     }
 
