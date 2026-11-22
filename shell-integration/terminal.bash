@@ -15,7 +15,9 @@ _terminal_save_status() {
     return "$_terminal_command_status"
 }
 
-_terminal_report_cwd() {
+_terminal_cwd_raw=
+_terminal_cwd_encoded=
+_terminal_encode_cwd() {
     local path=$PWD encoded= c i lc_all=${LC_ALL-} lc_all_set=${LC_ALL+1}
     # Bash before 3.2.43 keeps a function-local LC_ALL's locale after returning,
     # which leaves Readline moving the cursor by bytes, so restore it globally.
@@ -29,7 +31,16 @@ _terminal_report_cwd() {
         esac
     done
     if [[ $lc_all_set ]]; then LC_ALL=$lc_all; else unset LC_ALL; fi
-    printf '\033]7;file://%s%s\007' "${HOSTNAME-}" "$encoded"
+    _terminal_cwd_raw=$path
+    _terminal_cwd_encoded=$encoded
+}
+
+_terminal_report_cwd() {
+    # Unlike [[ == ]], [ = ] stays case-sensitive under nocasematch.
+    if [ "$PWD" != "$_terminal_cwd_raw" ]; then
+        _terminal_encode_cwd
+    fi
+    printf '\033]7;file://%s%s\007' "${HOSTNAME-}" "$_terminal_cwd_encoded"
 }
 
 _terminal_prompt_command() {
