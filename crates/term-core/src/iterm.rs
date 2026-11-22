@@ -1,5 +1,6 @@
 //! iTerm2's inline image protocol (<https://iterm2.com/documentation-images.html>).
 //! Current imgcat uses MultipartFile/FilePart/FileEnd; older versions use a single File.
+//! The WezTerm extension `doNotMoveCursor=1` keeps the cursor at its cell.
 
 use crate::Terminal;
 use crate::images::{Image, MAX_IMAGE_SIDE, PlaceOptions};
@@ -54,6 +55,7 @@ struct Options {
     width: Dimension,
     height: Dimension,
     stretch: bool,
+    do_not_move_cursor: bool,
     size: Option<usize>,
 }
 
@@ -71,6 +73,7 @@ impl Options {
                 "width" => opts.width = Dimension::parse(value)?,
                 "height" => opts.height = Dimension::parse(value)?,
                 "preserveAspectRatio" => opts.stretch = value == "0",
+                "doNotMoveCursor" => opts.do_not_move_cursor = value == "1",
                 "size" => opts.size = Some(value.parse().ok()?),
                 _ => {}
             }
@@ -167,6 +170,7 @@ impl Terminal {
                     ..Default::default()
                 },
             )
+            && !opts.do_not_move_cursor
         {
             self.advance_image_cursor(&placement);
         }
