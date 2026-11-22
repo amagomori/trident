@@ -459,7 +459,7 @@ impl Perform for Terminal {
                 if code == b"1" || code == b"0" {
                     self.icon_title = Some(title.clone());
                 }
-                if code != b"1" {
+                if code != b"1" && self.title.as_ref() != Some(&title) {
                     self.title = Some(title);
                     self.title_changed = true;
                 }
@@ -1580,6 +1580,49 @@ mod tests {
     }
 
     #[test]
+    fn osc_window_title_notifies_once_per_decoded_change() {
+        let mut term = Terminal::new(80, 24);
+        term.advance(b"\x1b]2;shell;home\x07\x1b]0;shell;home\x1b\\");
+        assert_eq!(term.take_title().as_deref(), Some("shell;home"));
+
+        term.advance(b"\x1b]1;icon\x07\x1b[20t\x1b[21t");
+        assert_eq!(term.take_title(), None);
+        assert_eq!(
+            term.take_responses(),
+            b"\x1b]Licon\x1b\\\x1b]lshell;home\x1b\\"
+        );
+
+        // The same window title in hex still updates the OSC 0 icon.
+        term.advance(b"\x1b[>0t\x1b]0;7368656c6c3b686f6d65\x07\x1b[20t\x1b[21t");
+        assert_eq!(term.take_title(), None);
+        assert_eq!(
+            term.take_responses(),
+            b"\x1b]Lshell;home\x1b\\\x1b]lshell;home\x1b\\"
+        );
+    }
+
+    #[test]
+    fn duplicate_window_title_preserves_progress_clear_and_reset() {
+        let mut term = Terminal::new(80, 24);
+        term.advance(b"\x1b]2;job\x07");
+        assert_eq!(term.take_title().as_deref(), Some("job"));
+        term.advance(b"\x1b]9;4;1;42\x07\x1b]2;job\x07");
+        assert_eq!(term.take_title(), None);
+        assert_eq!(
+            term.take_progress(),
+            Some(Some(crate::Progress::Normal(42)))
+        );
+
+        term.advance(b"\x1b]2;\x07\x1b]2;\x07");
+        assert_eq!(term.take_title().as_deref(), Some(""));
+        term.advance(b"\x1b]2;\x07");
+        assert_eq!(term.take_title(), None);
+        term.advance(b"\x1b]2;new\x07\x1bc");
+        assert_eq!(term.take_title().as_deref(), Some(""));
+        assert_eq!(term.take_title(), None);
+    }
+
+    #[test]
     fn title_stack_and_reports_follow_xterm() {
         let mut term = Terminal::new(80, 24);
         term.advance(b"\x1b]0;first\x07\x1b]1;icon-one\x07");
@@ -1588,7 +1631,7 @@ mod tests {
             term.take_responses(),
             b"\x1b]Lsecond\x1b\\\x1b]lsecond\x1b\\"
         );
-        term.advance(b"\x1b[23;0t");
+        term.advance(b"\x1b[23;0t\x1b]2;first\x07");
         assert_eq!(term.take_title(), Some("first".to_string()));
     }
 }

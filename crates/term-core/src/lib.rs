@@ -1574,9 +1574,6 @@ impl Terminal {
         self.selection = None;
     }
 
-    /// Returns the latest changed title, or `None` if unchanged since last call.
-    ///
-    /// An empty string represents a cleared title.
     /// Feeds the app's real window geometry for the XTWINOPS reports.
     pub fn set_window_geometry(&mut self, geometry: WindowGeometry) {
         self.window = geometry;
@@ -1588,6 +1585,9 @@ impl Terminal {
         std::mem::take(&mut self.window_ops)
     }
 
+    /// Returns the latest pending window title, or `None` if there is no update.
+    ///
+    /// Equal OSC 0/2 titles do not queue another update. An empty string clears the title.
     pub fn take_title(&mut self) -> Option<String> {
         if std::mem::take(&mut self.title_changed) {
             Some(self.title.clone().unwrap_or_default())
