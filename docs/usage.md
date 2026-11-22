@@ -260,6 +260,10 @@ printf '\e]777;notify;Title;Body\a'
 Trident shows at most five notifications per ten seconds, as plain text up to 1,024 characters.
 To ignore them, set `desktop_notifications = false`.
 
+On Linux, OSC 99 `w=` requests an expiry in milliseconds: `w=1250` requests 1.25
+seconds, `w=0` requests no expiry, and `w=-1` uses the desktop default.
+The desktop notification service decides whether to honor the hint.
+
 ## Bell
 
 A BEL (`printf '\a'`) in an unfocused window requests attention through the taskbar or Dock icon.

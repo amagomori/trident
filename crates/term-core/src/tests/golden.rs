@@ -1984,13 +1984,49 @@ fn desktop_notification_sequences() {
 }
 
 #[test]
+fn desktop_notification_expiry() {
+    let mut t = Terminal::new(20, 3);
+    for (meta, expected) in [
+        ("", None),
+        ("w=-1", Some(-1)),
+        ("w=0", Some(0)),
+        ("w=2147483647", Some(i32::MAX)),
+        ("w=4:w=45:w=bad", Some(45)),
+        ("w=", None),
+        ("w=12ms", None),
+        ("w=-2", None),
+        ("w=2147483648", None),
+    ] {
+        t.advance(format!("\x1b]99;{meta};T\x07").as_bytes());
+        assert_eq!(t.take_notifications()[0].expiry_ms, expected, "{meta}");
+    }
+    t.advance(b"\x1b]99;i=a:d=0:w=77;A\x07\x1b]99;i=b:d=0:w=0;B\x07");
+    t.advance(
+        b"\x1b]99;i=b:w=-1;!\x07\x1b]99;i=a:w=bad:w=2147483648:w=-2;!\x07\x1b]99;i=a;new\x07",
+    );
+    let hints: Vec<_> = t
+        .take_notifications()
+        .into_iter()
+        .map(|n| n.expiry_ms)
+        .collect();
+    assert_eq!(hints, [Some(-1), Some(77), None]);
+}
+
+#[test]
 fn desktop_notification_query_and_limits() {
     let mut t = Terminal::new(20, 3);
     t.advance(b"\x1b]99;i=q1:p=?;\x1b\\\x1b]99;p=?\x07");
+    let expiry = if cfg!(target_os = "linux") {
+        ":w=1"
+    } else {
+        ""
+    };
     assert_eq!(
         String::from_utf8(t.take_responses()).unwrap(),
-        "\x1b]99;i=q1:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2\x1b\\\
-         \x1b]99;i=:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2\x07"
+        format!(
+            "\x1b]99;i=q1:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2{expiry}\x1b\\\
+                 \x1b]99;i=:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2{expiry}\x07"
+        )
     );
     assert!(t.take_notifications().is_empty());
 
