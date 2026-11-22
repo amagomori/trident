@@ -2168,7 +2168,7 @@ impl Terminal {
     ///
     /// Returns `None` for missing, empty, rectangular, or multiline selections,
     /// or if the selected text exceeds `max_bytes` UTF-8 bytes before trimming
-    /// trailing whitespace. Oversized selections are not collected in full.
+    /// trailing U+0020 spaces. Oversized selections are not collected in full.
     pub fn selected_single_line(&self, max_bytes: usize) -> Option<String> {
         self.collect_selection_text(Some(max_bytes))
             .filter(|text| !text.is_empty())
@@ -2210,7 +2210,7 @@ impl Terminal {
                 }
             }
             if !block && (!wrapped || line == end.line) {
-                out.truncate(row_start + out[row_start..].trim_end().len());
+                out.truncate(row_start + out[row_start..].trim_end_matches(' ').len());
             }
             if line != end.line && (block || !wrapped) {
                 out.push('\n');
@@ -2255,7 +2255,7 @@ impl Terminal {
             let mut remaining = if block || (wrapped && line != end.line) {
                 text.as_str()
             } else {
-                text.trim_end()
+                text.trim_end_matches(' ')
             };
             for cell in cells {
                 if remaining.is_empty() {
