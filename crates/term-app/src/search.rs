@@ -3,6 +3,7 @@ use term_core::{
     Point, Terminal,
     search::{Match, SearchJob},
 };
+use unicode_segmentation::UnicodeSegmentation;
 use winit::keyboard::ModifiersState;
 
 pub fn accepts_text(mods: ModifiersState, option_as_alt: bool) -> bool {
@@ -84,6 +85,15 @@ impl Search {
             .extend(text.chars().filter(|&c| accepts_query_char(c)));
         self.refresh(term, true);
     }
+
+    /// Removes one trailing extended grapheme cluster from the committed query.
+    pub fn backspace(&mut self, term: &mut Terminal) {
+        if let Some((start, _)) = self.query.grapheme_indices(true).next_back() {
+            self.query.truncate(start);
+        }
+        self.refresh(term, true);
+    }
+
     /// Restart the search, scanning the newest lines now and the rest in later `advance` calls.
     pub fn refresh(&mut self, term: &mut Terminal, reset: bool) {
         let previous = self.selected();
@@ -816,6 +826,49 @@ mod tests {
             term.viewport_row((found.start.line - top) as usize).cells[0].c,
             'S'
         );
+    }
+
+    #[test]
+    fn backspace_preserves_the_bytes_before_each_grapheme() {
+        let mut term = Terminal::new(40, 2);
+        let mut search = Search::default();
+        let prefix = "e\u{301}:";
+        for cluster in [
+            "a",
+            "日",
+            "e\u{301}",
+            "a\u{315}\u{300}",
+            "👍🏽",
+            "👨‍👩‍👧‍👦",
+            "🇯🇵",
+            "1\u{fe0f}\u{20e3}",
+            "✈\u{fe0f}",
+            "\u{1100}\u{1161}\u{11a8}",
+        ] {
+            search.insert(&format!("{prefix}{cluster}"), &mut term);
+            for expected in [prefix, "e\u{301}", "", ""] {
+                search.backspace(&mut term);
+                assert_eq!(search.query, expected, "cluster {cluster:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn backspace_refreshes_matches_in_the_current_mode() {
+        let mut term = Terminal::new(40, 2);
+        term.advance(b"a.c abc");
+        for (regex, expected_matches) in [(false, 1), (true, 2)] {
+            let mut search = Search {
+                regex,
+                ..Search::default()
+            };
+            search.insert("a.ce\u{301}", &mut term);
+            search.finish(&mut term);
+            assert!(search.matches.is_empty());
+            search.backspace(&mut term);
+            search.finish(&mut term);
+            assert_eq!(search.matches.len(), expected_matches);
+        }
     }
 
     #[test]
