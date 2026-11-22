@@ -181,7 +181,8 @@ impl SearchJob {
             };
             if self.found.len() < offset + remaining {
                 if self.found.len() == self.found.capacity() {
-                    let capacity = (2 * self.found.len()).clamp(4, MATCH_LIMIT);
+                    // Grow fourfold to avoid copying a nearly full buffer just before the cap.
+                    let capacity = (4 * self.found.len()).clamp(4, MATCH_LIMIT);
                     self.found.reserve_exact(capacity - self.found.len());
                 }
                 self.found.push(matched);
