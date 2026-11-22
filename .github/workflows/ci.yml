@@ -62,6 +62,13 @@ jobs:
             exit 1
           fi
       - run: cargo build --release --workspace
+      - name: Check native command arguments through a standalone PTY
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            xvfb-run -a python3 .github/scripts/check_command_args.py target/release/trident
+          else
+            python3 .github/scripts/check_command_args.py target/release/trident
+          fi
       - name: Query the shipped terminfo capabilities over a PTY
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then

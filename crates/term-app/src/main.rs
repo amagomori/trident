@@ -54,7 +54,7 @@ use config::Action;
 use input::MouseButton as ReportButton;
 use pty::{Pty, SpawnDirectory};
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, FileType};
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
@@ -288,7 +288,7 @@ struct Options {
     font_size: f32,
     option_as_alt: bool,
     copy_on_select: bool,
-    command: Vec<String>,
+    command: Vec<OsString>,
     working_directory: Option<PathBuf>,
     /// The size of the window that opened this one, in cells.
     window_cells: Option<(usize, usize)>,
@@ -331,13 +331,12 @@ impl Options {
         }
     }
 
-    /// What the window's first tab runs: `-e`'s command, else the shell. New tabs
-    /// always run the shell.
-    fn command<'a>(&'a self, config: &'a config::Config, first_tab: bool) -> &'a [String] {
-        if self.command.is_empty() || !first_tab {
-            &config.shell
+    /// What the window's first tab runs: `-e`'s command, else the configured shell.
+    fn initial_command<'a>(&'a self, config: &'a config::Config) -> Vec<&'a OsStr> {
+        if self.command.is_empty() {
+            config.shell.iter().map(OsStr::new).collect()
         } else {
-            &self.command
+            self.command.iter().map(OsString::as_os_str).collect()
         }
     }
 }
@@ -386,11 +385,7 @@ fn usage() -> ! {
     std::process::exit(0);
 }
 
-fn parse_args() -> Result<Options, String> {
-    parse_args_from(std::env::args().skip(1))
-}
-
-fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
+fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<Options, String> {
     let mut options = Options {
         config_path: config::default_path(),
         font_size_override: false,
@@ -405,24 +400,28 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Options, St
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
-        match arg.as_str() {
+        match arg.to_str().ok_or("expected a UTF-8 option (see --help)")? {
             "--config" => options.config_path = args.next().ok_or("--config needs a path")?.into(),
             "--scrollback" => {
                 options.scrollback = Some(
                     args.next()
-                        .and_then(|s| s.parse().ok())
+                        .and_then(|s| s.to_str()?.parse().ok())
                         .filter(|n: &usize| *n <= 1_000_000)
                         .ok_or("--scrollback needs an integer between 0 and 1000000")?,
                 );
             }
             "--font" => {
-                options.font = Some(args.next().ok_or("--font needs a family name or path")?)
+                options.font = Some(
+                    args.next()
+                        .and_then(|s| s.into_string().ok())
+                        .ok_or("--font needs a UTF-8 family name or path")?,
+                )
             }
             "--font-size" => {
                 options.font_size_override = true;
                 options.font_size = args
                     .next()
-                    .and_then(|s| s.parse().ok())
+                    .and_then(|s| s.to_str()?.parse().ok())
                     .filter(|s: &f32| *s >= 4.0 && *s <= 200.0)
                     .ok_or("--font-size needs a number between 4 and 200")?;
             }
@@ -2007,7 +2006,7 @@ impl App {
         let spawn_cell = (guessed_fonts.metrics.width, guessed_fonts.metrics.height);
         let pty = self.spawn_pty(
             0,
-            self.options.command(&self.config, true),
+            &self.options.initial_command(&self.config),
             self.options.working_directory.clone().into(),
             &[],
             (spawn_cols, spawn_rows, spawn_cell),
@@ -2468,12 +2467,7 @@ impl App {
         let (cols, rows) = (s.term.cols(), s.term.rows());
         self.next_pane += 1;
         let id = self.next_pane;
-        let shell: Vec<OsString> = self
-            .options
-            .command(&self.config, false)
-            .iter()
-            .map(OsString::from)
-            .collect();
+        let shell: Vec<OsString> = self.config.shell.iter().map(OsString::from).collect();
         let command: &[OsString] = if command.is_empty() { &shell } else { &command };
         let pty = match self.spawn_pty(id, command, cwd, &env, (cols, rows, cell)) {
             Ok(pty) => pty,
@@ -2603,7 +2597,7 @@ impl App {
         let id = self.next_pane;
         let pty = match self.spawn_pty(
             id,
-            self.options.command(&self.config, false),
+            &self.config.shell,
             working_directory,
             &[],
             (cols, rows, cell),
@@ -6195,68 +6189,47 @@ fn main() {
     }
     #[cfg(target_os = "macos")]
     close_confirm::join_quit_group(quit_group);
-    if std::env::args().nth(1).as_deref() == Some("show") {
+    let first = std::env::args_os().nth(1);
+    if first.as_deref() == Some(OsStr::new("show")) {
         std::process::exit(show::main(std::env::args().skip(2)));
     }
-    if std::env::args().nth(1).as_deref() == Some("--install-terminfo") {
+    if first.as_deref() == Some(OsStr::new("--install-terminfo")) {
         std::process::exit(terminfo::install());
     }
+    let options = match parse_args_from(std::env::args_os().skip(1)) {
+        Ok(options) => options,
+        Err(e) => {
+            diag!("trident: {e}");
+            exit(2);
+        }
+    };
     #[cfg(target_os = "linux")]
     if let Some(socket) = std::env::var_os(ipc::SOCKET_ENV) {
         // A Trident process already runs: hand it this window's working
         // directory, environment and `-e` command, and exit. Options a forwarded
         // window cannot honor — another config file, font, scrollback and the
         // like — start a standalone process instead.
-        // `-e`'s words keep their raw bytes (non-UTF-8 arguments survive the
-        // hop); the options ahead of it still parse as text, and anything the
-        // forwarded window cannot honor — another config file, font,
-        // scrollback and the like — starts a standalone process instead.
-        let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-        let split = args
-            .iter()
-            .position(|arg| arg == "-e" || arg == "--command");
-        let (head, command): (&[OsString], Vec<OsString>) = match split {
-            Some(at) => (&args[..at], args[at + 1..].to_vec()),
-            None => (&args, Vec::new()),
-        };
-        let request = head
-            .iter()
-            .map(|arg| arg.clone().into_string())
-            .collect::<Result<Vec<_>, _>>()
-            .ok()
-            .and_then(|head| parse_args_from(head).ok())
-            .filter(|options| {
-                options.config_path == config::default_path()
-                    && !options.font_size_override
-                    && options.scrollback.is_none()
-                    && options.font.is_none()
-                    && !options.copy_on_select
-                    && options.window_cells.is_none()
-                    // `-e` without a command is a parse error, not a request.
-                    && (split.is_none() || !command.is_empty())
-            });
-        if request.is_some() {
+        if options.config_path == config::default_path()
+            && !options.font_size_override
+            && options.scrollback.is_none()
+            && options.font.is_none()
+            && !options.copy_on_select
+        {
             let cwd = std::env::current_dir().unwrap_or_default();
             let env = std::env::vars_os()
                 .filter_map(|(key, value)| {
                     Some((key.into_string().ok()?, value.into_string().ok()?))
                 })
                 .collect::<Vec<_>>();
-            if ipc::forward(std::path::Path::new(&socket), &cwd, &env, &command) {
+            if ipc::forward(std::path::Path::new(&socket), &cwd, &env, &options.command) {
                 return;
             }
         }
     }
-    let options = match parse_args() {
-        Ok(o) => Options {
-            working_directory: working_directory.filter(|dir| dir.is_dir()),
-            window_cells: window_cells.as_deref().and_then(window_state::parse_cells),
-            ..o
-        },
-        Err(e) => {
-            diag!("trident: {e}");
-            exit(2);
-        }
+    let options = Options {
+        working_directory: working_directory.filter(|dir| dir.is_dir()),
+        window_cells: window_cells.as_deref().and_then(window_state::parse_cells),
+        ..options
     };
     let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
         Ok(l) => l,
@@ -7300,8 +7273,7 @@ mod tests {
         );
         assert_eq!(options.size(&config), 22.0);
         assert_eq!(options.scrollback(&config), 42);
-        assert_eq!(options.command(&config, true), ["zsh", "-l"]);
-        assert_eq!(options.command(&config, false), ["zsh", "-l"]);
+        assert_eq!(options.initial_command(&config), ["zsh", "-l"]);
         options.font = Some("/cli.ttf".into());
         options.font_size_override = true;
         options.font_size = 18.0;
@@ -7319,8 +7291,7 @@ mod tests {
         let mut reloaded = config.clone();
         reloaded.scrollback = 123;
         assert_eq!(options.scrollback(&reloaded), 90);
-        assert_eq!(options.command(&config, true), ["bash"]);
-        assert_eq!(options.command(&config, false), ["zsh", "-l"]);
+        assert_eq!(options.initial_command(&config), ["bash"]);
     }
 
     fn batch(bytes: &[u8]) -> pty::Output {
@@ -7841,7 +7812,7 @@ mod tests {
 
     #[test]
     fn scrollback_option() {
-        let parse = |args: &[&str]| parse_args_from(args.iter().map(|s| s.to_string()));
+        let parse = |args: &[&str]| parse_args_from(args.iter().map(OsString::from));
         assert_eq!(
             parse(&[]).unwrap().scrollback(&config::Config::default()),
             10_000
@@ -8184,12 +8155,8 @@ mod tests {
             args(&["--option-as-alt", "--scrollback", "5"])
         );
         assert!(new_window_args(args(&["-e", "top"])).is_empty());
-        let options = parse_args_from(
-            new_window_args(args(&["--font-size", "14", "-e", "top"]))
-                .into_iter()
-                .map(|arg| arg.into_string().unwrap()),
-        )
-        .unwrap();
+        let options =
+            parse_args_from(new_window_args(args(&["--font-size", "14", "-e", "top"]))).unwrap();
         assert!(options.command.is_empty());
         assert_eq!(options.font_size, 14.0);
     }
@@ -8197,7 +8164,7 @@ mod tests {
     #[test]
     fn option_as_alt_flag_overrides_config_on_reload() {
         let from_file = parse_args_from(std::iter::empty()).unwrap();
-        let from_cli = parse_args_from(["--option-as-alt".to_owned()]).unwrap();
+        let from_cli = parse_args_from(["--option-as-alt".into()]).unwrap();
         let mut config = config::Config::default();
         for mode in [config::OptionAsAlt::Left, config::OptionAsAlt::Right] {
             config.option_as_alt = mode;
@@ -8216,7 +8183,7 @@ mod tests {
             "echo",
             "--copy-on-select",
         ];
-        let options = parse_args_from(args.into_iter().map(String::from)).unwrap();
+        let options = parse_args_from(args.map(OsString::from)).unwrap();
         assert!(options.copy_on_select);
         assert!(options.option_as_alt);
         assert_eq!(options.command, ["echo", "--copy-on-select"]);
