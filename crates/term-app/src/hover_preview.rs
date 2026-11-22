@@ -516,10 +516,17 @@ fn body_room(scale: f32) -> (u32, u32) {
     ((420.0 * scale) as u32, (260.0 * scale) as u32)
 }
 
+/// Font size and estimated character width, in physical pixels.
+fn card_font(scale: f32) -> (f32, f32) {
+    let font = (12.0 * scale).round();
+    (font, font * 0.6)
+}
+
 /// The padding and line height of a card at `scale`, in physical pixels.
 fn card_metrics(scale: f32) -> (f32, f32) {
     let pad = (8.0 * scale).round();
-    let line_h = ((12.0 * scale).round() * 1.4).round();
+    let (font, _) = card_font(scale);
+    let line_h = (font * 1.4).round();
     (pad, line_h)
 }
 
@@ -580,7 +587,8 @@ fn directory_lines(
     (detail, lines)
 }
 
-fn content(path: &Path, line: Option<usize>, max: (u32, u32), rows: usize) -> Option<Content> {
+fn content(path: &Path, line: Option<usize>, max: (u32, u32), scale: f32) -> Option<Content> {
+    let rows = lines_in(max.1, scale);
     let title = path
         .file_name()
         .map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy())
@@ -641,7 +649,12 @@ fn content(path: &Path, line: Option<usize>, max: (u32, u32), rows: usize) -> Op
         crate::show::Preview::Image(w, h, pixels, name) => {
             (format!("{name} · {size}"), Body::Image(w, h, pixels))
         }
-        crate::show::Preview::Text(text) => (size, text_lines(&text, line, rows)),
+        crate::show::Preview::Text(text) => {
+            let (_, char_w) = card_font(scale);
+            // The line-number gutter can only reduce the width available to draw.
+            let columns = (max.0 as f32 / char_w) as usize;
+            (size, text_lines(&text, line, rows, columns))
+        }
         crate::show::Preview::Binary(kind) => (size, note(&kind)),
     };
     Some(Content {
@@ -660,7 +673,7 @@ fn note(text: &str) -> Body {
 }
 
 /// Up to `rows` lines of `text`, numbered and centred on `line` (from 1) when given.
-fn text_lines(text: &str, line: Option<usize>, rows: usize) -> Body {
+fn text_lines(text: &str, line: Option<usize>, rows: usize, columns: usize) -> Body {
     let total = text.lines().count();
     let target = line.filter(|&l| l >= 1 && l <= total).map(|l| l - 1);
     let start = target.map_or(0, |t| {
@@ -672,9 +685,14 @@ fn text_lines(text: &str, line: Option<usize>, rows: usize) -> Body {
         .skip(start)
         .take(rows)
         .map(|l| {
-            l.replace('\t', "    ")
-                .chars()
-                .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+            l.chars()
+                .flat_map(|c| match c {
+                    '\t' => std::iter::repeat_n(' ', 4),
+                    c if c.is_control() => std::iter::repeat_n('\u{fffd}', 1),
+                    c => std::iter::repeat_n(c, 1),
+                })
+                // Keep one extra scalar so clip can distinguish overflow from an exact fit.
+                .take(columns.saturating_add(1))
                 .collect()
         })
         .collect();
@@ -804,8 +822,7 @@ fn draw(content: &Content, style: Style, room: (u32, u32)) -> Option<Image> {
     use resvg::{tiny_skia, usvg};
     let s = style.scale;
     let (pad, line_h) = card_metrics(s);
-    let font = (12.0 * s).round();
-    let char_w = font * 0.6;
+    let (font, char_w) = card_font(s);
     let header = line_h + pad;
     let max_chars = ((room.0 as f32) / char_w) as usize;
     let (gutter, body_w, body_h) = match &content.body {
@@ -1061,12 +1078,7 @@ fn build(job: &Job, latest: &AtomicU64) -> Option<(Candidate, Image)> {
     if latest.load(Ordering::Relaxed) != job.generation {
         return None;
     }
-    let content = content(
-        &path,
-        candidate.line,
-        job.room,
-        lines_in(job.room.1, job.style.scale),
-    )?;
+    let content = content(&path, candidate.line, job.room, job.style.scale)?;
     Some((candidate.clone(), draw(&content, job.style, job.room)?))
 }
 
@@ -1663,7 +1675,7 @@ mod tests {
         let (candidate, path) = resolve_in(&found, &dir).unwrap();
         assert_eq!((candidate.start, candidate.end), (8, 8 + name.len()));
         let Body::Lines { lines, first, mark } =
-            content(&path, candidate.line, (400, 200), 5).unwrap().body
+            content(&path, candidate.line, (400, 85), 1.0).unwrap().body
         else {
             panic!("expected text preview")
         };
@@ -1742,7 +1754,7 @@ mod tests {
                 let lines = Content {
                     title: "main.rs".into(),
                     detail: "1.2 KB".into(),
-                    body: text_lines(&text, Some(20), rows),
+                    body: text_lines(&text, Some(20), rows, usize::MAX),
                 };
                 let (w, h) = (room.0.min(500), room.1.min(400));
                 let picture = Content {
@@ -1788,32 +1800,83 @@ mod tests {
     #[test]
     fn text_cards_show_the_reported_line() {
         let text: String = (1..=40).map(|i| format!("line {i}\n")).collect();
-        let Body::Lines { lines, first, mark } = text_lines(&text, Some(20), MAX_LINES) else {
+        let Body::Lines { lines, first, mark } = text_lines(&text, Some(20), MAX_LINES, 40) else {
             panic!("lines");
         };
         assert_eq!((first, mark), (Some(14), Some(6)), "line 20 in the middle");
         assert_eq!(lines[mark.unwrap()], "line 20");
         assert_eq!(lines.len(), MAX_LINES);
-        let Body::Lines { first, mark, .. } = text_lines(&text, Some(2), MAX_LINES) else {
+        let Body::Lines { first, mark, .. } = text_lines(&text, Some(2), MAX_LINES, 40) else {
             panic!("lines");
         };
         assert_eq!((first, mark), (Some(1), Some(1)), "near the top");
-        let Body::Lines { lines, first, mark } = text_lines(&text, Some(39), MAX_LINES) else {
+        let Body::Lines { lines, first, mark } = text_lines(&text, Some(39), MAX_LINES, 40) else {
             panic!("lines");
         };
         assert_eq!((first, mark), (Some(27), Some(12)), "near the end");
         assert_eq!(lines.len(), MAX_LINES);
-        let Body::Lines { lines, first, mark } = text_lines(&text, Some(20), 5) else {
+        let Body::Lines { lines, first, mark } = text_lines(&text, Some(20), 5, 40) else {
             panic!("lines");
         };
         assert_eq!((lines.len(), first, mark), (5, Some(18), Some(2)));
-        let Body::Lines { lines, first, mark } = text_lines("a\tb\n", Some(99), MAX_LINES) else {
+        let Body::Lines { lines, first, mark } = text_lines("a\tb\n", Some(99), MAX_LINES, 40)
+        else {
             panic!("lines");
         };
         assert_eq!(
             (lines, first, mark),
             (vec!["a    b".to_string()], None, None)
         );
+    }
+
+    #[test]
+    fn text_rows_keep_one_extra_scalar_for_clipping() {
+        for (raw, clean) in [
+            ("", ""),
+            ("a", "a"),
+            ("界\t\x1bé\u{301}", "界    �é\u{301}"),
+        ] {
+            let text = format!("before\n{raw}\nafter");
+            for columns in 0..=clean.chars().count() + 1 {
+                let Body::Lines { lines, first, mark } = text_lines(&text, Some(2), 1, columns)
+                else {
+                    panic!("lines");
+                };
+                assert_eq!((first, mark), (Some(2), Some(0)));
+                assert_eq!(lines, [clean.chars().take(columns + 1).collect::<String>()]);
+                assert_eq!(clip(&lines[0], columns), clip(clean, columns));
+            }
+        }
+    }
+
+    #[test]
+    fn long_file_rows_draw_the_same_with_or_without_a_gutter() {
+        let dir = scratch();
+        let path = dir.join("long.txt");
+        let raw = "界\t".repeat(256 * 1024);
+        std::fs::write(&path, format!("before\n{raw}\nafter")).unwrap();
+        let style = Style {
+            fg: (255, 255, 255),
+            bg: (0, 0, 0),
+            scale: 1.25,
+        };
+        let room = (360, 100); // 40 columns at this scale, before the gutter.
+        for line in [None, Some(2)] {
+            let mut card = content(&path, line, room, style.scale).unwrap();
+            let bounded = draw(&card, style, room).unwrap();
+            let Body::Lines { lines, first, mark } = &mut card.body else {
+                panic!("lines");
+            };
+            assert_eq!((*first, *mark), (line.map(|_| 1), line.map(|_| 1)));
+            assert_eq!(lines[0], "before");
+            assert_eq!(lines[2], "after");
+            assert!(lines[1].chars().count() <= 41);
+            lines[1] = raw.replace('\t', "    ");
+            let full = draw(&card, style, room).unwrap();
+            assert_eq!((bounded.width, bounded.height), (full.width, full.height));
+            assert!(bounded.pixels == full.pixels);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1856,7 +1919,7 @@ mod tests {
             bg: (0x1a, 0x1b, 0x26),
             scale: 1.0,
         };
-        let text = content(&dir.join("src/main.rs"), None, body_room(1.0), MAX_LINES).unwrap();
+        let text = content(&dir.join("src/main.rs"), None, body_room(1.0), 1.0).unwrap();
         assert_eq!(text.title, "main.rs");
         let card = draw(&text, style, body_room(1.0)).unwrap();
         assert_eq!(card.pixels.len(), (card.width * card.height * 4) as usize);
@@ -1865,7 +1928,7 @@ mod tests {
         image::RgbaImage::from_pixel(600, 300, image::Rgba([255, 0, 0, 255]))
             .save(&png)
             .unwrap();
-        let picture = content(&png, None, body_room(1.0), MAX_LINES).unwrap();
+        let picture = content(&png, None, body_room(1.0), 1.0).unwrap();
         assert!(
             picture.detail.starts_with("PNG 600×300"),
             "{}",
@@ -1879,7 +1942,7 @@ mod tests {
         let centre = ((card.height / 2 * card.width + card.width / 2) * 4) as usize;
         assert_eq!(&card.pixels[centre..centre + 4], &[255, 0, 0, 255]);
 
-        let listing = content(&dir, None, body_room(1.0), MAX_LINES).unwrap();
+        let listing = content(&dir, None, body_room(1.0), 1.0).unwrap();
         assert_eq!(listing.detail, "2 items");
         let Body::Lines { lines, .. } = listing.body else {
             panic!("lines");
@@ -1927,7 +1990,7 @@ mod tests {
         let dir = scratch();
         let pdf = dir.join("page.pdf");
         std::fs::write(&pdf, tiny_pdf()).unwrap();
-        let page = content(&pdf, None, body_room(1.0), MAX_LINES).unwrap();
+        let page = content(&pdf, None, body_room(1.0), 1.0).unwrap();
         assert!(page.detail.starts_with("PDF · "), "{}", page.detail);
         let Body::Image(w, h, pixels) = page.body else {
             panic!("page");
