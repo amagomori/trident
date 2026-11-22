@@ -9,9 +9,9 @@ pub fn covers(c: char) -> bool {
     matches!(c, '\u{2500}'..='\u{259F}' | '\u{2800}'..='\u{28FF}' | '\u{E0B0}'..='\u{E0BF}')
 }
 
-/// Draws `c` over exactly `cells` cells, or `None` if it is not a built-in glyph.
+/// Draws `c` over exactly `cells` cells, or returns `None` for blank or unsupported glyphs.
 pub fn rasterize(c: char, metrics: &CellMetrics, cells: usize) -> Option<RasterizedGlyph> {
-    if !covers(c) {
+    if c == '\u{2800}' || !covers(c) {
         return None;
     }
     let w = (metrics.width * cells.max(1) as f32).round().max(1.0) as i32;
@@ -461,9 +461,9 @@ mod tests {
         .collect()
     }
 
-    fn all() -> impl Iterator<Item = char> {
+    fn nonblank() -> impl Iterator<Item = char> {
         ('\u{2500}'..='\u{259F}')
-            .chain('\u{2800}'..='\u{28FF}')
+            .chain('\u{2801}'..='\u{28FF}')
             .chain('\u{E0B0}'..='\u{E0BF}')
     }
 
@@ -516,14 +516,14 @@ mod tests {
     #[test]
     fn every_glyph_fills_exactly_its_cells() {
         for m in sizes() {
-            for c in all() {
+            for c in nonblank() {
                 for cells in [1, 2] {
                     let g = rasterize(c, &m, cells).expect("built-in glyph");
                     assert_eq!(g.width, (m.width * cells as f32) as usize, "{c:?}");
                     assert_eq!(g.height, m.height as usize, "{c:?}");
                     assert_eq!((g.left, g.top, g.color), (0.0, 0.0, false));
                     assert_eq!(g.coverage.len(), g.width * g.height);
-                    assert_eq!(g.coverage.iter().any(|&a| a > 0), c != '\u{2800}', "{c:?}");
+                    assert!(g.coverage.iter().any(|&a| a > 0), "{c:?} is blank");
                 }
             }
         }
@@ -540,6 +540,11 @@ mod tests {
             m.height = h as f32;
             for mask in 0..=255 {
                 let c = char::from_u32(0x2800 + mask).unwrap();
+                assert!(covers(c));
+                if mask == 0 {
+                    assert!(rasterize(c, &m, 1).is_none());
+                    continue;
+                }
                 let glyph = Bitmap::of(c, &m);
                 let mut observed = 0;
                 for y in 0..h {
