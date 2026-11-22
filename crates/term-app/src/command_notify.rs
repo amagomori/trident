@@ -85,6 +85,8 @@ pub fn notify(finished: Finished) {
         body: String::new(),
         urgency: term_core::Urgency::Normal,
         replace: None,
+        #[cfg(target_os = "linux")]
+        timeout: notify_rust::Timeout::Default,
     });
 }
 
@@ -96,6 +98,8 @@ pub struct Message {
     pub urgency: term_core::Urgency,
     /// A later message with the same key replaces this one while it is still shown.
     pub replace: Option<String>,
+    #[cfg(target_os = "linux")]
+    pub timeout: notify_rust::Timeout,
 }
 
 /// Queues a desktop notification. One background thread delivers them all, each after the
@@ -160,6 +164,7 @@ fn notify_linux(message: Message, shown: &mut ReplaceIds) {
     notification
         .summary(&message.title)
         .appname("Trident")
+        .timeout(message.timeout)
         .urgency(match message.urgency {
             term_core::Urgency::Low => notify_rust::Urgency::Low,
             term_core::Urgency::Normal => notify_rust::Urgency::Normal,

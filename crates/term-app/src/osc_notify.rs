@@ -245,6 +245,8 @@ pub fn show(notification: Notification) {
         body,
         urgency,
         replace: (!id.is_empty()).then_some(id),
+        #[cfg(target_os = "linux")]
+        timeout: notification.expiry_ms.unwrap_or(-1).into(),
     });
 }
 

@@ -48,6 +48,9 @@ pub struct Notification {
     pub body: String,
     pub urgency: Urgency,
     pub occasion: Occasion,
+    /// OSC 99 `w`: expiry in milliseconds. Zero requests persistence; −1 or no hint
+    /// leaves expiry to the desktop.
+    pub expiry_ms: Option<i32>,
 }
 
 #[derive(Default)]
@@ -64,6 +67,7 @@ struct Pending {
     id: Vec<u8>,
     urgency: Urgency,
     occasion: Occasion,
+    expiry_ms: Option<i32>,
     title: Vec<u8>,
     body: Vec<u8>,
     /// Base64 past the last complete quartet, decoded with the next chunk of the same field.
@@ -132,6 +136,7 @@ impl Notifications {
         let mut kind: &[u8] = b"title";
         let mut urgency = None;
         let mut occasion = None;
+        let mut expiry_ms = None;
         for pair in metadata.split(|&b| b == b':') {
             let Some(eq) = pair.iter().position(|&b| b == b'=') else {
                 continue;
@@ -142,6 +147,15 @@ impl Notifications {
                 b"d" => done = value != b"0",
                 b"e" => base64 = value == b"1",
                 b"p" => kind = value,
+                b"w" => {
+                    if let Some(ms) = std::str::from_utf8(value)
+                        .ok()
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .filter(|&ms| ms >= -1)
+                    {
+                        expiry_ms = Some(ms);
+                    }
+                }
                 b"u" => {
                     urgency = match value {
                         b"0" => Some(Urgency::Low),
@@ -162,8 +176,13 @@ impl Notifications {
             }
         }
         if kind == b"?" {
+            let expiry = if cfg!(target_os = "linux") {
+                ":w=1"
+            } else {
+                ""
+            };
             return Some(format!(
-                "\x1b]99;i={}:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2",
+                "\x1b]99;i={}:p=?;o=always,unfocused,invisible:p=title,body,?:u=0,1,2{expiry}",
                 String::from_utf8_lossy(id)
             ));
         }
@@ -184,6 +203,7 @@ impl Notifications {
         if let Some(occasion) = occasion {
             pending.occasion = occasion;
         }
+        pending.expiry_ms = expiry_ms.or(pending.expiry_ms);
         let is_title = kind == b"title";
         if !pending.carry.is_empty() && (!base64 || pending.carry_title != is_title) {
             let carry = std::mem::take(&mut pending.carry);
@@ -219,6 +239,7 @@ impl Notifications {
                 body: text(&pending.body),
                 urgency: pending.urgency,
                 occasion: pending.occasion,
+                expiry_ms: pending.expiry_ms,
             });
         } else {
             if self.pending.len() == MAX_PENDING {
