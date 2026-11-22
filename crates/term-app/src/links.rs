@@ -192,36 +192,31 @@ pub fn editor(
     };
     if let Some(program) = configured.first() {
         let (file, dir) = editor_target(program, file);
-        let file_text = file.to_string_lossy();
-        let named = configured.iter().any(|arg| arg.contains("{file}"));
+        let mut named = false;
         let mut argv: Vec<OsString> = configured
             .iter()
             .map(|arg| {
-                let mut filled = String::new();
+                let mut filled = OsString::new();
                 let mut rest = arg.as_str();
-                while let Some(start) = rest.find('{') {
-                    filled.push_str(&rest[..start]);
-                    rest = &rest[start..];
-                    let value = [
-                        ("{file}", file_text.to_string()),
-                        ("{line}", line.to_string()),
-                        ("{column}", column.to_string()),
-                    ]
-                    .into_iter()
-                    .find(|(placeholder, _)| rest.starts_with(placeholder));
-                    match value {
-                        Some((placeholder, value)) => {
-                            filled.push_str(&value);
-                            rest = &rest[placeholder.len()..];
-                        }
-                        None => {
-                            filled.push('{');
-                            rest = &rest[1..];
-                        }
-                    }
+                while let Some((literal, after_brace)) = rest.split_once('{') {
+                    filled.push(literal);
+                    rest = if let Some(tail) = after_brace.strip_prefix("file}") {
+                        filled.push(file);
+                        named = true;
+                        tail
+                    } else if let Some(tail) = after_brace.strip_prefix("line}") {
+                        filled.push(line.to_string());
+                        tail
+                    } else if let Some(tail) = after_brace.strip_prefix("column}") {
+                        filled.push(column.to_string());
+                        tail
+                    } else {
+                        filled.push("{");
+                        after_brace
+                    };
                 }
-                filled.push_str(rest);
-                OsString::from(filled)
+                filled.push(rest);
+                filled
             })
             .collect();
         if !named {
@@ -524,6 +519,26 @@ mod tests {
         assert_eq!(
             args(&argv),
             ["myedit", "/w/{line}/{column}.rs", "73", "{x}{"]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn configured_editor_keeps_native_path_bytes() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let file = Path::new(OsStr::from_bytes(b"/w/\xff/a $b{line}.rs"));
+        let configured = ["code", "{x}:{file}:{line}:{column}={file}"].map(String::from);
+        assert_eq!(
+            editor(&configured, None, file, 7, None),
+            Editor::Program(vec![
+                "code".into(),
+                OsStr::from_bytes(b"{x}:/w/\xff/a $b{line}.rs:7:1=/w/\xff/a $b{line}.rs").into(),
+            ])
+        );
+        assert_eq!(
+            editor(&["nvim".into(), "+{line}".into()], None, file, 7, None),
+            Editor::Terminal(vec!["nvim".into(), "+7".into(), file.into()], None)
         );
     }
 
