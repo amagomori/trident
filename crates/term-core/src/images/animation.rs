@@ -122,6 +122,34 @@ impl StoredImage {
 }
 
 impl Terminal {
+    /// Clamps the one-based frame number to the stored range (zero means root).
+    /// Only an uppercase delete may remove the last frame and its placements.
+    pub(crate) fn delete_frame(&mut self, id: u32, number: u32, free_last: bool) {
+        let Some(s) = self.images.images.get_mut(&id) else {
+            return;
+        };
+        if s.frames.len() == 1 {
+            if free_last {
+                self.delete_image(id);
+            }
+            return;
+        }
+        let index = (number.saturating_sub(1) as usize).min(s.frames.len() - 1);
+        self.images.bytes -= s.frames.remove(index).image.pixels.len();
+        let p = &mut s.playback;
+        if p.current == index {
+            p.current = index.min(s.frames.len() - 1);
+            p.due = None;
+        } else if p.current > index {
+            p.current -= 1;
+        }
+        if s.frames.len() == 1 {
+            self.images.animated -= 1;
+            p.due = None;
+        }
+        self.images.generation += 1;
+    }
+
     pub(crate) fn add_frame(
         &mut self,
         id: u32,

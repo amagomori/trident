@@ -235,6 +235,90 @@ fn animation_composes_frames_edits_and_chunked_patches() {
 }
 
 #[test]
+fn delete_frames_preserves_survivors_and_only_frees_the_final_image_for_uppercase() {
+    for key in ["i=7", "I=7"] {
+        for chunk in [1, usize::MAX] {
+            let mut t = term();
+            t.advance(&apc(&format!("a=T,{key},p=1,s=2,v=2,q=1"), &[1; 16]));
+            let id = placements(&t)[0].0;
+            for n in [2, 3] {
+                t.advance(&apc(&format!("a=f,{key},s=2,v=2,X=1,q=1"), &[n; 16]));
+            }
+            t.advance(&apc("a=T,i=8,s=1,v=1,q=1", &[8; 4]));
+            let placed = placements(&t);
+            let other_version = t.image_with_version(8).unwrap().1;
+            let version = |t: &Terminal| t.image_with_version(id).unwrap().1;
+            t.advance(&apc(&format!("a=a,{key},c=2"), &[]));
+            let second = version(&t);
+            t.advance(&apc(&format!("a=a,{key},c=1"), &[]));
+            let delete = |t: &mut Terminal, control: &str| {
+                for bytes in apc(control, &[]).chunks(chunk) {
+                    t.advance(bytes);
+                }
+            };
+            let generation = t.image_generation();
+            for absent in ["i=9", "I=9", "r=1"] {
+                delete(&mut t, &format!("a=d,d=F,{absent}"));
+            }
+            assert_eq!(t.image_generation(), generation);
+            assert_eq!(t.image_bytes(), 48 + 4);
+            for (command, bytes) in [
+                ("d=f", 32),              // Promote frame two to root.
+                ("d=F,r=4294967295", 16), // Clamp to the last frame.
+                ("d=f,r=0", 16),          // Lowercase keeps the final frame.
+            ] {
+                delete(&mut t, &format!("a=d,{command},{key}"));
+                assert_eq!(t.image_bytes(), bytes + 4);
+                assert_eq!(version(&t), second);
+                assert_eq!(t.image(id).unwrap().pixels, [2; 16]);
+                assert_eq!(placements(&t), placed);
+            }
+            t.advance(b"\x1b[?1049h");
+            t.advance(&apc(&format!("a=p,{key},q=1"), &[]));
+            delete(&mut t, &format!("a=d,d=F,{key}"));
+            assert!(placements(&t).is_empty());
+            t.advance(b"\x1b[?1049l");
+            assert!(t.image(id).is_none());
+            assert_eq!(placements(&t), placed[1..]);
+            assert_eq!(t.image_with_version(8).unwrap().1, other_version);
+            assert_eq!(t.image_bytes(), 4);
+            assert_eq!(replies(&mut t), "");
+        }
+    }
+}
+
+#[test]
+fn deleting_frames_during_playback_preserves_or_restarts_the_current_gap() {
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let at = |ms| start + Duration::from_millis(ms);
+    let mut t = term();
+    t.advance(&apc("a=T,i=1,s=1,v=1", &[1; 4]));
+    for n in 2..=5 {
+        t.advance(&apc(&format!("a=f,i=1,s=1,v=1,X=1,z={n}0"), &[n; 4]));
+    }
+    t.advance(&apc("a=a,i=1,c=3,s=3", &[]));
+    let third = t.image_with_version(1).unwrap().1;
+    assert_eq!(t.advance_animations(start, 0), Some(at(30)));
+    for r in [0, 4] {
+        // Remove the root, then the last frame, around the current one.
+        t.advance(&apc(&format!("a=d,d=f,i=1,r={r}"), &[]));
+        assert_eq!(t.image_with_version(1).unwrap().1, third);
+        assert_eq!(t.advance_animations(at(5), 0), Some(at(30)));
+    }
+    t.advance(&apc("a=d,d=f,i=1,r=2", &[])); // Current frame: show its successor.
+    assert_eq!(t.image(1).unwrap().pixels, [4; 4]);
+    assert_eq!(t.advance_animations(at(10), 0), Some(at(50)));
+    t.advance(&apc("a=d,d=f,i=1,r=2", &[])); // No successor: fall back to the last.
+    assert_eq!(t.image(1).unwrap().pixels, [2; 4]);
+    assert_eq!(t.advance_animations(at(20), 0), None);
+    t.advance(&apc("a=f,i=1,s=1,v=1,X=1,z=60", &[6; 4]));
+    assert_eq!(t.advance_animations(at(60), 0), Some(at(80)));
+    assert_eq!(t.advance_animations(at(80), 0), Some(at(140)));
+    assert_eq!(t.image(1).unwrap().pixels, [6; 4]);
+}
+
+#[test]
 fn frame_budget_survives_rejection_retransmission_and_delete() {
     let mut t = term();
     t.set_image_quota(12);

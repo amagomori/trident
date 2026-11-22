@@ -551,6 +551,12 @@ impl Terminal {
 
     fn kitty_delete(&mut self, c: &Control) {
         let free = c.delete.is_ascii_uppercase();
+        if c.delete.eq_ignore_ascii_case(&b'f') {
+            if let Ok(id) = self.resolve_image(c) {
+                self.delete_frame(id, c.rows, free);
+            }
+            return;
+        }
         let rows = self.rows as i64;
         // 1-based cell coordinates, as the protocol sends them.
         let (x, y) = (c.source.x as usize, c.source.y as i64);
