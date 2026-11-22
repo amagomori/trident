@@ -98,6 +98,7 @@ class Linux(Base):
             desktop = tar.extractfile(f"{top}/share/applications/trident.desktop").read().decode()
         self.assertIn("\nName=Trident\n", desktop)
         self.assertIn("\nExec=trident\n", desktop)
+        self.assertIn("\nX-TerminalArgExec=-e\n", desktop)
         self.assertIn("\nStartupWMClass=trident\n", desktop)
         first = hashlib.sha256(path.read_bytes()).hexdigest()
         stage = self.tmp / "again"
@@ -105,6 +106,27 @@ class Linux(Base):
         release.tarball(stage, "Trident-1.2.3-linux-x86_64", self.tmp / "again.tar.gz")
         self.assertEqual(hashlib.sha256((self.tmp / "again.tar.gz").read_bytes()).hexdigest(),
                          first, "tarball is not reproducible")
+
+    @unittest.skipUnless(shutil.which("xdg-terminal-exec"), "needs xdg-terminal-exec")
+    def test_xdg_terminal_argv(self):
+        stage = self.tmp / "stage"
+        release.stage(stage, self.binary, self.pdfium, "")
+        config = self.tmp / "config"
+        config.mkdir()
+        (config / "xdg-terminals.list").write_text("trident.desktop\n")
+        env = {
+            "PATH": f"{stage}/bin:{os.environ['PATH']}", "HOME": str(self.tmp),
+            "XDG_DATA_DIRS": str(stage / "share"), "XDG_CONFIG_HOME": str(config),
+            "XDG_CONFIG_DIRS": str(self.tmp / "empty"), "XTE_CACHE_ENABLED": "0",
+        }
+        for mode in ({}, {"XTE_EXECARG_COMPAT": "0"}):
+            for command in ([], ["echo"], ["printf", "%s\n", "two words", "", "--help"]):
+                with self.subTest(mode=mode, command=command):
+                    result = subprocess.run(["xdg-terminal-exec", r"--print-cmd=\0", "--", *command],
+                                            capture_output=True, env={**env, **mode}, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    expected = ["trident", "-e", *command] if command else ["trident"]
+                    self.assertEqual(result.stdout.split(b"\0"), [os.fsencode(a) for a in expected])
 
     @unittest.skipUnless(HAS_DEB, "needs dpkg-deb and tic")
     def test_deb_control_and_contents(self):
