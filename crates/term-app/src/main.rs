@@ -6630,6 +6630,43 @@ mod tests {
     }
 
     #[test]
+    fn bash_integration_reports_every_directory_with_the_current_host() {
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../shell-integration/terminal.bash"
+        );
+        let bash = std::env::var_os("TERMINAL_TEST_BASH").unwrap_or_else(|| "/bin/bash".into());
+        let output = std::process::Command::new(bash)
+            .args([
+                "--norc",
+                "-ic",
+                r#"source "$1"
+                   shopt -s nocasematch
+                   PWD=$'/tmp/A [x]%\xff'
+                   HOSTNAME=first; _terminal_report_cwd
+                   HOSTNAME=second; _terminal_report_cwd
+                   PWD=$'/tmp/a [x]%\xff'; _terminal_report_cwd
+                   unset HOSTNAME; _terminal_report_cwd"#,
+                "bash",
+                script,
+            ])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            output.stdout,
+            concat!(
+                "\x1b]7;file://first/tmp/A%20%5Bx%5D%25%FF\x07",
+                "\x1b]7;file://second/tmp/A%20%5Bx%5D%25%FF\x07",
+                "\x1b]7;file://second/tmp/a%20%5Bx%5D%25%FF\x07",
+                "\x1b]7;file:///tmp/a%20%5Bx%5D%25%FF\x07",
+            )
+            .as_bytes()
+        );
+    }
+
+    #[test]
     fn bash_integration_keeps_the_editor_locale_after_reporting_the_directory() {
         let script = concat!(
             env!("CARGO_MANIFEST_DIR"),
